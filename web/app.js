@@ -19,6 +19,7 @@ const state = {
     currentReader: null,
     pendingProcessCards: [],
     reasoningContent: '',
+    rawReasoningContent: '',
     toolResultsByMessage: {},
     subagentPlansByMessage: {},
     workflowPlansByMessage: {},
@@ -781,6 +782,7 @@ async function sendMessage() {
     state.isStreaming = true;
     state.isPaused = false;
     state.reasoningContent = '';
+    state.rawReasoningContent = '';
     state.toolResultsByMessage[assistantMessageId] = [];
     state.subagentPlansByMessage[assistantMessageId] = null;
     state.workflowPlansByMessage[assistantMessageId] = null;
@@ -876,6 +878,7 @@ async function sendMessage() {
         state.currentReader = null;
         state.pendingProcessCards = [];
         state.reasoningContent = '';
+        state.rawReasoningContent = '';
         trimRetainedProcessState();
         refreshWorkspacePanels();
         updateSendButton();
@@ -924,8 +927,10 @@ function handleStreamChunk(data, messageId) {
         console.log('[Frontend Debug] data.type:', data.type, '| data.content:', data.content ? data.content.substring(0, 100) : 'null');
         
         if (data.type === 'reasoning') {
-            state.reasoningContent += data.content;
-            updateReasoningCard(messageId, state.reasoningContent, true);
+            appendRawReasoningContent(data.content || '');
+            updateReasoningCard(messageId, state.rawReasoningContent, state.rawReasoningContent, true);
+        } else if (data.type === 'thought_summary') {
+            // 暂时关闭 thought_summary 主展示，直接观察原始 reasoning。
         } else if (data.type === 'workflow_plan') {
             state.workflowPlansByMessage[messageId] = {
                 title: data.title || 'Workflow',
@@ -939,7 +944,6 @@ function handleStreamChunk(data, messageId) {
         } else if (data.type === 'tool_status') {
             syncSubagentCardFromToolStatus(messageId, data);
             pushToolActivity(data.tool_name || '', data.content || '', data.status === 'error' ? 'error' : 'running');
-            appendProcessNote(messageId, buildToolStatusText(data), true);
         } else if (data.type === 'tool_result') {
             syncSubagentCardFromToolResult(messageId, data);
             pushToolActivity(data.tool_name || '', data.content || '', 'done');
@@ -1137,7 +1141,7 @@ function getOrCreateProcessContainer(messageDiv) {
     return processContainer;
 }
 
-function updateReasoningCard(messageId, content, isStreaming = false) {
+function updateReasoningCard(messageId, content, rawContent = '', isStreaming = false) {
     const messageDiv = document.getElementById(messageId);
     if (!messageDiv) return;
     
@@ -1162,15 +1166,27 @@ function updateReasoningCard(messageId, content, isStreaming = false) {
                 </svg>
             </div>
             <div class="reasoning-content-wrapper">
-                <div class="reasoning-content">${escapeHtml(sanitizeReasoningContent(content))}</div>
+                <div class="reasoning-summary">${escapeHtml(sanitizeReasoningContent(content || '正在生成原始思考内容...'))}</div>
+                <details class="reasoning-raw-panel ${rawContent ? '' : 'hidden'}">
+                    <summary>查看原始思考</summary>
+                    <pre class="reasoning-content">${escapeHtml(sanitizeReasoningContent(rawContent))}</pre>
+                </details>
             </div>
         `;
         processContainer.insertBefore(reasoningCard, processContainer.firstChild);
         state.pendingProcessCards.push(reasoningCard);
     } else {
+        const summaryDiv = reasoningCard.querySelector('.reasoning-summary');
         const contentDiv = reasoningCard.querySelector('.reasoning-content');
+        const rawPanel = reasoningCard.querySelector('.reasoning-raw-panel');
+        if (summaryDiv) {
+            summaryDiv.textContent = sanitizeReasoningContent(content || '正在生成原始思考内容...');
+        }
         if (contentDiv) {
-            contentDiv.textContent = sanitizeReasoningContent(content);
+            contentDiv.textContent = sanitizeReasoningContent(rawContent);
+        }
+        if (rawPanel) {
+            rawPanel.classList.toggle('hidden', !sanitizeReasoningContent(rawContent));
         }
         if (isStreaming) {
             reasoningCard.classList.add('streaming');
@@ -1220,10 +1236,36 @@ function updateWorkflowTaskCard(messageId) {
     renderWorkflowSidebar(messageId);
 }
 
+function appendReasoningContent(content, asBlock = false) {
+    const normalized = String(content || '').replace(/\r\n?/g, '\n').trim();
+    if (!normalized) return;
+
+    const existingBlocks = String(state.reasoningContent || '')
+        .split(/\n\n+/)
+        .map(block => block.trim())
+        .filter(Boolean);
+    if (existingBlocks.length > 0 && existingBlocks[existingBlocks.length - 1] === normalized) {
+        return;
+    }
+
+    if (!state.reasoningContent) {
+        state.reasoningContent = normalized;
+        return;
+    }
+
+    state.reasoningContent += asBlock ? `\n\n${normalized}` : normalized;
+}
+
+function appendRawReasoningContent(content) {
+    const normalized = String(content || '').replace(/\r\n?/g, '\n');
+    if (!normalized.trim()) return;
+    state.rawReasoningContent += normalized;
+}
+
 function appendProcessNote(messageId, note, isStreaming = false) {
     if (!note) return;
-    state.reasoningContent += (state.reasoningContent ? '\n\n' : '') + note;
-    updateReasoningCard(messageId, state.reasoningContent, isStreaming);
+    appendReasoningContent(note, true);
+    updateReasoningCard(messageId, state.reasoningContent, state.rawReasoningContent, isStreaming);
 }
 
 function sanitizeReasoningContent(content) {
@@ -1408,7 +1450,7 @@ function restoreAssistantProcessCards(messageId, message) {
 
     const reasoning = sanitizeReasoningContent(message.reasoning || '');
     if (reasoning) {
-        updateReasoningCard(messageId, reasoning, false);
+        updateReasoningCard(messageId, reasoning, message.raw_reasoning || '', false);
         finalizeReasoningCard(messageId);
     }
 }
@@ -1449,7 +1491,8 @@ function restoreInProgressSnapshot(snapshot) {
 
     if (snapshot.reasoning) {
         state.reasoningContent = snapshot.reasoning;
-        updateReasoningCard(messageId, snapshot.reasoning, !!snapshot.is_streaming);
+        state.rawReasoningContent = snapshot.raw_reasoning || '';
+        updateReasoningCard(messageId, snapshot.reasoning, state.rawReasoningContent, !!snapshot.is_streaming);
     }
 
     if (snapshot.workflow && Array.isArray(snapshot.workflow.steps)) {
@@ -2250,6 +2293,7 @@ async function resetToFreshSession({ refreshDelay = 0 } = {}) {
     state.enableSearch = false;
     state.enableRag = true;
     state.reasoningContent = '';
+    state.rawReasoningContent = '';
     state.toolActivityFeed = [];
     state.toolResultsByMessage = {};
     state.subagentPlansByMessage = {};

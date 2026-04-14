@@ -357,6 +357,7 @@ def init_stream_snapshot(session_id: str, message_id: str) -> dict[str, Any]:
         'message_id': message_id,
         'content': '',
         'reasoning': '',
+        'raw_reasoning': '',
         'tool_results': [],
         'artifacts': [],
         'workflow': None,
@@ -1059,7 +1060,7 @@ def chat():
 
                     if chunk.get("type") == "reasoning":
                         if enable_reasoning or is_workflow_stream:
-                            snapshot['reasoning'] += chunk.get('content', '')
+                            snapshot['raw_reasoning'] += chunk.get('content', '')
                             touch_stream_snapshot(session_id)
                             yield stream_json_line({'type': 'reasoning', 'content': chunk.get('content', '')})
                         continue

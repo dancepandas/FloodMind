@@ -785,6 +785,7 @@ body {
     max-height: 300px;
     overflow: hidden;
     transition: max-height var(--transition-slow), opacity var(--transition-normal);
+    padding: 0 16px 16px;
 }
 
 .reasoning-card.collapsed .reasoning-content-wrapper {
@@ -792,11 +793,53 @@ body {
     opacity: 0;
 }
 
-.reasoning-content {
-    padding: 0 16px 16px;
+.reasoning-summary {
+    max-height: 320px;
+    overflow-y: auto;
+    padding-right: 6px;
     font-size: 13px;
     line-height: 1.7;
     color: var(--color-text-secondary);
+    white-space: pre-wrap;
+    word-break: break-word;
+}
+
+.reasoning-summary::-webkit-scrollbar {
+    width: 4px;
+}
+
+.reasoning-summary::-webkit-scrollbar-thumb {
+    background: rgba(124, 58, 237, 0.35);
+    border-radius: 2px;
+}
+
+.reasoning-raw-panel {
+    margin-top: 12px;
+    border-top: 1px dashed rgba(124, 58, 237, 0.2);
+    padding-top: 12px;
+}
+
+.reasoning-raw-panel summary {
+    cursor: pointer;
+    color: var(--color-primary-dark);
+    font-size: 12px;
+    font-weight: 600;
+    list-style: none;
+}
+
+.reasoning-raw-panel summary::-webkit-details-marker {
+    display: none;
+}
+
+.reasoning-content {
+    margin-top: 10px;
+    padding: 12px;
+    border-radius: 12px;
+    background: rgba(255, 255, 255, 0.55);
+    border: 1px solid rgba(124, 58, 237, 0.12);
+    font-size: 12px;
+    line-height: 1.65;
+    color: var(--color-text-muted);
     white-space: pre-wrap;
     word-break: break-word;
     max-height: 280px;
@@ -813,7 +856,7 @@ body {
 }
 
 /* Streaming cursor for reasoning */
-.reasoning-card.streaming .reasoning-content::after {
+.reasoning-card.streaming .reasoning-summary::after {
     content: '';
     display: inline-block;
     width: 2px;

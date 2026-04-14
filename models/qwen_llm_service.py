@@ -6,10 +6,73 @@ Qwen模型服务模块
 """
 
 import logging
-from typing import Optional
+import os
+from typing import Any, Mapping, Optional
+
+import openai
 from langchain_openai import ChatOpenAI
+from langchain_core.messages import AIMessage, AIMessageChunk
+from langchain_core.outputs import ChatGeneration, ChatGenerationChunk, ChatResult
+from langchain_core.messages.base import BaseMessageChunk
+from langchain_openai.chat_models.base import (
+    _convert_delta_to_message_chunk,
+    _convert_dict_to_message,
+    _create_usage_metadata,
+)
 
 logger = logging.getLogger(__name__)
+
+
+class QwenReasoningChatOpenAI(ChatOpenAI):
+    """保留 DashScope reasoning_content 的 ChatOpenAI 兼容层。"""
+
+    @staticmethod
+    def _extract_reasoning(payload: Mapping[str, Any]) -> str:
+        for key in ("reasoning_content", "reasoning", "thinking"):
+            value = payload.get(key)
+            if isinstance(value, str) and value.strip():
+                return value
+        return ""
+
+    def _convert_chunk_to_generation_chunk(
+        self,
+        chunk: dict,
+        default_chunk_class: type,
+        base_generation_info: dict | None,
+    ) -> ChatGenerationChunk | None:
+        generation_chunk = super()._convert_chunk_to_generation_chunk(
+            chunk, default_chunk_class, base_generation_info
+        )
+        if generation_chunk is None:
+            return None
+
+        choices = chunk.get("choices", []) or chunk.get("chunk", {}).get("choices", [])
+        if not choices:
+            return generation_chunk
+
+        delta = choices[0].get("delta") or {}
+        reasoning = self._extract_reasoning(delta)
+        if reasoning and isinstance(generation_chunk.message, AIMessageChunk):
+            generation_chunk.message.additional_kwargs["reasoning_content"] = reasoning
+        return generation_chunk
+
+    def _create_chat_result(
+        self,
+        response: dict | openai.BaseModel,
+        generation_info: dict | None = None,
+    ) -> ChatResult:
+        chat_result = super()._create_chat_result(response, generation_info)
+
+        response_dict = response if isinstance(response, dict) else response.model_dump()
+        choices = response_dict.get("choices", []) or []
+        if not choices or not chat_result.generations:
+            return chat_result
+
+        message_payload = choices[0].get("message") or {}
+        reasoning = self._extract_reasoning(message_payload)
+        if reasoning and isinstance(chat_result.generations[0].message, AIMessage):
+            chat_result.generations[0].message.additional_kwargs["reasoning_content"] = reasoning
+        return chat_result
 
 
 class QwenLLMService:
@@ -38,6 +101,7 @@ class QwenLLMService:
         self.enable_search = enable_search
         self.enable_reasoning = enable_reasoning
         self.reasoning_model = reasoning_model
+        self.base_url = os.getenv("QWEN_BASE_URL", "https://dashscope.aliyuncs.com/compatible-mode/v1")
 
         # 如果启用推理模式，使用推理模型和优化的参数
         if enable_reasoning:
@@ -46,8 +110,7 @@ class QwenLLMService:
             reasoning_max_tokens = min(4096, max(1024, max_tokens))  # 推理需要更多token空间
             extra_body = {"enable_search": enable_search}
             if enable_reasoning:
-                extra_body["enable_reasoning"] = True
-                extra_body["return_reasoning"] = True
+                extra_body["enable_thinking"] = True
             logger.info(f"推理模式已启用 - 使用模型: {actual_model}, 温度: {actual_temperature}")
         else:
             actual_model = model_name
@@ -55,10 +118,10 @@ class QwenLLMService:
             reasoning_max_tokens = max_tokens
             extra_body = {"enable_search": enable_search}
 
-        self.llm = ChatOpenAI(
+        self.llm = QwenReasoningChatOpenAI(
             model=actual_model,
             api_key=api_key,
-            base_url="https://dashscope.aliyuncs.com/compatible-mode/v1",
+            base_url=self.base_url,
             temperature=actual_temperature,
             max_tokens=reasoning_max_tokens,
             timeout=90,
@@ -69,7 +132,7 @@ class QwenLLMService:
         )
 
         mode_str = "推理模式" if enable_reasoning else "标准模式"
-        logger.info(f"Qwen大模型服务初始化成功 - {mode_str} - 模型: {actual_model}, 搜索能力: {enable_search}")
+        logger.info(f"Qwen大模型服务初始化成功 - {mode_str} - 模型: {actual_model}, 搜索能力: {enable_search}, base_url: {self.base_url}")
     
     def get_llm(self) -> ChatOpenAI:
         """

@@ -21,6 +21,7 @@ import shutil
 import hashlib
 import subprocess
 import threading
+from functools import lru_cache
 from datetime import datetime
 from pathlib import Path
 from typing import Optional, Dict, Any, List, Union
@@ -495,6 +496,12 @@ def get_skill(skill_name: str = "") -> str:
         skill_name = parsed.get('skill_name', skill_name)
     
     skill_name = str(skill_name).strip().strip('"').strip("'")
+    return _get_skill_cached(skill_name)
+
+
+@lru_cache(maxsize=128)
+def _get_skill_cached(skill_name: str) -> str:
+    skill_name = str(skill_name).strip()
     skill = _find_skill(skill_name)
     
     if not skill:

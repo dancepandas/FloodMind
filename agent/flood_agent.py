@@ -57,37 +57,26 @@ class _FunctionsStreamCallback(BaseCallbackHandler):
         self._has_tool_call = False
         self._first_llm_call = True
         self._initial_enable_reasoning = enable_reasoning
-        self._last_reasoning_text = ""
+        self._reasoning_emit_buffer = ""
         logger.info(f"[Reasoning Callback] 初始化, enable_reasoning={enable_reasoning}")
 
-    def _emit_reasoning_text(self, text: str) -> None:
-        normalized = str(text or '').replace('\r\n', '\n').replace('\r', '\n')
-        normalized = re.sub(r"Invoking:\s*`[^`]+`\s*with\s*`\{[^`]*\}`", "", normalized)
-        normalized = re.sub(r"Invoking:\s*`[^`]+`", "", normalized)
-        normalized = normalized.replace("responded:", " ")
-        normalized = re.sub(r'\n{3,}', '\n\n', normalized)
-        normalized = re.sub(r'[ \t]+', ' ', normalized)
-        normalized = re.sub(r' *\n *', '\n', normalized).strip()
+    def _flush_reasoning_buffer(self) -> None:
+        if not self._reasoning_emit_buffer:
+            return
+        self._q.put(("reasoning", self._reasoning_emit_buffer))
+        self._reasoning_emit_buffer = ""
+
+    def _append_reasoning_chunk(self, text: str) -> None:
+        chunk = str(text or "")
+        if not chunk:
+            return
+        self._reasoning_emit_buffer += chunk
+        normalized = self._reasoning_emit_buffer.strip()
         if not normalized:
             return
 
-        paragraphs: List[str] = []
-        seen: set[str] = set()
-        for block in re.split(r'\n{2,}', normalized):
-            compact = re.sub(r'\s+', ' ', block).strip()
-            if not compact or compact in seen:
-                continue
-            seen.add(compact)
-            paragraphs.append(compact)
-
-        normalized = '\n\n'.join(paragraphs).strip()
-        if not normalized:
-            return
-
-        if normalized == self._last_reasoning_text:
-            return
-        self._last_reasoning_text = normalized
-        self._q.put(("reasoning", normalized))
+        if len(normalized) >= 48 or normalized.endswith(("。", "！", "？", "\n", ".", "!", "?", ":", "：", "；", ";")):
+            self._flush_reasoning_buffer()
 
     def on_llm_start(self, serialized, prompts, **kwargs):
         """LLM 开始生成"""
@@ -117,19 +106,22 @@ class _FunctionsStreamCallback(BaseCallbackHandler):
                         reasoning = additional_kwargs.get('reasoning_content')
                 
                 if reasoning:
-                    new_reasoning = reasoning[len(self._reasoning_buffer):]
+                    reasoning_text = str(reasoning)
+                    # DashScope OpenAI 兼容接口返回的是增量 delta.reasoning_content；
+                    # 但为了兼容少数可能返回累计文本的提供方，这里同时支持两种模式。
+                    if self._reasoning_buffer and reasoning_text.startswith(self._reasoning_buffer):
+                        new_reasoning = reasoning_text[len(self._reasoning_buffer):]
+                        self._reasoning_buffer = reasoning_text
+                    else:
+                        new_reasoning = reasoning_text
+                        self._reasoning_buffer += reasoning_text
+
                     if new_reasoning:
-                        self._reasoning_buffer = reasoning
-                        self._q.put(("reasoning", new_reasoning))
+                        self._append_reasoning_chunk(new_reasoning)
                         return
-            
-            if self._is_in_thinking_phase:
-                if token:
-                    self._pending_tokens.append(token)
-                    self._thinking_content += token
-            else:
-                if token:
-                    self._q.put(("token", token))
+
+            if not self._is_in_thinking_phase and token:
+                self._q.put(("token", token))
         else:
             # 无 reasoning 模式下也先缓冲 token；
             # 如果随后发生工具调用，说明这些内容只是内部规划，不应透传给前端。
@@ -141,18 +133,15 @@ class _FunctionsStreamCallback(BaseCallbackHandler):
         logger.info(f"[LLM End] _is_in_thinking_phase={self._is_in_thinking_phase}, _has_tool_call={self._has_tool_call}, pending_tokens={len(self._pending_tokens)}")
         # 不在这里发送 pending_tokens，因为此时还不知道是否有工具调用
         # pending_tokens 会在 on_tool_start 或 _run finally 中发送
+        self._flush_reasoning_buffer()
         self._is_in_thinking_phase = False
 
     def on_tool_start(self, serialized: dict, input_str: str, **kwargs) -> None:
         """工具开始执行"""
         tool_name = serialized.get("name", "unknown")
         logger.info(f"[Tool Start] 工具: {tool_name}, pending_tokens={len(self._pending_tokens)}, thinking_content_len={len(self._thinking_content)}")
-        
-        # 发送之前收集的思考内容为 reasoning
-        if self._enable_reasoning and self._thinking_content.strip():
-            for t in self._pending_tokens:
-                self._q.put(("reasoning", t))
-            logger.info(f"[Thinking] 发送思考内容: {self._thinking_content[:100]}...")
+
+        self._flush_reasoning_buffer()
         self._pending_tokens = []
         self._thinking_content = ""
         
@@ -206,34 +195,12 @@ class _FunctionsStreamCallback(BaseCallbackHandler):
         pass
 
     def on_agent_action(self, action, **kwargs) -> None:
-        """记录 agent 的工具决策轨迹，便于前端展示真实思考过程。"""
-        tool_name = str(getattr(action, "tool", "") or "").strip()
-        log_text = str(getattr(action, "log", "") or "").strip()
-
-        if log_text:
-            self._emit_reasoning_text(log_text)
-            return
-        _ = tool_name
+        """忽略 verbose agent action 文本，避免把调试轨迹当作思考过程。"""
+        return
 
     def on_text(self, text: str, **kwargs) -> None:
-        """接收 verbose 模式下的中间文本，例如 responded: ...。"""
-        normalized = str(text or "").strip()
-        if not normalized:
-            return
-
-        if normalized.startswith("Invoking:"):
-            return
-
-        if normalized.startswith("responded:"):
-            self._emit_reasoning_text(normalized[len("responded:"):].strip())
-            return
-
-        if normalized.startswith("=== 技能【"):
-            snippet = normalized[:800]
-            if len(normalized) > 800:
-                snippet += "\n..."
-            self._emit_reasoning_text(snippet)
-            return
+        """忽略 verbose 中间文本，思考卡片只展示原生 reasoning 与摘要事件。"""
+        return
 
     def on_chain_end(self, outputs, **kwargs):
         """链结束"""
@@ -241,10 +208,12 @@ class _FunctionsStreamCallback(BaseCallbackHandler):
 
     def on_chain_error(self, error: BaseException, **kwargs) -> None:
         """链错误"""
+        self._flush_reasoning_buffer()
         self._q.put(("reasoning", str(error)))
 
     def on_llm_error(self, error: BaseException, **kwargs) -> None:
         """LLM 错误"""
+        self._flush_reasoning_buffer()
         self._q.put(("reasoning", str(error)))
 
 
@@ -313,16 +282,12 @@ class FloodAgent:
 {skill_catalog}
 
 ## 可用子 agent 介绍
-- `delegate_python_specialist`：用于所有需要编写临时py脚本处理的任务，如数据提取、日志解析、中间 JSON/CSV构造、绘图等任务
-- `delegate_excel_specialist`：用于除去表格数据预览以外的所有复杂Excel处理任务，你需要明确告诉它你传入的数据文件结果如行数、列名等以及你的最终目的
-- `delegate_validator`：用于对照用户需求，校验结果是否满足要求，你需要告诉它你生成了哪些中间文件、最近一次结果文件、传入接口的文件等文件的路径
-
-## 子 agent 指派示例
-- 子 agent 只处理你明确交办的子任务；你负责总规划、决定是否继续下一步，以及向用户交付最终结果
-- 当任务较复杂时，应先由你自己拆分任务，再决定是否调用子 agent
-- 指派子agent任务时，应明确交代各项细节
-- **子 agent 返回的默认是中间结果，不是最终交付**：例如生成了 `input.json`、中间 `.json/.csv`、临时脚本、Excel 草稿、校验意见，这些都只代表某一步完成；除非用户目标本身就是“只生成这个中间文件”，否则你必须基于该结果继续判断并执行后续必要步骤，而不是立即结束回答
-- 当委派工具返回“文件已生成”“中间结果已完成”“可以继续下一步”这类内容时，默认理解为该步骤完成，需要你继续统筹后续步骤，而不是整体任务已经结束
+- `delegate_python_specialist`：用于所有需要编写临时py脚本处理的任务，如数据提取、日志解析、中间 JSON/CSV构造、绘图等任务。
+    你可以这样指派任务：我现在需要编写一个脚本将data/sessions/session-1776160969264-1adzerkfk/outputs/hydro_input.xlsx文件转换为格式为....形式的json文件
+- `delegate_excel_specialist`：用于除去表格数据预览以外的所有复杂Excel处理任务，你需要明确告诉它你传入的数据文件结果如行数、列名等以及你的最终目的。
+    你可以这样指派任务：请把data/sessions/session-1776160969264-1adzerkfk/outputs/result.json文件按照stationCdoe字段转换为标准的excel表格
+- `delegate_validator`：用于对照用户需求，校验结果是否满足要求，你需要告诉它你生成了哪些中间文件、最近一次结果文件、传入接口的文件等文件的路径。
+    你可以这样指派任务：请检查data/sessions/session-1776160969264-1adzerkfk/outputs/input.json文件中的内容是否符合skills/aojiang-hydro的输入要求
 
 ## 敖江流域子任务编码
 - 子任务：`霍口水库断面预报`、`霍口水库~山仔水库区间断面预报`、`山仔水库~水动力模型区间断面预报`、`水动力模型区间断面预报`、`桂湖溪流域出口断面预报`、`牛溪流域出口断面预报`
@@ -446,7 +411,12 @@ class FloodAgent:
 ## 核心职责
 1. 对照用户需求检查生成的文件、工具结果或中间产物
 2. 判断最近一次结果是否已经满足用户最终目标；如果它只是中间结果，必须明确判定为未完成
-3. 若未完成，只需告诉主 agent 用户最终目标是什么，不要展开步骤建议
+3. 若未完成，只需告诉主 agent 用户最终目标是什么，现阶段已经完成了哪些
+
+## 敖江流域子任务编码
+- 子任务：`霍口水库断面预报`、`霍口水库~山仔水库区间断面预报`、`山仔水库~水动力模型区间断面预报`、`水动力模型区间断面预报`、`桂湖溪流域出口断面预报`、`牛溪流域出口断面预报`
+- stationCode：`33c76b8bd9384486a945c2fc7fd622eb`、`20001`、`30001`、`40001`、`GE2AG000000L`、`GE2AF000000R`
+- 详细信息查看 aojiang-hydro SKILL.md文档
 
 ## 强约束
 - 不负责重新生成文件
@@ -528,8 +498,8 @@ class FloodAgent:
         self._skill_catalog = skill_catalog
         self._active_user_input = ""
 
-        self.python_tools: List[BaseTool] = [get_skill, run_script, exec_bash, exec_python_file, write_text_file, search_tool_error_memory, search_artifacts, read_artifact, search_memory]
-        self.excel_tools: List[BaseTool] = [get_skill, run_script, exec_bash, exec_python_file, write_text_file, search_tool_error_memory, search_artifacts, read_artifact, search_memory]
+        self.python_tools: List[BaseTool] = [get_skill, run_script, exec_bash, exec_python_file, write_text_file, search_tool_error_memory, search_artifacts, read_artifact]
+        self.excel_tools: List[BaseTool] = [get_skill, run_script, exec_bash, exec_python_file, write_text_file, search_tool_error_memory, search_artifacts, read_artifact]
         self.validator_tools: List[BaseTool] = [get_skill, run_script, exec_python_file, search_memory]
 
         self.python_specialist_executor = self._build_specialized_executor(self.PYTHON_SPECIALIST_PROMPT, self.python_tools, max_iterations=50)
@@ -558,14 +528,19 @@ class FloodAgent:
         logger.info("洪水预报智能体初始化成功（OpenAI Functions Agent）")
         self._warmup_chronos()
 
-    def _build_prompt(self, system_prompt: str) -> ChatPromptTemplate:
-        return ChatPromptTemplate.from_messages([
+    def _build_prompt(self, system_prompt: str, *, include_memory: bool = True, include_chat_history: bool = True) -> ChatPromptTemplate:
+        messages: List[Any] = [
             ("system", system_prompt.format(skill_catalog=self._skill_catalog, current_time_context="{current_time_context}")),
-            MessagesPlaceholder(variable_name="long_term_memory", optional=True),
-            MessagesPlaceholder(variable_name="chat_history", optional=True),
+        ]
+        if include_memory:
+            messages.append(MessagesPlaceholder(variable_name="long_term_memory", optional=True))
+        if include_chat_history:
+            messages.append(MessagesPlaceholder(variable_name="chat_history", optional=True))
+        messages.extend([
             ("human", "{input}"),
             MessagesPlaceholder(variable_name="agent_scratchpad"),
         ])
+        return ChatPromptTemplate.from_messages(messages)
 
     def _create_executor(self, agent, tools: List[BaseTool], max_iterations: int = 30, max_execution_time: int = 600) -> AgentExecutor:
         return AgentExecutor(
@@ -580,7 +555,7 @@ class FloodAgent:
         )
 
     def _build_specialized_executor(self, system_prompt: str, tools: List[BaseTool], max_iterations: int = 30) -> AgentExecutor:
-        prompt = self._build_prompt(system_prompt)
+        prompt = self._build_prompt(system_prompt, include_memory=False, include_chat_history=False)
         agent = create_openai_functions_agent(
             llm=self.llm_service.get_llm(),
             tools=tools,
@@ -845,6 +820,12 @@ class FloodAgent:
         return state.original_input
 
     def _verify_step_result(self, step: PlanStep, payload: Optional[Dict[str, Any]], stage_output: str) -> Dict[str, Any]:
+        base_progress = {
+            "completed_steps": [],
+            "pending_steps": [],
+            "failed_step": None,
+            "reusable_artifacts": self._collect_artifacts_from_payload(payload),
+        }
         if step.executor == "validator":
             validation = (payload or {}).get("validation") or self._parse_validator_output(stage_output)
             return {
@@ -854,6 +835,16 @@ class FloodAgent:
                 "goal_satisfied": bool(validation.get("is_final_goal_met")),
                 "requires_replan": not bool(validation.get("is_final_goal_met")),
                 "validation": validation,
+                **({
+                    **base_progress,
+                    "failed_step": {
+                        "step_id": step.step_id,
+                        "title": step.title,
+                        "executor": step.executor,
+                        "purpose": step.purpose,
+                        "status": step.status,
+                    },
+                } if not validation.get("is_final_goal_met") else base_progress),
             }
 
         if payload:
@@ -866,6 +857,16 @@ class FloodAgent:
                 "goal_satisfied": not should_continue,
                 "requires_replan": should_continue,
                 "validation": validation,
+                **({
+                    **base_progress,
+                    "failed_step": {
+                        "step_id": step.step_id,
+                        "title": step.title,
+                        "executor": step.executor,
+                        "purpose": step.purpose,
+                        "status": step.status,
+                    },
+                } if should_continue else base_progress),
             }
 
         text = (stage_output or "").strip()
@@ -876,6 +877,16 @@ class FloodAgent:
             "goal_satisfied": False,
             "requires_replan": not bool(text),
             "validation": {},
+            **({
+                **base_progress,
+                "failed_step": {
+                    "step_id": step.step_id,
+                    "title": step.title,
+                    "executor": step.executor,
+                    "purpose": step.purpose,
+                    "status": step.status,
+                },
+            } if not text else base_progress),
         }
 
     @staticmethod
@@ -902,6 +913,33 @@ class FloodAgent:
             return False
         return any([has_excel, has_image, has_report]) if any(needs.values()) else bool(lower_artifacts)
 
+    @staticmethod
+    def _classify_step_completion(state: AgentLoopState) -> Dict[str, Any]:
+        completed_steps: List[Dict[str, str]] = []
+        pending_steps: List[Dict[str, str]] = []
+        failed_step: Optional[Dict[str, str]] = None
+
+        for step in state.plan_steps:
+            item = {
+                "step_id": step.step_id,
+                "title": step.title,
+                "executor": step.executor,
+                "purpose": step.purpose,
+                "status": step.status,
+            }
+            if step.status == "completed":
+                completed_steps.append(item)
+            elif step.status == "failed":
+                failed_step = item
+            else:
+                pending_steps.append(item)
+
+        return {
+            "completed_steps": completed_steps,
+            "pending_steps": pending_steps,
+            "failed_step": failed_step,
+        }
+
     def _verify_goal_state(self, state: AgentLoopState) -> Dict[str, Any]:
         payload = state.latest_payload or {}
         validation = payload.get("validation") or state.final_verification or {}
@@ -910,6 +948,7 @@ class FloodAgent:
         artifacts_ok = self._artifacts_cover_needs(artifacts, needs)
         validation_ok = bool(validation.get("is_final_goal_met")) or not any(needs.values())
         goal_satisfied = artifacts_ok and validation_ok
+        progress = self._classify_step_completion(state)
         reason = str(validation.get("final_goal", "") or "")
         if not goal_satisfied and not reason:
             if any(needs.values()) and not artifacts_ok:
@@ -922,7 +961,59 @@ class FloodAgent:
             "reason": reason,
             "goal_satisfied": goal_satisfied,
             "requires_replan": not goal_satisfied,
+            "completed_steps": progress["completed_steps"],
+            "pending_steps": progress["pending_steps"],
+            "failed_step": progress["failed_step"],
+            "reusable_artifacts": artifacts,
         }
+
+    @staticmethod
+    def _format_progress_lines(items: List[Dict[str, str]]) -> str:
+        if not items:
+            return "- 无"
+        lines = []
+        for item in items:
+            title = str(item.get("title", "") or "未命名步骤")
+            executor = str(item.get("executor", "") or "orchestrator")
+            purpose = str(item.get("purpose", "") or "").strip()
+            line = f"- {title} ({executor})"
+            if purpose:
+                line += f": {purpose}"
+            lines.append(line)
+        return "\n".join(lines)
+
+    def _build_progress_context(self, state: AgentLoopState, verification: Dict[str, Any]) -> str:
+        completed_steps = verification.get("completed_steps") or []
+        pending_steps = verification.get("pending_steps") or []
+        failed_step = verification.get("failed_step") or {}
+        reusable_artifacts = verification.get("reusable_artifacts") or state.artifacts or []
+        latest_payload = state.latest_payload or {}
+
+        blocks = [
+            "[已完成步骤]",
+            self._format_progress_lines(completed_steps),
+            "",
+            "[未完成步骤]",
+            self._format_progress_lines(pending_steps),
+            "",
+            "[当前失败/待补步骤]",
+            self._format_progress_lines([failed_step] if failed_step else []),
+            "",
+            "[可复用产物]",
+            json.dumps(reusable_artifacts, ensure_ascii=False, indent=2),
+        ]
+
+        latest_summary = str(latest_payload.get("summary", "") or "").strip()
+        if latest_summary:
+            blocks.extend(["", "[最近一次结果摘要]", latest_summary])
+
+        blocks.extend([
+            "",
+            "[执行约束]",
+            "- 优先复用已完成步骤的中间结果和产物，不要默认从头重跑整条流程。",
+            "- 如果只是最后一步失败，只续做最后一步；只有当现有中间结果不足以继续时，才允许回退到更上游步骤。",
+        ])
+        return "\n".join(blocks)
 
     def _get_runtime_state_dir(self) -> str:
         memory = getattr(self, "memory", None)
@@ -1025,8 +1116,20 @@ class FloodAgent:
         latest_stage = str(payload.get("stage", "") or "").strip()
         artifacts = self._collect_artifacts_from_payload(payload)
         needs = self._needs_final_deliverable(state.original_input)
-        next_executor = "orchestrator"
+        failed_step = verification.get("failed_step") or {}
+        failed_executor = str(failed_step.get("executor", "") or "").strip()
+        next_executor = failed_executor or "orchestrator"
         next_title = "根据校验反馈继续执行"
+
+        if verification.get("scope") == "step" and failed_executor:
+            next_title = f"继续完成：{failed_step.get('title', '当前失败步骤')}"
+        elif verification.get("scope") == "goal":
+            if needs["excel"] and not self._artifacts_cover_needs(artifacts or state.artifacts, {"excel": True, "image": False, "report": False}):
+                next_executor = "excel_specialist"
+                next_title = "基于已有结果补齐最终 Excel"
+            elif failed_executor:
+                next_executor = failed_executor
+                next_title = f"继续完成：{failed_step.get('title', '当前失败步骤')}"
 
         if needs["excel"] and not self._artifacts_cover_needs(artifacts, {"excel": True, "image": False, "report": False}):
             if latest_stage == "python_specialist" or artifacts:
@@ -1037,11 +1140,19 @@ class FloodAgent:
             next_title = "复核最终交付是否满足目标"
 
         step_id = f"step-{len(state.plan_steps) + 1}"
+        progress_context = self._build_progress_context(state, verification)
+        reason = str(verification.get("reason", "") or "根据校验反馈继续推进任务")
         step = PlanStep(
             step_id=step_id,
             title=next_title,
             executor=next_executor,
-            purpose=str(verification.get("reason", "") or "根据校验反馈继续推进任务"),
+            purpose=reason,
+            input_text=(
+                f"[原始用户需求]\n{state.original_input}\n\n"
+                f"[当前待完成目标]\n{reason}\n\n"
+                f"{progress_context}\n\n"
+                "请只继续完成当前未完成步骤，禁止默认重跑已经完成的上游步骤。"
+            ),
         )
         state.plan_steps.append(step)
         state.replan_count += 1
@@ -1685,13 +1796,65 @@ class FloodAgent:
             full_tool_calls: List[Dict[str, str]] = []
             q: queue.Queue = queue.Queue()
             result_holder: Dict[str, Any] = {}
+            last_summary_text = ""
+            saw_native_reasoning = False
 
-            def normalize_loop_event(event: Dict[str, Any]) -> Dict[str, Any]:
+            def normalize_summary_text(text: str) -> str:
+                normalized = re.sub(r'\s+', ' ', str(text or '')).strip()
+                return normalized
+
+            def emit_summary_event(text: str) -> Optional[Dict[str, Any]]:
+                nonlocal full_reasoning, last_summary_text
+                normalized = normalize_summary_text(text)
+                if not normalized or normalized == last_summary_text:
+                    return None
+                last_summary_text = normalized
+                full_reasoning += ("\n\n" if full_reasoning else "") + normalized
+                return {"type": "thought_summary", "content": normalized}
+
+            def expand_text_for_thoughts(text: str, limit: int = 1200) -> str:
+                raw = str(text or "").replace("\r\n", "\n").replace("\r", "\n").strip()
+                if not raw:
+                    return ""
+                raw = re.sub(r'\n{3,}', '\n\n', raw)
+                raw = re.sub(r'[ \t]+', ' ', raw)
+                raw = re.sub(r' *\n *', '\n', raw).strip()
+                if len(raw) > limit:
+                    raw = raw[:limit].rstrip() + "\n..."
+                return raw
+
+            def summarize_tool_status(tool_name: str, content: str = "", status: str = "running") -> str:
+                tool_name = str(tool_name or "").strip()
+                content = expand_text_for_thoughts(content, limit=300)
+                if status == "error":
+                    if content:
+                        return f"工具 `{tool_name or 'unknown'}` 执行失败：\n{content}"
+                    return f"工具 `{tool_name or 'unknown'}` 执行失败。"
+
+                if content:
+                    return f"开始调用工具 `{tool_name or 'unknown'}`：\n{content}"
+                return f"开始调用工具 `{tool_name or 'unknown'}`。"
+
+            def summarize_tool_result(tool_name: str, content: str = "") -> str:
+                tool_name = str(tool_name or "").strip()
+                text = expand_text_for_thoughts(content, limit=1600)
+                if not text:
+                    return f"工具 `{tool_name or 'unknown'}` 执行完成。"
+                return f"工具 `{tool_name or 'unknown'}` 返回：\n{text}"
+
+            def build_step_summary(event: Dict[str, Any]) -> str:
+                detail = normalize_summary_text(event.get("detail", "") or event.get("purpose", ""))
+                title = normalize_summary_text(event.get("title", "") or "当前步骤")
+                if detail:
+                    return detail
+                return f"开始处理：{title}。"
+
+            def normalize_loop_events(event: Dict[str, Any]) -> List[Dict[str, Any]]:
                 nonlocal full_reasoning
                 event_type = event.get("type")
                 if event_type == "plan_created":
                     steps = event.get("steps", []) or []
-                    return {
+                    return [{
                         "type": "workflow_plan",
                         "title": "Agent Loop",
                         "steps": [
@@ -1704,19 +1867,21 @@ class FloodAgent:
                             }
                             for step in steps
                         ],
-                    }
+                    }]
                 if event_type == "step_started":
-                    return {
+                    events: List[Dict[str, Any]] = []
+                    events.append({
                         "type": "workflow_step",
                         "step_key": event.get("step_id", ""),
                         "label": event.get("executor", "orchestrator"),
                         "title": event.get("title", "待执行"),
                         "detail": event.get("detail", "") or event.get("purpose", ""),
                         "status": "running",
-                    }
+                    })
+                    return events
                 if event_type == "step_completed":
                     verification = event.get("verification", {}) or {}
-                    return {
+                    return [{
                         "type": "workflow_step",
                         "step_key": event.get("step_id", ""),
                         "label": event.get("executor", "orchestrator"),
@@ -1724,30 +1889,23 @@ class FloodAgent:
                         "detail": event.get("detail", "") or event.get("purpose", ""),
                         "status": "completed" if event.get("status") == "completed" else "failed",
                         "outcome": str(verification.get("reason", "") or "").strip(),
-                    }
+                    }]
                 if event_type == "replan":
-                    reason = str(event.get("reason", "") or "用户最终目标尚未完成")
-                    full_reasoning += f"\n[重规划]\n{reason}\n"
-                    return {"type": "reasoning", "content": f"\n[重规划]\n{reason}\n"}
+                    return []
                 if event_type == "artifact_created":
                     artifact = event.get("artifact", {}) or {}
                     path = str(artifact.get("path", "") or "")
                     filename = os.path.basename(path) if path else ""
                     if not filename:
-                        return {"type": "reasoning", "content": ""}
+                        return []
                     if artifact.get("artifact_type") == "image":
-                        return {"type": "image_generated", "filename": filename, "filepath": path}
-                    return {"type": "file_generated", "filename": filename, "filepath": path}
+                        return [{"type": "image_generated", "filename": filename, "filepath": path}]
+                    return [{"type": "file_generated", "filename": filename, "filepath": path}]
                 if event_type == "verification":
-                    verification = event.get("verification", {}) or {}
-                    reason = str(verification.get("reason", "") or "").strip()
-                    if not reason:
-                        reason = f"{event.get('title', '当前步骤')}校验状态：{verification.get('status', 'unknown')}"
-                    full_reasoning += f"\n[校验]\n{reason}\n"
-                    return {"type": "reasoning", "content": f"\n[校验]\n{reason}\n"}
+                    return []
                 if event_type == "goal_completed":
-                    return {"type": "reasoning", "content": "\n[校验]\n最终目标已满足，准备整理最终答复。\n"}
-                return event
+                    return []
+                return [event]
 
             def _run_loop() -> None:
                 try:
@@ -1755,7 +1913,7 @@ class FloodAgent:
                     loop_state = self._run_agent_loop(
                         user_input,
                         callbacks=[callback],
-                        event_sink=lambda event: q.put(("event", normalize_loop_event(event))),
+                        event_sink=lambda event: [q.put(("event", item)) for item in normalize_loop_events(event)],
                     )
                     result_holder["state"] = loop_state
                 except Exception as exc:
@@ -1773,6 +1931,8 @@ class FloodAgent:
                 if event_type == "error":
                     raise RuntimeError(content)
                 if event_type in {"reasoning", "token", "search_result"}:
+                    if event_type == "reasoning" and str(content or "").strip():
+                        saw_native_reasoning = True
                     yield {"type": event_type, "content": str(content or "")}
                     continue
                 if event_type in {"tool_status", "tool_result"}:
@@ -1782,6 +1942,8 @@ class FloodAgent:
                     continue
                 if event_type == "event":
                     event = content if isinstance(content, dict) else {"type": "reasoning", "content": str(content)}
+                    if event.get("type") == "thought_summary" and saw_native_reasoning:
+                        continue
                     yield event
 
             loop_state = result_holder.get("state")
