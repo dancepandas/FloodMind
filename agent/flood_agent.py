@@ -284,7 +284,7 @@ class FloodAgent:
 ## 可用子 agent 介绍
 - `delegate_python_specialist`：用于所有需要编写临时py脚本处理的任务，如数据提取、日志解析、中间 JSON/CSV构造、绘图等任务。
     你可以这样指派任务：我现在需要编写一个脚本将data/sessions/session-1776160969264-1adzerkfk/outputs/hydro_input.xlsx文件转换为格式为....形式的json文件
-- `delegate_excel_specialist`：用于除去表格数据预览以外的所有复杂Excel处理任务，你需要明确告诉它你传入的数据文件结果如行数、列名等以及你的最终目的。
+- `delegate_excel_specialist`：用于除去表格数据预览以外的所有复杂Excel处理任务，你只需要告诉它具体的Excel生成任务和关键文件信息。
     你可以这样指派任务：请把data/sessions/session-1776160969264-1adzerkfk/outputs/result.json文件按照stationCdoe字段转换为标准的excel表格
 - `delegate_validator`：用于对照用户需求，校验结果是否满足要求，你需要告诉它你生成了哪些中间文件、最近一次结果文件、传入接口的文件等文件的路径。
     你可以这样指派任务：请检查data/sessions/session-1776160969264-1adzerkfk/outputs/input.json文件中的内容是否符合skills/aojiang-hydro的输入要求
@@ -391,6 +391,8 @@ class FloodAgent:
 - 禁止猜测 `xlsx` skill 未声明的脚本或参数
 - 禁止把大表数据直接塞进 `run_script` 或 `write_text_file` 的长 JSON 参数
 - 如需生成大量表格内容，优先先写临时 Python 脚本，再执行该脚本生成 Excel
+- **只专注于 Excel 结构设计和文件生成，不要关心或重复上游的数据处理工作**
+- **不要尝试理解或执行最终目标，你的职责只是生成符合要求的 Excel 文件**
 
 ## 推荐工作流
 1. `get_skill('xlsx')` 确认可用能力
@@ -798,13 +800,21 @@ class FloodAgent:
         latest_payload = state.latest_payload or {}
 
         if step.executor == "excel_specialist" and latest_payload:
-            return (
-                f"请根据原始用户需求和已有中间结果生成最终 Excel。\n\n"
-                f"[原始用户需求]\n{state.original_input}\n\n"
-                f"[最近一次中间结果]\n{latest_payload.get('summary', '')}\n\n"
-                f"[最近一次产物]\n{json.dumps(latest_payload.get('artifacts', []), ensure_ascii=False, indent=2)}\n\n"
-                "要求输出真正可交付的 Excel 文件，而不是继续返回中间 JSON/CSV。"
+            artifacts = latest_payload.get('artifacts', [])
+            task_description = f"请基于已有的中间文件生成最终 Excel 文件。\n\n"
+
+            if artifacts:
+                task_description += f"[可用中间文件]\n{', '.join(artifacts)}\n\n"
+
+            task_description += (
+                f"[上游处理说明]\n{latest_payload.get('summary', '无')}\n\n"
+                "你的职责：\n"
+                "1. 只负责 Excel 结构设计和文件生成\n"
+                "2. 基于上游生成的中间文件创建最终 Excel\n"
+                "3. 输出真正可交付的 Excel 文件\n\n"
+                "不要重新解析原始数据或重复上游处理。"
             )
+            return task_description
 
         if step.executor == "validator" and state.previous_outputs:
             latest_summary = state.previous_outputs[-1][1]
@@ -1281,10 +1291,13 @@ class FloodAgent:
         if stage_name == "excel_specialist" and previous_outputs:
             latest_summary = previous_outputs[-1][1]
             return (
-                f"请根据原始用户需求和已有中间结果生成最终 Excel。\n\n"
-                f"[原始用户需求]\n{original_input}\n\n"
+                f"请基于上游中间结果生成最终 Excel 文件。\n\n"
                 f"[上游中间结果]\n{latest_summary}\n\n"
-                f"要求你优先基于上游生成的中间文件或结构化结果设计 Excel，而不是重新解析原始日志或重新构造大数组。"
+                f"你的职责：\n"
+                f"1. 只负责 Excel 结构设计和文件生成\n"
+                f"2. 基于上游生成的中间文件或结构化结果创建最终 Excel\n"
+                f"3. 输出真正可交付的 Excel 文件\n\n"
+                f"不要重新解析原始数据或重复上游处理。"
             )
 
         if not previous_outputs:
