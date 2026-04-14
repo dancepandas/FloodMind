@@ -1,0 +1,14 @@
+backend: Agg
+font.family: sans-serif
+font.serif: Noto Serif CJK SC, Source Han Serif SC, Songti SC, Times New Roman, DejaVu Serif
+font.sans-serif: WenQuanYi Zen Hei, WenQuanYi Micro Hei, Noto Sans CJK SC, Microsoft YaHei, SimHei, Arial Unicode MS, DejaVu Sans, Arial, Liberation Sans
+axes.unicode_minus: False
+axes.linewidth: 0.8
+xtick.direction: in
+ytick.direction: in
+xtick.major.width: 0.8
+ytick.major.width: 0.8
+xtick.top: True
+ytick.right: True
+figure.dpi: 300
+mathtext.fontset: stix
