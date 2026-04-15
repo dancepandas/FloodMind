@@ -310,7 +310,12 @@ def build_artifact_summary_text(artifact_events: list[dict[str, Any]], original_
 
     lines = []
     image_events = [event for event in artifact_events if event.get('type') == 'image_generated']
-    file_events = [event for event in artifact_events if event.get('type') == 'file_generated']
+    deliverable_exts = {'.xlsx', '.xls', '.docx', '.doc', '.pdf'}
+    file_events = [
+        event for event in artifact_events
+        if event.get('type') == 'file_generated'
+        and os.path.splitext(str(event.get('filename', '')))[1].lower() in deliverable_exts
+    ]
 
     cleaned_original = (original_text or "").strip()
     if not cleaned_original:
@@ -423,13 +428,26 @@ def extract_validated_artifact_paths(content: str) -> list[str]:
     validation = payload.get('validation') or {}
     overall_status = str(validation.get('overall_status', '')).strip().lower()
     is_final_goal_met = validation.get('is_final_goal_met')
+    current_result_type = str(validation.get('current_result_type', '')).strip().lower()
     if overall_status != 'pass' and is_final_goal_met is not True:
+        return []
+    if current_result_type and current_result_type != 'final_deliverable':
         return []
 
     artifacts = payload.get('artifacts') or []
     if not isinstance(artifacts, list):
         return []
-    return [str(path) for path in artifacts if str(path).strip()]
+
+    deliverable_exts = {'.xlsx', '.xls', '.docx', '.doc', '.pdf', '.png', '.jpg', '.jpeg', '.gif'}
+    result = []
+    for path in artifacts:
+        normalized = str(path).strip()
+        if not normalized:
+            continue
+        ext = os.path.splitext(normalized)[1].lower()
+        if ext in deliverable_exts:
+            result.append(normalized)
+    return result
 
 
 def filter_final_delivery_artifacts(artifact_paths: list[str], final_text: str) -> list[str]:

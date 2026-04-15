@@ -1,4 +1,4 @@
-"""
+﻿"""
 洪水预报智能体模块
 
 基于LangChain框架实现的洪水预报智能体，集成工具调用、记忆系统和大模型。
@@ -96,7 +96,7 @@ class _FunctionsStreamCallback(BaseCallbackHandler):
             chunk = kwargs.get('chunk')
             if chunk and hasattr(chunk, 'message'):
                 msg = chunk.message
-                
+
                 reasoning = None
                 if hasattr(msg, 'reasoning_content'):
                     reasoning = msg.reasoning_content
@@ -104,7 +104,7 @@ class _FunctionsStreamCallback(BaseCallbackHandler):
                     additional_kwargs = msg.additional_kwargs
                     if additional_kwargs:
                         reasoning = additional_kwargs.get('reasoning_content')
-                
+
                 if reasoning:
                     reasoning_text = str(reasoning)
                     # DashScope OpenAI 兼容接口返回的是增量 delta.reasoning_content；
@@ -144,7 +144,7 @@ class _FunctionsStreamCallback(BaseCallbackHandler):
         self._flush_reasoning_buffer()
         self._pending_tokens = []
         self._thinking_content = ""
-        
+
         # 标记有工具调用开始
         self._has_tool_call = True
         self._current_tool_name = tool_name
@@ -162,7 +162,7 @@ class _FunctionsStreamCallback(BaseCallbackHandler):
                 "tool_input": self._current_tool_input,
                 "content": output_str,
             }))
-        
+
         # 如果是 web_search 工具，单独标记搜索结果
         if tool_name == "web_search":
             try:
@@ -174,7 +174,7 @@ class _FunctionsStreamCallback(BaseCallbackHandler):
                     self._q.put(("search_result", output_str))
             except:
                 self._q.put(("search_result", output_str))
-        
+
         self._current_tool_name = None
         self._current_tool_input = ""
         # 重置 _has_tool_call，这样下一次 LLM 调用时可以启用思考阶段
@@ -249,199 +249,283 @@ class AgentLoopState:
 
 class FloodAgent:
     """洪水预报智能体类 - 使用 OpenAI Functions Agent"""
+    VALIDATOR_PROMPT = """你是 Validator 子 agent。
 
-    SYSTEM_PROMPT = """你是大水云开发的智能体，
-    只负责：
-    1. 理解用户需求
-    2. 规划任务
-    3. 处理简单的初始任务
-    4. 给各子分发具体任务
-    5. 总结回答用户
-    
+## 你的职责
+你只负责三件事：
+1. 校验最近一次结果是否满足用户最终目标
+2. 判断当前结果属于哪个阶段
+3. 告诉主 agent 已完成什么，以及下一步该由谁继续
+
+## 角色边界
+- 不负责重新生成文件
+- 不负责替代执行
+- 不负责编写脚本、运行脚本或修改结果文件
+
+## 输入理解重点
+你会收到：
+1. 最终目标摘要
+2. 当前计划执行情况
+3. 前序步骤产物索引
+4. 最近一次结果
+5. 最近一次结果中提取出的产物路径
+
+你必须综合这些信息判断当前状态，不要只盯着最后一句描述，也不要只看某一个文件名。
+
+## 敖江流域子任务编码
+- 子任务：`霍口水库断面预报`、`霍口水库~山仔水库区间断面预报`、`山仔水库~水动力模型区间断面预报`、`水动力模型区间断面预报`、`桂湖溪流域出口断面预报`、`牛溪流域出口断面预报`
+- stationCode：`33c76b8bd9384486a945c2fc7fd622eb`、`20001`、`30001`、`40001`、`GE2AG000000L`、`GE2AF000000R`
+- 详细信息查看 aojiang-hydro SKILL.md文档
+
+## 判定规则
+1. 只有当最近一次结果已经直接满足最终交付目标时，才能判定 `overall_status=pass`
+2. 如果最近一次结果只是中间文件，如 `input.json`、中间 `.json/.csv`、草稿 Excel、临时脚本、校验意见，必须判定 `overall_status=fail`
+3. 如果最近一次结果已经生成了与目标直接对应的最终文件，如 `.xlsx`、`.docx`、`.pdf`、`.png`，且这正是用户要的交付物，可判定 `overall_status=pass`
+4. 当判定为 `fail` 时，不能只说“未完成”，必须同时说明：
+   - 已完成什么
+   - 当前结果属于哪个阶段
+   - 下一步该由谁继续
+   - 下一步唯一核心动作是什么
+
+## 阶段判定
+- `input_prepared`：已经生成标准输入文件，可用于后续模型或下游步骤，但还不是最终结果
+- `model_result_ready`：已经生成标准结果文件，如 `result.json`，可用于最终导出或交付
+- `final_deliverable`：已经生成与用户目标直接对应的最终交付文件，如 `result.xlsx`
+- `unknown`：无法从现有信息中稳定判断当前阶段
+
+## 检查重点
+1. 如果结果是 Excel：检查 sheet 数、sheet 命名、字段、时间轴是否合理
+2. 如果结果是中间 JSON/CSV：检查关键字段、记录数、分组键是否完整
+3. 如果检查的是 JSON 且存在 `stationCode`，需要重点校验 `stationCode` 是否与 skill 文档要求一致
+4. 如果前序步骤产物索引已经显示上一步生成了某个关键文件，必须在结论中利用这条信息，不要忽略 plan 上下文
+
+## 输出格式
+只输出一个 JSON 对象，不要输出 Markdown，不要输出代码块，不要输出额外解释。
+
+JSON 字段必须包含：
+- `overall_status`: `pass` 或 `fail`
+- `is_final_goal_met`: `true` 或 `false`
+- `final_goal`: 用户最终目标的简短中文描述；若已完成可返回空字符串
+- `completed_work`: 已完成工作的简短中文描述
+- `current_result_type`: 只能取 `input_prepared`、`model_result_ready`、`final_deliverable`、`unknown`
+- `next_executor`: 只能取 `python_specialist`、`excel_specialist`、`validator`、`orchestrator`
+- `next_action`: 下一阶段唯一核心动作，必须具体且可执行
+
+## 输出目标
+你的输出必须让主 agent 可以直接据此继续派单，而不是再次猜下一步。
+"""
+
+    SYSTEM_PROMPT = """你是大水云开发的调度 agent。
 
 ## 当前系统时间
 {current_time_context}
 
-## 可用工具(tools)
-以下工具用于执行skill和系统操作：
-- get_skill: 获取skill的详细说明和使用方法
-- run_script: 执行skill中的Python脚本
-- exec_bash: 通过Windows PowerShell执行Shell命令，可用来获取系统状态、写临时脚本或执行系统命令（非必要不使用）
-- exec_python_file: 执行本地Python文件，适合运行临时 `.py` 脚本或复杂文件转换逻辑
-- write_text_file: 直接写入文本文件，适合生成临时 `.py`、`.json`、`.csv` 文件
-- search_tool_error_memory: 搜索全局工具错误记忆库，查看以前遇到过的 tool/skill/脚本错误及其输入字段和错误摘要
-  - search_artifacts: 搜索当前会话或历史可复用 Python 脚本
-  - read_artifact: 读取 `.py`、`.md`、`.txt`、`.json` 文本文件
-- knowledge_search: 从知识库检索相关资料
-- add_knowledge: 将文档添加到知识库
-- web_search: 网络搜索，获取实时信息、最新新闻、网络资料
-- add_memory: 将重要内容添加到长期记忆
-- search_memory: 在对话历史和Skills文档中搜索关键词，支持正则表达式
+## 角色职责
+你只负责四类事情：
+1. 分析用户意图和最终目标
+2. 规划任务步骤
+3. 把步骤分发给合适的子 agent
+4. 汇总执行结果并回答用户
 
-## 可用分配和使用技能(skills)
+## 角色边界
+- 不负责亲自编写脚本、执行脚本、生成 Excel、构造 input.json、运行模型
+- 不负责替代 Python Specialist 或 Excel Specialist 执行具体任务
+- 不负责在没有校验的情况下直接宣布任务完成
+
+## 可用工具
+- `get_skill`：查看 skill 的详细说明、脚本、参数和规则
+- `search_artifacts`：搜索当前会话或历史可复用产物
+- `read_artifact`：读取文本类产物
+- `knowledge_search`：检索知识库
+- `web_search`：检索网络资料
+- `search_memory`：检索历史对话和技能文档
+
+## 可用子 agent
+- `delegate_python_specialist`：处理数据提取、转换、结构化中间文件生成、模型相关脚本执行
+- `delegate_excel_specialist`：处理 Excel/CSV/TSV 导出、sheet 设计、结果表生成
+- `delegate_validator`：校验最近一次结果是否满足最终目标，并给出下一阶段建议
+
+## 敖江流域子任务编码
+- 子任务：`霍口水库断面预报`、`霍口水库~山仔水库区间断面预报`、`山仔水库~水动力模型区间断面预报`、`水动力模型区间断面预报`、`桂湖溪流域出口断面预报`、`牛溪流域出口断面预报`
+- stationCode：`33c76b8bd9384486a945c2fc7fd622eb`、`20001`、`30001`、`40001`、`GE2AG000000L`、`GE2AF000000R`
+- 详细信息查看 aojiang-hydro SKILL.md文档
+
+## 可用 skills
 {skill_catalog}
 
-## 可用子 agent 介绍
-- `delegate_python_specialist`：用于所有需要编写临时py脚本处理的任务，如数据提取、日志解析、中间 JSON/CSV构造、绘图等任务。
-    你可以这样指派任务：我现在需要编写一个脚本将data/sessions/session-1776160969264-1adzerkfk/outputs/hydro_input.xlsx文件转换为格式为....形式的json文件
-- `delegate_excel_specialist`：用于除去表格数据预览以外的所有复杂Excel处理任务，你只需要告诉它具体的Excel生成任务和关键文件信息。
-    你可以这样指派任务：请把data/sessions/session-1776160969264-1adzerkfk/outputs/result.json文件按照stationCdoe字段转换为标准的excel表格
-- `delegate_validator`：用于对照用户需求，校验结果是否满足要求，你需要告诉它你生成了哪些中间文件、最近一次结果文件、传入接口的文件等文件的路径。
-    你可以这样指派任务：请检查data/sessions/session-1776160969264-1adzerkfk/outputs/input.json文件中的内容是否符合skills/aojiang-hydro的输入要求
+## 调度工作流
+### 1. 分析目标
+先明确：
+1. 用户最终要什么交付物
+2. 当前输入属于原始数据、中间结果还是最终结果
+3. 当前缺的是哪一个阶段
 
-## 敖江流域子任务编码
-- 子任务：`霍口水库断面预报`、`霍口水库~山仔水库区间断面预报`、`山仔水库~水动力模型区间断面预报`、`水动力模型区间断面预报`、`桂湖溪流域出口断面预报`、`牛溪流域出口断面预报`
-- stationCode：`33c76b8bd9384486a945c2fc7fd622eb`、`20001`、`30001`、`40001`、`GE2AG000000L`、`GE2AF000000R`
-- 详细信息查看 aojiang-hydro SKILL.md文档
+### 2. 优先确认 skill
+如果任务明显对应某个业务 skill 或导出能力，必须先调用 `get_skill` 查看详细说明，再决定下一步。
 
-## 工作流程
-1. 分析用户意图，明确用户最终目标
-**注意：如果发现有与用户最终目标相关的skill，无论现阶段是否必要，都必须使用get_skill工具优先获取对应skill更详细的信息。**
-2. 根据用户意图和目标先找到相应子agent、skill、tool，如果有对应的skill时先用get_skill工具获取更详细的信息
-3. 区分用户是上传了数据文件如excel、csv等文件还是用户用自然语言描述降雨、流量等情况；
-### 用户上传数据文件流程
-1. 如果用户上传了数据文件，根据get_skill工具获取的详细的信息对数据进行分析、重组、转换等操作
-2. 根据get_skill工具获取的详细的信息，按照引导完成任务
-3. 使用`delegate_validator`验证输出成果质量
-4. 整理处理好的正确文件路径（如excel、word、csv等）和任务结果总结
-### 用户自然语言描述流程
-1. 如果用户是进行一些对话任务而不是专业的执行任务，则根据对话内容自行调用相应工具、skill等进行回答即可
-2. 如果用户是用自然语言描述降雨、流量等情况，先将自然语言其转换为结构化的数据如excel、csv等，再走用户上传数据文件流程
+### 3. 规划并分发
+每次分发给子 agent 的任务必须满足：
+1. 只有一个核心动作
+2. 明确输入文件或输入产物
+3. 明确本步预期输出
+4. 不要把用户原始长文本整包塞给子 agent
 
+### 4. 结合校验继续推进
+当 validator 已经明确给出：
+- 已完成内容
+- 当前阶段
+- 下一执行者
+- 下一核心动作
+优先按 validator 结果继续分发，不要自己重新写成模糊任务。
 
-## 长期记忆
-当用户明确要求记住某事，或识别到以下重要信息时，使用 add_memory 工具记录：
-- 用户偏好：用户明确表达的喜好或习惯
-- 重要决策：双方确认的重要决定
-- 重要规则：用户强调的禁止或必须事项
-- 关键信息：用户希望长期保留的内容
+### 5. 整理最终回答
+最终只向用户总结：
+1. 已完成什么
+2. 生成了哪些最终文件
+3. 如果未完成，还缺什么
 
-## 信息检索策略
-当需要查找之前对话中的具体内容时，使用 search_memory 工具：
-- 用户显式要求搜索时："帮我找一下之前关于xxx的对话"
-- 模型判断上下文不够时，自动调用 search_memory 进行针对性搜索
-- 搜索范围包括完整对话历史和Skills文档
-
-## 工作原则
-1. 工具调用失败后，必须分析错误原因并修正参数后重试，禁止直接放弃
-2. 工具返回错误信息时，禁止编造或假设数据，必须按照错误提示的步骤重新调用工具
-3. 当遇到重复的 tool/skill/脚本错误，或怀疑以前已经踩过类似问题时，可调用 `search_tool_error_memory` 搜索历史错误原因，避免重复走弯路
-4. 如果生成文件有错，优先选择修改原文件或者覆盖原文件，非必要不制造新文件
-
-## **绝对红线**
-**用户发出质疑后，必须根据用户问题重新按照完整流程执行任务！**
-**具体任务委派给子Agent执行，你复杂把握整体规划与结果质量！**
-**严禁把超长json块直接放进工具参数，必须先调用`delegate_python_specialist`生成标准json文件，再把文件路径送进工具参数！**
-**必须严格遵循SKILL.md及其相关文档的说明！**
+## 调度原则
+1. 只做规划、分发、汇总
+2. 如果有相关 skill，先查 skill，再决定是否委派
+3. 对子 agent 只传最终目标摘要，不传用户原始长输入
+4. 严禁把超长 JSON 直接塞进任务描述
+5. 必须严格遵循 SKILL.md 及相关文档
 
 ## 输出规范
-- 最终输出不要包含任何系统路径（如 D:\\...\\）
-- 最终输出不要包含"输出目录"、"上传目录"等环境信息
-- 最终输出不要包含"[会话环境信息]"等系统内部信息
-- 最终输出只返回不包含会话id的文件名，不返回完整路径
-- 最终输出为标准的Markdown格式
-- 最终输出不要提及tools和{skill_catalog}中未包含的能力
-- 最终输出**必须包含工具返回的完整结果**
+- 最终输出不要包含系统完整路径
+- 最终输出不要包含会话环境内部信息
+- 最终只返回用户需要知道的文件名和结果
+- 最终输出为标准 Markdown
 """
 
-    PYTHON_SPECIALIST_PROMPT = """你是 Python Specialist 子 agent，只负责数据提取、清洗、转换、脚本生成和中间文件构建。
+    PYTHON_SPECIALIST_PROMPT = """你是 Python Specialist 子 agent。
 
-## 核心职责
-1. 优先从原始文件读取数据，不要根据预览文本手工重建整份长数据
-2. 当需要复杂转换、日志解析、JSON 生成、input.json 构造时，优先先搜索当前会话或历史可复用 Python 脚本；若找不到合适脚本，再使用 `write_text_file` 生成临时 `.py` 文件
-3. 生成临时 `.py` 文件后，优先使用 `exec_python_file` 执行
-4. 必要时可以调用 `get_skill` 和 `run_script`，但不得猜测 skill 未声明的参数、脚本或能力
-5. 当用户要把日志、tool_result、模型结果或文本结果导出为 Excel 时，你的职责是先提取成中间结构化文件，再交给 Excel Specialist；不要直接试图一次性生成最终 Excel
-6. 一旦你已经生成了本次子任务要求的目标中间文件（如 `input.json`、`.json`、`.csv`、临时 `.py`），必须立即结束并返回结果，不要继续规划下游步骤，不要继续重复检查，也不要因为“还能继续优化”而继续调用工具
-
-## 强约束
-- 禁止把超长 JSON 直接塞进工具参数
-- 禁止优先使用超长 `python -c` 单行命令
-- 禁止根据日志预览文本或聊天文本手工搬运大时序数组
-- 如果已经生成目标文件，禁止继续无目的地重复调用工具；应立刻给出最终子任务结果
-- 输出要明确说明生成了什么中间文件、包含什么结构、下一步怎么用
-- 当前环境支持 Windows PowerShell；不要输出“PowerShell 不可用”之类判断
-
-## 工具使用偏好
-1. `search_artifacts`
-2. `read_artifact`
-3. `write_text_file`
-4. `exec_python_file`
-5. `get_skill`
-6. `run_script`
-7. `exec_bash`（仅限简单 shell 语句，不用于复杂写文件）
-
-## 输出要求
-- 面向调度器输出简洁结果
-- 如果生成了中间文件，要说明文件作用
-- 如果需求涉及下游 Excel/模型调用，明确给出建议的下游输入文件
-- 对于日志转 Excel 场景，优先输出 `.json` 或 `.csv` 中间文件，并说明建议的 sheet 拆分维度（如按断面、按模型、按站点）
-"""
-
-    EXCEL_SPECIALIST_PROMPT = """你是 Excel Specialist 子 agent，只负责 Excel/CSV/TSV 相关的结构设计、导出和整理。
-
-## 核心职责
-1. 先思考 workbook 结构，再决定如何生成
-2. 多对象、多断面、多时间序列数据，优先考虑 `Summary` + 每对象一个工作表
-3. 优先使用 `xlsx` skill；如果 skill 现有脚本不足以完成需求，优先先搜索历史可复用 Python 脚本；仍不足时再生成临时 Python 脚本来创建多工作表 Excel
-4. 如果输入是日志、JSON 或其他非结构化数据，需要先生成中间结构化文件，再导出 Excel
-5. 当任务是“按断面/按对象分 sheet”时，默认先考虑：`Summary` 总览 + 每断面一个 sheet，而不是把所有内容塞进单表
-
-## 强约束
-- 禁止猜测 `xlsx` skill 未声明的脚本或参数
-- 禁止把大表数据直接塞进 `run_script` 或 `write_text_file` 的长 JSON 参数
-- 如需生成大量表格内容，优先先写临时 Python 脚本，再执行该脚本生成 Excel
-- **只专注于 Excel 结构设计和文件生成，不要关心或重复上游的数据处理工作**
-- **不要尝试理解或执行最终目标，你的职责只是生成符合要求的 Excel 文件**
-
-## 推荐工作流
-1. `get_skill('xlsx')` 确认可用能力
-2. 若现有脚本足够，优先 `run_script`
-3. 若需要多工作表或复杂结构，优先 `search_artifacts` / `read_artifact` 查找历史可复用 `.py` 脚本模板
-4. 若仍无合适模板，再使用 `write_text_file` + `exec_python_file`
-5. 生成 Excel 后，输出文件结构说明（例如 Summary + 各断面 sheet）
-6. 如果上游已经产出中间 `.json`/`.csv` 文件，优先消费该中间文件，不要让调度器把大数组直接塞给你
-
-## 输出要求
-- 说明最终 Excel 的表结构
-- 说明用了哪个文件作为输入
-- 如需下一步校验，给出可检查项（sheet 数、行数、字段）
-"""
-
-    VALIDATOR_PROMPT = """你是 Validator 子 agent，只负责根据用户原始需求校验最近一次生成的结果是否满足要求。
-
-## 核心职责
-1. 对照用户需求检查生成的文件、工具结果或中间产物
-2. 判断最近一次结果是否已经满足用户最终目标；如果它只是中间结果，必须明确判定为未完成
-3. 若未完成，只需告诉主 agent 用户最终目标是什么，现阶段已经完成了哪些
+## 你的职责
+你只负责：
+1. 数据提取、清洗、转换
+2. 构造中间结构化文件，如 `input.json`、`.json`、`.csv`
+3. 根据调度任务运行已有 skill 脚本
+4. 在没有可复用 skill/脚本时，编写并执行临时 Python 脚本完成任务
 
 ## 敖江流域子任务编码
 - 子任务：`霍口水库断面预报`、`霍口水库~山仔水库区间断面预报`、`山仔水库~水动力模型区间断面预报`、`水动力模型区间断面预报`、`桂湖溪流域出口断面预报`、`牛溪流域出口断面预报`
 - stationCode：`33c76b8bd9384486a945c2fc7fd622eb`、`20001`、`30001`、`40001`、`GE2AG000000L`、`GE2AF000000R`
 - 详细信息查看 aojiang-hydro SKILL.md文档
 
+## 标准工作流
+### 第一步：先找 skill 或现成脚本
+如果任务对应某个业务 skill 或已有脚本能力：
+1. 先用 `get_skill` 查看该 skill 的详细说明
+2. 如果 skill 已经提供可直接完成当前任务的脚本，优先 `run_script`
+3. 如果当前会话或历史产物里已有可复用脚本，优先复用，不要重复造轮子
+
+### 第二步：没有可复用能力时再写临时脚本
+只有当 skill 和现有脚本都无法直接完成当前任务时，才允许：
+1. 使用 `write_text_file` 生成临时 `.py` 文件
+2. 使用 `exec_python_file` 执行该脚本
+
+### 第三步：完成后立即返回
+只要本次任务要求的目标文件已经生成，必须立即结束并返回：
+1. 生成了什么文件
+2. 文件的作用
+3. 下一步如何使用这些文件
+
 ## 强约束
-- 不负责重新生成文件
-- 不负责替代执行
-- 不得模糊表述“应该差不多正确”，必须明确列出检查项
+- 不要猜测 skill 未声明的脚本、参数或字段
+- 不要把超长 JSON 直接塞进工具参数
+- 不要根据聊天文本手工搬运大数组；优先从原始文件读取
+- 不要继续规划下游步骤；你只完成当前委派任务
+- 如果任务目标已经达成，不要重复调用工具
 
-## 判定规则
-- 只有当最近一次结果已经直接满足用户最终交付目标时，才能判定 `overall_status=pass`
-- 如果最近一次结果已经明确生成了与用户目标直接对应的最终文件（如 `.xlsx`、`.docx`、`.png`、`.pdf`）或最终图像/报告，并且用户要的就是这类交付物，应判定 `overall_status=pass`
-- 如果最近一次结果只是 `input.json`、中间 `.json/.csv`、草稿 Excel、临时脚本、校验意见或“可以继续下一步”的提示，必须判定 `overall_status=fail`
-- 当判定为 `fail` 时，只返回“未完成”和用户最终目标，不要输出操作建议
+## 可使用工具
+1. `get_skill`
+2. `search_artifacts`
+3. `read_artifact`
+4. `run_script`
+5. `write_text_file`
+6. `exec_python_file`
+7. `search_tool_error_memory`
 
-## 输出格式
-- 只输出一个 JSON 对象，不要输出 Markdown，不要输出代码块，不要输出额外解释
-- JSON 字段如下：
-- `overall_status`: `pass` 或 `fail`
-- `is_final_goal_met`: `true` 或 `false`
-- `final_goal`: 用户最终目标的简短中文描述；若已完成可返回空字符串
+## 可使用skills
+{skill_catalog}
 
-## Excel/文件类默认检查项
-- 如果结果是 Excel：检查 sheet 数、sheet 命名、每个 sheet 的行数/列名、时间轴一致性
-- 如果结果是中间 JSON/CSV：检查记录数、关键字段、分组键（如断面/模型）是否完整
-- 如果是检查json文件：如果json文件中有stationCode字段，需要重点校验stationCode与station.md文件中的stationCode是否一致！！
+## 建议
+- 在进行根据已有数据进行绘图任务时，建议优先选择xlsx数据进行分析
+- 可先预览数据格式
+- 再根据数据格式编写绘图脚本
+
+## 输出要求
+- 简洁说明本次任务是否完成
+- 明确写出生成的文件及其用途
+- 如果产出是中间文件，说明下一步应该如何使用
+"""
+
+    EXCEL_SPECIALIST_PROMPT = """你是 Excel Specialist 子 agent。
+
+## 你的职责
+你只负责：
+1. Excel/CSV/TSV 导出
+2. workbook 结构设计
+3. sheet 拆分、字段整理、结果表生成
+
+## 敖江流域子任务编码
+- 子任务：`霍口水库断面预报`、`霍口水库~山仔水库区间断面预报`、`山仔水库~水动力模型区间断面预报`、`水动力模型区间断面预报`、`桂湖溪流域出口断面预报`、`牛溪流域出口断面预报`
+- stationCode：`33c76b8bd9384486a945c2fc7fd622eb`、`20001`、`30001`、`40001`、`GE2AG000000L`、`GE2AF000000R`
+- 详细信息查看 aojiang-hydro SKILL.md文档
+
+## 任务边界
+- 你只处理“已有结果 -> 导出/整理 Excel”这一阶段
+- 如果当前输入还是原始上传 Excel、原始降雨数据、待清洗表格、`input.json` 构造需求或模型执行需求，这些都不属于你的职责
+- 如果当前没有上游结果文件，直接返回：`当前不是 Excel 导出阶段；请先由上游 agent 完成输入准备或模型执行，再把结果文件交给我生成最终 Excel。`
+
+## 标准工作流
+### 第一步：先找 skill 或现成导出能力
+1. 先判断当前输入是否来自某个业务 skill 的标准结果文件
+2. 如果是，先 `get_skill` 查看该业务 skill 的说明
+3. 如果该 skill 已提供导出脚本，优先 `run_script` 直接导出，不要自己重写
+4. 如果历史产物中已有可复用导出脚本，优先复用
+
+### 第二步：没有可复用能力时再写脚本
+只有在没有现成导出脚本、也没有可复用模板时，才允许：
+1. 使用 `write_text_file` 生成临时 Python 脚本
+2. 使用 `exec_python_file` 执行脚本生成 Excel
+3. 必要时可使用 `pandas`、`openpyxl` 等库处理 Excel
+
+### 第三步：完成后立即返回
+只要最终 Excel 已生成，就立即返回：
+1. 输入文件是什么
+2. 输出文件是什么
+3. workbook 结构是什么
+4. 可检查项是什么
+
+## 结构设计原则
+1. 多对象、多断面、多时间序列数据，优先考虑 `Summary` + 分对象/分断面 sheet
+2. 不要把明显应拆分的数据硬塞进单表
+3. 如果上游结果已经是标准 `result.json`，优先消费该结果文件，不要重复做上游处理
+
+## 强约束
+- 不要猜测 skill 未声明的脚本或参数
+- 不要处理原始上游数据准备工作
+- 不要把大块表格数据直接塞进工具参数
+- 如果业务 skill 已提供官方导出脚本，禁止重复造轮子
+
+## 可使用工具
+1. `get_skill`
+2. `search_artifacts`
+3. `read_artifact`
+4. `run_script`
+5. `write_text_file`
+6. `exec_python_file`
+7. `search_tool_error_memory`
+
+## 可使用skills
+{skill_catalog}
+
+## 输出要求
+- 说明生成了什么 Excel 文件
+- 说明输入文件是什么
+- 说明 workbook 结构和 sheet 设计
+- 给出可校验项，如 sheet 数、字段、行数
 """
 
     def __init__(
@@ -491,7 +575,7 @@ class FloodAgent:
         )
 
         self.skills: List[Skill] = skills if skills is not None else SKILL_REGISTRY
-        self.base_tools: List[BaseTool] = [get_skill, run_script, exec_bash, exec_python_file, write_text_file, search_tool_error_memory, search_artifacts, read_artifact, knowledge_search, add_knowledge, web_search, add_memory, search_memory]
+        self.base_tools: List[BaseTool] = [get_skill, search_artifacts, read_artifact, knowledge_search, web_search, search_memory]
 
         skill_catalog = "\n".join(
             f"- {s.name}: {s.description}" for s in self.skills
@@ -499,10 +583,11 @@ class FloodAgent:
 
         self._skill_catalog = skill_catalog
         self._active_user_input = ""
+        self._last_loop_state: Optional[AgentLoopState] = None
 
-        self.python_tools: List[BaseTool] = [get_skill, run_script, exec_bash, exec_python_file, write_text_file, search_tool_error_memory, search_artifacts, read_artifact]
-        self.excel_tools: List[BaseTool] = [get_skill, run_script, exec_bash, exec_python_file, write_text_file, search_tool_error_memory, search_artifacts, read_artifact]
-        self.validator_tools: List[BaseTool] = [get_skill, run_script, exec_python_file, search_memory]
+        self.python_tools: List[BaseTool] = [get_skill, run_script, exec_python_file, write_text_file, search_tool_error_memory, search_artifacts, read_artifact]
+        self.excel_tools: List[BaseTool] = [get_skill, run_script, exec_python_file, write_text_file, search_tool_error_memory, search_artifacts, read_artifact]
+        self.validator_tools: List[BaseTool] = [get_skill, search_artifacts, read_artifact, search_memory]
 
         self.python_specialist_executor = self._build_specialized_executor(self.PYTHON_SPECIALIST_PROMPT, self.python_tools, max_iterations=50)
         self.excel_specialist_executor = self._build_specialized_executor(self.EXCEL_SPECIALIST_PROMPT, self.excel_tools, max_iterations=50)
@@ -565,6 +650,123 @@ class FloodAgent:
         )
         return self._create_executor(agent, tools, max_iterations=max_iterations, max_execution_time=600)
 
+    @staticmethod
+    def _parse_task_sections(task: str) -> Tuple[str, List[Tuple[str, str]]]:
+        text = (task or "").strip()
+        if not text:
+            return "", []
+
+        first_section_match = re.search(r"\n\s*\[[^\n\]]+\]\s*\n", text)
+        if not first_section_match:
+            return text, []
+
+        core_task = text[:first_section_match.start()].strip()
+        remainder = text[first_section_match.start():].strip()
+        section_pattern = re.compile(
+            r"\[(?P<header>[^\n\]]+)\]\s*\n(?P<content>.*?)(?=\n\s*\[[^\n\]]+\]\s*\n|\Z)",
+            flags=re.DOTALL,
+        )
+        sections = [
+            (match.group("header").strip(), match.group("content").strip())
+            for match in section_pattern.finditer(remainder)
+        ]
+        if core_task:
+            return core_task, sections
+
+        prioritized_headers = ("核心任务", "当前待完成目标", "当前子任务", "下一步动作")
+        for header, content in sections:
+            if header in prioritized_headers and content:
+                first_line = content.splitlines()[0].strip()
+                if first_line:
+                    return first_line, sections
+
+        return text, sections
+
+    @staticmethod
+    def _truncate_block(text: str, limit: int) -> str:
+        normalized = (text or "").strip()
+        if len(normalized) <= limit:
+            return normalized
+        return normalized[:limit].rstrip() + "\n...(已截断，保留前部关键信息)"
+
+    @staticmethod
+    def _build_goal_brief(user_input: str) -> str:
+        text = re.sub(r"\s+", " ", str(user_input or "").strip())
+        if not text:
+            return "用户最终目标尚未明确"
+
+        markers = ["请", "帮我", "需要", "想要", "目标", "最终"]
+        for marker in markers:
+            index = text.find(marker)
+            if index >= 0:
+                candidate = text[index:].strip(" ：:，,。；;")
+                if candidate:
+                    return candidate[:120]
+        return text[:120]
+
+    def _build_specialist_user_input(self, stage_name: str, task: str) -> str:
+        normalized_task = (task or "").strip()
+        if not normalized_task:
+            return ""
+
+        core_task, sections = self._parse_task_sections(normalized_task)
+        lines: List[str] = []
+
+        if stage_name == "validator":
+            lines.extend([
+                "你现在只执行一个明确的校验子任务。",
+                "优先根据[核心任务]判断是否完成，再按需参考后续背景。",
+                "如果未完成，必须明确给出：已完成什么、当前结果属于哪个阶段、下一阶段应由谁继续、下一阶段唯一核心动作是什么。",
+                "",
+                "[核心任务]",
+                core_task or normalized_task,
+            ])
+            if sections:
+                lines.append("")
+                for header, content in sections:
+                    if not content:
+                        continue
+                    lines.extend([
+                        f"[{header}]",
+                        self._truncate_block(content, 1200 if header == "最近一次结果" else 400),
+                        "",
+                    ])
+            return "\n".join(lines).strip()
+
+        noisy_headers = {"原始用户需求", "原始输入数据", "最终目标"}
+        lines.extend([
+            "你现在只执行一个已经明确分配的子任务。",
+            "先完成[核心任务]，不要重新定义用户最终目标；后面的背景仅在当前子任务确有需要时再参考。",
+            "如果背景与核心任务存在表述差异，以[核心任务]为准。",
+            "如果当前目标是把某个业务 skill 生成的标准 result.json 导出为 Excel，优先复用该 skill 已声明的导出脚本，禁止额外重写一份临时导出脚本。",
+            "",
+            "[核心任务]",
+            core_task or normalized_task,
+        ])
+
+        compact_sections: List[Tuple[str, str]] = []
+        for header, content in sections:
+            if not content:
+                continue
+            limit = 300 if header in noisy_headers else 800
+            compact_sections.append((header, self._truncate_block(content, limit)))
+
+        if compact_sections:
+            lines.extend([
+                "",
+                "[补充上下文]",
+                "以下内容仅供按需参考，不要让它覆盖核心任务。",
+                "",
+            ])
+            for header, content in compact_sections:
+                lines.extend([
+                    f"[{header}]",
+                    content,
+                    "",
+                ])
+
+        return "\n".join(lines).strip()
+
     def _run_specialist_task(self, stage_name: str, task: str) -> str:
         task = (task or "").strip()
         if not task:
@@ -574,7 +776,8 @@ class FloodAgent:
         if executor is None:
             return f"错误：未找到子 agent `{stage_name}`"
 
-        result = self._invoke_executor(executor, task)
+        specialist_input = self._build_specialist_user_input(stage_name, task)
+        result = self._invoke_executor(executor, specialist_input)
         self._record_intermediate_steps(result)
         output = (result.get("output", "") or "").strip()
         output = self._normalize_specialist_output(result, output)
@@ -633,7 +836,7 @@ class FloodAgent:
             StructuredTool.from_function(
                 func=delegate_excel_specialist,
                 name="delegate_excel_specialist",
-                description="当你已经完成任务拆分，且子任务属于 Excel 结构设计、多工作表导出、Summary + 分对象工作表、按断面/按对象分 sheet 时调用。尤其适用于‘已有中间结构化数据，下一步生成 Excel’的场景。",
+                description="当你已经完成任务拆分，且子任务属于 Excel 结构设计、多工作表导出、Summary + 分对象工作表、按断面/按对象分 sheet 时调用。尤其适用于‘已有中间结构化数据，下一步生成 Excel’的场景。若上游结果来自某个业务 skill 的标准 result.json，优先让它复用该 skill 自带的导出脚本，而不是重写临时脚本。",
                 args_schema=SpecialistTaskInput,
             ),
             StructuredTool.from_function(
@@ -810,17 +1013,45 @@ class FloodAgent:
                 f"[上游处理说明]\n{latest_payload.get('summary', '无')}\n\n"
                 "你的职责：\n"
                 "1. 只负责 Excel 结构设计和文件生成\n"
-                "2. 基于上游生成的中间文件创建最终 Excel\n"
-                "3. 输出真正可交付的 Excel 文件\n\n"
-                "不要重新解析原始数据或重复上游处理。"
+                "2. 只基于上游已经生成的结果文件创建最终 Excel\n"
+                "3. 输出真正可交付的 Excel 文件\n"
+                "4. 如果当前没有上游结果文件，而只有用户原始上传 Excel、原始降雨表、input.json 准备需求或模型执行需求，直接返回：当前不是 Excel 导出阶段；请先由上游 agent 完成输入准备或模型执行，再把结果文件交给我生成最终 Excel。\n\n"
+                "不要重新解析原始数据，不要推断水文计算流程，不要重复上游处理。"
             )
             return task_description
 
         if step.executor == "validator" and state.previous_outputs:
             latest_summary = state.previous_outputs[-1][1]
+            progress = self._classify_step_completion(state)
+            goal_brief = self._build_goal_brief(state.original_input)
+            step_index_items = progress.get('completed_steps') or []
+            step_index_items = step_index_items + (progress.get('pending_steps') or [])
+            if progress.get('failed_step'):
+                step_index_items.append(progress.get('failed_step'))
+            plan_lines = []
+            for step_item in state.plan_steps:
+                item = self._build_step_progress_item(state, step_item)
+                title = str(item.get("title", "") or "未命名步骤")
+                executor = str(item.get("executor", "") or "orchestrator")
+                status = str(item.get("status", "") or "pending")
+                purpose = str(item.get("purpose", "") or "").strip()
+                line = f"- [{status}] {title} ({executor})"
+                if purpose:
+                    line += f": {purpose}"
+                output_summary = str(item.get("output_summary", "") or "").strip()
+                artifacts = str(item.get("artifacts", "") or "").strip()
+                if output_summary:
+                    line += f" | 产出摘要: {output_summary}"
+                if artifacts and artifacts != "[]":
+                    line += f" | 产物: {artifacts}"
+                plan_lines.append(line)
             return (
-                "请根据原始用户需求检查最近一次执行结果是否满足要求。\n\n"
-                f"[原始用户需求]\n{state.original_input}\n\n"
+                "请根据用户最终目标摘要检查最近一次执行结果是否满足要求。\n\n"
+                f"[最终目标摘要]\n{goal_brief}\n\n"
+                f"[当前计划执行情况]\n{chr(10).join(plan_lines) if plan_lines else '- 无'}\n\n"
+                f"[前序步骤产物索引]\n{self._build_step_artifact_index(step_index_items)}\n\n"
+                f"[已完成步骤]\n{self._format_progress_lines(progress.get('completed_steps') or [])}\n\n"
+                f"[未完成步骤]\n{self._format_progress_lines(progress.get('pending_steps') or [])}\n\n"
                 f"[最近一次子agent输出]\n{latest_summary}"
             )
 
@@ -838,12 +1069,14 @@ class FloodAgent:
         }
         if step.executor == "validator":
             validation = (payload or {}).get("validation") or self._parse_validator_output(stage_output)
+            step_completed = bool((stage_output or "").strip())
             return {
                 "scope": "goal",
-                "status": "pass" if validation.get("is_final_goal_met") else "fail",
+                "status": "pass" if step_completed else "fail",
+                "step_completed": step_completed,
                 "reason": str(validation.get("final_goal", "") or ""),
                 "goal_satisfied": bool(validation.get("is_final_goal_met")),
-                "requires_replan": not bool(validation.get("is_final_goal_met")),
+                "requires_replan": not step_completed,
                 "validation": validation,
                 **({
                     **base_progress,
@@ -854,7 +1087,7 @@ class FloodAgent:
                         "purpose": step.purpose,
                         "status": step.status,
                     },
-                } if not validation.get("is_final_goal_met") else base_progress),
+                } if not step_completed else base_progress),
             }
 
         if payload:
@@ -862,27 +1095,20 @@ class FloodAgent:
             should_continue = self._should_force_continue(payload)
             return {
                 "scope": "step",
-                "status": "fail" if should_continue else "pass",
+                "status": "pass",
+                "step_completed": True,
                 "reason": str(validation.get("final_goal", "") or ""),
                 "goal_satisfied": not should_continue,
-                "requires_replan": should_continue,
+                "requires_replan": False,
                 "validation": validation,
-                **({
-                    **base_progress,
-                    "failed_step": {
-                        "step_id": step.step_id,
-                        "title": step.title,
-                        "executor": step.executor,
-                        "purpose": step.purpose,
-                        "status": step.status,
-                    },
-                } if should_continue else base_progress),
+                **base_progress,
             }
 
         text = (stage_output or "").strip()
         return {
             "scope": "step",
             "status": "pass" if text else "fail",
+            "step_completed": bool(text),
             "reason": "" if text else "当前步骤未产出有效结果",
             "goal_satisfied": False,
             "requires_replan": not bool(text),
@@ -930,13 +1156,7 @@ class FloodAgent:
         failed_step: Optional[Dict[str, str]] = None
 
         for step in state.plan_steps:
-            item = {
-                "step_id": step.step_id,
-                "title": step.title,
-                "executor": step.executor,
-                "purpose": step.purpose,
-                "status": step.status,
-            }
+            item = FloodAgent._build_step_progress_item(state, step)
             if step.status == "completed":
                 completed_steps.append(item)
             elif step.status == "failed":
@@ -948,6 +1168,40 @@ class FloodAgent:
             "completed_steps": completed_steps,
             "pending_steps": pending_steps,
             "failed_step": failed_step,
+        }
+
+    @staticmethod
+    def _summarize_text_block(text: str, limit: int = 160) -> str:
+        normalized = re.sub(r"\s+", " ", str(text or "").strip())
+        if not normalized:
+            return ""
+        if len(normalized) <= limit:
+            return normalized
+        return normalized[:limit].rstrip() + "..."
+
+    @staticmethod
+    def _get_step_artifacts(state: AgentLoopState, step_id: str) -> List[str]:
+        artifacts: List[str] = []
+        for record in state.artifact_registry:
+            if str(record.get("producer_step_id", "") or "").strip() != step_id:
+                continue
+            path = str(record.get("path", "") or "").strip()
+            if path and path not in artifacts:
+                artifacts.append(path)
+        return artifacts
+
+    @staticmethod
+    def _build_step_progress_item(state: AgentLoopState, step: PlanStep) -> Dict[str, str]:
+        output_summary = FloodAgent._summarize_text_block(step.output_text)
+        artifacts = FloodAgent._get_step_artifacts(state, step.step_id)
+        return {
+            "step_id": step.step_id,
+            "title": step.title,
+            "executor": step.executor,
+            "purpose": step.purpose,
+            "status": step.status,
+            "output_summary": output_summary,
+            "artifacts": json.dumps(artifacts, ensure_ascii=False) if artifacts else "[]",
         }
 
     def _verify_goal_state(self, state: AgentLoopState) -> Dict[str, Any]:
@@ -989,8 +1243,38 @@ class FloodAgent:
             line = f"- {title} ({executor})"
             if purpose:
                 line += f": {purpose}"
+            output_summary = str(item.get("output_summary", "") or "").strip()
+            artifacts = str(item.get("artifacts", "") or "").strip()
+            if output_summary:
+                line += f" | 产出摘要: {output_summary}"
+            if artifacts and artifacts != "[]":
+                line += f" | 产物: {artifacts}"
             lines.append(line)
         return "\n".join(lines)
+
+    @staticmethod
+    def _build_step_artifact_index(items: List[Dict[str, str]]) -> str:
+        if not items:
+            return "[]"
+
+        index_payload: List[Dict[str, Any]] = []
+        for item in items:
+            raw_artifacts = str(item.get("artifacts", "") or "[]").strip() or "[]"
+            try:
+                artifacts = json.loads(raw_artifacts)
+            except Exception:
+                artifacts = [raw_artifacts] if raw_artifacts and raw_artifacts != "[]" else []
+
+            index_payload.append({
+                "step_id": str(item.get("step_id", "") or "").strip(),
+                "title": str(item.get("title", "") or "").strip(),
+                "executor": str(item.get("executor", "") or "").strip(),
+                "status": str(item.get("status", "") or "").strip(),
+                "purpose": str(item.get("purpose", "") or "").strip(),
+                "output_summary": str(item.get("output_summary", "") or "").strip(),
+                "artifacts": artifacts,
+            })
+        return json.dumps(index_payload, ensure_ascii=False, indent=2)
 
     def _build_progress_context(self, state: AgentLoopState, verification: Dict[str, Any]) -> str:
         completed_steps = verification.get("completed_steps") or []
@@ -998,6 +1282,7 @@ class FloodAgent:
         failed_step = verification.get("failed_step") or {}
         reusable_artifacts = verification.get("reusable_artifacts") or state.artifacts or []
         latest_payload = state.latest_payload or {}
+        step_artifact_index_items = completed_steps + pending_steps + ([failed_step] if failed_step else [])
 
         blocks = [
             "[已完成步骤]",
@@ -1011,6 +1296,9 @@ class FloodAgent:
             "",
             "[可复用产物]",
             json.dumps(reusable_artifacts, ensure_ascii=False, indent=2),
+            "",
+            "[前序步骤产物索引]",
+            self._build_step_artifact_index(step_artifact_index_items),
         ]
 
         latest_summary = str(latest_payload.get("summary", "") or "").strip()
@@ -1128,37 +1416,53 @@ class FloodAgent:
         needs = self._needs_final_deliverable(state.original_input)
         failed_step = verification.get("failed_step") or {}
         failed_executor = str(failed_step.get("executor", "") or "").strip()
+        validation = verification.get("validation") or {}
+        suggested_executor = str(validation.get("next_executor", "") or "").strip()
+        suggested_action = str(validation.get("next_action", "") or "").strip()
+        completed_work = str(validation.get("completed_work", "") or "").strip()
+        current_result_type = str(validation.get("current_result_type", "") or "").strip()
         next_executor = failed_executor or "orchestrator"
         next_title = "根据校验反馈继续执行"
 
         if verification.get("scope") == "step" and failed_executor:
             next_title = f"继续完成：{failed_step.get('title', '当前失败步骤')}"
         elif verification.get("scope") == "goal":
-            if needs["excel"] and not self._artifacts_cover_needs(artifacts or state.artifacts, {"excel": True, "image": False, "report": False}):
+            if suggested_executor in {"python_specialist", "excel_specialist", "validator", "orchestrator"}:
+                next_executor = suggested_executor
+                next_title = suggested_action or "根据校验反馈继续执行"
+            elif needs["excel"] and not self._artifacts_cover_needs(artifacts or state.artifacts, {"excel": True, "image": False, "report": False}):
                 next_executor = "excel_specialist"
                 next_title = "基于已有结果补齐最终 Excel"
             elif failed_executor:
                 next_executor = failed_executor
                 next_title = f"继续完成：{failed_step.get('title', '当前失败步骤')}"
 
-        if needs["excel"] and not self._artifacts_cover_needs(artifacts, {"excel": True, "image": False, "report": False}):
+        if not suggested_executor and needs["excel"] and not self._artifacts_cover_needs(artifacts, {"excel": True, "image": False, "report": False}):
             if latest_stage == "python_specialist" or artifacts:
                 next_executor = "excel_specialist"
                 next_title = "基于中间结果生成最终 Excel"
-        elif latest_stage == "excel_specialist":
-            next_executor = "validator"
-            next_title = "复核最终交付是否满足目标"
+            elif latest_stage == "excel_specialist":
+                next_executor = "validator"
+                next_title = "复核最终交付是否满足目标"
 
         step_id = f"step-{len(state.plan_steps) + 1}"
         progress_context = self._build_progress_context(state, verification)
-        reason = str(verification.get("reason", "") or "根据校验反馈继续推进任务")
+        reason_parts = []
+        if completed_work:
+            reason_parts.append(f"已完成：{completed_work}")
+        if current_result_type:
+            reason_parts.append(f"当前阶段：{current_result_type}")
+        fallback_reason = str(verification.get("reason", "") or "根据校验反馈继续推进任务")
+        reason_parts.append(suggested_action or fallback_reason)
+        reason = "；".join(part for part in reason_parts if part)
         step = PlanStep(
             step_id=step_id,
             title=next_title,
             executor=next_executor,
             purpose=reason,
             input_text=(
-                f"[原始用户需求]\n{state.original_input}\n\n"
+                f"{suggested_action or next_title}\n\n"
+                f"[最终目标摘要]\n{self._build_goal_brief(state.original_input)}\n\n"
                 f"[当前待完成目标]\n{reason}\n\n"
                 f"{progress_context}\n\n"
                 "请只继续完成当前未完成步骤，禁止默认重跑已经完成的上游步骤。"
@@ -1169,6 +1473,7 @@ class FloodAgent:
 
     def _run_agent_loop(self, user_input: str, callbacks: Optional[List[Any]] = None, event_sink: Optional[Any] = None) -> AgentLoopState:
         state = self._build_initial_loop_state(user_input)
+        self._last_loop_state = state
         if event_sink:
             event_sink({
                 "type": "plan_created",
@@ -1220,7 +1525,7 @@ class FloodAgent:
             payload = self._extract_result_payload(step.executor, result, stage_output)
             verification = self._verify_step_result(step, payload, stage_output)
 
-            step.status = "completed" if verification.get("status") == "pass" else "failed"
+            step.status = "completed" if verification.get("step_completed", verification.get("status") == "pass") else "failed"
             step.output_text = stage_output
             step.verification = verification
             state.previous_outputs.append((step.executor, stage_output))
@@ -1231,6 +1536,7 @@ class FloodAgent:
             self._mark_artifacts_validated(state, verification.get("validation") or {})
             self._record_journal_entry(state, step=step, verification=verification, stage_input=stage_input)
             self._persist_loop_state(state)
+            self._last_loop_state = state
 
             if event_sink:
                 for artifact in new_artifacts:
@@ -1270,6 +1576,16 @@ class FloodAgent:
                         "type": "replan",
                         "reason": str((verification if verification.get("requires_replan") else goal_verification).get("reason", "") or "用户最终目标尚未完成"),
                         "next_step": {"step_id": last_step.step_id, "title": last_step.title, "executor": last_step.executor},
+                        "steps": [
+                            {
+                                "step_id": plan_step.step_id,
+                                "title": plan_step.title,
+                                "executor": plan_step.executor,
+                                "purpose": plan_step.purpose,
+                                "status": plan_step.status,
+                            }
+                            for plan_step in state.plan_steps
+                        ],
                     })
 
         if state.terminal_status == "running":
@@ -1277,6 +1593,7 @@ class FloodAgent:
             if state.latest_payload:
                 state.final_output = self._build_forced_continuation_input(user_input, state.latest_payload)
             self._persist_loop_state(state)
+        self._last_loop_state = state
         return state
 
     def _build_stage_user_input(self, stage_name: str, original_input: str, previous_outputs: List[Tuple[str, str]]) -> str:
@@ -1437,10 +1754,37 @@ class FloodAgent:
 
     def _run_validator_check(self, delegated_task: str, specialist_output: str) -> str:
         artifacts = self._extract_artifact_paths(specialist_output)
+        runtime_plan = ""
+        runtime_step_index = "[]"
+        if hasattr(self, "_last_loop_state") and getattr(self, "_last_loop_state", None) is not None:
+            state = getattr(self, "_last_loop_state")
+            plan_lines = []
+            step_index_items = []
+            for step_item in getattr(state, "plan_steps", []) or []:
+                item = self._build_step_progress_item(state, step_item)
+                step_index_items.append(item)
+                title = str(item.get("title", "") or "未命名步骤")
+                executor = str(item.get("executor", "") or "orchestrator")
+                status = str(item.get("status", "") or "pending")
+                purpose = str(item.get("purpose", "") or "").strip()
+                line = f"- [{status}] {title} ({executor})"
+                if purpose:
+                    line += f": {purpose}"
+                output_summary = str(item.get("output_summary", "") or "").strip()
+                artifacts = str(item.get("artifacts", "") or "").strip()
+                if output_summary:
+                    line += f" | 产出摘要: {output_summary}"
+                if artifacts and artifacts != "[]":
+                    line += f" | 产物: {artifacts}"
+                plan_lines.append(line)
+            runtime_plan = "\n".join(plan_lines)
+            runtime_step_index = self._build_step_artifact_index(step_index_items)
         validator_input = (
             "请根据用户最终目标验证最近一次结果是否已经满足最终交付要求。"
             "如果它只是中间结果，必须判定 fail。\n\n"
-            f"[原始用户需求]\n{self._active_user_input or delegated_task}\n\n"
+            f"[最终目标摘要]\n{self._build_goal_brief(self._active_user_input or delegated_task)}\n\n"
+            f"[当前计划执行情况]\n{runtime_plan or '- 无'}\n\n"
+            f"[前序步骤产物索引]\n{runtime_step_index}\n\n"
             f"[当前委派子任务]\n{delegated_task}\n\n"
             f"[最近一次结果]\n{specialist_output}\n\n"
             f"[最近一次结果中提取到的产物路径]\n{json.dumps(artifacts, ensure_ascii=False, indent=2)}"
@@ -1484,6 +1828,10 @@ class FloodAgent:
                 parsed.setdefault("overall_status", "fail")
                 parsed.setdefault("is_final_goal_met", parsed.get("overall_status") == "pass")
                 parsed.setdefault("final_goal", "" if parsed.get("overall_status") == "pass" else "用户最终目标尚未完成")
+                parsed.setdefault("completed_work", "")
+                parsed.setdefault("current_result_type", "final_deliverable" if parsed.get("overall_status") == "pass" else "unknown")
+                parsed.setdefault("next_executor", "orchestrator" if parsed.get("overall_status") != "pass" else "")
+                parsed.setdefault("next_action", "" if parsed.get("overall_status") == "pass" else parsed.get("final_goal", "用户最终目标尚未完成"))
                 return parsed
         except Exception:
             pass
@@ -1494,6 +1842,10 @@ class FloodAgent:
             "overall_status": "pass" if is_pass else "fail",
             "is_final_goal_met": is_pass,
             "final_goal": "" if is_pass else "用户最终目标尚未完成",
+            "completed_work": "",
+            "current_result_type": "final_deliverable" if is_pass else "unknown",
+            "next_executor": "" if is_pass else "orchestrator",
+            "next_action": "" if is_pass else "用户最终目标尚未完成",
             "raw_output": raw,
         }
 
@@ -1567,7 +1919,7 @@ class FloodAgent:
     def _build_forced_continuation_input(original_user_input: str, payload: Dict[str, Any]) -> str:
         validation = payload.get("validation") or {}
         return (
-            f"[原始用户需求]\n{original_user_input}\n\n"
+            f"[最终目标摘要]\n{FloodAgent._build_goal_brief(original_user_input)}\n\n"
             "[系统强制校验结论]\n"
             "最近一次子任务结果只是中间结果，尚未满足用户最终目标。你现在不得结束，必须继续执行后续步骤。\n\n"
             f"[最近一次中间结果]\n{payload.get('summary', '')}\n\n"
@@ -1904,16 +2256,34 @@ class FloodAgent:
                         "outcome": str(verification.get("reason", "") or "").strip(),
                     }]
                 if event_type == "replan":
-                    return []
+                    steps = event.get("steps", []) or []
+                    next_step = event.get("next_step", {}) or {}
+                    events: List[Dict[str, Any]] = [{
+                        "type": "workflow_plan",
+                        "title": "Agent Loop",
+                        "steps": [
+                            {
+                                "key": step.get("step_id", ""),
+                                "label": step.get("executor", "orchestrator"),
+                                "title": step.get("title", "待执行"),
+                                "detail": step.get("detail", "") or step.get("purpose", ""),
+                                "status": "completed" if step.get("status") == "completed" else ("failed" if step.get("status") == "failed" else "pending"),
+                            }
+                            for step in steps
+                        ],
+                    }]
+                    if next_step.get("step_id"):
+                        events.append({
+                            "type": "workflow_step",
+                            "step_key": next_step.get("step_id", ""),
+                            "label": next_step.get("executor", "orchestrator"),
+                            "title": next_step.get("title", "待执行"),
+                            "detail": str(event.get("reason", "") or ""),
+                            "status": "pending",
+                        })
+                    return events
                 if event_type == "artifact_created":
-                    artifact = event.get("artifact", {}) or {}
-                    path = str(artifact.get("path", "") or "")
-                    filename = os.path.basename(path) if path else ""
-                    if not filename:
-                        return []
-                    if artifact.get("artifact_type") == "image":
-                        return [{"type": "image_generated", "filename": filename, "filepath": path}]
-                    return [{"type": "file_generated", "filename": filename, "filepath": path}]
+                    return []
                 if event_type == "verification":
                     return []
                 if event_type == "goal_completed":
