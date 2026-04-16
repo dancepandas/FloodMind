@@ -12,6 +12,7 @@ const state = {
     currentMessageId: null,
     sessionId: localStorage.getItem('floodmind_session_id') || generateSessionId(),
     uploadedFiles: [],
+    pendingUploadedFiles: [],
     chatHistory: [],
     enableSearch: false,
     enableRag: true,
@@ -20,6 +21,7 @@ const state = {
     pendingProcessCards: [],
     reasoningContent: '',
     rawReasoningContent: '',
+    messageFlowsByMessage: {},
     toolResultsByMessage: {},
     subagentPlansByMessage: {},
     workflowPlansByMessage: {},
@@ -84,14 +86,20 @@ function renderUploadedFilesPanel() {
         return;
     }
     elements.uploadedFilesPanel.innerHTML = state.uploadedFiles.map(file => `
-        <div class="uploaded-file-item">
+        <div class="uploaded-file-item ${state.pendingUploadedFiles.some(pending => pending.id === file.id) ? 'is-pending' : ''}">
             <div class="uploaded-file-icon">${escapeHtml(file.name.split('.').pop().toUpperCase())}</div>
             <div class="uploaded-file-meta">
                 <div class="uploaded-file-name">${escapeHtml(file.name)}</div>
-                <div class="uploaded-file-size">${formatFileSize(file.size || 0)}</div>
+                <div class="uploaded-file-size">${formatFileSize(file.size || 0)}${state.pendingUploadedFiles.some(pending => pending.id === file.id) ? ' · 待附带' : ''}</div>
             </div>
         </div>
     `).join('');
+}
+
+function shouldAttachAllUploadedFiles(message) {
+    const text = String(message || '').trim();
+    if (!text) return false;
+    return /已上传的文件|上传的文件|上次上传的文件|之前上传的文件/.test(text);
 }
 
 function pushToolActivity(toolName, content, status = 'done') {
@@ -531,13 +539,15 @@ async function uploadFile(file) {
                 const response = JSON.parse(xhr.responseText);
                 if (response.status === 'success') {
                     updateProgress(100, '上传成功！');
-                    
-                    state.uploadedFiles.push({
+
+                    const uploadedFile = {
                         id: response.file_id,
                         name: file.name,
                         size: file.size,
                         path: response.file_path
-                    });
+                    };
+                    state.uploadedFiles.push(uploadedFile);
+                    state.pendingUploadedFiles.push({ ...uploadedFile });
                     refreshWorkspacePanels();
                     
                     setTimeout(() => {
@@ -768,7 +778,9 @@ function setInputValue(value) {
 async function sendMessage() {
     const message = elements.chatInput.value.trim();
     if (!message || state.isStreaming) return;
-    const attachedFilesSnapshot = state.uploadedFiles.map(file => ({ ...file }));
+    const shouldAttachAll = shouldAttachAllUploadedFiles(message);
+    const attachedFilesSnapshot = (shouldAttachAll ? state.uploadedFiles : state.pendingUploadedFiles).map(file => ({ ...file }));
+    const attachedFileIds = attachedFilesSnapshot.map(file => file.id);
     
     elements.welcomeMessage.classList.add('hidden');
     
@@ -789,8 +801,6 @@ async function sendMessage() {
     refreshWorkspacePanels();
     updateSendButton();
     
-    const thinkingIndicator = addThinkingIndicator(assistantMessageId);
-    
     try {
         console.log('[Frontend Debug] 发送消息');
         const response = await fetch('/api/chat', {
@@ -799,16 +809,17 @@ async function sendMessage() {
             body: JSON.stringify({
                 session_id: state.sessionId,
                 message: message,
-                uploaded_files: state.uploadedFiles.map(f => f.id),
+                uploaded_files: attachedFileIds,
                 assistant_message_id: assistantMessageId,
             })
         });
+
+        state.pendingUploadedFiles = [];
+        refreshWorkspacePanels();
         
         if (!response.ok) {
             throw new Error(`HTTP error! status: ${response.status}`);
         }
-        
-        thinkingIndicator.remove();
         
         state.currentReader = response.body.getReader();
         const decoder = new TextDecoder();
@@ -871,7 +882,6 @@ async function sendMessage() {
           
     } catch (error) {
         console.error('发送消息失败:', error);
-        thinkingIndicator.remove();
         updateMessageContent(assistantMessageId, '抱歉，连接失败，请检查网络或后端服务。');
     } finally {
         state.isStreaming = false;
@@ -928,9 +938,9 @@ function handleStreamChunk(data, messageId) {
         
         if (data.type === 'reasoning') {
             appendRawReasoningContent(data.content || '');
-            updateReasoningCard(messageId, state.rawReasoningContent, state.rawReasoningContent, true);
+            appendAssistantDialogueSegment(messageId, 'thought', data.content || '', true);
         } else if (data.type === 'thought_summary') {
-            // 暂时关闭 thought_summary 主展示，直接观察原始 reasoning。
+            appendAssistantDialogueSegment(messageId, 'thought', data.content || '', false);
         } else if (data.type === 'workflow_plan') {
             state.workflowPlansByMessage[messageId] = {
                 title: data.title || 'Workflow',
@@ -944,6 +954,10 @@ function handleStreamChunk(data, messageId) {
         } else if (data.type === 'tool_status') {
             syncSubagentCardFromToolStatus(messageId, data);
             pushToolActivity(data.tool_name || '', data.content || '', data.status === 'error' ? 'error' : 'running');
+            const toolNarration = buildToolStatusNarration(data);
+            if (toolNarration) {
+                appendAssistantDialogueSegment(messageId, 'answer', toolNarration, false);
+            }
         } else if (data.type === 'tool_result') {
             syncSubagentCardFromToolResult(messageId, data);
             pushToolActivity(data.tool_name || '', data.content || '', 'done');
@@ -954,7 +968,7 @@ function handleStreamChunk(data, messageId) {
             pushToolActivity('system', data.content || '处理请求时出错', 'error');
             finalizeReasoningCard(messageId);
             collapseAllProcessCards(messageId);
-            appendMessageContent(messageId, data.content || '处理请求时出错');
+            appendAssistantDialogueSegment(messageId, 'answer', data.content || '处理请求时出错', false);
         } else if (data.type === 'image_generated') {
             pushToolActivity('image_generated', data.filename || '生成图片', 'done');
             finalizeReasoningCard(messageId);
@@ -968,20 +982,30 @@ function handleStreamChunk(data, messageId) {
         } else if (data.type === 'final_override') {
             finalizeReasoningCard(messageId);
             collapseAllProcessCards(messageId);
-            updateMessageContent(messageId, data.content || '');
+            updateAssistantAnswerContent(messageId, data.content || '');
         } else if (data.type === 'stream_end') {
             finalizeReasoningCard(messageId);
             collapseAllProcessCards(messageId);
         } else if (data.content) {
             finalizeReasoningCard(messageId);
             collapseAllProcessCards(messageId);
-            appendMessageContent(messageId, data.content);
+            appendAssistantDialogueSegment(messageId, 'answer', data.content, data.type === 'token');
         }
         
         renderWorkspaceSummary();
         scrollToBottom();
         requestAnimationFrame(resolve);
     });
+}
+
+function buildToolStatusNarration(data) {
+    const toolName = getFriendlyToolName(data.tool_name || '');
+    const detail = summarizeToolInput(data.tool_name || '', data.content || '');
+    if (!toolName) return '';
+    if (data.status === 'error') {
+        return `这一步执行出错，我需要调整后重试。\n\n${toolName}${detail ? `：${detail}` : ''}`;
+    }
+    return `我需要调用 ${toolName}${detail ? `，${detail}` : ''}`;
 }
 
 // ============================================
@@ -1036,8 +1060,9 @@ function addMessage(role, content, isStreaming = false, attachments = [], forced
         <div class="message-avatar">${avatar}</div>
         <div class="message-content">
             <div class="message-bubble" id="bubble-${messageId}">
-                ${role === 'assistant' ? renderMarkdown(content) : escapeHtml(content)}
-                ${isStreaming && role === 'assistant' ? '<span class="streaming-cursor"></span>' : ''}
+                ${role === 'assistant'
+                    ? `<div class="assistant-dialogue-flow" id="flow-${messageId}"></div>${isStreaming ? '<span class="streaming-cursor"></span>' : ''}`
+                    : escapeHtml(content)}
             </div>
             <span class="message-time">${time}</span>
         </div>
@@ -1053,6 +1078,15 @@ function addMessage(role, content, isStreaming = false, attachments = [], forced
     }
     
     elements.messagesList.appendChild(messageDiv);
+
+    if (role === 'assistant') {
+        state.messageFlowsByMessage[messageId] = [];
+        if (content) {
+            updateAssistantAnswerContent(messageId, content);
+        } else {
+            renderAssistantDialogueFlow(messageId, isStreaming);
+        }
+    }
     
     if (role === 'user') {
         state.messages.push({ role, content, id: messageId });
@@ -1087,6 +1121,11 @@ function appendMessageContent(messageId, content) {
     const bubble = document.getElementById(`bubble-${messageId}`);
     if (!bubble) return;
 
+    if (bubble.querySelector('.assistant-dialogue-flow')) {
+        appendAssistantDialogueSegment(messageId, 'answer', content, true);
+        return;
+    }
+
     bubble.dataset.rawText = (bubble.dataset.rawText || '') + content;
     const cursor = bubble.querySelector('.streaming-cursor');
     const textNode = document.createTextNode(content);
@@ -1104,6 +1143,10 @@ function appendMessageContent(messageId, content) {
 function updateMessageContent(messageId, content) {
     const bubble = document.getElementById(`bubble-${messageId}`);
     if (bubble) {
+        if (bubble.querySelector('.assistant-dialogue-flow')) {
+            updateAssistantAnswerContent(messageId, content);
+            return;
+        }
         bubble.dataset.rawText = content;
         bubble.innerHTML = renderMarkdown(content);
     }
@@ -1112,6 +1155,14 @@ function updateMessageContent(messageId, content) {
 function getRenderedMessageText(messageId) {
     const bubble = document.getElementById(`bubble-${messageId}`);
     if (!bubble) return '';
+    if (bubble.querySelector('.assistant-dialogue-flow')) {
+        const flow = state.messageFlowsByMessage[messageId] || [];
+        return flow
+            .filter(segment => segment.type === 'answer')
+            .map(segment => segment.rawText || '')
+            .join('\n\n')
+            .trim();
+    }
     if (bubble.dataset.rawText !== undefined) {
         return bubble.dataset.rawText || '';
     }
@@ -1121,6 +1172,10 @@ function getRenderedMessageText(messageId) {
 function removeStreamingCursor(messageId) {
     const bubble = document.getElementById(`bubble-${messageId}`);
     if (!bubble) return;
+    if (bubble.querySelector('.assistant-dialogue-flow')) {
+        renderAssistantDialogueFlow(messageId, false);
+        return;
+    }
     if (bubble.dataset.rawText !== undefined) {
         bubble.innerHTML = renderMarkdown(bubble.dataset.rawText);
     } else {
@@ -1194,6 +1249,109 @@ function updateReasoningCard(messageId, content, rawContent = '', isStreaming = 
     }
 }
 
+function renderThoughtMarkdown(text) {
+    const normalized = normalizeLooseMarkdown(sanitizeReasoningContent(text || '').replace(/\n{3,}/g, '\n\n'));
+    return escapeHtml(normalized).replace(/\n/g, '<br>');
+}
+
+function toggleThoughtSegment(button) {
+    const segment = button.closest('.assistant-segment.is-thought');
+    if (!segment) return;
+    segment.classList.toggle('collapsed');
+}
+
+function renderAssistantDialogueFlow(messageId, isStreaming = false) {
+    const bubble = document.getElementById(`bubble-${messageId}`);
+    if (!bubble) return;
+
+    const flow = state.messageFlowsByMessage[messageId] || [];
+    const segmentsHtml = flow.map(segment => {
+        const kindClass = segment.type === 'thought' ? 'is-thought' : 'is-answer';
+        const contentHtml = segment.type === 'thought'
+            ? renderThoughtMarkdown(segment.rawText || '')
+            : renderMarkdown(segment.rawText || '');
+        if (segment.type === 'thought') {
+            const isComplete = !!segment.isComplete;
+            return `
+                <div class="assistant-segment ${kindClass}${isComplete ? ' collapsed' : ''}">
+                    <button class="assistant-thought-toggle" onclick="toggleThoughtSegment(this)">
+                        <span class="assistant-thought-chevron">${isComplete ? '&#9656;' : '&#9662;'}</span>
+                        <span class="assistant-thought-dot"></span>
+                        <span class="assistant-segment-label">${escapeHtml(isComplete ? '思考过程' : '思考中...')}</span>
+                    </button>
+                    <div class="assistant-thought-panel">
+                        <div class="assistant-segment-body">${contentHtml || '正在整理思路...'}</div>
+                    </div>
+                </div>
+            `;
+        }
+        return `
+            <div class="assistant-segment ${kindClass}">
+                <div class="assistant-segment-label">${escapeHtml('回答')}</div>
+                <div class="assistant-segment-body markdown-body">${contentHtml || (segment.type === 'thought' ? '正在整理思路...' : '正在组织回答...')}</div>
+                <div class="assistant-artifact-stack"></div>
+            </div>
+        `;
+    }).join('');
+
+    bubble.innerHTML = `
+        <div class="assistant-dialogue-flow" id="flow-${messageId}">${segmentsHtml}</div>
+        ${isStreaming ? '<span class="streaming-cursor"></span>' : ''}
+    `;
+}
+
+function appendAssistantDialogueSegment(messageId, type, content, append = true) {
+    const normalized = String(content || '').replace(/\r\n?/g, '\n');
+    if (!normalized.trim()) return;
+
+    const flow = state.messageFlowsByMessage[messageId] || [];
+    const lastSegment = flow[flow.length - 1];
+    if (type === 'answer' && lastSegment && lastSegment.type === 'thought') {
+        lastSegment.isComplete = true;
+    }
+    if (type === 'thought' && lastSegment && lastSegment.type === 'answer' && String(lastSegment.rawText || '').trim()) {
+        append = false;
+    }
+    if (append && lastSegment && lastSegment.type === type) {
+        lastSegment.rawText = (lastSegment.rawText || '') + normalized;
+    } else {
+        flow.push({ type, rawText: normalized, isComplete: type !== 'thought' });
+    }
+    state.messageFlowsByMessage[messageId] = flow;
+    renderAssistantDialogueFlow(messageId, state.isStreaming && state.currentMessageId === messageId);
+}
+
+function updateAssistantAnswerContent(messageId, content) {
+    const normalized = String(content || '').replace(/\r\n?/g, '\n');
+    const flow = state.messageFlowsByMessage[messageId] || [];
+    let lastAnswerSegment = null;
+    for (let index = flow.length - 1; index >= 0; index -= 1) {
+        if (flow[index].type === 'answer') {
+            lastAnswerSegment = flow[index];
+            break;
+        }
+    }
+    if (lastAnswerSegment) {
+        lastAnswerSegment.rawText = normalized;
+    } else if (normalized.trim()) {
+        if (flow.length > 0 && flow[flow.length - 1].type === 'thought') {
+            flow[flow.length - 1].isComplete = true;
+        }
+        flow.push({ type: 'answer', rawText: normalized, isComplete: true });
+    }
+    state.messageFlowsByMessage[messageId] = flow;
+    renderAssistantDialogueFlow(messageId, state.isStreaming && state.currentMessageId === messageId);
+}
+
+function getLastAnswerArtifactHost(messageId) {
+    const messageDiv = document.getElementById(messageId);
+    if (!messageDiv) return null;
+    const answerSegments = messageDiv.querySelectorAll('.assistant-segment.is-answer');
+    if (!answerSegments.length) return null;
+    const lastSegment = answerSegments[answerSegments.length - 1];
+    return lastSegment.querySelector('.assistant-artifact-stack') || lastSegment;
+}
+
 function isWorkflowMessage(messageId) {
     return !!(state.workflowPlansByMessage[messageId] && state.workflowPlansByMessage[messageId].isWorkflow);
 }
@@ -1265,7 +1423,21 @@ function appendRawReasoningContent(content) {
 function appendProcessNote(messageId, note, isStreaming = false) {
     if (!note) return;
     appendReasoningContent(note, true);
-    updateReasoningCard(messageId, state.reasoningContent, state.rawReasoningContent, isStreaming);
+    appendAssistantDialogueSegment(messageId, 'thought', note, false);
+}
+
+function finalizeReasoningCard(messageId) {
+    const flow = state.messageFlowsByMessage[messageId] || [];
+    let changed = false;
+    flow.forEach(segment => {
+        if (segment.type === 'thought' && !segment.isComplete) {
+            segment.isComplete = true;
+            changed = true;
+        }
+    });
+    if (changed) {
+        renderAssistantDialogueFlow(messageId, false);
+    }
 }
 
 function sanitizeReasoningContent(content) {
@@ -1275,105 +1447,23 @@ function sanitizeReasoningContent(content) {
 function getSubagentLabel(stage) {
     const labels = {
         orchestrator: '主调度',
-        python_specialist: 'Python 专项',
-        excel_specialist: 'Excel 专项',
-        validator: '结果校验',
+        execution_specialist: '执行专项',
     };
     return labels[stage] || stage || '处理中';
 }
 
 function getDelegatedStageFromToolName(toolName) {
     const name = (toolName || '').toLowerCase();
-    if (name.includes('delegate_python_specialist')) return 'python_specialist';
-    if (name.includes('delegate_excel_specialist')) return 'excel_specialist';
-    if (name.includes('delegate_validator')) return 'validator';
+    if (name.includes('delegate_execution_specialist')) return 'execution_specialist';
     return '';
 }
 
 function syncSubagentCardFromToolStatus(messageId, data) {
-    const stage = getDelegatedStageFromToolName(data.tool_name || '');
-    if (!stage) return;
-
-    const current = state.subagentPlansByMessage[messageId] || { stages: [] };
-    const stages = current.stages.includes(stage) ? current.stages : [...current.stages, stage];
-    updateSubagentCard(messageId, stages, stage, data.status === 'error' ? 'error' : 'running');
-    updateSubagentCardStatus(messageId, stage, data.status === 'error' ? 'error' : 'running', summarizeToolInput(data.tool_name || '', data.content || ''));
+    return;
 }
 
 function syncSubagentCardFromToolResult(messageId, data) {
-    const stage = getDelegatedStageFromToolName(data.tool_name || '');
-    if (!stage) return;
-
-    const current = state.subagentPlansByMessage[messageId] || { stages: [] };
-    const stages = current.stages.includes(stage) ? current.stages : [...current.stages, stage];
-    updateSubagentCard(messageId, stages, stage, 'completed');
-    updateSubagentCardStatus(messageId, stage, 'completed', summarizeToolResult(data.tool_name || '', data.content || ''));
-}
-
-function updateSubagentCard(messageId, stages, currentStage, status = 'running') {
-    const messageDiv = document.getElementById(messageId);
-    if (!messageDiv) return;
-
-    const processContainer = getOrCreateProcessContainer(messageDiv);
-    let card = processContainer.querySelector('.subagent-card');
-    const normalizedStages = Array.isArray(stages) ? stages : [];
-    state.subagentPlansByMessage[messageId] = { stages: normalizedStages, currentStage, status };
-
-    const stepsHtml = normalizedStages.map(stage => {
-        const cls = stage === currentStage ? 'subagent-step active' : 'subagent-step';
-        return `<span class="${cls}">${escapeHtml(getSubagentLabel(stage))}</span>`;
-    }).join('');
-
-    const statusText = status === 'completed' ? '已完成' : status === 'error' ? '出错' : `当前：${getSubagentLabel(currentStage)}`;
-
-    if (!card) {
-        card = document.createElement('div');
-        card.className = 'subagent-card';
-        card.innerHTML = `
-            <div class="card-header" onclick="toggleSubagentCard(this)">
-                <div class="card-label">
-                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                        <path d="M9 3H5a2 2 0 0 0-2 2v4"></path>
-                        <path d="M15 3h4a2 2 0 0 1 2 2v4"></path>
-                        <path d="M21 15v4a2 2 0 0 1-2 2h-4"></path>
-                        <path d="M3 15v4a2 2 0 0 0 2 2h4"></path>
-                        <path d="M7 12h10"></path>
-                        <path d="m13 8 4 4-4 4"></path>
-                    </svg>
-                    <span>子 Agent 流程</span>
-                    <span class="subagent-status">${escapeHtml(statusText)}</span>
-                </div>
-                <svg class="toggle-icon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                    <polyline points="6 9 12 15 18 9"></polyline>
-                </svg>
-            </div>
-            <div class="subagent-content-wrapper">
-                <div class="subagent-steps">${stepsHtml}</div>
-                <div class="subagent-detail">
-                    <div class="subagent-detail-label">当前动作</div>
-                    <div class="subagent-detail-text">系统正在按专项分工处理当前任务。</div>
-                </div>
-            </div>
-        `;
-        processContainer.insertBefore(card, processContainer.firstChild);
-        state.pendingProcessCards.push(card);
-    } else {
-        const steps = card.querySelector('.subagent-steps');
-        const statusEl = card.querySelector('.subagent-status');
-        if (steps) steps.innerHTML = stepsHtml;
-        if (statusEl) statusEl.textContent = statusText;
-    }
-}
-
-function updateSubagentCardStatus(messageId, stage, status, detail = '') {
-    const plan = state.subagentPlansByMessage[messageId] || { stages: [stage] };
-    updateSubagentCard(messageId, plan.stages, stage, status);
-    const messageDiv = document.getElementById(messageId);
-    if (!messageDiv) return;
-    const detailEl = messageDiv.querySelector('.subagent-detail-text');
-    if (!detailEl) return;
-    const statusLabel = status === 'completed' ? '已完成' : status === 'error' ? '执行出错' : '正在执行';
-    detailEl.textContent = `${getSubagentLabel(stage)}：${statusLabel}${detail ? ` · ${detail}` : ''}`;
+    return;
 }
 
 function buildToolStatusText(data) {
@@ -1450,8 +1540,11 @@ function restoreAssistantProcessCards(messageId, message) {
 
     const reasoning = sanitizeReasoningContent(message.reasoning || '');
     if (reasoning) {
-        updateReasoningCard(messageId, reasoning, message.raw_reasoning || '', false);
-        finalizeReasoningCard(messageId);
+        appendAssistantDialogueSegment(messageId, 'thought', reasoning, false);
+    }
+
+    if (message.content) {
+        updateAssistantAnswerContent(messageId, message.content);
     }
 }
 
@@ -1488,11 +1581,16 @@ function restoreInProgressSnapshot(snapshot) {
     state.currentMessageId = messageId;
     state.isStreaming = !!snapshot.is_streaming;
     state.isPaused = false;
+    state.messageFlowsByMessage[messageId] = [];
 
     if (snapshot.reasoning) {
         state.reasoningContent = snapshot.reasoning;
         state.rawReasoningContent = snapshot.raw_reasoning || '';
-        updateReasoningCard(messageId, snapshot.reasoning, state.rawReasoningContent, !!snapshot.is_streaming);
+        appendAssistantDialogueSegment(messageId, 'thought', snapshot.reasoning, false);
+    }
+
+    if (snapshot.content) {
+        updateAssistantAnswerContent(messageId, snapshot.content);
     }
 
     if (snapshot.workflow && Array.isArray(snapshot.workflow.steps)) {
@@ -1552,33 +1650,6 @@ function ensureSnapshotPolling() {
             refreshCurrentSessionSnapshot();
         }
     }, 3000);
-}
-
-function finalizeReasoningCard(messageId) {
-    const messageDiv = document.getElementById(messageId);
-    if (!messageDiv) return;
-    if (isWorkflowMessage(messageId)) return;
-    
-    const reasoningCard = messageDiv.querySelector('.reasoning-card');
-    if (reasoningCard) {
-        reasoningCard.classList.remove('streaming');
-        
-        const statusSpan = reasoningCard.querySelector('.thinking-status');
-        if (statusSpan) {
-            statusSpan.remove();
-        }
-        
-        const wrapper = reasoningCard.querySelector('.reasoning-content-wrapper');
-        const toggleIcon = reasoningCard.querySelector('.toggle-icon');
-        if (wrapper && !reasoningCard.classList.contains('collapsed')) {
-            wrapper.style.maxHeight = '0';
-            wrapper.style.opacity = '0';
-        }
-        if (toggleIcon) {
-            toggleIcon.style.transform = 'rotate(180deg)';
-        }
-        reasoningCard.classList.add('collapsed');
-    }
 }
 
 function addSearchResultCard(messageId, content) {
@@ -1672,30 +1743,6 @@ function toggleSearchCard(header) {
     }
 }
 
-function toggleSubagentCard(header) {
-    const card = header.closest('.subagent-card');
-    if (!card) return;
-
-    const wrapper = card.querySelector('.subagent-content-wrapper');
-    const toggleIcon = card.querySelector('.toggle-icon');
-
-    if (card.classList.contains('collapsed')) {
-        if (wrapper) {
-            wrapper.style.maxHeight = '220px';
-            wrapper.style.opacity = '1';
-        }
-        if (toggleIcon) toggleIcon.style.transform = 'rotate(0deg)';
-        card.classList.remove('collapsed');
-    } else {
-        if (wrapper) {
-            wrapper.style.maxHeight = '0';
-            wrapper.style.opacity = '0';
-        }
-        if (toggleIcon) toggleIcon.style.transform = 'rotate(180deg)';
-        card.classList.add('collapsed');
-    }
-}
-
 function toggleWorkflowTaskCard(header) {
     const card = header.closest('.workflow-task-card');
     if (!card) return;
@@ -1729,9 +1776,7 @@ function getFriendlyToolName(toolName) {
         'write_text_file': '写入文本文件',
         'search_artifacts': '搜索历史脚本',
         'read_artifact': '读取历史脚本',
-        'delegate_python_specialist': '委派 Python 专项',
-        'delegate_excel_specialist': '委派 Excel 专项',
-        'delegate_validator': '委派结果校验',
+        'delegate_execution_specialist': '委派执行专项',
         'read_file': '读取文件',
         'knowledge_search': '搜索知识库',
         'add_knowledge': '添加知识',
@@ -1792,19 +1837,6 @@ function collapseAllProcessCards(messageId) {
         searchCard.classList.add('collapsed');
     }
 
-    const subagentCard = messageDiv.querySelector('.subagent-card');
-    if (subagentCard && !subagentCard.classList.contains('collapsed')) {
-        const wrapper = subagentCard.querySelector('.subagent-content-wrapper');
-        const toggleIcon = subagentCard.querySelector('.toggle-icon');
-        if (wrapper) {
-            wrapper.style.maxHeight = '0';
-            wrapper.style.opacity = '0';
-        }
-        if (toggleIcon) {
-            toggleIcon.style.transform = 'rotate(180deg)';
-        }
-        subagentCard.classList.add('collapsed');
-    }
 }
 
 function toggleReasoningCard(header) {
@@ -1865,6 +1897,12 @@ function addDownloadCard(messageId, filename, filepath, size, downloadUrl) {
         </a>
     `;
     
+    const artifactHost = getLastAnswerArtifactHost(messageId);
+    if (artifactHost) {
+        artifactHost.appendChild(card);
+        return;
+    }
+
     const messageContent = messageDiv.querySelector('.message-content');
     const messageBubble = messageDiv.querySelector('.message-bubble');
     messageContent.insertBefore(card, messageBubble);
@@ -1908,6 +1946,12 @@ function addImageCard(messageId, filename, filepath, size, imageUrl, imageBase64
         </div>
     `;
     
+    const artifactHost = getLastAnswerArtifactHost(messageId);
+    if (artifactHost) {
+        artifactHost.appendChild(card);
+        return;
+    }
+
     const messageContent = messageDiv.querySelector('.message-content');
     const messageBubble = messageDiv.querySelector('.message-bubble');
     messageContent.insertBefore(card, messageBubble);
@@ -1932,28 +1976,6 @@ function formatFileSize(bytes) {
     if (bytes < 1024) return bytes + ' B';
     if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + ' KB';
     return (bytes / (1024 * 1024)).toFixed(1) + ' MB';
-}
-
-function addThinkingIndicator(messageId) {
-    const messageDiv = document.getElementById(messageId);
-    if (!messageDiv) return null;
-    
-    const indicator = document.createElement('div');
-    indicator.className = 'thinking-indicator';
-    indicator.innerHTML = `
-        <div class="thinking-dots">
-            <span></span>
-            <span></span>
-            <span></span>
-        </div>
-        <span class="thinking-text">正在思考...</span>
-    `;
-    
-    const messageContent = messageDiv.querySelector('.message-content');
-    const messageBubble = messageDiv.querySelector('.message-bubble');
-    messageContent.insertBefore(indicator, messageBubble);
-    
-    return indicator;
 }
 
 // ============================================
@@ -2288,6 +2310,7 @@ async function resetToFreshSession({ refreshDelay = 0 } = {}) {
     state.messages = [];
     state.sessionId = generateSessionId();
     state.uploadedFiles = [];
+    state.pendingUploadedFiles = [];
     state.isPaused = false;
     state.isStreaming = false;
     state.enableSearch = false;
@@ -2336,6 +2359,7 @@ async function loadHistorySession(historyId) {
         elements.messagesList.innerHTML = '';
         state.messages = [];
         state.uploadedFiles = [];
+        state.pendingUploadedFiles = [];
         state.toolActivityFeed = [];
         state.toolResultsByMessage = {};
         state.subagentPlansByMessage = {};

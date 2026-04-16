@@ -22,6 +22,11 @@ SMALL_DOC_SIZE_THRESHOLD = 10000
 SMALL_DOC_TOKEN_THRESHOLD = 3000
 
 
+def _clean_filter_value(value: Any) -> Optional[str]:
+    text = str(value or "").strip()
+    return text or None
+
+
 @dataclass
 class DocumentProcessingResult:
     """文档处理结果"""
@@ -41,6 +46,23 @@ class SearchResult:
     scores: List[float]
     source: str
     query: str
+    metadata_filter: Dict[str, Any] = field(default_factory=dict)
+
+    @staticmethod
+    def _format_display_source(doc: Document) -> str:
+        display_path = str(doc.metadata.get("display_path", "") or "").strip()
+        if display_path:
+            return display_path
+
+        relative_path = str(doc.metadata.get("relative_path", "") or "").strip()
+        if relative_path:
+            return f"./{relative_path}"
+
+        filename = str(doc.metadata.get("filename", "") or "").strip()
+        if filename:
+            return filename
+
+        return "未知来源"
     
     def to_context_text(self, max_length: int = 4000) -> str:
         """转换为上下文文本"""
@@ -51,8 +73,19 @@ class SearchResult:
         total_length = 0
         
         for i, doc in enumerate(self.documents):
-            source = doc.metadata.get("filename", doc.metadata.get("source", "未知来源"))
-            chunk_text = f"【参考 {i+1}】(来源: {source})\n{doc.page_content}\n"
+            source = self._format_display_source(doc)
+            meta_parts = []
+            folder_path = str(doc.metadata.get("folder_path", "") or "").strip()
+            asset_kind = str(doc.metadata.get("asset_kind", "") or "").strip()
+            index_mode = str(doc.metadata.get("index_mode", "") or "").strip()
+            if folder_path:
+                meta_parts.append(f"目录: {folder_path}")
+            if asset_kind:
+                meta_parts.append(f"类型: {asset_kind}")
+            if index_mode:
+                meta_parts.append(f"索引: {index_mode}")
+            meta_text = f" | {'; '.join(meta_parts)}" if meta_parts else ""
+            chunk_text = f"【参考 {i+1}】(来源: {source}{meta_text})\n{doc.page_content}\n"
             
             if total_length + len(chunk_text) > max_length:
                 break
@@ -316,6 +349,7 @@ class KnowledgeRetriever:
         include_permanent: bool = True,
         include_session: bool = True,
         include_small_docs: bool = True,
+        metadata_filter: Optional[Dict[str, Any]] = None,
     ) -> SearchResult:
         """
         检索相关知识
@@ -332,11 +366,12 @@ class KnowledgeRetriever:
             SearchResult: 检索结果
         """
         top_k = top_k or self.top_k
+        merged_filter = self._merge_metadata_filter(query, metadata_filter)
         all_docs: List[Tuple[Document, float]] = []
         
         if include_permanent:
             try:
-                results = self.permanent_store.search_with_scores(query, k=top_k)
+                results = self.permanent_store.search_with_scores(query, k=top_k, filter=merged_filter or None)
                 all_docs.extend(results)
             except Exception as e:
                 logger.warning(f"检索永久知识库失败: {e}")
@@ -344,7 +379,7 @@ class KnowledgeRetriever:
         if include_session and session_id:
             try:
                 session_store = self.get_session_store(session_id)
-                results = session_store.search_with_scores(query, k=top_k)
+                results = session_store.search_with_scores(query, k=top_k, filter=merged_filter or None)
                 all_docs.extend(results)
             except Exception as e:
                 logger.warning(f"检索会话知识库失败: {e}")
@@ -352,6 +387,8 @@ class KnowledgeRetriever:
         if include_small_docs:
             small_docs = self._get_small_docs(session_id)
             for doc in small_docs:
+                if not self._matches_metadata_filter(doc, merged_filter):
+                    continue
                 score = self._simple_similarity(query, doc.page_content)
                 all_docs.append((doc, score))
         
@@ -374,6 +411,7 @@ class KnowledgeRetriever:
             scores=scores,
             source=", ".join(source_parts),
             query=query,
+            metadata_filter=merged_filter,
         )
     
     def _get_small_docs(self, session_id: Optional[str]) -> List[Document]:
@@ -398,12 +436,72 @@ class KnowledgeRetriever:
         
         intersection = query_terms & content_terms
         return len(intersection) / len(query_terms)
+
+    def _normalize_filter(self, metadata_filter: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+        if not metadata_filter:
+            return {}
+
+        allowed_keys = {
+            "asset_kind",
+            "index_mode",
+            "file_type",
+            "folder_level_1",
+            "folder_level_2",
+            "folder_level_3",
+            "folder_level_4",
+            "folder_level_5",
+            "folder_level_6",
+            "filename",
+        }
+        normalized: Dict[str, Any] = {}
+        for key, value in metadata_filter.items():
+            if key not in allowed_keys:
+                continue
+            cleaned = _clean_filter_value(value)
+            if cleaned is not None:
+                normalized[key] = cleaned
+        return normalized
+
+    def _infer_filter_from_query(self, query: str) -> Dict[str, Any]:
+        lower_query = str(query or "").lower()
+        inferred: Dict[str, Any] = {}
+
+        if any(token in lower_query for token in ["excel", "xlsx", "xls", "表格", "数据表", "sheet"]):
+            inferred["asset_kind"] = "excel_asset"
+            inferred["index_mode"] = "file_summary"
+        elif any(token in lower_query for token in ["gis", "图层", "shp", "geojson", "地理信息", "栅格", "矢量"]):
+            inferred["asset_kind"] = "gis_asset"
+            inferred["index_mode"] = "file_summary"
+        elif any(token in lower_query for token in ["图片", "图件", "照片", "示意图", "png", "jpg", "jpeg"]):
+            inferred["asset_kind"] = "image_asset"
+            inferred["index_mode"] = "file_summary"
+        elif any(token in lower_query for token in ["word", "pdf", "报告", "文档", "说明", "方案", "正文"]):
+            inferred["asset_kind"] = "text_document"
+            inferred["index_mode"] = "content_chunk"
+
+        return inferred
+
+    def _merge_metadata_filter(self, query: str, metadata_filter: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+        explicit = self._normalize_filter(metadata_filter)
+        inferred = self._infer_filter_from_query(query)
+        return {**inferred, **explicit}
+
+    @staticmethod
+    def _matches_metadata_filter(doc: Document, metadata_filter: Dict[str, Any]) -> bool:
+        if not metadata_filter:
+            return True
+        for key, expected in metadata_filter.items():
+            actual = str(doc.metadata.get(key, "") or "").strip()
+            if actual != str(expected):
+                return False
+        return True
     
     def get_context_for_query(
         self,
         query: str,
         session_id: Optional[str] = None,
         max_length: int = 4000,
+        metadata_filter: Optional[Dict[str, Any]] = None,
     ) -> str:
         """
         获取查询相关的上下文文本
@@ -416,7 +514,7 @@ class KnowledgeRetriever:
         Returns:
             格式化的上下文文本
         """
-        result = self.search(query, session_id)
+        result = self.search(query, session_id, metadata_filter=metadata_filter)
         return result.to_context_text(max_length)
     
     def clear_session(self, session_id: str):
@@ -439,7 +537,7 @@ class KnowledgeRetriever:
         
         parts = []
         for i, doc in enumerate(docs):
-            source = doc.metadata.get("filename", "用户上传")
+            source = SearchResult._format_display_source(doc)
             parts.append(f"【文档 {i+1}】({source})\n{doc.page_content}")
         
         return "\n\n".join(parts)

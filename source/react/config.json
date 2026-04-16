@@ -1,0 +1,14 @@
+{
+  "routes": [
+    {
+      "path": "/",
+      "src": "src/pages/AgentPage.tsx"
+    }
+  ],
+  "components": [
+    {"name": "Sidebar", "src": "src/components/Sidebar.tsx"},
+    {"name": "ContextPanel", "src": "src/components/ContextPanel.tsx"},
+    {"name": "ChatArea", "src": "src/components/ChatArea.tsx"},
+    {"name": "ChatMessage", "src": "src/components/ChatMessage.tsx"}
+  ]
+}

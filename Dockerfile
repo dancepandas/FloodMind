@@ -8,6 +8,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     gcc \
     g++ \
     curl \
+    libgl1 \
+    libglib2.0-0 \
     fontconfig \
     fonts-noto-cjk \
     fonts-noto-cjk-extra \

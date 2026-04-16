@@ -73,7 +73,16 @@ root_logger.addHandler(console_handler)
 logger = logging.getLogger(__name__)
 
 # 创建 Flask 应用
-app = Flask(__name__, static_folder='web')
+REACT_DIST_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'source', 'react', 'dist')
+LEGACY_WEB_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'web')
+react_frontend_flag = os.environ.get('USE_REACT_FRONTEND')
+if react_frontend_flag is None:
+    USE_REACT_FRONTEND = os.path.exists(REACT_DIST_DIR)
+else:
+    USE_REACT_FRONTEND = react_frontend_flag == '1' and os.path.exists(REACT_DIST_DIR)
+STATIC_WEB_DIR = REACT_DIST_DIR if USE_REACT_FRONTEND else LEGACY_WEB_DIR
+
+app = Flask(__name__, static_folder=STATIC_WEB_DIR)
 CORS(app)
 
 DATA_DIR = os.environ.get('DATA_DIR', os.path.join(os.path.dirname(os.path.abspath(__file__)), 'data'))
@@ -686,7 +695,7 @@ def passthrough_workflow_content(content: str) -> Optional[str]:
 @app.route('/')
 def index():
     """首页"""
-    return send_from_directory('web', 'index.html')
+    return send_from_directory(app.static_folder, 'index.html')
 
 
 @app.route('/<path:path>')
@@ -694,7 +703,10 @@ def static_files(path):
     """静态文件"""
     if path.startswith('api/'):
         return jsonify({'error': 'Not found'}), 404
-    return send_from_directory('web', path)
+    file_path = os.path.join(app.static_folder, path)
+    if os.path.exists(file_path) and os.path.isfile(file_path):
+        return send_from_directory(app.static_folder, path)
+    return send_from_directory(app.static_folder, 'index.html')
 
 
 # ============================================

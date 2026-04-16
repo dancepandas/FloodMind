@@ -238,6 +238,12 @@ class SearchArtifactsInput(BaseModel):
     limit: int = Field(default=10, description="返回结果上限，默认10")
 
 
+class CheckArtifactExistsInput(BaseModel):
+    """检查产物是否存在的输入参数"""
+    artifact_path: str = Field(default="", description="要检查的产物路径或文件名")
+    scope: str = Field(default="current", description="搜索范围：current 或 reusable")
+
+
 class SearchToolErrorMemoryInput(BaseModel):
     """搜索工具错误记忆库的输入参数"""
     query: str = Field(default="", description="搜索关键词，可用 tool 名、skill 名、脚本名、错误摘要等")
@@ -368,6 +374,38 @@ def _artifact_matches_query(record: Dict[str, Any], query: str) -> bool:
         return True
     tokens = [token for token in query.split() if token]
     return all(token in text for token in tokens)
+
+
+def _resolve_artifact_candidates(artifact_path: str, scope: str = "current") -> List[Path]:
+    raw = str(artifact_path or "").strip().strip('"').strip("'")
+    if not raw:
+        return []
+
+    direct_path = Path(raw)
+    resolved_direct = direct_path if direct_path.is_absolute() else (_PROJECT_ROOT / direct_path).resolve()
+
+    candidates: List[Path] = []
+    if resolved_direct.exists() and resolved_direct.is_file():
+        candidates.append(resolved_direct)
+
+    normalized_raw = raw.replace("\\", "/").lower()
+    base_name = Path(raw).name.lower()
+    for path in _iter_candidate_artifacts(scope):
+        normalized_candidate = str(path).replace("\\", "/").lower()
+        if normalized_candidate == normalized_raw or normalized_candidate.endswith(normalized_raw):
+            candidates.append(path)
+            continue
+        if path.name.lower() == base_name:
+            candidates.append(path)
+
+    deduped: List[Path] = []
+    seen = set()
+    for path in candidates:
+        key = str(path.resolve())
+        if key not in seen:
+            seen.add(key)
+            deduped.append(path)
+    return deduped
 
 
 def _extract_error_core(output: str) -> str:
@@ -1100,6 +1138,63 @@ def search_artifacts(query: str = "", scope: str = "current", limit: int = 10) -
     )
 
 
+@tool(args_schema=CheckArtifactExistsInput)
+def check_artifact_exists(artifact_path: str = "", scope: str = "current") -> str:
+    """
+    检查目标产物是否真实存在。
+
+    优先按给定路径直接判断；如果传入的是文件名或相对路径，则在当前会话 outputs
+    或 reusable 范围内做文件名/后缀匹配，适合校验 `.xlsx`、`.docx`、`.pdf`、图片等二进制产物。
+    """
+    parsed = _parse_json_if_needed(artifact_path)
+    if parsed and 'artifact_path' in parsed:
+        artifact_path = parsed.get('artifact_path', artifact_path)
+        scope = parsed.get('scope', scope)
+
+    artifact_path = str(artifact_path).strip().strip('"').strip("'")
+    scope = str(scope).strip().lower() or "current"
+    if not artifact_path:
+        return _finalize_tool_output(
+            "check_artifact_exists",
+            "错误：artifact_path 参数不能为空",
+            artifact_path=artifact_path,
+            scope=scope,
+        )
+
+    if scope not in {"current", "reusable"}:
+        return _finalize_tool_output(
+            "check_artifact_exists",
+            "错误：scope 仅支持 `current` 或 `reusable`",
+            artifact_path=artifact_path,
+            scope=scope,
+        )
+
+    candidates = _resolve_artifact_candidates(artifact_path, scope)
+    if not candidates:
+        return _finalize_tool_output(
+            "check_artifact_exists",
+            f"未找到目标产物：{artifact_path}",
+            artifact_path=artifact_path,
+            scope=scope,
+        )
+
+    lines = [f"确认找到 {len(candidates)} 个匹配产物：", ""]
+    for idx, path in enumerate(candidates, start=1):
+        lines.extend([
+            f"{idx}. {path.name}",
+            f"   - 路径: {path}",
+            f"   - 大小: {path.stat().st_size} bytes",
+            f"   - 更新时间: {datetime.fromtimestamp(path.stat().st_mtime).isoformat()}",
+        ])
+
+    return _finalize_tool_output(
+        "check_artifact_exists",
+        "\n".join(lines),
+        artifact_path=artifact_path,
+        scope=scope,
+    )
+
+
 @tool(args_schema=ReadArtifactInput)
 def read_artifact(artifact_path: str = "", max_chars: int = 12000) -> str:
     """
@@ -1258,6 +1353,12 @@ class KnowledgeSearchInput(BaseModel):
     """知识检索的输入参数"""
     query: str = Field(default="", description="检索查询文本")
     top_k: int = Field(default=5, description="返回结果数量")
+    asset_kind: str = Field(default="", description="可选过滤：text_document / excel_asset / gis_asset / image_asset")
+    index_mode: str = Field(default="", description="可选过滤：content_chunk / file_summary")
+    folder_level_1: str = Field(default="", description="可选过滤：一级目录名")
+    folder_level_2: str = Field(default="", description="可选过滤：二级目录名")
+    folder_level_3: str = Field(default="", description="可选过滤：三级目录名")
+    filename: str = Field(default="", description="可选过滤：文件名")
 
 
 class AddKnowledgeInput(BaseModel):
@@ -1269,7 +1370,16 @@ class AddKnowledgeInput(BaseModel):
 
 
 @tool(args_schema=KnowledgeSearchInput)
-def knowledge_search(query: str = "", top_k: int = 5) -> str:
+def knowledge_search(
+    query: str = "",
+    top_k: int = 5,
+    asset_kind: str = "",
+    index_mode: str = "",
+    folder_level_1: str = "",
+    folder_level_2: str = "",
+    folder_level_3: str = "",
+    filename: str = "",
+) -> str:
     """
     从知识库中检索相关参考资料。
     
@@ -1286,11 +1396,27 @@ def knowledge_search(query: str = "", top_k: int = 5) -> str:
     if parsed:
         query = parsed.get('query', query)
         top_k = parsed.get('top_k', top_k)
+        asset_kind = parsed.get('asset_kind', asset_kind)
+        index_mode = parsed.get('index_mode', index_mode)
+        folder_level_1 = parsed.get('folder_level_1', folder_level_1)
+        folder_level_2 = parsed.get('folder_level_2', folder_level_2)
+        folder_level_3 = parsed.get('folder_level_3', folder_level_3)
+        filename = parsed.get('filename', filename)
     
     query = str(query).strip().strip('"').strip("'")
     
     if not query:
         return _finalize_tool_output("knowledge_search", "错误：检索查询不能为空", query=query, top_k=top_k)
+
+    metadata_filter = {
+        "asset_kind": asset_kind,
+        "index_mode": index_mode,
+        "folder_level_1": folder_level_1,
+        "folder_level_2": folder_level_2,
+        "folder_level_3": folder_level_3,
+        "filename": filename,
+    }
+    metadata_filter = {k: str(v).strip() for k, v in metadata_filter.items() if str(v).strip()}
     
     retriever = _get_retriever()
     if retriever is None:
@@ -1307,6 +1433,7 @@ def knowledge_search(query: str = "", top_k: int = 5) -> str:
             query=query,
             session_id=session_id,
             top_k=top_k,
+            metadata_filter=metadata_filter,
         )
         
         if not result.documents or len(result.documents) == 0:
@@ -1319,9 +1446,24 @@ def knowledge_search(query: str = "", top_k: int = 5) -> str:
         
         context_text = result.to_context_text()
         
-        response = f"找到 {len(result.documents)} 条相关知识（来源: {result.source}）：\n\n{context_text}"
-        
-        return _finalize_tool_output("knowledge_search", response, query=query, top_k=top_k)
+        filter_text = ""
+        if result.metadata_filter:
+            filter_text = f"\n生效过滤条件: {json.dumps(result.metadata_filter, ensure_ascii=False)}\n"
+
+        response = f"找到 {len(result.documents)} 条相关知识（来源: {result.source}）：{filter_text}\n{context_text}"
+
+        return _finalize_tool_output(
+            "knowledge_search",
+            response,
+            query=query,
+            top_k=top_k,
+            asset_kind=asset_kind,
+            index_mode=index_mode,
+            folder_level_1=folder_level_1,
+            folder_level_2=folder_level_2,
+            folder_level_3=folder_level_3,
+            filename=filename,
+        )
         
     except Exception as e:
         logger.error(f"知识检索失败: {e}")
@@ -1783,6 +1925,7 @@ __all__ = [
     'exec_python_file',
     'write_text_file',
     'search_artifacts',
+    'check_artifact_exists',
     'read_artifact',
     'read_file',
     'knowledge_search',

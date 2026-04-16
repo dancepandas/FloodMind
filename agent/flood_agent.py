@@ -30,14 +30,15 @@ from models.qwen_llm_service import QwenLLMService
 from memory import SimpleMemory, DualMemory
 from skills import SKILL_REGISTRY
 from skills.base import Skill
-from tools import get_skill, run_script, exec_bash, exec_python_file, write_text_file, search_tool_error_memory, search_artifacts, read_artifact, knowledge_search, add_knowledge, web_search, add_memory, search_memory, set_rag_config, set_memory_instance, reset_retry_guard
+from tools import get_skill, run_script, exec_bash, exec_python_file, write_text_file, search_tool_error_memory, search_artifacts, check_artifact_exists, read_artifact, knowledge_search, add_knowledge, web_search, add_memory, search_memory, set_rag_config, set_memory_instance, reset_retry_guard
 from config.settings import settings
 
 logger = logging.getLogger(__name__)
 
 
 class SpecialistTaskInput(BaseModel):
-    task: str = Field(default="", description="交给子 agent 的明确子任务说明，应尽量具体、短小、可执行")
+    task: str = Field(default="", description="交给执行单元的明确任务说明，应尽量具体、短小、可执行")
+    skill_name: str = Field(default="", description="若当前任务明确要求复用某个 skill，则传入对应的 skill 名称")
 
 
 class _FunctionsStreamCallback(BaseCallbackHandler):
@@ -239,7 +240,7 @@ class AgentLoopState:
     final_output: str = "抱歉，我无法回答这个问题。"
     latest_payload: Optional[Dict[str, Any]] = None
     artifacts: List[str] = field(default_factory=list)
-    final_verification: Dict[str, Any] = field(default_factory=dict)
+    final_check: Dict[str, Any] = field(default_factory=dict)
     round_count: int = 0
     replan_count: int = 0
     terminal_status: str = "running"
@@ -249,72 +250,6 @@ class AgentLoopState:
 
 class FloodAgent:
     """洪水预报智能体类 - 使用 OpenAI Functions Agent"""
-    VALIDATOR_PROMPT = """你是 Validator 子 agent。
-
-## 你的职责
-你只负责三件事：
-1. 校验最近一次结果是否满足用户最终目标
-2. 判断当前结果属于哪个阶段
-3. 告诉主 agent 已完成什么，以及下一步该由谁继续
-
-## 角色边界
-- 不负责重新生成文件
-- 不负责替代执行
-- 不负责编写脚本、运行脚本或修改结果文件
-
-## 输入理解重点
-你会收到：
-1. 最终目标摘要
-2. 当前计划执行情况
-3. 前序步骤产物索引
-4. 最近一次结果
-5. 最近一次结果中提取出的产物路径
-
-你必须综合这些信息判断当前状态，不要只盯着最后一句描述，也不要只看某一个文件名。
-
-## 敖江流域子任务编码
-- 子任务：`霍口水库断面预报`、`霍口水库~山仔水库区间断面预报`、`山仔水库~水动力模型区间断面预报`、`水动力模型区间断面预报`、`桂湖溪流域出口断面预报`、`牛溪流域出口断面预报`
-- stationCode：`33c76b8bd9384486a945c2fc7fd622eb`、`20001`、`30001`、`40001`、`GE2AG000000L`、`GE2AF000000R`
-- 详细信息查看 aojiang-hydro SKILL.md文档
-
-## 判定规则
-1. 只有当最近一次结果已经直接满足最终交付目标时，才能判定 `overall_status=pass`
-2. 如果最近一次结果只是中间文件，如 `input.json`、中间 `.json/.csv`、草稿 Excel、临时脚本、校验意见，必须判定 `overall_status=fail`
-3. 如果最近一次结果已经生成了与目标直接对应的最终文件，如 `.xlsx`、`.docx`、`.pdf`、`.png`，且这正是用户要的交付物，可判定 `overall_status=pass`
-4. 当判定为 `fail` 时，不能只说“未完成”，必须同时说明：
-   - 已完成什么
-   - 当前结果属于哪个阶段
-   - 下一步该由谁继续
-   - 下一步唯一核心动作是什么
-
-## 阶段判定
-- `input_prepared`：已经生成标准输入文件，可用于后续模型或下游步骤，但还不是最终结果
-- `model_result_ready`：已经生成标准结果文件，如 `result.json`，可用于最终导出或交付
-- `final_deliverable`：已经生成与用户目标直接对应的最终交付文件，如 `result.xlsx`
-- `unknown`：无法从现有信息中稳定判断当前阶段
-
-## 检查重点
-1. 如果结果是 Excel：检查 sheet 数、sheet 命名、字段、时间轴是否合理
-2. 如果结果是中间 JSON/CSV：检查关键字段、记录数、分组键是否完整
-3. 如果检查的是 JSON 且存在 `stationCode`，需要重点校验 `stationCode` 是否与 skill 文档要求一致
-4. 如果前序步骤产物索引已经显示上一步生成了某个关键文件，必须在结论中利用这条信息，不要忽略 plan 上下文
-
-## 输出格式
-只输出一个 JSON 对象，不要输出 Markdown，不要输出代码块，不要输出额外解释。
-
-JSON 字段必须包含：
-- `overall_status`: `pass` 或 `fail`
-- `is_final_goal_met`: `true` 或 `false`
-- `final_goal`: 用户最终目标的简短中文描述；若已完成可返回空字符串
-- `completed_work`: 已完成工作的简短中文描述
-- `current_result_type`: 只能取 `input_prepared`、`model_result_ready`、`final_deliverable`、`unknown`
-- `next_executor`: 只能取 `python_specialist`、`excel_specialist`、`validator`、`orchestrator`
-- `next_action`: 下一阶段唯一核心动作，必须具体且可执行
-
-## 输出目标
-你的输出必须让主 agent 可以直接据此继续派单，而不是再次猜下一步。
-"""
-
     SYSTEM_PROMPT = """你是大水云开发的调度 agent。
 
 ## 当前系统时间
@@ -324,26 +259,23 @@ JSON 字段必须包含：
 你只负责四类事情：
 1. 分析用户意图和最终目标
 2. 规划任务步骤
-3. 把步骤分发给合适的子 agent
+3. 把步骤分发给执行单元
 4. 汇总执行结果并回答用户
 
 ## 角色边界
-- 不负责亲自编写脚本、执行脚本、生成 Excel、构造 input.json、运行模型
-- 不负责替代 Python Specialist 或 Excel Specialist 执行具体任务
+- 不负责亲自编写脚本、执行脚本、生成 Excel、构造 input.json、运行模型等具体任务
 - 不负责在没有校验的情况下直接宣布任务完成
 
 ## 可用工具
 - `get_skill`：查看 skill 的详细说明、脚本、参数和规则
 - `search_artifacts`：搜索当前会话或历史可复用产物
 - `read_artifact`：读取文本类产物
-- `knowledge_search`：检索知识库
-- `web_search`：检索网络资料
+- `knowledge_search`：检索知识库（知识查询时，优先使用）
+- `web_search`：检索网络资料（knowledge_search搜索结果不够支撑回答时，搜索网络资料补充）
 - `search_memory`：检索历史对话和技能文档
 
-## 可用子 agent
-- `delegate_python_specialist`：处理数据提取、转换、结构化中间文件生成、模型相关脚本执行
-- `delegate_excel_specialist`：处理 Excel/CSV/TSV 导出、sheet 设计、结果表生成
-- `delegate_validator`：校验最近一次结果是否满足最终目标，并给出下一阶段建议
+## 可用执行单元
+- `delegate_execution_specialist`：执行单步落地任务，包括数据提取、转换、结构化文件生成、Excel 导出、模型相关脚本执行；如已明确 skill，委派时一并传 `skill_name`
 
 ## 敖江流域子任务编码
 - 子任务：`霍口水库断面预报`、`霍口水库~山仔水库区间断面预报`、`山仔水库~水动力模型区间断面预报`、`水动力模型区间断面预报`、`桂湖溪流域出口断面预报`、`牛溪流域出口断面预报`
@@ -364,19 +296,23 @@ JSON 字段必须包含：
 如果任务明显对应某个业务 skill 或导出能力，必须先调用 `get_skill` 查看详细说明，再决定下一步。
 
 ### 3. 规划并分发
-每次分发给子 agent 的任务必须满足：
+每次分发给 `delegate_execution_specialist` 的任务必须满足：
 1. 只有一个核心动作
 2. 明确输入文件或输入产物
-3. 明确本步预期输出
-4. 不要把用户原始长文本整包塞给子 agent
+3. 明确预期输出
+4. 明确必要约束或应参考的 skill
+5. 不要把用户原始长文本整包塞给执行单元
+6. 如果你已经确定要复用某个 skill，必须显式传入 `skill_name`
+
+合格示例：
+- task: 把 `./input.xlsx` 转为 `./input.json`，输入表包含 `time` 和 `rainfall` 两列；skill_name: `hydro-input-prep`
+- task: 使用 `normalize_hydro_input_file_to_excel.py` 将上传的 `2.xlsx` 转为标准中间 Excel；skill_name: `hydro-input-prep`
+- task: 基于 `./result.json` 生成最终 `./result.xlsx`，优先复用对应业务 skill 已声明的导出脚本；skill_name: `<对应业务 skill>`
+- 读取 `./result.xlsx` 中的 `rainfall` 列并绘制时序图，输出 `./rainfall.png`
 
 ### 4. 结合校验继续推进
-当 validator 已经明确给出：
-- 已完成内容
-- 当前阶段
-- 下一执行者
-- 下一核心动作
-优先按 validator 结果继续分发，不要自己重新写成模糊任务。
+只有当本轮任务明确承诺了文件产物时，才在流程结束后执行代码级最终文件存在性检查。
+如果最终文件检查明确指出缺失文件，优先按缺失文件结果继续分发，不要自己重新写成模糊任务。
 
 ### 5. 整理最终回答
 最终只向用户总结：
@@ -387,7 +323,7 @@ JSON 字段必须包含：
 ## 调度原则
 1. 只做规划、分发、汇总
 2. 如果有相关 skill，先查 skill，再决定是否委派
-3. 对子 agent 只传最终目标摘要，不传用户原始长输入
+3. 对执行单元只传当前这一步的执行指令，不传用户原始长输入和多余会话背景
 4. 严禁把超长 JSON 直接塞进任务描述
 5. 必须严格遵循 SKILL.md 及相关文档
 
@@ -398,39 +334,25 @@ JSON 字段必须包含：
 - 最终输出为标准 Markdown
 """
 
-    PYTHON_SPECIALIST_PROMPT = """你是 Python Specialist 子 agent。
+    EXECUTION_SPECIALIST_PROMPT = """你是 Execution Specialist 执行单元。
 
 ## 你的职责
 你只负责：
-1. 数据提取、清洗、转换
-2. 构造中间结构化文件，如 `input.json`、`.json`、`.csv`
-3. 根据调度任务运行已有 skill 脚本
-4. 在没有可复用 skill/脚本时，编写并执行临时 Python 脚本完成任务
+1. 执行调度 agent 已明确分配的单步任务
+2. 数据提取、清洗、转换
+3. 构造中间结构化文件，如 `input.json`、`.json`、`.csv`
+4. 生成 Excel/CSV/TSV 等表格结果
+5. 根据调度任务运行已有 skill 脚本
+6. 在没有可复用 skill/脚本时，编写并执行临时 Python 脚本完成任务
 
-## 敖江流域子任务编码
-- 子任务：`霍口水库断面预报`、`霍口水库~山仔水库区间断面预报`、`山仔水库~水动力模型区间断面预报`、`水动力模型区间断面预报`、`桂湖溪流域出口断面预报`、`牛溪流域出口断面预报`
-- stationCode：`33c76b8bd9384486a945c2fc7fd622eb`、`20001`、`30001`、`40001`、`GE2AG000000L`、`GE2AF000000R`
-- 详细信息查看 aojiang-hydro SKILL.md文档
-
-## 标准工作流
-### 第一步：先找 skill 或现成脚本
-如果任务对应某个业务 skill 或已有脚本能力：
-1. 先用 `get_skill` 查看该 skill 的详细说明
-2. 如果 skill 已经提供可直接完成当前任务的脚本，优先 `run_script`
-3. 如果当前会话或历史产物里已有可复用脚本，优先复用，不要重复造轮子
-
-### 第二步：没有可复用能力时再写临时脚本
-只有当 skill 和现有脚本都无法直接完成当前任务时，才允许：
-1. 使用 `write_text_file` 生成临时 `.py` 文件
-2. 使用 `exec_python_file` 执行该脚本
-
-### 第三步：完成后立即返回
-只要本次任务要求的目标文件已经生成，必须立即结束并返回：
-1. 生成了什么文件
-2. 文件的作用
-3. 下一步如何使用这些文件
+## 执行原则
+- 把输入任务视为已定稿的执行指令，不要重写目标，不要重新拆解流程，不要补充下游计划
+- 优先复用已有 skill、已有脚本、已有中间结果；只有缺少直接能力时才写临时脚本
+- 只围绕当前这一步行动；做完立即返回，不扩展上下游
+- 如果指令缺文件、缺参数、缺前置产物，就明确指出缺什么，不要自己猜业务意图
 
 ## 强约束
+- 不要重新理解用户需求；按当前任务执行
 - 不要猜测 skill 未声明的脚本、参数或字段
 - 不要把超长 JSON 直接塞进工具参数
 - 不要根据聊天文本手工搬运大数组；优先从原始文件读取
@@ -449,83 +371,10 @@ JSON 字段必须包含：
 ## 可使用skills
 {skill_catalog}
 
-## 建议
-- 在进行根据已有数据进行绘图任务时，建议优先选择xlsx数据进行分析
-- 可先预览数据格式
-- 再根据数据格式编写绘图脚本
-
 ## 输出要求
 - 简洁说明本次任务是否完成
-- 明确写出生成的文件及其用途
-- 如果产出是中间文件，说明下一步应该如何使用
-"""
-
-    EXCEL_SPECIALIST_PROMPT = """你是 Excel Specialist 子 agent。
-
-## 你的职责
-你只负责：
-1. Excel/CSV/TSV 导出
-2. workbook 结构设计
-3. sheet 拆分、字段整理、结果表生成
-
-## 敖江流域子任务编码
-- 子任务：`霍口水库断面预报`、`霍口水库~山仔水库区间断面预报`、`山仔水库~水动力模型区间断面预报`、`水动力模型区间断面预报`、`桂湖溪流域出口断面预报`、`牛溪流域出口断面预报`
-- stationCode：`33c76b8bd9384486a945c2fc7fd622eb`、`20001`、`30001`、`40001`、`GE2AG000000L`、`GE2AF000000R`
-- 详细信息查看 aojiang-hydro SKILL.md文档
-
-## 任务边界
-- 你只处理“已有结果 -> 导出/整理 Excel”这一阶段
-- 如果当前输入还是原始上传 Excel、原始降雨数据、待清洗表格、`input.json` 构造需求或模型执行需求，这些都不属于你的职责
-- 如果当前没有上游结果文件，直接返回：`当前不是 Excel 导出阶段；请先由上游 agent 完成输入准备或模型执行，再把结果文件交给我生成最终 Excel。`
-
-## 标准工作流
-### 第一步：先找 skill 或现成导出能力
-1. 先判断当前输入是否来自某个业务 skill 的标准结果文件
-2. 如果是，先 `get_skill` 查看该业务 skill 的说明
-3. 如果该 skill 已提供导出脚本，优先 `run_script` 直接导出，不要自己重写
-4. 如果历史产物中已有可复用导出脚本，优先复用
-
-### 第二步：没有可复用能力时再写脚本
-只有在没有现成导出脚本、也没有可复用模板时，才允许：
-1. 使用 `write_text_file` 生成临时 Python 脚本
-2. 使用 `exec_python_file` 执行脚本生成 Excel
-3. 必要时可使用 `pandas`、`openpyxl` 等库处理 Excel
-
-### 第三步：完成后立即返回
-只要最终 Excel 已生成，就立即返回：
-1. 输入文件是什么
-2. 输出文件是什么
-3. workbook 结构是什么
-4. 可检查项是什么
-
-## 结构设计原则
-1. 多对象、多断面、多时间序列数据，优先考虑 `Summary` + 分对象/分断面 sheet
-2. 不要把明显应拆分的数据硬塞进单表
-3. 如果上游结果已经是标准 `result.json`，优先消费该结果文件，不要重复做上游处理
-
-## 强约束
-- 不要猜测 skill 未声明的脚本或参数
-- 不要处理原始上游数据准备工作
-- 不要把大块表格数据直接塞进工具参数
-- 如果业务 skill 已提供官方导出脚本，禁止重复造轮子
-
-## 可使用工具
-1. `get_skill`
-2. `search_artifacts`
-3. `read_artifact`
-4. `run_script`
-5. `write_text_file`
-6. `exec_python_file`
-7. `search_tool_error_memory`
-
-## 可使用skills
-{skill_catalog}
-
-## 输出要求
-- 说明生成了什么 Excel 文件
-- 说明输入文件是什么
-- 说明 workbook 结构和 sheet 设计
-- 给出可校验项，如 sheet 数、字段、行数
+- 明确返回直接结果，如生成文件路径、读取/搜索结果、关键输出摘要
+- 不要给出下一步建议，不要说明后续如何使用，由调度 agent 决定后续动作
 """
 
     def __init__(
@@ -585,18 +434,12 @@ JSON 字段必须包含：
         self._active_user_input = ""
         self._last_loop_state: Optional[AgentLoopState] = None
 
-        self.python_tools: List[BaseTool] = [get_skill, run_script, exec_python_file, write_text_file, search_tool_error_memory, search_artifacts, read_artifact]
-        self.excel_tools: List[BaseTool] = [get_skill, run_script, exec_python_file, write_text_file, search_tool_error_memory, search_artifacts, read_artifact]
-        self.validator_tools: List[BaseTool] = [get_skill, search_artifacts, read_artifact, search_memory]
+        self.execution_tools: List[BaseTool] = [get_skill, run_script, exec_python_file, write_text_file, search_tool_error_memory, search_artifacts, read_artifact]
 
-        self.python_specialist_executor = self._build_specialized_executor(self.PYTHON_SPECIALIST_PROMPT, self.python_tools, max_iterations=50)
-        self.excel_specialist_executor = self._build_specialized_executor(self.EXCEL_SPECIALIST_PROMPT, self.excel_tools, max_iterations=50)
-        self.validator_executor = self._build_specialized_executor(self.VALIDATOR_PROMPT, self.validator_tools, max_iterations=50)
+        self.execution_specialist_executor = self._build_specialized_executor(self.EXECUTION_SPECIALIST_PROMPT, self.execution_tools, max_iterations=50)
 
         self._executors: Dict[str, AgentExecutor] = {
-            "python_specialist": self.python_specialist_executor,
-            "excel_specialist": self.excel_specialist_executor,
-            "validator": self.validator_executor,
+            "execution_specialist": self.execution_specialist_executor,
         }
 
         self.delegation_tools: List[BaseTool] = self._build_delegation_tools()
@@ -704,80 +547,62 @@ JSON 字段必须包含：
                     return candidate[:120]
         return text[:120]
 
-    def _build_specialist_user_input(self, stage_name: str, task: str) -> str:
+    def _build_specialist_user_input(self, stage_name: str, task: str, skill_name: str = "") -> str:
         normalized_task = (task or "").strip()
+        normalized_skill_name = (skill_name or "").strip()
         if not normalized_task:
             return ""
 
         core_task, sections = self._parse_task_sections(normalized_task)
         lines: List[str] = []
 
-        if stage_name == "validator":
-            lines.extend([
-                "你现在只执行一个明确的校验子任务。",
-                "优先根据[核心任务]判断是否完成，再按需参考后续背景。",
-                "如果未完成，必须明确给出：已完成什么、当前结果属于哪个阶段、下一阶段应由谁继续、下一阶段唯一核心动作是什么。",
-                "",
-                "[核心任务]",
-                core_task or normalized_task,
-            ])
-            if sections:
-                lines.append("")
-                for header, content in sections:
-                    if not content:
-                        continue
-                    lines.extend([
-                        f"[{header}]",
-                        self._truncate_block(content, 1200 if header == "最近一次结果" else 400),
-                        "",
-                    ])
-            return "\n".join(lines).strip()
-
-        noisy_headers = {"原始用户需求", "原始输入数据", "最终目标"}
         lines.extend([
             "你现在只执行一个已经明确分配的子任务。",
-            "先完成[核心任务]，不要重新定义用户最终目标；后面的背景仅在当前子任务确有需要时再参考。",
-            "如果背景与核心任务存在表述差异，以[核心任务]为准。",
-            "如果当前目标是把某个业务 skill 生成的标准 result.json 导出为 Excel，优先复用该 skill 已声明的导出脚本，禁止额外重写一份临时导出脚本。",
+            "把它当作执行指令，不要重写目标，不要补充计划，不要重新理解用户需求。",
+            "如果存在[核心任务]，只围绕[核心任务]执行；其他内容仅作最小必要参考。",
             "",
             "[核心任务]",
             core_task or normalized_task,
         ])
 
-        compact_sections: List[Tuple[str, str]] = []
+        if normalized_skill_name:
+            lines.extend([
+                "",
+                "[指定skill]",
+                normalized_skill_name,
+                "",
+                "如果当前任务明确要求复用该 skill，优先先调用 `get_skill` 查看其脚本与参数，再执行。",
+            ])
+
         for header, content in sections:
             if not content:
                 continue
-            limit = 300 if header in noisy_headers else 800
-            compact_sections.append((header, self._truncate_block(content, limit)))
-
-        if compact_sections:
-            lines.extend([
-                "",
-                "[补充上下文]",
-                "以下内容仅供按需参考，不要让它覆盖核心任务。",
-                "",
-            ])
-            for header, content in compact_sections:
+            if header in {"当前待完成目标", "输入文件", "可用中间文件", "预期输出", "执行约束", "可复用产物"}:
                 lines.extend([
-                    f"[{header}]",
-                    content,
                     "",
+                    f"[{header}]",
+                    self._truncate_block(content, 500),
                 ])
 
         return "\n".join(lines).strip()
 
-    def _run_specialist_task(self, stage_name: str, task: str) -> str:
+    @staticmethod
+    def _normalize_executor_name(stage_name: str) -> str:
+        return str(stage_name or "").strip()
+
+    def _run_specialist_task(self, stage_name: str, task: str, skill_name: str = "") -> str:
+        stage_name = self._normalize_executor_name(stage_name)
         task = (task or "").strip()
+        skill_name = (skill_name or "").strip()
         if not task:
             return f"错误：委派给 {stage_name} 的 task 不能为空"
 
         executor = self._executors.get(stage_name)
         if executor is None:
-            return f"错误：未找到子 agent `{stage_name}`"
+            return f"错误：未找到执行单元 `{stage_name}`"
 
-        specialist_input = self._build_specialist_user_input(stage_name, task)
-        result = self._invoke_executor(executor, specialist_input)
+        specialist_input = self._build_specialist_user_input(stage_name, task, skill_name)
+        result = self._invoke_executor(executor, specialist_input, include_session_context=False)
         self._record_intermediate_steps(result)
         output = (result.get("output", "") or "").strip()
         output = self._normalize_specialist_output(result, output)
@@ -785,24 +610,9 @@ JSON 字段必须包含：
             return f"{stage_name} 未返回有效结果"
 
         stage_label = {
-            "python_specialist": "Python Specialist",
-            "excel_specialist": "Excel Specialist",
-            "validator": "Validator",
+            "execution_specialist": "Execution Specialist",
         }.get(stage_name, stage_name)
 
-        if stage_name == "validator":
-            payload = {
-                "stage": stage_name,
-                "stage_label": stage_label,
-                "result_type": "validation",
-                "status": "completed",
-                "user_goal": self._active_user_input,
-                "summary": output,
-                "validation": self._parse_validator_output(output),
-            }
-            return json.dumps(payload, ensure_ascii=False, indent=2)
-
-        validation_output = self._run_validator_check(task, output)
         payload = {
             "stage": stage_name,
             "stage_label": stage_label,
@@ -810,39 +620,21 @@ JSON 字段必须包含：
             "status": "completed",
             "user_goal": self._active_user_input,
             "task": task,
+            "skill_name": skill_name,
             "summary": output,
             "artifacts": self._extract_artifact_paths(output),
-            "validation": self._parse_validator_output(validation_output),
         }
         return json.dumps(payload, ensure_ascii=False, indent=2)
 
     def _build_delegation_tools(self) -> List[BaseTool]:
-        def delegate_python_specialist(task: str = "") -> str:
-            return self._run_specialist_task("python_specialist", task)
-
-        def delegate_excel_specialist(task: str = "") -> str:
-            return self._run_specialist_task("excel_specialist", task)
-
-        def delegate_validator(task: str = "") -> str:
-            return self._run_specialist_task("validator", task)
+        def delegate_execution_specialist(task: str = "", skill_name: str = "") -> str:
+            return self._run_specialist_task("execution_specialist", task, skill_name)
 
         return [
             StructuredTool.from_function(
-                func=delegate_python_specialist,
-                name="delegate_python_specialist",
-                description="当你已经完成任务拆分，且子任务属于数据提取、日志解析、文件结构化、中间 JSON/CSV、临时 Python 脚本、input.json 构造时调用。尤其适用于‘先解析文件/日志，再继续下游处理’的第一步。",
-                args_schema=SpecialistTaskInput,
-            ),
-            StructuredTool.from_function(
-                func=delegate_excel_specialist,
-                name="delegate_excel_specialist",
-                description="当你已经完成任务拆分，且子任务属于 Excel 结构设计、多工作表导出、Summary + 分对象工作表、按断面/按对象分 sheet 时调用。尤其适用于‘已有中间结构化数据，下一步生成 Excel’的场景。若上游结果来自某个业务 skill 的标准 result.json，优先让它复用该 skill 自带的导出脚本，而不是重写临时脚本。",
-                args_schema=SpecialistTaskInput,
-            ),
-            StructuredTool.from_function(
-                func=delegate_validator,
-                name="delegate_validator",
-                description="当你已经拿到中间结果或最终文件，且需要对照用户需求检查是否满足要求时调用。尤其适用于 Excel/JSON/模型结果生成后的最后一步复核。",
+                func=delegate_execution_specialist,
+                name="delegate_execution_specialist",
+                description="当你已经完成任务拆分，且需要执行单元无脑执行某一个明确步骤时调用。适用于数据提取、文件转换、中间 JSON/CSV、Excel 导出、运行 skill 脚本、编写最小临时 Python 脚本等单步落地任务。若已明确要复用某个 skill，必须同时传入 skill_name。",
                 args_schema=SpecialistTaskInput,
             ),
         ]
@@ -929,7 +721,7 @@ JSON 字段必须包含：
     @staticmethod
     def _select_execution_plan(user_input: str) -> List[str]:
         # 当前默认始终先由主 agent 统一理解和规划，避免在任务尚未澄清前
-        # 就因为规则命中而提前切到子 agent，导致执行顺序和展示逻辑混乱。
+        # 就因为规则命中而提前切到执行单元，导致执行顺序和展示逻辑混乱。
         return ["orchestrator"]
 
     def _build_initial_loop_state(self, user_input: str) -> AgentLoopState:
@@ -937,7 +729,7 @@ JSON 字段必须包含：
             step_id="step-1",
             title="理解目标并开始执行",
             executor="orchestrator",
-            purpose="先由主 agent 理解最终目标、选择技能与子 agent，并产出第一轮结果。",
+            purpose="先由主 agent 理解最终目标、选择技能与执行单元，并产出第一轮结果。",
             input_text=user_input,
         )
         return AgentLoopState(original_input=user_input, plan_steps=[initial_step])
@@ -966,7 +758,7 @@ JSON 字段必须包含：
         if not text:
             return self._extract_latest_delegation_payload(result)
 
-        if stage_name in {"python_specialist", "excel_specialist", "validator"}:
+        if self._normalize_executor_name(stage_name) == "execution_specialist":
             try:
                 parsed = json.loads(text)
                 if isinstance(parsed, dict):
@@ -983,15 +775,8 @@ JSON 字段必须包含：
             payload.setdefault("user_goal", self._active_user_input)
             payload["summary"] = text
             payload["artifacts"] = output_artifacts
-            validation = dict(payload.get("validation") or {})
             if self._artifacts_satisfy_user_goal(payload):
-                validation.update({
-                    "overall_status": "pass",
-                    "is_final_goal_met": True,
-                    "final_goal": "",
-                })
                 payload["result_type"] = "final"
-            payload["validation"] = validation
             return payload
 
         return delegated_payload
@@ -1001,59 +786,6 @@ JSON 字段必须包含：
             return step.input_text
 
         latest_payload = state.latest_payload or {}
-
-        if step.executor == "excel_specialist" and latest_payload:
-            artifacts = latest_payload.get('artifacts', [])
-            task_description = f"请基于已有的中间文件生成最终 Excel 文件。\n\n"
-
-            if artifacts:
-                task_description += f"[可用中间文件]\n{', '.join(artifacts)}\n\n"
-
-            task_description += (
-                f"[上游处理说明]\n{latest_payload.get('summary', '无')}\n\n"
-                "你的职责：\n"
-                "1. 只负责 Excel 结构设计和文件生成\n"
-                "2. 只基于上游已经生成的结果文件创建最终 Excel\n"
-                "3. 输出真正可交付的 Excel 文件\n"
-                "4. 如果当前没有上游结果文件，而只有用户原始上传 Excel、原始降雨表、input.json 准备需求或模型执行需求，直接返回：当前不是 Excel 导出阶段；请先由上游 agent 完成输入准备或模型执行，再把结果文件交给我生成最终 Excel。\n\n"
-                "不要重新解析原始数据，不要推断水文计算流程，不要重复上游处理。"
-            )
-            return task_description
-
-        if step.executor == "validator" and state.previous_outputs:
-            latest_summary = state.previous_outputs[-1][1]
-            progress = self._classify_step_completion(state)
-            goal_brief = self._build_goal_brief(state.original_input)
-            step_index_items = progress.get('completed_steps') or []
-            step_index_items = step_index_items + (progress.get('pending_steps') or [])
-            if progress.get('failed_step'):
-                step_index_items.append(progress.get('failed_step'))
-            plan_lines = []
-            for step_item in state.plan_steps:
-                item = self._build_step_progress_item(state, step_item)
-                title = str(item.get("title", "") or "未命名步骤")
-                executor = str(item.get("executor", "") or "orchestrator")
-                status = str(item.get("status", "") or "pending")
-                purpose = str(item.get("purpose", "") or "").strip()
-                line = f"- [{status}] {title} ({executor})"
-                if purpose:
-                    line += f": {purpose}"
-                output_summary = str(item.get("output_summary", "") or "").strip()
-                artifacts = str(item.get("artifacts", "") or "").strip()
-                if output_summary:
-                    line += f" | 产出摘要: {output_summary}"
-                if artifacts and artifacts != "[]":
-                    line += f" | 产物: {artifacts}"
-                plan_lines.append(line)
-            return (
-                "请根据用户最终目标摘要检查最近一次执行结果是否满足要求。\n\n"
-                f"[最终目标摘要]\n{goal_brief}\n\n"
-                f"[当前计划执行情况]\n{chr(10).join(plan_lines) if plan_lines else '- 无'}\n\n"
-                f"[前序步骤产物索引]\n{self._build_step_artifact_index(step_index_items)}\n\n"
-                f"[已完成步骤]\n{self._format_progress_lines(progress.get('completed_steps') or [])}\n\n"
-                f"[未完成步骤]\n{self._format_progress_lines(progress.get('pending_steps') or [])}\n\n"
-                f"[最近一次子agent输出]\n{latest_summary}"
-            )
 
         if latest_payload:
             return self._build_forced_continuation_input(state.original_input, latest_payload)
@@ -1067,40 +799,15 @@ JSON 字段必须包含：
             "failed_step": None,
             "reusable_artifacts": self._collect_artifacts_from_payload(payload),
         }
-        if step.executor == "validator":
-            validation = (payload or {}).get("validation") or self._parse_validator_output(stage_output)
-            step_completed = bool((stage_output or "").strip())
-            return {
-                "scope": "goal",
-                "status": "pass" if step_completed else "fail",
-                "step_completed": step_completed,
-                "reason": str(validation.get("final_goal", "") or ""),
-                "goal_satisfied": bool(validation.get("is_final_goal_met")),
-                "requires_replan": not step_completed,
-                "validation": validation,
-                **({
-                    **base_progress,
-                    "failed_step": {
-                        "step_id": step.step_id,
-                        "title": step.title,
-                        "executor": step.executor,
-                        "purpose": step.purpose,
-                        "status": step.status,
-                    },
-                } if not step_completed else base_progress),
-            }
-
         if payload:
-            validation = payload.get("validation") or {}
-            should_continue = self._should_force_continue(payload)
             return {
                 "scope": "step",
                 "status": "pass",
                 "step_completed": True,
-                "reason": str(validation.get("final_goal", "") or ""),
-                "goal_satisfied": not should_continue,
+                "reason": "",
+                "goal_satisfied": False,
                 "requires_replan": False,
-                "validation": validation,
+                "final_check": {},
                 **base_progress,
             }
 
@@ -1112,7 +819,7 @@ JSON 字段必须包含：
             "reason": "" if text else "当前步骤未产出有效结果",
             "goal_satisfied": False,
             "requires_replan": not bool(text),
-            "validation": {},
+            "final_check": {},
             **({
                 **base_progress,
                 "failed_step": {
@@ -1206,14 +913,15 @@ JSON 字段必须包含：
 
     def _verify_goal_state(self, state: AgentLoopState) -> Dict[str, Any]:
         payload = state.latest_payload or {}
-        validation = payload.get("validation") or state.final_verification or {}
         needs = self._needs_final_deliverable(state.original_input)
         artifacts = state.artifacts or self._collect_artifacts_from_payload(payload)
         artifacts_ok = self._artifacts_cover_needs(artifacts, needs)
-        validation_ok = bool(validation.get("is_final_goal_met")) or not any(needs.values())
-        goal_satisfied = artifacts_ok and validation_ok
+        if not any(needs.values()):
+            goal_satisfied = bool(str(payload.get("summary", "") or state.final_output or "").strip())
+        else:
+            goal_satisfied = artifacts_ok
         progress = self._classify_step_completion(state)
-        reason = str(validation.get("final_goal", "") or "")
+        reason = str((state.final_check or {}).get("final_goal", "") or "")
         if not goal_satisfied and not reason:
             if any(needs.values()) and not artifacts_ok:
                 reason = "缺少与用户目标匹配的最终交付文件"
@@ -1275,6 +983,59 @@ JSON 字段必须包含：
                 "artifacts": artifacts,
             })
         return json.dumps(index_payload, ensure_ascii=False, indent=2)
+
+    def _run_final_file_existence_check(self, state: AgentLoopState) -> Dict[str, Any]:
+        artifacts = list(dict.fromkeys(state.artifacts or self._collect_artifacts_from_payload(state.latest_payload)))
+        if not artifacts:
+            return {
+                "overall_status": "pass",
+                "is_final_goal_met": True,
+                "final_goal": "",
+                "completed_work": "无文件产物需要校验",
+                "current_result_type": "unknown",
+                "next_executor": "",
+                "next_action": "",
+            }
+
+        existing_files: List[str] = []
+        missing_files: List[str] = []
+        for artifact in artifacts:
+            try:
+                tool_output = check_artifact_exists.invoke({"artifact_path": artifact, "scope": "current"})
+            except Exception as exc:
+                logger.warning("check_artifact_exists 调用失败，回退到 os.path.exists: %s", exc)
+                tool_output = ""
+
+            tool_text = str(tool_output or "").strip()
+            if tool_text and "确认找到" in tool_text and "匹配产物" in tool_text:
+                existing_files.append(artifact)
+                continue
+
+            if os.path.exists(str(artifact)):
+                existing_files.append(artifact)
+            else:
+                missing_files.append(artifact)
+
+        if not missing_files:
+            return {
+                "overall_status": "pass",
+                "is_final_goal_met": True,
+                "final_goal": "",
+                "completed_work": f"已确认存在的文件: {', '.join(existing_files)}",
+                "current_result_type": "final_deliverable",
+                "next_executor": "",
+                "next_action": "",
+            }
+
+        return {
+            "overall_status": "fail",
+            "is_final_goal_met": False,
+            "final_goal": f"缺失文件: {', '.join(missing_files)}",
+            "completed_work": f"已确认存在的文件: {', '.join(existing_files)}" if existing_files else "",
+            "current_result_type": "unknown",
+            "next_executor": "execution_specialist",
+            "next_action": f"补齐缺失文件: {', '.join(missing_files)}",
+        }
 
     def _build_progress_context(self, state: AgentLoopState, verification: Dict[str, Any]) -> str:
         completed_steps = verification.get("completed_steps") or []
@@ -1361,14 +1122,6 @@ JSON 字段必须包含：
             new_records.append(record)
         return new_records
 
-    def _mark_artifacts_validated(self, state: AgentLoopState, validation: Dict[str, Any]) -> None:
-        if not validation.get("is_final_goal_met"):
-            return
-        for record in state.artifact_registry:
-            if record.get("deliverable_candidate"):
-                record["validated"] = True
-                record["updated_at"] = datetime.now().isoformat()
-
     def _record_journal_entry(self, state: AgentLoopState, *, step: PlanStep, verification: Dict[str, Any], stage_input: str) -> None:
         entry = {
             "timestamp": datetime.now().isoformat(),
@@ -1402,7 +1155,7 @@ JSON 字段必须包含：
                     "round_count": state.round_count,
                     "replan_count": state.replan_count,
                     "artifacts": state.artifacts,
-                    "final_verification": state.final_verification,
+                    "final_check": state.final_check,
                 },
                 handle,
                 ensure_ascii=False,
@@ -1416,44 +1169,29 @@ JSON 字段必须包含：
         needs = self._needs_final_deliverable(state.original_input)
         failed_step = verification.get("failed_step") or {}
         failed_executor = str(failed_step.get("executor", "") or "").strip()
-        validation = verification.get("validation") or {}
-        suggested_executor = str(validation.get("next_executor", "") or "").strip()
-        suggested_action = str(validation.get("next_action", "") or "").strip()
-        completed_work = str(validation.get("completed_work", "") or "").strip()
-        current_result_type = str(validation.get("current_result_type", "") or "").strip()
-        next_executor = failed_executor or "orchestrator"
+        next_executor = self._normalize_executor_name(failed_executor) or "orchestrator"
         next_title = "根据校验反馈继续执行"
 
         if verification.get("scope") == "step" and failed_executor:
             next_title = f"继续完成：{failed_step.get('title', '当前失败步骤')}"
         elif verification.get("scope") == "goal":
-            if suggested_executor in {"python_specialist", "excel_specialist", "validator", "orchestrator"}:
-                next_executor = suggested_executor
-                next_title = suggested_action or "根据校验反馈继续执行"
-            elif needs["excel"] and not self._artifacts_cover_needs(artifacts or state.artifacts, {"excel": True, "image": False, "report": False}):
-                next_executor = "excel_specialist"
+            if needs["excel"] and not self._artifacts_cover_needs(artifacts or state.artifacts, {"excel": True, "image": False, "report": False}):
+                next_executor = "execution_specialist"
                 next_title = "基于已有结果补齐最终 Excel"
             elif failed_executor:
-                next_executor = failed_executor
+                next_executor = self._normalize_executor_name(failed_executor)
                 next_title = f"继续完成：{failed_step.get('title', '当前失败步骤')}"
 
-        if not suggested_executor and needs["excel"] and not self._artifacts_cover_needs(artifacts, {"excel": True, "image": False, "report": False}):
-            if latest_stage == "python_specialist" or artifacts:
-                next_executor = "excel_specialist"
+        if needs["excel"] and not self._artifacts_cover_needs(artifacts, {"excel": True, "image": False, "report": False}):
+            if artifacts:
+                next_executor = "execution_specialist"
                 next_title = "基于中间结果生成最终 Excel"
-            elif latest_stage == "excel_specialist":
-                next_executor = "validator"
-                next_title = "复核最终交付是否满足目标"
 
         step_id = f"step-{len(state.plan_steps) + 1}"
         progress_context = self._build_progress_context(state, verification)
         reason_parts = []
-        if completed_work:
-            reason_parts.append(f"已完成：{completed_work}")
-        if current_result_type:
-            reason_parts.append(f"当前阶段：{current_result_type}")
         fallback_reason = str(verification.get("reason", "") or "根据校验反馈继续推进任务")
-        reason_parts.append(suggested_action or fallback_reason)
+        reason_parts.append(fallback_reason)
         reason = "；".join(part for part in reason_parts if part)
         step = PlanStep(
             step_id=step_id,
@@ -1494,7 +1232,21 @@ JSON 字段必须包含：
             if step is None:
                 goal_verification = self._verify_goal_state(state)
                 if goal_verification.get("goal_satisfied"):
+                    final_file_check = self._run_final_file_existence_check(state)
+                    state.final_check = final_file_check
+                    if not final_file_check.get("is_final_goal_met"):
+                        goal_verification = {
+                            **goal_verification,
+                            "status": "fail",
+                            "reason": str(final_file_check.get("final_goal", "") or "涉及文件不存在"),
+                            "goal_satisfied": False,
+                            "requires_replan": True,
+                            "final_check": final_file_check,
+                        }
+                        self._replan_after_verification(state, goal_verification)
+                        continue
                     state.terminal_status = "completed"
+                    self._persist_loop_state(state)
                     break
                 self._replan_after_verification(state, goal_verification)
                 continue
@@ -1513,16 +1265,17 @@ JSON 字段必须包含：
                 })
 
             stage_input = self._build_step_input(state, step)
-            result = self._invoke_executor(self._executors[step.executor], stage_input, callbacks=callbacks)
+            executor_name = self._normalize_executor_name(step.executor)
+            result = self._invoke_executor(self._executors[executor_name], stage_input, callbacks=callbacks, include_session_context=executor_name == "orchestrator")
             state.tool_calls.extend(self._record_intermediate_steps(result))
             if event_sink:
                 for tool_event in self._build_tool_activity_events(result):
                     event_sink(tool_event)
             stage_output = (result.get("output", "") or "").strip()
-            if step.executor != "orchestrator":
+            if executor_name != "orchestrator":
                 stage_output = self._normalize_specialist_output(result, stage_output)
 
-            payload = self._extract_result_payload(step.executor, result, stage_output)
+            payload = self._extract_result_payload(executor_name, result, stage_output)
             verification = self._verify_step_result(step, payload, stage_output)
 
             step.status = "completed" if verification.get("step_completed", verification.get("status") == "pass") else "failed"
@@ -1531,9 +1284,7 @@ JSON 字段必须包含：
             state.previous_outputs.append((step.executor, stage_output))
             state.final_output = stage_output or state.final_output
             state.latest_payload = payload
-            state.final_verification = verification.get("validation") or state.final_verification
             new_artifacts = self._register_artifacts(state, step, payload)
-            self._mark_artifacts_validated(state, verification.get("validation") or {})
             self._record_journal_entry(state, step=step, verification=verification, stage_input=stage_input)
             self._persist_loop_state(state)
             self._last_loop_state = state
@@ -1561,8 +1312,23 @@ JSON 字段必须包含：
 
             goal_verification = self._verify_goal_state(state)
             if goal_verification.get("goal_satisfied"):
+                final_file_check = self._run_final_file_existence_check(state)
+                state.final_check = final_file_check
+                if not final_file_check.get("is_final_goal_met"):
+                    goal_verification = {
+                        **goal_verification,
+                        "status": "fail",
+                        "reason": str(final_file_check.get("final_goal", "") or "涉及文件不存在"),
+                        "goal_satisfied": False,
+                        "requires_replan": True,
+                        "final_check": final_file_check,
+                    }
+                else:
+                    goal_verification["final_check"] = final_file_check
+
+            if goal_verification.get("goal_satisfied"):
                 state.terminal_status = "completed"
-                state.final_verification = goal_verification
+                state.final_check = goal_verification.get("final_check") or state.final_check
                 self._persist_loop_state(state)
                 if event_sink:
                     event_sink({"type": "goal_completed", "verification": goal_verification})
@@ -1597,26 +1363,7 @@ JSON 字段必须包含：
         return state
 
     def _build_stage_user_input(self, stage_name: str, original_input: str, previous_outputs: List[Tuple[str, str]]) -> str:
-        if stage_name == "validator":
-            latest_summary = previous_outputs[-1][1] if previous_outputs else ""
-            return (
-                f"请根据原始用户需求检查最近一次执行结果是否满足要求。\n\n"
-                f"[原始用户需求]\n{original_input}\n\n"
-                f"[最近一次子agent输出]\n{latest_summary}"
-            )
-
-        if stage_name == "excel_specialist" and previous_outputs:
-            latest_summary = previous_outputs[-1][1]
-            return (
-                f"请基于上游中间结果生成最终 Excel 文件。\n\n"
-                f"[上游中间结果]\n{latest_summary}\n\n"
-                f"你的职责：\n"
-                f"1. 只负责 Excel 结构设计和文件生成\n"
-                f"2. 基于上游生成的中间文件或结构化结果创建最终 Excel\n"
-                f"3. 输出真正可交付的 Excel 文件\n\n"
-                f"不要重新解析原始数据或重复上游处理。"
-            )
-
+        stage_name = self._normalize_executor_name(stage_name)
         if not previous_outputs:
             return original_input
 
@@ -1626,17 +1373,18 @@ JSON 字段必须包含：
             f"[已有中间结果]\n" + "\n\n".join(context_blocks)
         )
 
-    def _invoke_executor(self, executor: AgentExecutor, user_input: str, callbacks: Optional[List[Any]] = None) -> Dict[str, Any]:
+    def _invoke_executor(self, executor: AgentExecutor, user_input: str, callbacks: Optional[List[Any]] = None, include_session_context: bool = True) -> Dict[str, Any]:
         agent_input = {
             "input": user_input,
             "current_time_context": self._get_current_time_context(),
             "current_system_context": self._get_current_system_context(),
-            "chat_history": self._get_chat_history_messages(),
         }
 
-        context_messages = self._build_context_messages()
-        if context_messages:
-            agent_input["long_term_memory"] = context_messages
+        if include_session_context:
+            agent_input["chat_history"] = self._get_chat_history_messages()
+            context_messages = self._build_context_messages()
+            if context_messages:
+                agent_input["long_term_memory"] = context_messages
 
         reset_retry_guard()
         if callbacks:
@@ -1747,52 +1495,7 @@ JSON 字段必须包含：
                 previous_outputs.append((stage_name, stage_output))
                 final_output = stage_output
 
-        if len(previous_outputs) >= 2 and previous_outputs[-1][0] == "validator":
-            final_output = f"{previous_outputs[-2][1]}\n\n[校验结果]\n{previous_outputs[-1][1]}"
-
         return final_output, previous_outputs, tool_calls
-
-    def _run_validator_check(self, delegated_task: str, specialist_output: str) -> str:
-        artifacts = self._extract_artifact_paths(specialist_output)
-        runtime_plan = ""
-        runtime_step_index = "[]"
-        if hasattr(self, "_last_loop_state") and getattr(self, "_last_loop_state", None) is not None:
-            state = getattr(self, "_last_loop_state")
-            plan_lines = []
-            step_index_items = []
-            for step_item in getattr(state, "plan_steps", []) or []:
-                item = self._build_step_progress_item(state, step_item)
-                step_index_items.append(item)
-                title = str(item.get("title", "") or "未命名步骤")
-                executor = str(item.get("executor", "") or "orchestrator")
-                status = str(item.get("status", "") or "pending")
-                purpose = str(item.get("purpose", "") or "").strip()
-                line = f"- [{status}] {title} ({executor})"
-                if purpose:
-                    line += f": {purpose}"
-                output_summary = str(item.get("output_summary", "") or "").strip()
-                artifacts = str(item.get("artifacts", "") or "").strip()
-                if output_summary:
-                    line += f" | 产出摘要: {output_summary}"
-                if artifacts and artifacts != "[]":
-                    line += f" | 产物: {artifacts}"
-                plan_lines.append(line)
-            runtime_plan = "\n".join(plan_lines)
-            runtime_step_index = self._build_step_artifact_index(step_index_items)
-        validator_input = (
-            "请根据用户最终目标验证最近一次结果是否已经满足最终交付要求。"
-            "如果它只是中间结果，必须判定 fail。\n\n"
-            f"[最终目标摘要]\n{self._build_goal_brief(self._active_user_input or delegated_task)}\n\n"
-            f"[当前计划执行情况]\n{runtime_plan or '- 无'}\n\n"
-            f"[前序步骤产物索引]\n{runtime_step_index}\n\n"
-            f"[当前委派子任务]\n{delegated_task}\n\n"
-            f"[最近一次结果]\n{specialist_output}\n\n"
-            f"[最近一次结果中提取到的产物路径]\n{json.dumps(artifacts, ensure_ascii=False, indent=2)}"
-        )
-        result = self._invoke_executor(self.validator_executor, validator_input)
-        self._record_intermediate_steps(result)
-        output = (result.get("output", "") or "").strip()
-        return self._normalize_specialist_output(result, output)
 
     @staticmethod
     def _extract_artifact_paths(text: str) -> List[str]:
@@ -1808,55 +1511,13 @@ JSON 字段必须包含：
         return seen
 
     @staticmethod
-    def _parse_validator_output(text: str) -> Dict[str, Any]:
-        raw = (text or "").strip()
-        if not raw:
-            return {
-                "overall_status": "fail",
-                "is_final_goal_met": False,
-                "final_goal": "未能确认用户最终目标是否已经完成",
-                "raw_output": raw,
-            }
-
-        cleaned = raw
-        if cleaned.startswith("```"):
-            cleaned = re.sub(r"^```(?:json)?\s*|\s*```$", "", cleaned, flags=re.DOTALL).strip()
-
-        try:
-            parsed = json.loads(cleaned)
-            if isinstance(parsed, dict):
-                parsed.setdefault("overall_status", "fail")
-                parsed.setdefault("is_final_goal_met", parsed.get("overall_status") == "pass")
-                parsed.setdefault("final_goal", "" if parsed.get("overall_status") == "pass" else "用户最终目标尚未完成")
-                parsed.setdefault("completed_work", "")
-                parsed.setdefault("current_result_type", "final_deliverable" if parsed.get("overall_status") == "pass" else "unknown")
-                parsed.setdefault("next_executor", "orchestrator" if parsed.get("overall_status") != "pass" else "")
-                parsed.setdefault("next_action", "" if parsed.get("overall_status") == "pass" else parsed.get("final_goal", "用户最终目标尚未完成"))
-                return parsed
-        except Exception:
-            pass
-
-        lower = cleaned.lower()
-        is_pass = '"overall_status"' not in lower and ("overall_status: pass" in lower or "pass" == lower)
-        return {
-            "overall_status": "pass" if is_pass else "fail",
-            "is_final_goal_met": is_pass,
-            "final_goal": "" if is_pass else "用户最终目标尚未完成",
-            "completed_work": "",
-            "current_result_type": "final_deliverable" if is_pass else "unknown",
-            "next_executor": "" if is_pass else "orchestrator",
-            "next_action": "" if is_pass else "用户最终目标尚未完成",
-            "raw_output": raw,
-        }
-
-    @staticmethod
     def _extract_latest_delegation_payload(result: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         for step in reversed(result.get("intermediate_steps", [])):
             if not isinstance(step, (list, tuple)) or len(step) < 2:
                 continue
             action, observation = step[0], step[1]
             tool_name = getattr(action, "tool", "")
-            if tool_name not in {"delegate_python_specialist", "delegate_excel_specialist", "delegate_validator"}:
+            if tool_name != "delegate_execution_specialist":
                 continue
             text = str(observation or "").strip()
             try:
@@ -1872,17 +1533,8 @@ JSON 字段必须包含：
         if not payload or payload.get("result_type") != "intermediate":
             return False
 
-        validation = payload.get("validation") or {}
-        overall_status = str(validation.get("overall_status", "")).strip().lower()
-        is_final_goal_met = validation.get("is_final_goal_met")
-
         if FloodAgent._artifacts_satisfy_user_goal(payload):
             return False
-
-        if overall_status == "fail":
-            return True
-        if is_final_goal_met is False:
-            return True
         return False
 
     @staticmethod
@@ -1917,14 +1569,12 @@ JSON 字段必须包含：
 
     @staticmethod
     def _build_forced_continuation_input(original_user_input: str, payload: Dict[str, Any]) -> str:
-        validation = payload.get("validation") or {}
         return (
             f"[最终目标摘要]\n{FloodAgent._build_goal_brief(original_user_input)}\n\n"
-            "[系统强制校验结论]\n"
-            "最近一次子任务结果只是中间结果，尚未满足用户最终目标。你现在不得结束，必须继续执行后续步骤。\n\n"
+            "[系统强制继续结论]\n"
+            "最近一次结果仍未满足用户最终目标。你现在不得结束，必须继续执行后续步骤。\n\n"
             f"[最近一次中间结果]\n{payload.get('summary', '')}\n\n"
-            f"[校验结果]\n{json.dumps(validation, ensure_ascii=False, indent=2)}\n\n"
-            "请根据校验结论继续调用合适的技能、工具或子 agent，直到真正完成用户最终目标。"
+            "请根据当前已有结果继续调用合适的技能、工具或执行单元，直到真正完成用户最终目标。"
         )
 
     @staticmethod
@@ -1932,18 +1582,7 @@ JSON 字段必须包含：
         if not payload:
             return ""
 
-        validation = payload.get("validation") or {}
-        overall_status = str(validation.get("overall_status", "")).strip().lower() or "unknown"
-        is_final_goal_met = validation.get("is_final_goal_met")
-        final_goal = str(validation.get("final_goal", "") or "").strip()
-
-        lines = [
-            "[调度校验]",
-            f"- overall_status: {overall_status}",
-            f"- is_final_goal_met: {is_final_goal_met}",
-        ]
-        if final_goal:
-            lines.append(f"- final_goal: {final_goal}")
+        lines = ["[调度检查]", f"- has_artifacts: {bool((payload or {}).get('artifacts'))}"]
 
         if should_continue:
             lines.append("- 结论: 当前结果仍视为中间结果，主 agent 需要继续执行后续步骤。")
@@ -2009,18 +1648,18 @@ JSON 字段必须包含：
         if self._is_agent_stopped_message(text):
             fallback = self._extract_specialist_fallback_output(result)
             if fallback:
-                logger.warning("子 agent 在停止前已产出有效结果，改用最近一次成功工具输出作为返回内容")
+                logger.warning("执行单元在停止前已产出有效结果，改用最近一次成功工具输出作为返回内容")
                 return fallback
-            return "子 agent 达到迭代次数或执行时间上限，且未能整理出最终子任务结论。"
+            return "执行单元达到迭代次数或执行时间上限，且未能整理出最终子任务结论。"
 
         if "Agent stopped due to iteration limit or time limit." in text:
             fallback = self._extract_specialist_fallback_output(result)
             if fallback:
-                logger.warning("子 agent 输出中包含停止提示，已替换为最近一次成功工具输出")
+                logger.warning("执行单元输出中包含停止提示，已替换为最近一次成功工具输出")
                 return fallback
             return text.replace(
                 "Agent stopped due to iteration limit or time limit.",
-                "子 agent 达到迭代次数或执行时间上限。",
+                "执行单元达到迭代次数或执行时间上限。",
             ).strip()
 
         return text

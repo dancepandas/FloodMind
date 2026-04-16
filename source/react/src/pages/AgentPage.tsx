@@ -1,0 +1,64 @@
+import { ChatArea } from '@/features/chat/components/ChatArea';
+import { ContextPanel } from '@/features/context/components/ContextPanel';
+import { Sidebar } from '@/features/sidebar/components/Sidebar';
+import { useAgentApp } from '@/hooks/useAgentApp';
+
+const AgentPage = () => {
+  const {
+    sessionId,
+    sessions,
+    messages,
+    uploadedFiles,
+    toolActivities,
+    workflow,
+    selectedPreview,
+    runtimeState,
+    inputValue,
+    isStreaming,
+    setInputValue,
+    handleSubmit,
+    handleUpload,
+    handlePreviewFile,
+    handlePauseResume,
+    handleNewSession,
+    handleDeleteSession,
+    loadSession,
+    toggleThought,
+    closePreview,
+  } = useAgentApp();
+
+  return (
+    <div className="min-h-screen bg-[linear-gradient(180deg,#f5f9ff_0%,#eef5ff_100%)] text-foreground font-sans">
+      <div className="w-full h-screen flex overflow-hidden bg-background/90 shadow-custom relative backdrop-blur-sm">
+        <Sidebar
+          sessions={sessions}
+          activeSessionId={sessionId}
+          onNewSession={handleNewSession}
+          onSelectSession={loadSession}
+          onDeleteSession={handleDeleteSession}
+        />
+        <ChatArea
+          messages={messages}
+          inputValue={inputValue}
+          isStreaming={isStreaming}
+          isPaused={runtimeState.isPaused}
+          onInputChange={setInputValue}
+          onSubmit={handleSubmit}
+          onPause={handlePauseResume}
+          onUpload={handleUpload}
+          onToggleThought={toggleThought}
+        />
+        <ContextPanel
+          files={uploadedFiles}
+          tools={toolActivities}
+          workflow={workflow}
+          selectedPreview={selectedPreview}
+          onPreviewFile={handlePreviewFile}
+          onClosePreview={closePreview}
+        />
+      </div>
+    </div>
+  );
+};
+
+export default AgentPage;
