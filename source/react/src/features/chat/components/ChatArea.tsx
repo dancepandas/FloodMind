@@ -37,7 +37,7 @@ export function ChatArea({
 
       <ChatComposer
         value={inputValue}
-        disabled={isPaused}
+        disabled={isStreaming && !isPaused}
         isRunning={isStreaming}
         onChange={onInputChange}
         onSubmit={onSubmit}

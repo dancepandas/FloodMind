@@ -1,14 +1,15 @@
 import type { ChatMessage, GeneratedArtifact, MessageBlock } from "@/types/app";
+import { uuid } from "@/lib/utils";
 
 export function createUserMessage(content: string): ChatMessage {
   return {
-    id: crypto.randomUUID(),
+    id: uuid(),
     role: "user",
     content,
     timestamp: new Date().toISOString(),
     blocks: [
       {
-        id: crypto.randomUUID(),
+        id: uuid(),
         type: "answer",
         content,
       },
@@ -18,7 +19,7 @@ export function createUserMessage(content: string): ChatMessage {
 
 export function createAssistantMessage(id?: string): ChatMessage {
   return {
-    id: id || crypto.randomUUID(),
+    id: id || uuid(),
     role: "assistant",
     content: "",
     timestamp: new Date().toISOString(),
@@ -46,7 +47,7 @@ export function appendThoughtBlock(message: ChatMessage, content: string, append
       }
     });
     blocks.push({
-      id: crypto.randomUUID(),
+      id: uuid(),
       type: "thought",
       content,
       isCollapsed: false,
@@ -78,7 +79,7 @@ export function appendAnswerBlock(message: ChatMessage, content: string, append 
       }
     });
     blocks.push({
-      id: crypto.randomUUID(),
+      id: uuid(),
       type: "answer",
       content: normalized,
       isArchived: false,
@@ -114,7 +115,7 @@ export function finalizeThoughtBlocks(message: ChatMessage): ChatMessage {
 
 export function setAssistantFinalContent(message: ChatMessage, content: string): ChatMessage {
   const answerBlock: MessageBlock = {
-    id: crypto.randomUUID(),
+    id: uuid(),
     type: "answer",
     content,
     isArchived: false,
@@ -143,7 +144,7 @@ export function fromServerMessage(raw: Record<string, unknown>): ChatMessage {
   if (role === "assistant") {
     if (reasoning.trim()) {
       blocks.push({
-        id: crypto.randomUUID(),
+        id: uuid(),
         type: "thought",
         content: reasoning,
         isCollapsed: true,
@@ -151,14 +152,14 @@ export function fromServerMessage(raw: Record<string, unknown>): ChatMessage {
       });
     }
     if (content.trim()) {
-      blocks.push({ id: crypto.randomUUID(), type: "answer", content, isArchived: false });
+      blocks.push({ id: uuid(), type: "answer", content, isArchived: false });
     }
   } else {
-    blocks.push({ id: crypto.randomUUID(), type: "answer", content, isArchived: false });
+    blocks.push({ id: uuid(), type: "answer", content, isArchived: false });
   }
 
   return {
-    id: crypto.randomUUID(),
+    id: uuid(),
     role,
     content,
     reasoning,

@@ -1,4 +1,6 @@
 import { ChevronDown, ChevronRight, Bot, User } from "lucide-react";
+import ReactMarkdown from "react-markdown";
+import remarkGfm from "remark-gfm";
 import type { ChatMessage as ChatMessageModel } from "@/types/app";
 
 interface ChatMessageProps {
@@ -25,7 +27,7 @@ export function ChatMessage({ message, onToggleThought }: ChatMessageProps) {
             </div>
           ) : (
             <div className="flex flex-col gap-3 w-full">
-              {message.blocks.map((block) => {
+              {message.blocks.filter((block) => block.type === "thought" || !block.isArchived).map((block) => {
                 if (block.type === "thought") {
                   return (
                     <div key={block.id} className={`w-full transition-all duration-300 ${block.isArchived ? "opacity-40" : "opacity-100"}`}>
@@ -46,11 +48,10 @@ export function ChatMessage({ message, onToggleThought }: ChatMessageProps) {
                 }
 
                 return (
-                  <div key={block.id} className={`px-4 py-3 rounded-2xl rounded-tl-sm bg-background border border-border shadow-sm text-sm text-foreground whitespace-pre-wrap leading-relaxed transition-all duration-300 ${block.isArchived ? "opacity-50 scale-[0.99]" : "opacity-100"}`}>
-                    <div className="inline-flex items-center px-2 py-0.5 rounded-full bg-primary/10 text-primary text-[11px] font-semibold mb-2">
-                      回答
+                  <div key={block.id} className={`px-4 py-3 rounded-2xl rounded-tl-sm bg-background border border-border shadow-sm text-sm text-foreground leading-relaxed transition-all duration-300 ${block.isArchived ? "opacity-50 scale-[0.99]" : "opacity-100"}`}>
+                    <div className="prose prose-sm max-w-none prose-headings:text-foreground prose-p:text-foreground prose-strong:text-foreground prose-li:text-foreground prose-code:text-foreground prose-code:bg-muted prose-code:px-1 prose-code:rounded prose-table:text-foreground prose-th:bg-muted prose-th:border-border prose-td:border-border">
+                      <ReactMarkdown remarkPlugins={[remarkGfm]}>{block.content}</ReactMarkdown>
                     </div>
-                    <div>{block.content}</div>
                     {!!message.artifacts?.length && message.blocks[message.blocks.length - 1].id === block.id && (
                       <div className="mt-3 flex flex-col gap-3 items-start">
                         {message.artifacts.map((artifact) =>

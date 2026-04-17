@@ -77,6 +77,8 @@ export interface WorkflowStepItem {
   status: "pending" | "running" | "completed" | "error";
   detail?: string;
   outcome?: string;
+  expected_deliverables?: { type: string; format?: string; description?: string }[];
+  output_artifacts?: string[];
 }
 
 export interface WorkflowPlan {

@@ -98,6 +98,8 @@ export function ContextPanel({ files, tools, workflow, selectedPreview, onPrevie
                   <span className={`text-xs mt-0.5 font-medium ${step.status === "pending" ? "text-muted-foreground/70" : "text-foreground"}`}>{step.title || step.label}</span>
                   {step.detail ? <span className="text-[11px] mt-1 text-muted-foreground whitespace-pre-wrap break-words">{step.detail}</span> : null}
                   {step.outcome ? <span className="text-[11px] mt-1 text-primary whitespace-pre-wrap break-words">{step.outcome}</span> : null}
+                  {step.expected_deliverables?.length ? <span className="text-[10px] mt-1 text-muted-foreground/60">交付物: {step.expected_deliverables.map((d) => d.type).join(", ")}</span> : null}
+                  {step.output_artifacts?.length ? <span className="text-[10px] mt-1 text-primary/70">产物: {step.output_artifacts.map((a) => a.split("/").pop() || a).join(", ")}</span> : null}
                 </div>
               </div>
             ))}

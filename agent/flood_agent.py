@@ -16,6 +16,7 @@ import os
 import queue
 import re
 import threading
+import time
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Optional, Dict, Any, List, Tuple
@@ -39,6 +40,12 @@ logger = logging.getLogger(__name__)
 class SpecialistTaskInput(BaseModel):
     task: str = Field(default="", description="交给执行单元的明确任务说明，应尽量具体、短小、可执行")
     skill_name: str = Field(default="", description="若当前任务明确要求复用某个 skill，则传入对应的 skill 名称")
+
+
+class CreatePlanInput(BaseModel):
+    user_goal: str = Field(description="用户的原始意图描述，不含系统注入的上下文信息")
+    deliverables: str = Field(description="预期最终交付物类型，逗号分隔。可选: image, excel, report, other")
+    steps: str = Field(description="执行步骤JSON数组，每个元素含title、executor、skill_name(可选)、purpose、expected_deliverables(JSON数组)")
 
 
 class _FunctionsStreamCallback(BaseCallbackHandler):
@@ -164,18 +171,6 @@ class _FunctionsStreamCallback(BaseCallbackHandler):
                 "content": output_str,
             }))
 
-        # 如果是 web_search 工具，单独标记搜索结果
-        if tool_name == "web_search":
-            try:
-                import json
-                search_data = json.loads(output_str) if output_str.strip().startswith("[") else None
-                if search_data and isinstance(search_data, list):
-                    self._q.put(("search_result", output_str))
-                else:
-                    self._q.put(("search_result", output_str))
-            except:
-                self._q.put(("search_result", output_str))
-
         self._current_tool_name = None
         self._current_tool_input = ""
         # 重置 _has_tool_call，这样下一次 LLM 调用时可以启用思考阶段
@@ -229,11 +224,67 @@ class PlanStep:
     output_text: str = ""
     verification: Dict[str, Any] = field(default_factory=dict)
     attempt_count: int = 0
+    skill_name: str = ""
+    expected_deliverables: List[Dict[str, str]] = field(default_factory=list)
+    output_artifacts: List[str] = field(default_factory=list)
+    output_summary: str = ""
+    error_message: str = ""
+
+
+@dataclass
+class ExecutionPlan:
+    plan_id: str = ""
+    user_message: str = ""
+    goal_deliverables: List[Dict[str, str]] = field(default_factory=list)
+    steps: List[Dict[str, Any]] = field(default_factory=list)
+    created_at: str = ""
+    updated_at: str = ""
+    terminal_status: str = "running"
+
+    def find_step(self, step_id: str) -> Optional[Dict[str, Any]]:
+        for s in self.steps:
+            if s.get("step_id") == step_id:
+                return s
+        return None
+
+    def next_pending_step(self) -> Optional[Dict[str, Any]]:
+        for s in self.steps:
+            if s.get("status") == "pending":
+                return s
+        return None
+
+    def all_steps_completed(self) -> bool:
+        return all(s.get("status") == "completed" for s in self.steps) if self.steps else False
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "plan_id": self.plan_id,
+            "user_message": self.user_message,
+            "goal_deliverables": self.goal_deliverables,
+            "steps": self.steps,
+            "created_at": self.created_at,
+            "updated_at": self.updated_at,
+            "terminal_status": self.terminal_status,
+        }
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> "ExecutionPlan":
+        return cls(
+            plan_id=data.get("plan_id", ""),
+            user_message=data.get("user_message", ""),
+            goal_deliverables=data.get("goal_deliverables", []),
+            steps=data.get("steps", []),
+            created_at=data.get("created_at", ""),
+            updated_at=data.get("updated_at", ""),
+            terminal_status=data.get("terminal_status", "running"),
+        )
 
 
 @dataclass
 class AgentLoopState:
     original_input: str
+    user_message: str = ""
+    plan: Optional[ExecutionPlan] = None
     plan_steps: List[PlanStep] = field(default_factory=list)
     previous_outputs: List[Tuple[str, str]] = field(default_factory=list)
     tool_calls: List[Dict[str, str]] = field(default_factory=list)
@@ -267,12 +318,17 @@ class FloodAgent:
 - 不负责在没有校验的情况下直接宣布任务完成
 
 ## 可用工具
+- `create_plan`：【必须首先调用】创建结构化执行计划，明确用户意图、预期交付物和执行步骤
 - `get_skill`：查看 skill 的详细说明、脚本、参数和规则
 - `search_artifacts`：搜索当前会话或历史可复用产物
 - `read_artifact`：读取文本类产物
 - `knowledge_search`：检索知识库（知识查询时，优先使用）
 - `web_search`：检索网络资料（knowledge_search搜索结果不够支撑回答时，搜索网络资料补充）
 - `search_memory`：检索历史对话和技能文档
+
+## 执行工具细节
+- 调用工具时一次只传一个参数：例如要查看两个skill时，应该是`get_skill（skill1）`，等待返回结果，再进行`get_skill（skill2）`，等待返回结果
+- excel的sheet命名字符最长允许31个字符，所以stationCode太长时，sheet_name可能会被截断
 
 ## 可用执行单元
 - `delegate_execution_specialist`：执行单步落地任务，包括数据提取、转换、结构化文件生成、Excel 导出、模型相关脚本执行；如已明确 skill，委派时一并传 `skill_name`
@@ -286,35 +342,50 @@ class FloodAgent:
 {skill_catalog}
 
 ## 调度工作流
-### 1. 分析目标
+### 0. 创建执行计划（强制）
+在分发任何执行任务之前，你必须先调用 `create_plan` 工具：
+- user_goal: 用户的原始意图（不要包含上下文注入信息）
+- deliverables: 预期最终交付物类型，逗号分隔（image/excel/report/other）
+- steps: 执行步骤JSON数组，每个元素含 title、executor、skill_name(可选)、purpose、expected_deliverables
+
+示例：用户说"把结果绘制成时序图"
+→ create_plan(user_goal="把结果绘制成时序图", deliverables="image", steps='[{{{{"title":"绘制时序图","executor":"execution_specialist","skill_name":"plotting","purpose":"基于预报数据绘制PNG时序图","expected_deliverables":[{{{{"type":"image","format":"png"}}}}]}}}}]')
+
+### 2. 分析目标
 先明确：
 1. 用户最终要什么交付物
 2. 当前输入属于原始数据、中间结果还是最终结果
 3. 当前缺的是哪一个阶段
+4. 当前任务是基于之前的任务成果继续还是开启新的任务
+5. 若是基于之前的任务成果，绝对不能重跑之前的任务，必须严格按照已有成果开展工作
 
-### 2. 优先确认 skill
+### 3. 优先确认 skill
 如果任务明显对应某个业务 skill 或导出能力，必须先调用 `get_skill` 查看详细说明，再决定下一步。
 
-### 3. 规划并分发
+### 4. 规划并分发
 每次分发给 `delegate_execution_specialist` 的任务必须满足：
 1. 只有一个核心动作
 2. 明确输入文件或输入产物
 3. 明确预期输出
-4. 明确必要约束或应参考的 skill
-5. 不要把用户原始长文本整包塞给执行单元
-6. 如果你已经确定要复用某个 skill，必须显式传入 `skill_name`
+4. 不要把用户原始长文本整包塞给执行单元
+5. 如果你已经确定要使用某个 skill，直接明确要求执行
+    run_script(
+        skill_name='.....',
+        script_name='......',
+        args='[.....]'
+    )
 
 合格示例：
 - task: 把 `./input.xlsx` 转为 `./input.json`，输入表包含 `time` 和 `rainfall` 两列；skill_name: `hydro-input-prep`
 - task: 使用 `normalize_hydro_input_file_to_excel.py` 将上传的 `2.xlsx` 转为标准中间 Excel；skill_name: `hydro-input-prep`
 - task: 基于 `./result.json` 生成最终 `./result.xlsx`，优先复用对应业务 skill 已声明的导出脚本；skill_name: `<对应业务 skill>`
-- 读取 `./result.xlsx` 中的 `rainfall` 列并绘制时序图，输出 `./rainfall.png`
+- 读取 `./result.xlsx` 中的 `rainfall` 列并绘制时序图，输出 `./rainfall.png`；skill_name: `plotting`
 
-### 4. 结合校验继续推进
+### 5. 结合校验继续推进
 只有当本轮任务明确承诺了文件产物时，才在流程结束后执行代码级最终文件存在性检查。
 如果最终文件检查明确指出缺失文件，优先按缺失文件结果继续分发，不要自己重新写成模糊任务。
 
-### 5. 整理最终回答
+### 6. 整理最终回答
 最终只向用户总结：
 1. 已完成什么
 2. 生成了哪些最终文件
@@ -331,29 +402,32 @@ class FloodAgent:
 - 最终输出不要包含系统完整路径
 - 最终输出不要包含会话环境内部信息
 - 最终只返回用户需要知道的文件名和结果
-- 最终输出为标准 Markdown
+- 需要直接展示的最终输出，需要按照标准 Markdown 格式文本输出
+- 涉及10条以上长度的数据时，都需要整理一份excel文件输出
+- 用户没有明确要求生成报告时，规划任务阶段不要创建report产物需求
+- 涉及报告生成任务时，若用户明确指定文件格式则按照用户指定格式生成，否则就生成docx文件
 """
 
     EXECUTION_SPECIALIST_PROMPT = """你是 Execution Specialist 执行单元。
 
 ## 你的职责
 你只负责：
-1. 执行调度 agent 已明确分配的单步任务
-2. 数据提取、清洗、转换
-3. 构造中间结构化文件，如 `input.json`、`.json`、`.csv`
-4. 生成 Excel/CSV/TSV 等表格结果
-5. 根据调度任务运行已有 skill 脚本
-6. 在没有可复用 skill/脚本时，编写并执行临时 Python 脚本完成任务
+1. 严格执行调度 agent 已明确分配的单步任务
+2. 严格根据调度任务运行已有 skill 脚本
+3. 编写并执行临时 Python 脚本完成任务
 
 ## 执行原则
 - 把输入任务视为已定稿的执行指令，不要重写目标，不要重新拆解流程，不要补充下游计划
-- 优先复用已有 skill、已有脚本、已有中间结果；只有缺少直接能力时才写临时脚本
 - 只围绕当前这一步行动；做完立即返回，不扩展上下游
 - 如果指令缺文件、缺参数、缺前置产物，就明确指出缺什么，不要自己猜业务意图
+- 只需根据任务命令执行即可，非必要不查看skill的具体信息
+
+## 执行工具细节
+- 调用工具时一次只传一个参数：例如要查看两个skill时，应该是`get_skill（skill1）`，等待返回结果，再进行`get_skill（skill2）`，等待返回结果
 
 ## 强约束
 - 不要重新理解用户需求；按当前任务执行
-- 不要猜测 skill 未声明的脚本、参数或字段
+- 不要猜测或杜撰 skill 中未声明的脚本、参数或字段
 - 不要把超长 JSON 直接塞进工具参数
 - 不要根据聊天文本手工搬运大数组；优先从原始文件读取
 - 不要继续规划下游步骤；你只完成当前委派任务
@@ -432,7 +506,11 @@ class FloodAgent:
 
         self._skill_catalog = skill_catalog
         self._active_user_input = ""
+        self._active_user_message = ""
+        self._step_start_time = 0.0
+        self._abort_check = None
         self._last_loop_state: Optional[AgentLoopState] = None
+        self._plan_event_sink: Optional[Any] = None
 
         self.execution_tools: List[BaseTool] = [get_skill, run_script, exec_python_file, write_text_file, search_tool_error_memory, search_artifacts, read_artifact]
 
@@ -456,7 +534,12 @@ class FloodAgent:
         self._executors["orchestrator"] = self.agent_executor
 
         logger.info("洪水预报智能体初始化成功（OpenAI Functions Agent）")
-        self._warmup_chronos()
+        
+        if enable_chronos_warmup is None:
+            enable_chronos_warmup = settings.agent.enable_chronos_warmup
+        
+        if enable_chronos_warmup:
+            self._warmup_chronos()
 
     def _build_prompt(self, system_prompt: str, *, include_memory: bool = True, include_chat_history: bool = True) -> ChatPromptTemplate:
         messages: List[Any] = [
@@ -532,21 +615,6 @@ class FloodAgent:
             return normalized
         return normalized[:limit].rstrip() + "\n...(已截断，保留前部关键信息)"
 
-    @staticmethod
-    def _build_goal_brief(user_input: str) -> str:
-        text = re.sub(r"\s+", " ", str(user_input or "").strip())
-        if not text:
-            return "用户最终目标尚未明确"
-
-        markers = ["请", "帮我", "需要", "想要", "目标", "最终"]
-        for marker in markers:
-            index = text.find(marker)
-            if index >= 0:
-                candidate = text[index:].strip(" ：:，,。；;")
-                if candidate:
-                    return candidate[:120]
-        return text[:120]
-
     def _build_specialist_user_input(self, stage_name: str, task: str, skill_name: str = "") -> str:
         normalized_task = (task or "").strip()
         normalized_skill_name = (skill_name or "").strip()
@@ -571,7 +639,7 @@ class FloodAgent:
                 "[指定skill]",
                 normalized_skill_name,
                 "",
-                "如果当前任务明确要求复用该 skill，优先先调用 `get_skill` 查看其脚本与参数，再执行。",
+                "如果当前任务明确要求复用该 skill，优先使用run_script执行skill中的脚本，遇到参数错误时再调用 `get_skill` 查看其脚本与参数，再执行。",
             ])
 
         for header, content in sections:
@@ -585,6 +653,21 @@ class FloodAgent:
                 ])
 
         return "\n".join(lines).strip()
+
+    def _build_goal_brief(self, state: AgentLoopState) -> str:
+        text = state.user_message or self._extract_user_message(state.original_input)
+        normalized = re.sub(r"\s+", " ", str(text).strip())
+        if not normalized:
+            return "用户最终目标尚未明确"
+
+        markers = ["请", "帮我", "需要", "想要", "目标", "最终"]
+        for marker in markers:
+            index = normalized.find(marker)
+            if index >= 0:
+                candidate = normalized[index:].strip(" ：:，,。；;")
+                if candidate:
+                    return candidate[:120]
+        return normalized[:120]
 
     @staticmethod
     def _normalize_executor_name(stage_name: str) -> str:
@@ -630,14 +713,121 @@ class FloodAgent:
         def delegate_execution_specialist(task: str = "", skill_name: str = "") -> str:
             return self._run_specialist_task("execution_specialist", task, skill_name)
 
+        agent_ref = self
+
+        def create_plan(user_goal: str = "", deliverables: str = "", steps: str = "") -> str:
+            return agent_ref._handle_create_plan(user_goal, deliverables, steps)
+
         return [
             StructuredTool.from_function(
                 func=delegate_execution_specialist,
                 name="delegate_execution_specialist",
-                description="当你已经完成任务拆分，且需要执行单元无脑执行某一个明确步骤时调用。适用于数据提取、文件转换、中间 JSON/CSV、Excel 导出、运行 skill 脚本、编写最小临时 Python 脚本等单步落地任务。若已明确要复用某个 skill，必须同时传入 skill_name。",
+                description="当你已经完成任务拆分，且需要执行单元无脑执行某一个明确步骤时调用。适用于数据提取、文件转换、中间 JSON/CSV、Excel 导出、运行 skill 脚本、编写最小临时 Python 脚本等单步落地任务。若已明确要复用某个 skill，必须同时传入 skill_name以及对应的run_script（）可执行命令。",
                 args_schema=SpecialistTaskInput,
             ),
+            StructuredTool.from_function(
+                func=create_plan,
+                name="create_plan",
+                description="【必须首先调用】在分发任何执行任务之前，你必须先调用此工具创建结构化执行计划。明确用户意图、预期交付物和执行步骤。",
+                args_schema=CreatePlanInput,
+            ),
         ]
+
+    def _handle_create_plan(self, user_goal: str, deliverables: str, steps: str) -> str:
+        try:
+            parsed_steps = json.loads(steps) if steps else []
+        except json.JSONDecodeError:
+            parsed_steps = [{"title": steps[:60] if steps else "执行任务", "executor": "execution_specialist", "purpose": user_goal, "expected_deliverables": []}]
+
+        if not isinstance(parsed_steps, list):
+            parsed_steps = [parsed_steps]
+
+        normalized_steps = []
+        for i, raw_step in enumerate(parsed_steps):
+            if not isinstance(raw_step, dict):
+                raw_step = {"title": str(raw_step)[:60]}
+            step_id = raw_step.get("step_id") or f"step-{i + 1}"
+            expected = raw_step.get("expected_deliverables", [])
+            if isinstance(expected, str):
+                try:
+                    expected = json.loads(expected)
+                except Exception:
+                    expected = [{"type": expected}]
+            if not isinstance(expected, list):
+                expected = [expected] if expected else []
+            normalized_steps.append({
+                "step_id": step_id,
+                "title": str(raw_step.get("title", "") or f"步骤 {i + 1}"),
+                "executor": str(raw_step.get("executor", "") or "execution_specialist"),
+                "skill_name": str(raw_step.get("skill_name", "") or ""),
+                "purpose": str(raw_step.get("purpose", "") or ""),
+                "status": "pending",
+                "expected_deliverables": expected,
+                "output_artifacts": [],
+                "output_summary": "",
+                "error_message": "",
+                "attempt_count": 0,
+            })
+
+        deliverable_types = [d.strip() for d in deliverables.split(",") if d.strip()] if deliverables else []
+        goal_deliverables = [{"type": dt} for dt in deliverable_types]
+
+        plan = ExecutionPlan(
+            plan_id=f"plan-{datetime.now().strftime('%Y%m%d-%H%M%S')}",
+            user_message=user_goal,
+            goal_deliverables=goal_deliverables,
+            steps=normalized_steps,
+            created_at=datetime.now().isoformat(),
+            updated_at=datetime.now().isoformat(),
+        )
+
+        if self._last_loop_state is not None:
+            self._last_loop_state.plan = plan
+            self._last_loop_state.user_message = user_goal
+            self._persist_loop_state(self._last_loop_state)
+            if self._plan_event_sink:
+                self._plan_event_sink({
+                    "type": "workflow_plan",
+                    "title": user_goal,
+                    "steps": [
+                        {
+                            "key": s["step_id"],
+                            "label": s["title"],
+                            "title": s["title"],
+                            "status": s["status"],
+                            "detail": s["purpose"],
+                            "expected_deliverables": s["expected_deliverables"],
+                        }
+                        for s in normalized_steps
+                    ],
+                })
+
+        summary = f"执行计划已创建: {len(normalized_steps)} 个步骤, 交付物: {deliverables or '无特定类型'}"
+        logger.info(f"[create_plan] {summary}")
+        return summary
+
+    def _load_execution_plan(self) -> Optional[ExecutionPlan]:
+        runtime_dir = self._get_runtime_state_dir()
+        plan_path = os.path.join(runtime_dir, "execution_plan.json")
+        if not os.path.exists(plan_path):
+            return None
+        try:
+            with open(plan_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            return ExecutionPlan.from_dict(data)
+        except Exception as e:
+            logger.warning(f"加载 execution_plan.json 失败: {e}")
+            return None
+
+    def _save_execution_plan(self, plan: ExecutionPlan) -> None:
+        runtime_dir = self._get_runtime_state_dir()
+        plan_path = os.path.join(runtime_dir, "execution_plan.json")
+        plan.updated_at = datetime.now().isoformat()
+        try:
+            with open(plan_path, "w", encoding="utf-8") as f:
+                json.dump(plan.to_dict(), f, ensure_ascii=False, indent=2)
+        except Exception as e:
+            logger.warning(f"保存 execution_plan.json 失败: {e}")
 
     @staticmethod
     def _warmup_chronos():
@@ -725,6 +915,8 @@ class FloodAgent:
         return ["orchestrator"]
 
     def _build_initial_loop_state(self, user_input: str) -> AgentLoopState:
+        user_message = getattr(self, '_active_user_message', '') or self._extract_user_message(user_input)
+        existing_plan = self._load_execution_plan()
         initial_step = PlanStep(
             step_id="step-1",
             title="理解目标并开始执行",
@@ -732,7 +924,23 @@ class FloodAgent:
             purpose="先由主 agent 理解最终目标、选择技能与执行单元，并产出第一轮结果。",
             input_text=user_input,
         )
-        return AgentLoopState(original_input=user_input, plan_steps=[initial_step])
+        state = AgentLoopState(original_input=user_input, user_message=user_message, plan=existing_plan, plan_steps=[initial_step])
+        return state
+
+    @staticmethod
+    def _extract_user_message(enhanced_input: str) -> str:
+        lines = enhanced_input.strip().split("\n")
+        content_lines = []
+        found_blank = False
+        for line in lines:
+            stripped = line.strip()
+            if not stripped and not found_blank:
+                found_blank = True
+                continue
+            if found_blank:
+                content_lines.append(line)
+        result = "\n".join(content_lines).strip()
+        return result if result else enhanced_input.strip()
 
     @staticmethod
     def _get_next_pending_step(state: AgentLoopState) -> Optional[PlanStep]:
@@ -838,7 +1046,7 @@ class FloodAgent:
         return {
             "excel": any(marker in lower_text for marker in ("excel", ".xlsx", "工作表", "结果表", "导出表")),
             "image": any(marker in lower_text for marker in ("图片", "图", "过程线", "plot", ".png", ".jpg", ".jpeg")),
-            "report": any(marker in lower_text for marker in ("报告", "docx", "word", ".docx", ".pdf", "pdf")),
+            "report": any(marker in lower_text for marker in ("报告", "docx", "word", ".docx", ".pdf", "pdf", "md", ".md")),
         }
 
     @staticmethod
@@ -846,7 +1054,7 @@ class FloodAgent:
         lower_artifacts = [str(path or "").lower() for path in artifacts]
         has_excel = any(path.endswith(".xlsx") or path.endswith(".xls") for path in lower_artifacts)
         has_image = any(path.endswith(".png") or path.endswith(".jpg") or path.endswith(".jpeg") for path in lower_artifacts)
-        has_report = any(path.endswith(".docx") or path.endswith(".pdf") for path in lower_artifacts)
+        has_report = any(path.endswith(".docx") or path.endswith(".pdf") or path.endswith(".md") for path in lower_artifacts)
 
         if needs["excel"] and not has_excel:
             return False
@@ -913,20 +1121,28 @@ class FloodAgent:
 
     def _verify_goal_state(self, state: AgentLoopState) -> Dict[str, Any]:
         payload = state.latest_payload or {}
-        needs = self._needs_final_deliverable(state.original_input)
         artifacts = state.artifacts or self._collect_artifacts_from_payload(payload)
-        artifacts_ok = self._artifacts_cover_needs(artifacts, needs)
-        if not any(needs.values()):
-            goal_satisfied = bool(str(payload.get("summary", "") or state.final_output or "").strip())
+        plan = state.plan
+
+        if plan and plan.goal_deliverables:
+            goal_satisfied = self._artifacts_cover_plan_deliverables(artifacts, plan.goal_deliverables)
+            missing = self._get_missing_deliverable_types(artifacts, plan.goal_deliverables)
+            reason = ""
+            if not goal_satisfied and missing:
+                reason = f"缺少交付物: {', '.join(missing)}"
         else:
-            goal_satisfied = artifacts_ok
-        progress = self._classify_step_completion(state)
-        reason = str((state.final_check or {}).get("final_goal", "") or "")
-        if not goal_satisfied and not reason:
-            if any(needs.values()) and not artifacts_ok:
-                reason = "缺少与用户目标匹配的最终交付文件"
+            user_text = state.user_message or self._extract_user_message(state.original_input)
+            needs = self._needs_final_deliverable(user_text)
+            artifacts_ok = self._artifacts_cover_needs(artifacts, needs)
+            if not any(needs.values()):
+                goal_satisfied = bool(str(payload.get("summary", "") or state.final_output or "").strip())
             else:
-                reason = "用户最终目标尚未完成"
+                goal_satisfied = artifacts_ok
+            reason = ""
+            if not goal_satisfied:
+                reason = "缺少与用户目标匹配的最终交付文件" if any(needs.values()) and not artifacts_ok else "用户最终目标尚未完成"
+
+        progress = self._classify_step_completion(state)
         return {
             "scope": "goal",
             "status": "pass" if goal_satisfied else "fail",
@@ -938,6 +1154,40 @@ class FloodAgent:
             "failed_step": progress["failed_step"],
             "reusable_artifacts": artifacts,
         }
+
+    @staticmethod
+    def _artifacts_cover_plan_deliverables(artifacts: List[str], goal_deliverables: List[Dict[str, str]]) -> bool:
+        if not goal_deliverables:
+            return bool(artifacts)
+        type_extensions = {
+            "image": {".png", ".jpg", ".jpeg"},
+            "excel": {".xlsx", ".xls"},
+            "report": {".docx", ".pdf", ".md"},
+        }
+        lower_artifacts = [str(a).lower() for a in artifacts]
+        for d in goal_deliverables:
+            dtype = d.get("type", "").lower()
+            exts = type_extensions.get(dtype, set())
+            if exts and not any(any(a.endswith(ext) for ext in exts) for a in lower_artifacts):
+                return False
+        return True
+
+    @staticmethod
+    def _get_missing_deliverable_types(artifacts: List[str], goal_deliverables: List[Dict[str, str]]) -> List[str]:
+        type_extensions = {
+            "image": {".png", ".jpg", ".jpeg"},
+            "excel": {".xlsx", ".xls"},
+            "report": {".docx", ".pdf", ".md"},
+        }
+        lower_artifacts = [str(a).lower() for a in artifacts]
+        missing = []
+        for d in goal_deliverables:
+            dtype = d.get("type", "").lower()
+            exts = type_extensions.get(dtype, set())
+            if exts and not any(any(a.endswith(ext) for ext in exts) for a in lower_artifacts):
+                desc = d.get("description") or d.get("format") or dtype
+                missing.append(desc)
+        return missing
 
     @staticmethod
     def _format_progress_lines(items: List[Dict[str, str]]) -> str:
@@ -985,8 +1235,8 @@ class FloodAgent:
         return json.dumps(index_payload, ensure_ascii=False, indent=2)
 
     def _run_final_file_existence_check(self, state: AgentLoopState) -> Dict[str, Any]:
-        artifacts = list(dict.fromkeys(state.artifacts or self._collect_artifacts_from_payload(state.latest_payload)))
-        if not artifacts:
+        all_artifacts = list(dict.fromkeys(state.artifacts or self._collect_artifacts_from_payload(state.latest_payload)))
+        if not all_artifacts:
             return {
                 "overall_status": "pass",
                 "is_final_goal_met": True,
@@ -997,9 +1247,39 @@ class FloodAgent:
                 "next_action": "",
             }
 
+        plan = state.plan
+        if plan and plan.goal_deliverables:
+            type_extensions = {
+                "image": {".png", ".jpg", ".jpeg"},
+                "excel": {".xlsx", ".xls"},
+                "report": {".docx", ".pdf", ".md"},
+            }
+            goal_relevant_extensions = set()
+            for d in plan.goal_deliverables:
+                dtype = d.get("type", "").lower()
+                goal_relevant_extensions.update(type_extensions.get(dtype, set()))
+            if not goal_relevant_extensions:
+                goal_relevant_extensions = {".xlsx", ".xls", ".png", ".jpg", ".jpeg", ".docx", ".pdf", ".md"}
+        else:
+            needs = self._needs_final_deliverable(state.user_message or state.original_input)
+            goal_relevant_extensions = set()
+            if needs["image"]:
+                goal_relevant_extensions.update((".png", ".jpg", ".jpeg"))
+            if needs["excel"]:
+                goal_relevant_extensions.update((".xlsx", ".xls"))
+            if needs["report"]:
+                goal_relevant_extensions.update((".docx", ".pdf"))
+            if not goal_relevant_extensions:
+                goal_relevant_extensions = {".xlsx", ".xls", ".png", ".jpg", ".jpeg", ".docx", ".pdf", ".md"}
+
+        artifacts_to_check = [
+            a for a in all_artifacts
+            if any(str(a).lower().endswith(ext) for ext in goal_relevant_extensions)
+        ]
+
         existing_files: List[str] = []
         missing_files: List[str] = []
-        for artifact in artifacts:
+        for artifact in artifacts_to_check:
             try:
                 tool_output = check_artifact_exists.invoke({"artifact_path": artifact, "scope": "current"})
             except Exception as exc:
@@ -1085,6 +1365,39 @@ class FloodAgent:
         os.makedirs(fallback_dir, exist_ok=True)
         return fallback_dir
 
+    def _get_output_dir(self) -> Optional[str]:
+        state_dir = self._get_runtime_state_dir()
+        parent = os.path.dirname(state_dir)
+        output_dir = os.path.join(parent, "outputs")
+        if os.path.isdir(output_dir):
+            return output_dir
+        return None
+
+    _ARTIFACT_EXTENSIONS = {".json", ".csv", ".xlsx", ".xls", ".docx", ".pdf", ".md", ".txt", ".png", ".jpg", ".jpeg"}
+
+    def _scan_output_dir_for_artifacts(self, since_time: float) -> List[str]:
+        output_dir = self._get_output_dir()
+        if not output_dir:
+            return []
+        found = []
+        try:
+            for filename in os.listdir(output_dir):
+                full_path = os.path.join(output_dir, filename)
+                if not os.path.isfile(full_path):
+                    continue
+                ext = os.path.splitext(filename)[1].lower()
+                if ext not in self._ARTIFACT_EXTENSIONS:
+                    continue
+                try:
+                    if os.path.getmtime(full_path) >= since_time - 1:
+                        found.append(full_path)
+                except OSError:
+                    continue
+        except OSError:
+            return []
+        found.sort(key=lambda p: os.path.getmtime(p))
+        return found
+
     def _build_artifact_record(self, path: str, producer_step: PlanStep) -> Dict[str, Any]:
         normalized = str(path or "").strip()
         lower_path = normalized.lower()
@@ -1097,7 +1410,7 @@ class FloodAgent:
             artifact_type = "table"
         elif lower_path.endswith((".png", ".jpg", ".jpeg")):
             artifact_type = "image"
-        elif lower_path.endswith((".docx", ".pdf")):
+        elif lower_path.endswith((".docx", ".pdf", ".md")):
             artifact_type = "report"
 
         return {
@@ -1111,8 +1424,12 @@ class FloodAgent:
         }
 
     def _register_artifacts(self, state: AgentLoopState, step: PlanStep, payload: Optional[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        step_start_time = getattr(self, '_step_start_time', 0)
+        text_artifacts = self._collect_artifacts_from_payload(payload)
+        fs_artifacts = self._scan_output_dir_for_artifacts(step_start_time) if step_start_time else []
+        all_artifact_paths = list(dict.fromkeys(text_artifacts + fs_artifacts))
         new_records: List[Dict[str, Any]] = []
-        for artifact in self._collect_artifacts_from_payload(payload):
+        for artifact in all_artifact_paths:
             if artifact not in state.artifacts:
                 state.artifacts.append(artifact)
             if any(record.get("path") == artifact for record in state.artifact_registry):
@@ -1121,6 +1438,35 @@ class FloodAgent:
             state.artifact_registry.append(record)
             new_records.append(record)
         return new_records
+
+    def _sync_plan_step_completion(self, state: AgentLoopState, step: PlanStep, output_text: str, new_artifacts: List[Dict[str, Any]]) -> None:
+        plan = state.plan
+        if not plan:
+            return
+        plan_step = plan.find_step(step.step_id)
+        if plan_step:
+            plan_step["status"] = step.status
+            plan_step["output_summary"] = (output_text or "")[:300]
+            plan_step["output_artifacts"] = [r.get("path", "") for r in new_artifacts]
+            plan_step["attempt_count"] = step.attempt_count
+            if step.status == "failed":
+                plan_step["error_message"] = (output_text or "")[:500]
+        else:
+            plan_step_data = {
+                "step_id": step.step_id,
+                "title": step.title,
+                "executor": step.executor,
+                "skill_name": getattr(step, "skill_name", ""),
+                "purpose": step.purpose,
+                "status": step.status,
+                "expected_deliverables": getattr(step, "expected_deliverables", []),
+                "output_artifacts": [r.get("path", "") for r in new_artifacts],
+                "output_summary": (output_text or "")[:300],
+                "error_message": (output_text or "")[:500] if step.status == "failed" else "",
+                "attempt_count": step.attempt_count,
+            }
+            plan.steps.append(plan_step_data)
+        self._save_execution_plan(plan)
 
     def _record_journal_entry(self, state: AgentLoopState, *, step: PlanStep, verification: Dict[str, Any], stage_input: str) -> None:
         entry = {
@@ -1151,6 +1497,7 @@ class FloodAgent:
             json.dump(
                 {
                     "original_input": state.original_input,
+                    "user_message": state.user_message,
                     "terminal_status": state.terminal_status,
                     "round_count": state.round_count,
                     "replan_count": state.replan_count,
@@ -1162,11 +1509,14 @@ class FloodAgent:
                 indent=2,
             )
 
+        if state.plan:
+            self._save_execution_plan(state.plan)
+
     def _replan_after_verification(self, state: AgentLoopState, verification: Dict[str, Any]) -> None:
         payload = state.latest_payload or {}
         latest_stage = str(payload.get("stage", "") or "").strip()
         artifacts = self._collect_artifacts_from_payload(payload)
-        needs = self._needs_final_deliverable(state.original_input)
+        plan = state.plan
         failed_step = verification.get("failed_step") or {}
         failed_executor = str(failed_step.get("executor", "") or "").strip()
         next_executor = self._normalize_executor_name(failed_executor) or "orchestrator"
@@ -1175,17 +1525,31 @@ class FloodAgent:
         if verification.get("scope") == "step" and failed_executor:
             next_title = f"继续完成：{failed_step.get('title', '当前失败步骤')}"
         elif verification.get("scope") == "goal":
-            if needs["excel"] and not self._artifacts_cover_needs(artifacts or state.artifacts, {"excel": True, "image": False, "report": False}):
+            missing_types = []
+            if plan and plan.goal_deliverables:
+                missing_types = self._get_missing_deliverable_types(artifacts or state.artifacts, plan.goal_deliverables)
+            else:
+                user_text = state.user_message or self._extract_user_message(state.original_input)
+                fallback_needs = self._needs_final_deliverable(user_text)
+                if fallback_needs["image"] and not self._artifacts_cover_needs(artifacts or state.artifacts, {"excel": False, "image": True, "report": False}):
+                    missing_types.append("image")
+                if fallback_needs["excel"] and not self._artifacts_cover_needs(artifacts or state.artifacts, {"excel": True, "image": False, "report": False}):
+                    missing_types.append("excel")
+                if fallback_needs["report"] and not self._artifacts_cover_needs(artifacts or state.artifacts, {"excel": False, "image": False, "report": True}):
+                    missing_types.append("report")
+
+            if "image" in missing_types:
+                next_executor = "execution_specialist"
+                next_title = "基于已有结果生成图表"
+            elif "excel" in missing_types:
                 next_executor = "execution_specialist"
                 next_title = "基于已有结果补齐最终 Excel"
+            elif "report" in missing_types:
+                next_executor = "execution_specialist"
+                next_title = "基于已有结果生成报告"
             elif failed_executor:
                 next_executor = self._normalize_executor_name(failed_executor)
                 next_title = f"继续完成：{failed_step.get('title', '当前失败步骤')}"
-
-        if needs["excel"] and not self._artifacts_cover_needs(artifacts, {"excel": True, "image": False, "report": False}):
-            if artifacts:
-                next_executor = "execution_specialist"
-                next_title = "基于中间结果生成最终 Excel"
 
         step_id = f"step-{len(state.plan_steps) + 1}"
         progress_context = self._build_progress_context(state, verification)
@@ -1199,8 +1563,8 @@ class FloodAgent:
             executor=next_executor,
             purpose=reason,
             input_text=(
-                f"{suggested_action or next_title}\n\n"
-                f"[最终目标摘要]\n{self._build_goal_brief(state.original_input)}\n\n"
+                f"{next_title}\n\n"
+                f"[最终目标摘要]\n{self._build_goal_brief(state)}\n\n"
                 f"[当前待完成目标]\n{reason}\n\n"
                 f"{progress_context}\n\n"
                 "请只继续完成当前未完成步骤，禁止默认重跑已经完成的上游步骤。"
@@ -1209,9 +1573,11 @@ class FloodAgent:
         state.plan_steps.append(step)
         state.replan_count += 1
 
-    def _run_agent_loop(self, user_input: str, callbacks: Optional[List[Any]] = None, event_sink: Optional[Any] = None) -> AgentLoopState:
+    def _run_agent_loop(self, user_input: str, callbacks: Optional[List[Any]] = None, event_sink: Optional[Any] = None, abort_check: Optional[Any] = None) -> AgentLoopState:
         state = self._build_initial_loop_state(user_input)
         self._last_loop_state = state
+        self._plan_event_sink = event_sink
+        self._abort_check = abort_check
         if event_sink:
             event_sink({
                 "type": "plan_created",
@@ -1228,6 +1594,12 @@ class FloodAgent:
 
         max_rounds = 6
         while state.round_count < max_rounds and state.terminal_status == "running":
+            if self._abort_check and self._abort_check():
+                logger.info("Agent loop aborted by external signal")
+                state.terminal_status = "aborted"
+                self._persist_loop_state(state)
+                break
+
             step = self._get_next_pending_step(state)
             if step is None:
                 goal_verification = self._verify_goal_state(state)
@@ -1235,16 +1607,26 @@ class FloodAgent:
                     final_file_check = self._run_final_file_existence_check(state)
                     state.final_check = final_file_check
                     if not final_file_check.get("is_final_goal_met"):
-                        goal_verification = {
-                            **goal_verification,
-                            "status": "fail",
-                            "reason": str(final_file_check.get("final_goal", "") or "涉及文件不存在"),
-                            "goal_satisfied": False,
-                            "requires_replan": True,
-                            "final_check": final_file_check,
-                        }
-                        self._replan_after_verification(state, goal_verification)
-                        continue
+                        plan = state.plan
+                        if plan and plan.goal_deliverables:
+                            goal_artifacts_exist = self._artifacts_cover_plan_deliverables(state.artifacts or [], plan.goal_deliverables)
+                        else:
+                            needs = self._needs_final_deliverable(state.user_message or self._extract_user_message(state.original_input))
+                            any_goal_need = any(needs.values())
+                            goal_artifacts_exist = self._artifacts_cover_needs(state.artifacts or [], needs) if any_goal_need else bool(state.artifacts)
+                        if not goal_artifacts_exist:
+                            goal_verification = {
+                                **goal_verification,
+                                "status": "fail",
+                                "reason": str(final_file_check.get("final_goal", "") or "涉及文件不存在"),
+                                "goal_satisfied": False,
+                                "requires_replan": True,
+                                "final_check": final_file_check,
+                            }
+                            self._replan_after_verification(state, goal_verification)
+                            continue
+                        else:
+                            logger.info("最终文件检查发现缺失文件但与用户目标无关，视为目标已完成: %s", final_file_check.get("final_goal", ""))
                     state.terminal_status = "completed"
                     self._persist_loop_state(state)
                     break
@@ -1254,6 +1636,7 @@ class FloodAgent:
             step.status = "running"
             step.attempt_count += 1
             state.round_count += 1
+            self._step_start_time = time.time()
             if event_sink:
                 event_sink({
                     "type": "step_started",
@@ -1268,9 +1651,6 @@ class FloodAgent:
             executor_name = self._normalize_executor_name(step.executor)
             result = self._invoke_executor(self._executors[executor_name], stage_input, callbacks=callbacks, include_session_context=executor_name == "orchestrator")
             state.tool_calls.extend(self._record_intermediate_steps(result))
-            if event_sink:
-                for tool_event in self._build_tool_activity_events(result):
-                    event_sink(tool_event)
             stage_output = (result.get("output", "") or "").strip()
             if executor_name != "orchestrator":
                 stage_output = self._normalize_specialist_output(result, stage_output)
@@ -1285,6 +1665,7 @@ class FloodAgent:
             state.final_output = stage_output or state.final_output
             state.latest_payload = payload
             new_artifacts = self._register_artifacts(state, step, payload)
+            self._sync_plan_step_completion(state, step, stage_output, new_artifacts)
             self._record_journal_entry(state, step=step, verification=verification, stage_input=stage_input)
             self._persist_loop_state(state)
             self._last_loop_state = state
@@ -1411,36 +1792,6 @@ class FloodAgent:
                 self._remember_reusable_result(observation_text.strip())
         return recorded_tool_calls
 
-    @staticmethod
-    def _build_tool_activity_events(result: Dict[str, Any]) -> List[Dict[str, Any]]:
-        events: List[Dict[str, Any]] = []
-        for step in result.get("intermediate_steps", []):
-            if not isinstance(step, (list, tuple)) or len(step) < 2:
-                continue
-            action, observation = step[0], step[1]
-            tool_name = str(getattr(action, "tool", "") or "").strip()
-            if not tool_name:
-                continue
-
-            tool_input = str(getattr(action, "tool_input", "") or "").strip()
-            observation_text = str(observation or "").strip()
-            status_event: Dict[str, Any] = {
-                "type": "tool_status",
-                "tool_name": tool_name,
-                "status": "running",
-            }
-            if tool_input:
-                status_event["content"] = tool_input
-            events.append(status_event)
-
-            if observation_text:
-                events.append({
-                    "type": "tool_result",
-                    "tool_name": tool_name,
-                    "content": observation_text,
-                })
-        return events
-
     def _build_fallback_assistant_output(self, tool_calls: List[Dict[str, str]]) -> str:
         recent_result = self.memory.get_recent_reusable_result() if hasattr(self.memory, 'get_recent_reusable_result') else ""
         if recent_result and recent_result.strip():
@@ -1500,7 +1851,7 @@ class FloodAgent:
     @staticmethod
     def _extract_artifact_paths(text: str) -> List[str]:
         candidates = re.findall(
-            r"[A-Za-z]:(?:\\|/)[^\s\"\*]+\.(?:json|csv|xlsx|xls|docx|pdf|png|jpg|jpeg)|/[^\s\"\*]+\.(?:json|csv|xlsx|xls|docx|pdf|png|jpg|jpeg)",
+            r"[A-Za-z]:(?:\\|/)[^\s\"\*]+\.(?:json|csv|xlsx|xls|docx|pdf|md|txt|png|jpg|jpeg)|/[^\s\"\*]+\.(?:json|csv|xlsx|xls|docx|pdf|md|txt|png|jpg|jpeg)",
             text or "",
             flags=re.IGNORECASE,
         )
@@ -1557,7 +1908,7 @@ class FloodAgent:
 
         has_excel = any(path.endswith(".xlsx") or path.endswith(".xls") for path in lower_artifacts)
         has_image = any(path.endswith(".png") or path.endswith(".jpg") or path.endswith(".jpeg") for path in lower_artifacts)
-        has_report = any(path.endswith(".docx") or path.endswith(".pdf") for path in lower_artifacts)
+        has_report = any(path.endswith(".docx") or path.endswith(".pdf") or path.endswith(".md") for path in lower_artifacts)
 
         if needs_excel and has_excel:
             return True
@@ -1567,10 +1918,11 @@ class FloodAgent:
             return True
         return False
 
-    @staticmethod
-    def _build_forced_continuation_input(original_user_input: str, payload: Dict[str, Any]) -> str:
+    def _build_forced_continuation_input(self, original_user_input: str, payload: Dict[str, Any]) -> str:
+        user_msg = self._extract_user_message(original_user_input)
+        brief_text = re.sub(r"\s+", " ", str(user_msg).strip())[:120] if user_msg else "用户最终目标尚未明确"
         return (
-            f"[最终目标摘要]\n{FloodAgent._build_goal_brief(original_user_input)}\n\n"
+            f"[最终目标摘要]\n{brief_text}\n\n"
             "[系统强制继续结论]\n"
             "最近一次结果仍未满足用户最终目标。你现在不得结束，必须继续执行后续步骤。\n\n"
             f"[最近一次中间结果]\n{payload.get('summary', '')}\n\n"
@@ -1774,7 +2126,7 @@ class FloodAgent:
         """对话接口（run方法的别名）"""
         return self.run(message)
 
-    def stream(self, user_input: str, enable_reasoning: bool = False):
+    def stream(self, user_input: str, enable_reasoning: bool = False, user_message: str = "", abort_check: Optional[Any] = None):
         """
         流式运行智能体（token 级别），通过 Queue + threading 实现真实流式
 
@@ -1784,6 +2136,7 @@ class FloodAgent:
         try:
             logger.info(f"收到用户输入(流式): {user_input[:50]}...")
             self._active_user_input = user_input
+            self._active_user_message = user_message
 
             if hasattr(self.memory, 'set_status_callback'):
                 self.memory.set_status_callback(None)
@@ -1936,6 +2289,7 @@ class FloodAgent:
                         user_input,
                         callbacks=[callback],
                         event_sink=lambda event: [q.put(("event", item)) for item in normalize_loop_events(event)],
+                        abort_check=abort_check,
                     )
                     result_holder["state"] = loop_state
                 except Exception as exc:

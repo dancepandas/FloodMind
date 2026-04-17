@@ -85,6 +85,9 @@ STATIC_WEB_DIR = REACT_DIST_DIR if USE_REACT_FRONTEND else LEGACY_WEB_DIR
 app = Flask(__name__, static_folder=STATIC_WEB_DIR)
 CORS(app)
 
+logger.debug(f"USE_REACT_FRONTEND: {USE_REACT_FRONTEND}")
+logger.debug(f"STATIC_WEB_DIR: {STATIC_WEB_DIR}")
+
 DATA_DIR = os.environ.get('DATA_DIR', os.path.join(os.path.dirname(os.path.abspath(__file__)), 'data'))
 os.makedirs(DATA_DIR, exist_ok=True)
 os.makedirs(os.path.join(DATA_DIR, 'sessions'), exist_ok=True)
@@ -116,14 +119,15 @@ DOWNLOADABLE_EXTENSIONS = {
     '.pdf': 'application/pdf',
     '.pptx': 'application/vnd.openxmlformats-officedocument.presentationml.presentation',
     '.xlsx': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+    '.md': 'text/markdown',
 }
 ARTIFACT_EXTENSIONS = IMAGE_EXTENSIONS | set(DOWNLOADABLE_EXTENSIONS.keys())
 ARTIFACT_PATH_PATTERN = re.compile(
-    r'[A-Za-z]:\\[^\s\n]*\.(?:png|jpg|jpeg|docx|pdf|pptx|xlsx)|/[^\s\n]*\.(?:png|jpg|jpeg|docx|pdf|pptx|xlsx)',
+    r'[A-Za-z]:\\[^\s\n]*\.(?:png|jpg|jpeg|docx|pdf|pptx|xlsx|md|txt)|/[^\s\n]*\.(?:png|jpg|jpeg|docx|pdf|pptx|xlsx|md|txt)',
     re.IGNORECASE,
 )
 ARTIFACT_FILENAME_PATTERN = re.compile(
-    r'`?([\w\-\u4e00-\u9fff]+\.(?:png|jpg|jpeg|docx|pdf|pptx|xlsx))`?',
+    r'`?([\w\-\u4e00-\u9fff]+\.(?:png|jpg|jpeg|docx|pdf|pptx|xlsx|md|txt))`?',
     re.IGNORECASE,
 )
 
@@ -1037,7 +1041,7 @@ def chat():
                 streamed_text_parts: list[str] = []
                 is_workflow_stream = False
 
-                for chunk in agent.stream(enhanced_message, enable_reasoning=enable_reasoning):
+                for chunk in agent.stream(enhanced_message, enable_reasoning=enable_reasoning, user_message=message, abort_check=lambda: session_abort_flags.get(session_id, False)):
                     if session_abort_flags.get(session_id, False):
                         finish_stream_snapshot(session_id)
                         yield stream_json_line({'type': 'error', 'content': '会话已被用户暂停'})
