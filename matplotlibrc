@@ -10,5 +10,5 @@ xtick.major.width: 0.8
 ytick.major.width: 0.8
 xtick.top: True
 ytick.right: True
-figure.dpi: 300
+figure.dpi: 100
 mathtext.fontset: stix

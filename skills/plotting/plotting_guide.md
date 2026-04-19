@@ -25,7 +25,7 @@ ax.set_title("Custom Chart")
 ax.set_xlabel("x")
 ax.set_ylabel("y")
 fig.autofmt_xdate()
-fig.savefig(output_file, dpi=200, bbox_inches="tight")
+fig.savefig(output_file, dpi=100, bbox_inches="tight")
 ```
 
 ## Recommended tool order
@@ -119,7 +119,7 @@ ax.set_xlabel('Time')
 ax.set_ylabel('Flow')
 ax.grid(True, alpha=0.3)
 fig.autofmt_xdate()
-fig.savefig(output_file, dpi=200, bbox_inches='tight')
+fig.savefig(output_file, dpi=100, bbox_inches='tight')
 ''')
 ```
 
@@ -154,7 +154,7 @@ ax.set_xlabel('Station')
 ax.set_ylabel('Rainfall')
 ax.tick_params(axis='x', rotation=30)
 ax.grid(True, axis='y', alpha=0.3)
-fig.savefig(output_file, dpi=200, bbox_inches='tight')
+fig.savefig(output_file, dpi=100, bbox_inches='tight')
 ''')
 ```
 
@@ -188,7 +188,7 @@ ax.set_title('Rainfall vs Flow')
 ax.set_xlabel('Rainfall')
 ax.set_ylabel('Flow')
 fig.colorbar(sc, ax=ax, label='WaterLevel')
-fig.savefig(output_file, dpi=200, bbox_inches='tight')
+fig.savefig(output_file, dpi=100, bbox_inches='tight')
 ''')
 ```
 
@@ -234,7 +234,7 @@ labels = [h.get_label() for h in handles]
 ax1.legend(handles, labels, loc='upper left')
 
 fig.autofmt_xdate()
-fig.savefig(output_file, dpi=200, bbox_inches='tight')
+fig.savefig(output_file, dpi=100, bbox_inches='tight')
 ''')
 ```
 
@@ -269,7 +269,7 @@ ax.set_title('Flow Distribution by Station')
 ax.set_xlabel('Station')
 ax.set_ylabel('Flow')
 ax.tick_params(axis='x', rotation=30)
-fig.savefig(output_file, dpi=200, bbox_inches='tight')
+fig.savefig(output_file, dpi=100, bbox_inches='tight')
 ''')
 ```
 
@@ -301,7 +301,7 @@ corr = numeric_df.corr(numeric_only=True)
 fig, ax = plt.subplots(figsize=(8, 6))
 sns.heatmap(corr, annot=True, cmap='Blues', fmt='.2f', ax=ax)
 ax.set_title('Correlation Heatmap')
-fig.savefig(output_file, dpi=200, bbox_inches='tight')
+fig.savefig(output_file, dpi=100, bbox_inches='tight')
 ''')
 ```
 

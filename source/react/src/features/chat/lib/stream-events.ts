@@ -87,8 +87,12 @@ export function applyStreamEvent(data: Record<string, any>, handlers: StreamHand
   }
 
   if (data.type === "file_generated" || data.type === "image_generated") {
-    log.info(`[${eventType}] filename="${data.filename}" filepath="${data.filepath}"`);
-    updateAssistant((message) => attachArtifact(message, data as GeneratedArtifact));
+    log.info(`[${eventType}] filename="${data.filename}" filepath="${data.filepath}" image_url="${data.image_url || ''}" download_url="${data.download_url || ''}" size=${data.size}`);
+    updateAssistant((message) => {
+      const updated = attachArtifact(message, data as GeneratedArtifact);
+      log.info(`[${eventType}] attachArtifact result: artifacts count=${updated.artifacts?.length}, last artifact type=${updated.artifacts?.[updated.artifacts.length - 1]?.type}, image_url=${updated.artifacts?.[updated.artifacts.length - 1]?.image_url}`);
+      return updated;
+    });
     return;
   }
 

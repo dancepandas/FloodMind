@@ -23,7 +23,10 @@ export function Sidebar({
           <div className="w-8 h-8 rounded-lg bg-primary flex items-center justify-center text-primary-foreground">
             <Bot size={20} />
           </div>
-          <span className="font-semibold text-lg text-foreground">洪水智能体</span>
+          <span className="font-semibold text-lg text-foreground relative">
+            FloodMind
+            <sup className="absolute -top-2 -right-6 text-[10px] font-medium text-primary bg-primary/10 px-1 rounded leading-none">beta</sup>
+          </span>
         </div>
 
         <button onClick={onNewSession} className="flex items-center gap-2 w-full px-3 py-2 bg-background border border-border rounded-md hover:bg-muted transition-colors text-sm font-medium">

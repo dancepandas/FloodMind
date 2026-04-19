@@ -1,3 +1,4 @@
+import { useEffect, useRef } from "react";
 import { ChatComposer } from "@/features/chat/components/ChatComposer";
 import { ChatMessage } from "@/features/chat/components/ChatMessage";
 import type { ChatMessage as ChatMessageModel } from "@/types/app";
@@ -25,14 +26,30 @@ export function ChatArea({
   onUpload,
   onToggleThought,
 }: ChatAreaProps) {
+  const scrollContainerRef = useRef<HTMLDivElement>(null);
+  const bottomRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    bottomRef.current?.scrollIntoView({ behavior: "smooth" });
+  }, [messages]);
+
+  useEffect(() => {
+    if (!isStreaming) return;
+    const interval = setInterval(() => {
+      bottomRef.current?.scrollIntoView({ behavior: "smooth" });
+    }, 300);
+    return () => clearInterval(interval);
+  }, [isStreaming]);
+
   return (
     <div className="flex-1 flex flex-col h-full bg-[linear-gradient(180deg,rgba(255,255,255,0.58)_0%,rgba(239,246,255,0.72)_100%)] relative min-w-0">
-      <div className="flex-1 overflow-y-auto px-6 py-6 scroll-smooth">
+      <div ref={scrollContainerRef} className="flex-1 overflow-y-auto px-6 py-6 scroll-smooth">
         <div className="w-full flex flex-col">
           {messages.map((message) => (
             <ChatMessage key={message.id} message={message} onToggleThought={onToggleThought} />
           ))}
         </div>
+        <div ref={bottomRef} />
       </div>
 
       <ChatComposer

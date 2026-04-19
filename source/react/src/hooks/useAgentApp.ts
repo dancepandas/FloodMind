@@ -239,6 +239,12 @@ export function useAgentApp() {
           try {
             const data = JSON.parse(trimmed) as Record<string, any>;
             eventCount++;
+            if (data.type === "image_generated" || data.type === "file_generated") {
+              log.info(`[SSE] 收到artifact事件: type=${data.type}, filename=${data.filename}, image_url=${data.image_url || ''}, download_url=${data.download_url || ''}, isStreaming=${true}`);
+            }
+            if (data.type === "stream_end") {
+              log.info(`[SSE] 收到stream_end事件, 此时isStreaming=true`);
+            }
             applyStreamEvent(data, {
               updateAssistant,
               pushToolActivity,

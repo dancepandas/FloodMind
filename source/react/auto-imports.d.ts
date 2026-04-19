@@ -22,6 +22,7 @@ declare global {
   const CircleCheckIcon: typeof import('lucide-react').CircleCheckIcon
   const CircleIcon: typeof import('lucide-react').CircleIcon
   const Command: typeof import('lucide-react').Command
+  const Download: typeof import('lucide-react').Download
   const File: typeof import('lucide-react').File
   const FileText: typeof import('lucide-react').FileText
   const Form: typeof import('lucide-react').Form
@@ -58,6 +59,7 @@ declare global {
   const Wrench: typeof import('lucide-react').Wrench
   const X: typeof import('lucide-react').X
   const XIcon: typeof import('lucide-react').XIcon
+  const ZoomIn: typeof import('lucide-react').ZoomIn
   const cache: typeof import('react').cache
   const cacheSignal: typeof import('react').cacheSignal
   const createContext: typeof import('react').createContext

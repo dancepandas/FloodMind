@@ -284,6 +284,7 @@ def build_artifact_event(filepath: str, fallback_session_id: str, emitted_paths:
     if ext in IMAGE_EXTENSIONS:
         file_info['type'] = 'image_generated'
         file_info['image_url'] = url
+        file_info['download_url'] = url
     else:
         file_info['type'] = 'file_generated'
         file_info['download_url'] = url
@@ -905,19 +906,26 @@ def get_session_output_file(session_id: str, filename: str):
         output_dir = get_session_output_dir(session_id)
         file_path = os.path.join(output_dir, filename)
         
-        # 安全检查：确保文件在输出目录内
+        logger.info(f"[OUTPUT_FILE] 请求: session={session_id}, filename={filename}, constructed_path={file_path}")
+
         real_path = os.path.realpath(file_path)
         real_output_dir = os.path.realpath(output_dir)
         if not real_path.startswith(real_output_dir):
+            logger.warning(f"[OUTPUT_FILE] 非法路径: real_path={real_path}, real_output_dir={real_output_dir}")
             return jsonify({'error': '非法路径'}), 403
         
         if not os.path.exists(real_path):
+            logger.warning(f"[OUTPUT_FILE] 文件不存在: {real_path}, output_dir内容={os.listdir(real_output_dir) if os.path.isdir(real_output_dir) else 'N/A'}")
             return jsonify({'error': '文件不存在'}), 404
         
+        file_size = os.path.getsize(real_path)
         ext = os.path.splitext(filename)[1].lower()
+        logger.info(f"[OUTPUT_FILE] 命中: ext={ext}, size={file_size}, real_path={real_path}")
 
         if ext == '.png':
-            return send_file(real_path, mimetype='image/png')
+            response = send_file(real_path, mimetype='image/png')
+            logger.info(f"[OUTPUT_FILE] 返回PNG图片, size={file_size}")
+            return response
 
         if ext in {'.jpg', '.jpeg'}:
             return send_file(real_path, mimetype='image/jpeg')
@@ -933,7 +941,7 @@ def get_session_output_file(session_id: str, filename: str):
         return send_file(real_path)
         
     except Exception as e:
-        logger.error(f"获取输出文件失败: {e}", exc_info=True)
+        logger.error(f"[OUTPUT_FILE] 获取输出文件失败: {e}", exc_info=True)
         return jsonify({'error': str(e)}), 500
 
 
@@ -1126,6 +1134,7 @@ def chat():
                         logger.info(f"tool_result 内容: {filtered_content[:200] if len(filtered_content) > 200 else filtered_content}")
 
                         validated_paths = extract_validated_artifact_paths(original_content)
+                        logger.info(f"[ARTIFACT] extract_validated_artifact_paths result: paths={validated_paths}, tool={tool_name}")
                         if validated_paths:
                             approved_artifact_paths = validated_paths
 
@@ -1145,17 +1154,22 @@ def chat():
 
                 final_text = ''.join(streamed_text_parts)
                 approved_artifact_paths = resolve_artifact_references(session_id, approved_artifact_paths, final_text)
+                logger.info(f"[ARTIFACT] approved_artifact_paths after resolve: {approved_artifact_paths}")
 
                 approved_artifact_events: list[dict[str, Any]] = []
                 emitted_paths: set[str] = set()
                 for artifact_path in approved_artifact_paths:
                     artifact_event = build_artifact_event(artifact_path, session_id, emitted_paths)
                     if artifact_event:
+                        logger.info(f"[ARTIFACT] built event: type={artifact_event.get('type')}, filename={artifact_event.get('filename')}, image_url={artifact_event.get('image_url', '')}, download_url={artifact_event.get('download_url', '')}, size={artifact_event.get('size')}")
                         approved_artifact_events.append(artifact_event)
+                    else:
+                        logger.warning(f"[ARTIFACT] build_artifact_event returned None for path: {artifact_path}")
 
                 snapshot['artifacts'] = approved_artifact_events
                 touch_stream_snapshot(session_id)
                 save_session_artifact_events(session_id, approved_artifact_events)
+                logger.info(f"[ARTIFACT] total approved events: {len(approved_artifact_events)}, saved to approved_artifacts.json")
 
                 final_override_content = build_artifact_summary_text(approved_artifact_events, final_text)
                 if final_override_content:
@@ -1171,9 +1185,11 @@ def chat():
                     yield stream_json_line({'type': 'final_override', 'content': final_override_content})
 
                 for artifact_event in approved_artifact_events:
+                    logger.info(f"[ARTIFACT] sending SSE event: type={artifact_event.get('type')}, filename={artifact_event.get('filename')}, image_url={artifact_event.get('image_url', '')}, download_url={artifact_event.get('download_url', '')}")
                     yield stream_json_line(artifact_event)
 
                 finish_stream_snapshot(session_id)
+                logger.info(f"[ARTIFACT] stream finished, sending stream_end. SSE stream connection will close now.")
                 yield stream_json_line({'type': 'stream_end'})
 
                 session_info = session_manager.get_session_info(session_id)
