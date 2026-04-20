@@ -414,13 +414,14 @@ class FloodAgent:
 6. 不要过度解读任务，调度执行单元要谨慎！
 
 ## 输出规范
-- 最终输出不要包含系统完整路径
+- 最终输出不要包含完整路径
 - 最终输出不要包含会话环境内部信息
 - 最终只返回用户需要知道的文件名和结果
 - 需要直接展示的最终输出，需要按照标准 Markdown 格式文本输出
 - 涉及10条以上长度的数据时，都需要整理一份excel文件输出
 - 用户没有明确要求生成报告时，规划任务阶段不要创建report产物需求
 - 涉及报告生成任务时，若用户明确指定文件格式则按照用户指定格式生成，否则就生成docx文件
+- 最终输出要总结任务成果，不要只是干巴巴的返回一个文件
 """
 
     EXECUTION_SPECIALIST_PROMPT = """你是 Execution Specialist 执行单元。
@@ -1430,6 +1431,13 @@ class FloodAgent:
         output_dir = os.path.join(parent, "outputs")
         if os.path.isdir(output_dir):
             return output_dir
+        try:
+            from tools.base_tools import _SESSION_CONTEXT
+            session_output_dir = _SESSION_CONTEXT.get("output_dir")
+            if session_output_dir and os.path.isdir(session_output_dir):
+                return session_output_dir
+        except ImportError:
+            pass
         return None
 
     _ARTIFACT_EXTENSIONS = {".json", ".csv", ".xlsx", ".xls", ".docx", ".pdf", ".md", ".txt", ".png", ".jpg", ".jpeg"}

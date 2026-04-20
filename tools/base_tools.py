@@ -56,6 +56,12 @@ def _build_exec_env() -> Dict[str, str]:
     env['PYTHONPATH'] = str(_PROJECT_ROOT) if not existing_pythonpath else f"{_PROJECT_ROOT}{os.pathsep}{existing_pythonpath}"
     env.setdefault('MPLBACKEND', 'Agg')
     env.setdefault('MPLCONFIGDIR', str(_PROJECT_ROOT / 'data' / 'matplotlib'))
+    output_dir = _SESSION_CONTEXT.get("output_dir")
+    session_id = _SESSION_CONTEXT.get("session_id")
+    if session_id:
+        env['SESSION_ID'] = str(session_id)
+    if output_dir:
+        env['SESSION_OUTPUT_DIR'] = str(output_dir)
     return env
 
 
@@ -250,6 +256,17 @@ class ExecPythonFileInput(BaseModel):
     workdir: str = Field(default="", description="工作目录，可选；默认使用脚本所在目录")
 
 
+def _resolve_path(path_str: str) -> Path:
+    """解析路径：绝对路径直接用，相对路径优先从 session output 目录解析，再 fallback 到项目根。"""
+    p = Path(path_str)
+    if p.is_absolute():
+        return p.resolve()
+    output_dir = _SESSION_CONTEXT.get("output_dir")
+    if output_dir:
+        return (Path(output_dir) / p).resolve()
+    return (_PROJECT_ROOT / p).resolve()
+
+
 class WriteTextFileInput(BaseModel):
     """写入文本文件的输入参数"""
     file_path: str = Field(default="", description="要写入的文件路径")
@@ -408,7 +425,10 @@ def _resolve_artifact_candidates(artifact_path: str, scope: str = "current") -> 
         return []
 
     direct_path = Path(raw)
-    resolved_direct = direct_path if direct_path.is_absolute() else (_PROJECT_ROOT / direct_path).resolve()
+    if direct_path.is_absolute():
+        resolved_direct = direct_path.resolve()
+    else:
+        resolved_direct = _resolve_path(raw)
 
     candidates: List[Path] = []
     if resolved_direct.exists() and resolved_direct.is_file():
@@ -665,12 +685,13 @@ def run_script(skill_name: str = "", script_name: str = "", args: Union[str, Lis
     执行技能中的 Python 脚本。
     
     在调用此工具前，必须先调用 get_skill 了解脚本用法。
+    脚本的工作目录已自动设为当前会话的输出目录，因此输出文件参数只写文件名（如 result.json），不要加任何目录前缀。
     脚本的标准输出将作为结果返回。
     
     Args:
         skill_name: 技能名称
         script_name: 脚本文件名
-        args: 脚本参数（JSON数组或列表）
+        args: 脚本参数（JSON数组或列表）。注意：--output_file 等输出路径参数只写文件名，不要加 data/sessions/ 等前缀
         env: 环境变量（JSON对象格式）
     """
     parsed = _parse_json_if_needed(skill_name)
@@ -724,14 +745,24 @@ def run_script(skill_name: str = "", script_name: str = "", args: Union[str, Lis
         run_env.update(env_dict)
         run_env['PYTHONIOENCODING'] = 'utf-8'
         
-        logger.info(f"执行脚本: {' '.join(cmd)}")
+        session_output_dir = _SESSION_CONTEXT.get("output_dir")
+        session_id = _SESSION_CONTEXT.get("session_id")
+        if session_id:
+            run_env['SESSION_ID'] = str(session_id)
+        if session_output_dir:
+            run_env['SESSION_OUTPUT_DIR'] = str(session_output_dir)
+            exec_cwd = str(session_output_dir)
+        else:
+            exec_cwd = str(script_path.parent)
+        
+        logger.info(f"执行脚本: {' '.join(cmd)}, cwd={exec_cwd}")
         
         process = subprocess.Popen(
             cmd,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             env=run_env,
-            cwd=str(script_path.parent),
+            cwd=exec_cwd,
             text=True,
             encoding='utf-8',
             errors='replace',
@@ -908,15 +939,16 @@ def exec_python_file(
     """
     执行一个本地 Python 文件。
 
-    适用于先通过 `exec_bash` 写出临时 `.py` 脚本，再稳定执行该脚本。
+    适用于先通过 `write_text_file` 写出临时 `.py` 脚本，再稳定执行该脚本。
     相比 `python -c "..."` 更适合多行逻辑、文件转换和 JSON 生成场景。
+    脚本的工作目录已自动设为当前会话的输出目录，因此输出文件参数只写文件名（如 result.json），不要加任何目录前缀。
 
     Args:
         script_path: Python 文件路径
-        args: 脚本参数（JSON数组或列表）
+        args: 脚本参数（JSON数组或列表）。注意：输出路径参数只写文件名，不要加 data/sessions/ 等前缀
         env: 环境变量（JSON对象格式）
         timeout: 超时时间（秒）
-        workdir: 工作目录，可选；默认使用脚本所在目录
+        workdir: 工作目录，可选；默认为当前会话的输出目录
     """
     parsed = _parse_json_if_needed(script_path)
     if parsed and 'script_path' in parsed:
@@ -969,7 +1001,14 @@ def exec_python_file(
     except json.JSONDecodeError:
         env_dict = {}
 
-    exec_cwd = Path(workdir).resolve() if workdir else script_file.parent
+    exec_cwd_path = Path(workdir).resolve() if workdir else None
+    if exec_cwd_path is None:
+        session_output_dir = _SESSION_CONTEXT.get("output_dir")
+        if session_output_dir:
+            exec_cwd_path = Path(session_output_dir)
+        else:
+            exec_cwd_path = script_file.parent
+    exec_cwd = str(exec_cwd_path)
 
     try:
         cmd = [sys.executable, str(script_file)] + args_list
@@ -1261,9 +1300,7 @@ def read_artifact(artifact_path: str = "", max_chars: int = 12000) -> str:
             max_chars=max_chars,
         )
 
-    path = Path(artifact_path)
-    if not path.is_absolute():
-        path = (_PROJECT_ROOT / path).resolve()
+    path = _resolve_path(artifact_path)
 
     if not path.exists() or not path.is_file():
         return _finalize_tool_output(
@@ -1317,6 +1354,26 @@ _RAG_CONFIG: Dict[str, Any] = {
 }
 
 _RETRIEVER_INSTANCE: Optional[Any] = None
+
+_SESSION_CONTEXT: Dict[str, Any] = {
+    "session_id": None,
+    "output_dir": None,
+}
+
+
+def set_session_context(session_id: str, output_dir: Optional[str] = None):
+    global _SESSION_CONTEXT
+    _SESSION_CONTEXT["session_id"] = session_id
+    if output_dir:
+        _SESSION_CONTEXT["output_dir"] = output_dir
+        os.makedirs(output_dir, exist_ok=True)
+    else:
+        _SESSION_CONTEXT["output_dir"] = str(_SESSION_ROOT / session_id / "outputs")
+        os.makedirs(_SESSION_CONTEXT["output_dir"], exist_ok=True)
+
+
+def get_current_session_output_dir() -> Optional[str]:
+    return _SESSION_CONTEXT.get("output_dir")
 
 
 def set_rag_config(

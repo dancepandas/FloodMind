@@ -37,6 +37,8 @@ from tools.base_tools import (
     set_skill_registry,
     set_rag_config,
     set_memory_instance,
+    set_session_context,
+    get_current_session_output_dir,
 )
 
 from tools.agent_tool import (
@@ -71,6 +73,8 @@ __all__ = [
     'set_skill_registry',
     'set_rag_config',
     'set_memory_instance',
+    'set_session_context',
+    'get_current_session_output_dir',
     'AgentTool',
     'PermissionBehavior',
     'PermissionResult',

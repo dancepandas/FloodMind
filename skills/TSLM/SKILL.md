@@ -73,7 +73,7 @@ python flood_prediction.py --times '["2025-01-01 00:00:00", ...]' --flows '[120.
 run_script(
     skill_name='prediction',
     script_name='flood_prediction.py',
-    args='["--times", "[\"2025-01-01 00:00:00\", \"2025-01-01 01:00:00\", \"2025-01-01 02:00:00\", \"2025-01-01 03:00:00\", \"2025-01-01 04:00:00\"]", "--flows", "[120.5, 125.3, 130.2, 128.7, 132.1]", "--predict_steps", "8", "--output_file", "outputs/chronos_result.json"]'
+    args='["--times", "[\"2025-01-01 00:00:00\", \"2025-01-01 01:00:00\", \"2025-01-01 02:00:00\", \"2025-01-01 03:00:00\", \"2025-01-01 04:00:00\"]", "--flows", "[120.5, 125.3, 130.2, 128.7, 132.1]", "--predict_steps", "8", "--output_file", "chronos_result.json"]'
 )
 ```
 

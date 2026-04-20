@@ -48,6 +48,12 @@ data/           运行时数据（sessions、vector_store、tool_error_memory）
 3. 将脚本放入 `scripts/`
 4. skill 会由 `skills/__init__.py` 自动发现并注册
 
+### 脚本输出路径约定
+- `run_script` / `exec_python_file` 的工作目录（cwd）已自动设为当前会话的输出目录
+- 脚本的输出文件参数**只写文件名**即可，例如 `--output_file result.json`，不要写 `data/sessions/.../result.json` 或任何目录前缀
+- 如果写成了 `data/sessions/result.json`，文件会存到 `输出目录/data/sessions/result.json`（路径嵌套错误），后续产物检查将找不到文件
+- 脚本如需获取输出目录的绝对路径，读取环境变量 `SESSION_OUTPUT_DIR`
+
 ## 安全边界
 - `write_text_file` 只允许写入 `data/sessions/` 和项目根目录下的文件
 - `exec_bash` 禁止执行 `rm -rf`、`del /s`、`format`、`rmdir /s` 等破坏性命令
@@ -61,7 +67,11 @@ data/           运行时数据（sessions、vector_store、tool_error_memory）
 - 使用 logging 模块记录日志，不用 print
 
 ## 常见陷阱
+- DashScope 的 reasoning_content 可能返回增量或累计文本，回调中需要兼容两种模式
 - Qwen 模型的 tool_call 参数有时会以 JSON 字符串形式传入，需要 `_parse_json_if_needed` 兼容
 - Chronos 模型首次加载较慢（~30s），需要预热
+- Excel sheet 名称最长 31 字符，stationCode 过长时会被截断
+- matplotlib 在无头环境必须设置 `MPLBACKEND=Agg`
+- 脚本输出路径只写文件名（`result.json`），不要写 `data/sessions/.../result.json`，否则路径嵌套导致文件找不到
 - Excel sheet 名称最长 31 字符，stationCode 过长时会被截断
 - matplotlib 在无头环境必须设置 `MPLBACKEND=Agg`

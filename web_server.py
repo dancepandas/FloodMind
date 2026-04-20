@@ -31,7 +31,7 @@ from config.settings import settings
 from models import QwenLLMService, get_qwen_llm_service
 from memory import SimpleMemory, DualMemory, SessionManager
 from agent import FloodAgent
-from tools import set_rag_config, set_memory_instance
+from tools import set_rag_config, set_memory_instance, set_session_context
 
 # 配置日志
 logs_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'logs')
@@ -571,12 +571,22 @@ def create_agent_for_session(session_id: str, enable_search: bool = False, enabl
         session_id=session_id,
     )
     
+    set_session_context(
+        session_id=session_id,
+        output_dir=str(session_manager.get_output_dir(session_id)),
+    )
+    
     return agent
 
 
 def get_or_create_agent(session_id: str) -> FloodAgent:
     """获取或创建会话智能体"""
     session_manager.touch_session(session_id)
+    
+    set_session_context(
+        session_id=session_id,
+        output_dir=str(session_manager.get_output_dir(session_id)),
+    )
     
     agent = session_manager.get_agent(session_id)
     if agent:

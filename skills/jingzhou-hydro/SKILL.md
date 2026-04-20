@@ -70,7 +70,7 @@ python export_jingzhou_hydro_result_to_excel.py --input_file "result.json" [--ou
 run_script(
     skill_name='jingzhou-hydro-intake',
     script_name='export_jingzhou_hydro_result_to_excel.py',
-    args=['--input_file', 'outputs/jingzhou_result.json', '--output_file', 'outputs/jingzhou_result.xlsx']
+    args=['--input_file', 'jingzhou_result.json', '--output_file', 'jingzhou_result.xlsx']
 )
 ```
 
@@ -116,7 +116,7 @@ run_script(
 run_script(
     skill_name='jingzhou-hydro-intake',
     script_name='run_jingzhou_hydro_model.py',
-    args=['--input_file', 'input.json', '--output_file', 'outputs/jingzhou_result.json', '--base_url', 'http://192.168.30.108:3500']
+    args=['--input_file', 'input.json', '--output_file', 'jingzhou_result.json', '--base_url', 'http://192.168.30.108:3500']
 )
 ```
 
