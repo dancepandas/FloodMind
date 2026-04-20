@@ -19,6 +19,7 @@ import threading
 import time
 from dataclasses import dataclass, field
 from datetime import datetime
+from pathlib import Path
 from typing import Optional, Dict, Any, List, Tuple
 from langchain_classic.agents import AgentExecutor, create_openai_functions_agent
 from langchain_core.callbacks import BaseCallbackHandler
@@ -31,7 +32,7 @@ from models.qwen_llm_service import QwenLLMService
 from memory import SimpleMemory, DualMemory
 from skills import SKILL_REGISTRY
 from skills.base import Skill
-from tools import get_skill, run_script, exec_bash, exec_python_file, write_text_file, search_tool_error_memory, search_artifacts, check_artifact_exists, read_artifact, knowledge_search, add_knowledge, web_search, add_memory, search_memory, set_rag_config, set_memory_instance, reset_retry_guard
+from tools import get_skill, run_script, exec_bash, exec_python_file, write_text_file, search_tool_error_memory, search_artifacts, check_artifact_exists, read_artifact, knowledge_search, add_knowledge, web_search, add_memory, search_memory, update_project_instructions, set_rag_config, set_memory_instance, reset_retry_guard
 from config.settings import settings
 
 logger = logging.getLogger(__name__)
@@ -306,6 +307,8 @@ class FloodAgent:
 ## 当前系统时间
 {current_time_context}
 
+{project_context}
+
 ## 角色职责
 你只负责四类事情：
 1. 分析用户意图和最终目标
@@ -325,6 +328,17 @@ class FloodAgent:
 - `knowledge_search`：检索知识库（知识查询时，优先使用）
 - `web_search`：检索网络资料（knowledge_search搜索结果不够支撑回答时，搜索网络资料补充）
 - `search_memory`：检索历史对话和技能文档
+- `update_project_instructions`：将用户偏好或规则写入 AGENTS.md，使其在后续所有对话中生效
+
+## 用户偏好处理
+当用户表达长期偏好、规则或习惯时（如"以后都用PNG格式"、"不要生成PDF"）：
+1. 先确认用户意图：此偏好仅本次对话生效，还是所有对话都生效？
+2. 仅本次对话 → 调用 `add_memory` 写入会话记忆
+3. 所有对话 → 进一步确认作用域：
+   - 仅本项目 → `update_project_instructions(scope="project")`
+   - 全局所有项目 → `update_project_instructions(scope="global")`
+4. **写入前必须向用户展示将要写入的内容，等待用户确认后再执行 `update_project_instructions`**
+5. 写入后告知用户：此偏好已持久化，将在后续所有对话中自动生效
 
 ## 执行工具细节
 - 调用工具时一次只传一个参数：例如要查看两个skill时，应该是`get_skill（skill1）`，等待返回结果，再进行`get_skill（skill2）`，等待返回结果
@@ -397,6 +411,7 @@ class FloodAgent:
 3. 对执行单元只传当前这一步的执行指令，不传用户原始长输入和多余会话背景
 4. 严禁把超长 JSON 直接塞进任务描述
 5. 必须严格遵循 SKILL.md 及相关文档
+6. 不要过度解读任务，调度执行单元要谨慎！
 
 ## 输出规范
 - 最终输出不要包含系统完整路径
@@ -409,6 +424,8 @@ class FloodAgent:
 """
 
     EXECUTION_SPECIALIST_PROMPT = """你是 Execution Specialist 执行单元。
+
+{project_context}
 
 ## 你的职责
 你只负责：
@@ -498,7 +515,7 @@ class FloodAgent:
         )
 
         self.skills: List[Skill] = skills if skills is not None else SKILL_REGISTRY
-        self.base_tools: List[BaseTool] = [get_skill, search_artifacts, read_artifact, knowledge_search, web_search, search_memory]
+        self.base_tools: List[BaseTool] = [get_skill, search_artifacts, read_artifact, knowledge_search, web_search, search_memory, update_project_instructions]
 
         skill_catalog = "\n".join(
             f"- {s.name}: {s.description}" for s in self.skills
@@ -541,9 +558,51 @@ class FloodAgent:
         if enable_chronos_warmup:
             self._warmup_chronos()
 
+    @staticmethod
+    def _load_project_context() -> str:
+        parts = []
+
+        global_path = Path.home() / ".floodagent" / "AGENTS.md"
+        global_ctx = FloodAgent._read_agents_md(global_path, label="全局级指令")
+        if global_ctx:
+            parts.append(global_ctx)
+
+        project_path = Path(__file__).resolve().parent.parent / "AGENTS.md"
+        cwd_path = Path.cwd() / "AGENTS.md"
+        project_ctx = FloodAgent._read_agents_md(cwd_path, label="项目级指令")
+        if not project_ctx:
+            project_ctx = FloodAgent._read_agents_md(project_path, label="项目级指令")
+        if project_ctx:
+            parts.append(project_ctx)
+
+        return "\n\n".join(parts)
+
+    @staticmethod
+    def _read_agents_md(path: Path, label: str = "项目级指令") -> str:
+        if not path.exists():
+            return ""
+        try:
+            content = path.read_text(encoding="utf-8").strip()
+            if not content:
+                return ""
+            lines = content.splitlines()
+            filtered = [line for line in lines if not line.startswith("#")]
+            body = "\n".join(line for line in filtered if line.strip())
+            if not body:
+                return ""
+            return f"## {label}（来自 {path.name}）\n{body}"
+        except Exception as e:
+            logger.warning(f"读取 {path} 失败: {e}")
+            return ""
+
     def _build_prompt(self, system_prompt: str, *, include_memory: bool = True, include_chat_history: bool = True) -> ChatPromptTemplate:
+        formatted = system_prompt.format(
+            skill_catalog=self._skill_catalog,
+            current_time_context="{current_time_context}",
+            project_context="{project_context}",
+        )
         messages: List[Any] = [
-            ("system", system_prompt.format(skill_catalog=self._skill_catalog, current_time_context="{current_time_context}")),
+            ("system", formatted),
         ]
         if include_memory:
             messages.append(MessagesPlaceholder(variable_name="long_term_memory", optional=True))
@@ -1759,6 +1818,7 @@ class FloodAgent:
             "input": user_input,
             "current_time_context": self._get_current_time_context(),
             "current_system_context": self._get_current_system_context(),
+            "project_context": self._load_project_context(),
         }
 
         if include_session_context:
