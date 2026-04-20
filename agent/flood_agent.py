@@ -2223,6 +2223,7 @@ class FloodAgent:
             result_holder: Dict[str, Any] = {}
             last_summary_text = ""
             saw_native_reasoning = False
+            saw_token = False
 
             def normalize_summary_text(text: str) -> str:
                 normalized = re.sub(r'\s+', ' ', str(text or '')).strip()
@@ -2377,6 +2378,8 @@ class FloodAgent:
                 if event_type in {"reasoning", "token", "search_result"}:
                     if event_type == "reasoning" and str(content or "").strip():
                         saw_native_reasoning = True
+                    if event_type == "token":
+                        saw_token = True
                     yield {"type": event_type, "content": str(content or "")}
                     continue
                 if event_type in {"tool_status", "tool_result"}:
@@ -2396,7 +2399,7 @@ class FloodAgent:
 
             full_tool_calls.extend(loop_state.tool_calls)
             full_answer = loop_state.final_output
-            if full_answer:
+            if full_answer and not saw_token:
                 yield {"type": "token", "content": full_answer}
 
             if full_answer:

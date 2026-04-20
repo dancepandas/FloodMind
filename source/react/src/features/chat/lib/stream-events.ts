@@ -129,13 +129,13 @@ export function applyStreamEvent(data: Record<string, any>, handlers: StreamHand
 
     const toolName = data.tool_name || "";
     const rawContent = data.content || "";
-    let refs: ReferenceLink[] = [];
+    let refs: ReferenceLink[] | null = null;
     if (toolName === "knowledge_search") {
       refs = parseKnowledgeReferences(rawContent);
     } else if (toolName === "web_search") {
       refs = parseWebReferences(rawContent);
     }
-    if (refs.length > 0) {
+    if (refs !== null) {
       const seen = new Set<string>();
       const deduped = refs.filter((r) => {
         const key = (r.url || r.title || "").toLowerCase();

@@ -256,8 +256,28 @@ class ExecPythonFileInput(BaseModel):
     workdir: str = Field(default="", description="工作目录，可选；默认使用脚本所在目录")
 
 
+def _strip_session_prefix(path_str: str) -> str:
+    """剥离 LLM 误加的 data/sessions/<id>/outputs/ 或 data/sessions/<id>/ 前缀。
+    
+    LLM 经常传入 data/sessions/xxx/result.py 这样的路径，如果直接拼到 output_dir 
+    会变成 <output_dir>/data/sessions/xxx/result.py（路径嵌套）。
+    """
+    s = path_str.replace("\\", "/")
+    m = re.match(r"^data/sessions/[^/]+/outputs/(.+)$", s)
+    if m:
+        return m.group(1)
+    m = re.match(r"^data/sessions/[^/]+/(.+)$", s)
+    if m:
+        return m.group(1)
+    m = re.match(r"^data/sessions/(.+)$", s)
+    if m:
+        return m.group(1)
+    return path_str
+
+
 def _resolve_path(path_str: str) -> Path:
     """解析路径：绝对路径直接用，相对路径优先从 session output 目录解析，再 fallback 到项目根。"""
+    path_str = _strip_session_prefix(path_str)
     p = Path(path_str)
     if p.is_absolute():
         return p.resolve()
@@ -972,9 +992,7 @@ def exec_python_file(
             workdir=workdir,
         )
 
-    script_file = Path(script_path)
-    if not script_file.is_absolute():
-        script_file = (_PROJECT_ROOT / script_file).resolve()
+    script_file = _resolve_path(script_path)
 
     if not script_file.exists() or not script_file.is_file():
         return _finalize_tool_output(
@@ -1103,8 +1121,11 @@ def write_text_file(file_path: str = "", content: str = "", encoding: str = "utf
     适用于生成临时 Python 脚本、JSON 文件、CSV 文件或其他文本文件，
     可避免通过 PowerShell here-string 或复杂转义来写文件。
 
+    文件会自动写入当前会话的输出目录。file_path 只写文件名（如 generate_data.py），
+    不要加任何目录前缀（不要写 data/sessions/xxx.py，否则路径嵌套出错）。
+
     Args:
-        file_path: 要写入的文件路径
+        file_path: 要写入的文件名或路径。只写文件名即可（如 result.json），不要加 data/sessions/ 等目录前缀
         content: 完整文件内容
         encoding: 文件编码
     """
@@ -1134,9 +1155,7 @@ def write_text_file(file_path: str = "", content: str = "", encoding: str = "utf
             encoding=encoding,
         )
 
-    target_file = Path(file_path)
-    if not target_file.is_absolute():
-        target_file = (_PROJECT_ROOT / target_file).resolve()
+    target_file = _resolve_path(file_path)
 
     try:
         target_file.parent.mkdir(parents=True, exist_ok=True)

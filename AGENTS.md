@@ -66,12 +66,40 @@ data/           运行时数据（sessions、vector_store、tool_error_memory）
 - 不添加非必要注释
 - 使用 logging 模块记录日志，不用 print
 
+## word默认风格
+- 正文中文字体使用`宋体小四号`
+- 正文英文字体使用`Times New Roman小四号`
+- 正文文本格式`首行缩进两字符，两端对齐，单倍行距`
+- 文本题目使用`黑体小二号，段后1行`
+- 一级标题使用`黑体四号，段后1行`
+- 二级标题使用`黑体小四号，段后1行`
+- 三级标题使用`宋体小四号，段后1行`
+- 表格表名使用`中文宋体五号，英文Times New Roman五号`
+- 表格内字体使用`中文宋体五号，英文Times New Roman五号`
+- 图名使用`中文宋体五号，英文Times New Roman五号`
+
+## 绘图默认风格
+- 必须设置图例
+- **必须严格按以下模板编写绘图脚本开头**（import 顺序不可变，`mpl.use('Agg')` 必须在 `import pyplot` 之前）：
+```python
+import matplotlib as mpl
+mpl.use('Agg')
+import matplotlib.pyplot as plt
+from matplotlib.font_manager import fontManager
+
+for f in fontManager.ttflist:
+    if f.name in ('SimSun', '宋体', 'Noto Sans CJK SC', 'WenQuanYi Zen Hei'):
+        mpl.rcParams['font.sans-serif'] = [f.name, 'Times New Roman'] + mpl.rcParams['font.sans-serif']
+        break
+mpl.rcParams['font.family'] = 'sans-serif'
+mpl.rcParams['axes.unicode_minus'] = False
+```
+
 ## 常见陷阱
 - DashScope 的 reasoning_content 可能返回增量或累计文本，回调中需要兼容两种模式
 - Qwen 模型的 tool_call 参数有时会以 JSON 字符串形式传入，需要 `_parse_json_if_needed` 兼容
 - Chronos 模型首次加载较慢（~30s），需要预热
 - Excel sheet 名称最长 31 字符，stationCode 过长时会被截断
-- matplotlib 在无头环境必须设置 `MPLBACKEND=Agg`
 - 脚本输出路径只写文件名（`result.json`），不要写 `data/sessions/.../result.json`，否则路径嵌套导致文件找不到
 - Excel sheet 名称最长 31 字符，stationCode 过长时会被截断
 - matplotlib 在无头环境必须设置 `MPLBACKEND=Agg`
