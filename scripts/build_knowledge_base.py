@@ -8,7 +8,6 @@
 
 用法：
   python scripts/build_knowledge_base.py --input ./docs
-  python scripts/build_knowledge_base.py --input ./docs --output ./my_vector_db
   python scripts/build_knowledge_base.py --input ./docs --dry-run
 """
 
