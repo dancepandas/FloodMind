@@ -32,10 +32,23 @@ from tools.base_tools import (
     web_search,
     add_memory,
     search_memory,
+    update_project_instructions,
     reset_retry_guard,
     set_skill_registry,
     set_rag_config,
     set_memory_instance,
+)
+
+from tools.agent_tool import (
+    AgentTool,
+    PermissionBehavior,
+    PermissionResult,
+    ValidationResult,
+    UpdateProjectInstructionsInput,
+    check_dangerous_command,
+    check_path_permission,
+    build_agent_tool,
+    get_agents_md_path,
 )
 
 __all__ = [
@@ -53,8 +66,18 @@ __all__ = [
     'web_search',
     'add_memory',
     'search_memory',
+    'update_project_instructions',
     'reset_retry_guard',
     'set_skill_registry',
     'set_rag_config',
     'set_memory_instance',
+    'AgentTool',
+    'PermissionBehavior',
+    'PermissionResult',
+    'ValidationResult',
+    'check_dangerous_command',
+    'check_path_permission',
+    'build_agent_tool',
+    'UpdateProjectInstructionsInput',
+    'get_agents_md_path',
 ]

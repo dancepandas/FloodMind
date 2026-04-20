@@ -29,6 +29,8 @@ from typing import Optional, Dict, Any, List, Union
 from langchain_core.tools import tool
 from pydantic import BaseModel, Field
 
+from tools.agent_tool import check_dangerous_command, check_path_permission, PermissionBehavior, UpdateProjectInstructionsInput, get_agents_md_path
+
 logger = logging.getLogger(__name__)
 
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -190,10 +192,34 @@ def _apply_retry_guard(tool_name: str, signature: str, output: str) -> str:
     return output
 
 
+_MAX_INLINE_OUTPUT_CHARS = 8000
+_TRUNCATED_OUTPUT_DIR = _PROJECT_ROOT / "data" / "truncated_outputs"
+
+
+def _save_truncated_output(tool_name: str, output: str) -> Optional[str]:
+    try:
+        _TRUNCATED_OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+        safe_name = re.sub(r'[^\w]', '_', tool_name)
+        filename = f"{safe_name}_{ts}.txt"
+        path = _TRUNCATED_OUTPUT_DIR / filename
+        path.write_text(output, encoding="utf-8")
+        return str(path)
+    except Exception as e:
+        logger.warning(f"保存截断输出失败: {e}")
+        return None
+
+
 def _finalize_tool_output(tool_name: str, output: str, **signature_parts: Any) -> str:
     _record_tool_error_memory(tool_name, output, **signature_parts)
     signature = _build_call_signature(tool_name, **signature_parts)
-    return _apply_retry_guard(tool_name, signature, output)
+    result = _apply_retry_guard(tool_name, signature, output)
+    if len(result) > _MAX_INLINE_OUTPUT_CHARS:
+        saved_path = _save_truncated_output(tool_name, result)
+        if saved_path:
+            preview = result[:_MAX_INLINE_OUTPUT_CHARS]
+            result = f"{preview}\n\n... [输出过长，已截断。完整结果已保存至: {saved_path}]"
+    return result
 
 
 class GetSkillInput(BaseModel):
@@ -812,6 +838,15 @@ def exec_bash(command: str = "", timeout: int = 120) -> str:
     if not command:
         return _finalize_tool_output("exec_bash", "错误：命令不能为空", command=command, timeout=timeout)
 
+    danger_check = check_dangerous_command(command)
+    if danger_check.behavior == PermissionBehavior.DENY:
+        return _finalize_tool_output(
+            "exec_bash",
+            f"权限拒绝：{danger_check.reason}",
+            command=command,
+            timeout=timeout,
+        )
+
     normalized_command = command.lower()
     if normalized_command.startswith("powershell ") or normalized_command.startswith("powershell.exe ") or normalized_command.startswith("pwsh ") or normalized_command.startswith("pwsh.exe ") or normalized_command.startswith("bash ") or normalized_command.startswith("sh "):
         return _finalize_tool_output(
@@ -1047,6 +1082,15 @@ def write_text_file(file_path: str = "", content: str = "", encoding: str = "utf
         return _finalize_tool_output(
             "write_text_file",
             "错误：file_path 参数不能为空",
+            file_path=file_path,
+            encoding=encoding,
+        )
+
+    perm = check_path_permission(file_path, require_write=True)
+    if perm.behavior == PermissionBehavior.DENY:
+        return _finalize_tool_output(
+            "write_text_file",
+            f"权限拒绝：{perm.reason}",
             file_path=file_path,
             encoding=encoding,
         )
@@ -1918,6 +1962,210 @@ def search_memory(
         return _finalize_tool_output("search_memory", f"搜索记忆失败: {str(e)}", keywords=keywords, search_type=search_type, max_results=max_results)
 
 
+def _backup_agents_md(path: Path) -> bool:
+    if not path.exists():
+        return True
+    try:
+        bak = path.with_suffix(path.suffix + ".bak")
+        shutil.copy2(path, bak)
+        return True
+    except Exception as e:
+        logger.warning(f"备份 {path} 失败: {e}")
+        return False
+
+
+def _parse_agents_md_sections(content: str) -> List[Dict[str, Any]]:
+    sections = []
+    current_title = ""
+    current_lines: List[str] = []
+    for line in content.splitlines():
+        if line.startswith("## "):
+            if current_title or current_lines:
+                sections.append({"title": current_title, "lines": current_lines[:], "start_h2": True})
+            current_title = line[3:].strip()
+            current_lines = [line]
+        else:
+            current_lines.append(line)
+    if current_title or current_lines:
+        sections.append({"title": current_title, "lines": current_lines[:], "start_h2": True})
+    return sections
+
+
+def _rebuild_agents_md(sections: List[Dict[str, Any]]) -> str:
+    parts: List[str] = []
+    for i, sec in enumerate(sections):
+        body = "\n".join(sec["lines"]).strip()
+        if body:
+            parts.append(body)
+    return "\n\n".join(parts) + "\n"
+
+
+@tool(args_schema=UpdateProjectInstructionsInput)
+def update_project_instructions(
+    action: str = "append",
+    content: str = "",
+    section_title: str = "",
+    scope: str = "project",
+) -> str:
+    """
+    修改项目级或全局 AGENTS.md 指令文件，用于持久化用户偏好和规则。
+
+    写入前会自动备份原文件。此工具影响所有后续对话，请务必先向用户确认。
+
+    Args:
+        action: 操作类型
+            - append: 在文件末尾追加内容（自动创建"用户偏好"章节或追加到已有章节）
+            - replace_section: 替换指定章节的全部内容
+            - remove_section: 删除指定章节
+        content: 要追加或替换的内容（纯文本即可，工具自动处理格式）
+        section_title: 章节标题（replace_section/remove_section 时必填）
+        scope: 作用域
+            - project: 本项目的 AGENTS.md
+            - global: 全局 ~/.floodagent/AGENTS.md（跨项目生效）
+    """
+    from tools.agent_tool import get_agents_md_path
+
+    parsed = _parse_json_if_needed(action)
+    if parsed and isinstance(parsed, dict):
+        action = parsed.get("action", action)
+        content = parsed.get("content", content)
+        section_title = parsed.get("section_title", section_title)
+        scope = parsed.get("scope", scope)
+
+    action = str(action).strip().lower()
+    scope = str(scope).strip().lower()
+    content = str(content).strip()
+    section_title = str(section_title).strip()
+
+    if action not in ("append", "replace_section", "remove_section"):
+        return _finalize_tool_output(
+            "update_project_instructions",
+            "错误：action 仅支持 append、replace_section、remove_section",
+            action=action, scope=scope,
+        )
+
+    if scope not in ("project", "global"):
+        return _finalize_tool_output(
+            "update_project_instructions",
+            "错误：scope 仅支持 project 或 global",
+            action=action, scope=scope,
+        )
+
+    if action in ("replace_section", "remove_section") and not section_title:
+        return _finalize_tool_output(
+            "update_project_instructions",
+            "错误：replace_section 和 remove_section 需要提供 section_title",
+            action=action, scope=scope,
+        )
+
+    if action in ("append", "replace_section") and not content:
+        return _finalize_tool_output(
+            "update_project_instructions",
+            "错误：append 和 replace_section 需要提供 content",
+            action=action, scope=scope,
+        )
+
+    target_path = get_agents_md_path(scope)
+
+    if not _backup_agents_md(target_path):
+        return _finalize_tool_output(
+            "update_project_instructions",
+            f"备份失败，中止写入: {target_path}",
+            action=action, scope=scope,
+        )
+
+    existing = ""
+    if target_path.exists():
+        try:
+            existing = target_path.read_text(encoding="utf-8")
+        except Exception as e:
+            return _finalize_tool_output(
+                "update_project_instructions",
+                f"读取 {target_path} 失败: {e}",
+                action=action, scope=scope,
+            )
+
+    if action == "append":
+        new_section = f"\n## 用户偏好\n\n{content}\n"
+        sections = _parse_agents_md_sections(existing)
+        user_pref_idx = None
+        for i, sec in enumerate(sections):
+            if sec["title"].strip() == "用户偏好":
+                user_pref_idx = i
+                break
+
+        if user_pref_idx is not None:
+            body_lines = sections[user_pref_idx]["lines"]
+            last_line = body_lines[-1] if body_lines else ""
+            if not last_line.endswith("\n"):
+                body_lines.append("")
+            body_lines.append(content)
+            body_lines.append("")
+        else:
+            sections.append({"title": "用户偏好", "lines": [f"## 用户偏好", "", content, ""], "start_h2": True})
+
+        new_content = _rebuild_agents_md(sections)
+
+    elif action == "replace_section":
+        sections = _parse_agents_md_sections(existing)
+        found = False
+        for i, sec in enumerate(sections):
+            if sec["title"].strip() == section_title:
+                sections[i] = {"title": section_title, "lines": [f"## {section_title}", "", content, ""], "start_h2": True}
+                found = True
+                break
+        if not found:
+            sections.append({"title": section_title, "lines": [f"## {section_title}", "", content, ""], "start_h2": True})
+        new_content = _rebuild_agents_md(sections)
+
+    elif action == "remove_section":
+        sections = _parse_agents_md_sections(existing)
+        original_count = len(sections)
+        sections = [s for s in sections if s["title"].strip() != section_title]
+        if len(sections) == original_count:
+            return _finalize_tool_output(
+                "update_project_instructions",
+                f"未找到章节 '{section_title}'，文件未修改",
+                action=action, scope=scope, section_title=section_title,
+            )
+        new_content = _rebuild_agents_md(sections)
+
+    else:
+        return _finalize_tool_output(
+            "update_project_instructions",
+            f"未知操作: {action}",
+            action=action, scope=scope,
+        )
+
+    try:
+        target_path.parent.mkdir(parents=True, exist_ok=True)
+        target_path.write_text(new_content, encoding="utf-8")
+        scope_label = "全局" if scope == "global" else "项目"
+        return _finalize_tool_output(
+            "update_project_instructions",
+            f"已更新{scope_label}级指令文件: {target_path}\n操作: {action}\n请告知用户：此偏好将在后续所有对话中生效。",
+            action=action, scope=scope, section_title=section_title,
+        )
+    except Exception as e:
+        logger.error(f"写入 {target_path} 失败: {e}", exc_info=True)
+        bak = target_path.with_suffix(target_path.suffix + ".bak")
+        if bak.exists():
+            try:
+                shutil.copy2(bak, target_path)
+                return _finalize_tool_output(
+                    "update_project_instructions",
+                    f"写入失败已自动回滚: {e}",
+                    action=action, scope=scope,
+                )
+            except Exception:
+                pass
+        return _finalize_tool_output(
+            "update_project_instructions",
+            f"写入失败: {e}（备份文件: {bak}）",
+            action=action, scope=scope,
+        )
+
+
 __all__ = [
     'get_skill',
     'run_script',
@@ -1933,6 +2181,7 @@ __all__ = [
     'web_search',
     'add_memory',
     'search_memory',
+    'update_project_instructions',
     'reset_retry_guard',
     'set_skill_registry',
     'set_rag_config',
