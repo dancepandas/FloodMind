@@ -7,9 +7,52 @@ import {
 } from "@/features/chat/lib/message-blocks";
 import { createLogger } from "@/lib/logger";
 import { uuid } from "@/lib/utils";
-import type { ChatMessage, GeneratedArtifact, ToolActivity, WorkflowPlan } from "@/types/app";
+import type { ChatMessage, GeneratedArtifact, ReferenceLink, ToolActivity, WorkflowPlan } from "@/types/app";
 
 const log = createLogger("Stream");
+
+function parseKnowledgeReferences(content: string): ReferenceLink[] {
+  const refs: ReferenceLink[] = [];
+  const pattern = /【参考\s*\d+】\s*\(来源:\s*([^|)]+)\|/g;
+  let match;
+  while ((match = pattern.exec(content)) !== null) {
+    const source = match[1].trim();
+    const filename = source.split("/").pop() || source;
+    refs.push({ title: filename, source });
+  }
+  return refs;
+}
+
+function parseWebReferences(content: string): ReferenceLink[] {
+  const refs: ReferenceLink[] = [];
+  try {
+    const items = JSON.parse(content);
+    if (Array.isArray(items)) {
+      for (const item of items) {
+        if (item.url || item.title) {
+          refs.push({
+            title: item.title || item.url || "",
+            url: item.url,
+            source: item.source || item.website || "",
+          });
+        }
+      }
+    }
+  } catch {
+    const urlPattern = /"url"\s*:\s*"([^"]+)"/g;
+    const titlePattern = /"title"\s*:\s*"([^"]+)"/g;
+    const urls: string[] = [];
+    const titles: string[] = [];
+    let m;
+    while ((m = urlPattern.exec(content)) !== null) urls.push(m[1]);
+    while ((m = titlePattern.exec(content)) !== null) titles.push(m[1]);
+    const count = Math.max(urls.length, titles.length);
+    for (let i = 0; i < count; i++) {
+      refs.push({ title: titles[i] || urls[i] || "", url: urls[i] });
+    }
+  }
+  return refs;
+}
 
 interface StreamHandlers {
   updateAssistant: (updater: (message: ChatMessage) => ChatMessage) => void;
@@ -83,6 +126,28 @@ export function applyStreamEvent(data: Record<string, any>, handlers: StreamHand
     const contentPreview = (data.content || "").slice(0, 120);
     log.info(`[${eventType}] tool="${data.tool_name}" content=${contentPreview.length > 0 ? `"${contentPreview}…"` : "(empty)"}`);
     pushToolActivity(data.tool_name || "tool", data.content || "", "done");
+
+    const toolName = data.tool_name || "";
+    const rawContent = data.content || "";
+    let refs: ReferenceLink[] = [];
+    if (toolName === "knowledge_search") {
+      refs = parseKnowledgeReferences(rawContent);
+    } else if (toolName === "web_search") {
+      refs = parseWebReferences(rawContent);
+    }
+    if (refs.length > 0) {
+      const seen = new Set<string>();
+      const deduped = refs.filter((r) => {
+        const key = (r.url || r.title || "").toLowerCase();
+        if (seen.has(key)) return false;
+        seen.add(key);
+        return true;
+      });
+      updateAssistant((message) => ({
+        ...message,
+        references: deduped,
+      }));
+    }
     return;
   }
 

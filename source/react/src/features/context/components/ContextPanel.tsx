@@ -1,16 +1,15 @@
-import { FileText, ListTree, Loader2, Paperclip, Wrench, X } from "lucide-react";
-import type { FilePreview, ToolActivity, UploadedFileItem, WorkflowPlan } from "@/types/app";
+import { FileText, ListTree, Paperclip, X } from "lucide-react";
+import type { FilePreview, UploadedFileItem, WorkflowPlan } from "@/types/app";
 
 interface ContextPanelProps {
   files: UploadedFileItem[];
-  tools: ToolActivity[];
   workflow?: WorkflowPlan | null;
   selectedPreview?: FilePreview | null;
   onPreviewFile: (fileId: string) => void;
   onClosePreview: () => void;
 }
 
-export function ContextPanel({ files, tools, workflow, selectedPreview, onPreviewFile, onClosePreview }: ContextPanelProps) {
+export function ContextPanel({ files, workflow, selectedPreview, onPreviewFile, onClosePreview }: ContextPanelProps) {
   return (
     <div className="w-[340px] h-full bg-[rgba(246,250,255,0.92)] border-l border-border flex flex-col flex-shrink-0 overflow-y-auto backdrop-blur-sm">
       <div className="p-4 border-b border-border">
@@ -51,32 +50,6 @@ export function ContextPanel({ files, tools, workflow, selectedPreview, onPrevie
             </div>
           </div>
         )}
-      </div>
-
-      <div className="p-4 border-b border-border">
-        <div className="flex items-center gap-2 mb-3 text-foreground font-medium">
-          <Wrench size={18} />
-          <h3>工具执行</h3>
-        </div>
-        <div className="flex max-h-[280px] flex-col gap-2 overflow-y-auto pr-1">
-          {tools.length === 0 ? (
-            <div className="text-sm text-muted-foreground rounded-lg border border-dashed border-border px-3 py-4 text-center">工具过程会显示在这里</div>
-          ) : (
-            tools.map((tool) => (
-              <div key={tool.id} className="p-3 bg-background border border-border rounded-lg shadow-sm flex flex-col gap-2 min-h-0">
-                <div className="flex items-center justify-between gap-2">
-                  <span className="text-sm font-medium text-foreground truncate">{tool.toolName}</span>
-                  {tool.status === "running" && <Loader2 size={14} className="text-primary animate-spin" />}
-                  {tool.status === "done" && <span className="text-[11px] text-primary font-semibold">完成</span>}
-                  {tool.status === "error" && <span className="text-[11px] text-destructive font-semibold">失败</span>}
-                </div>
-                <div className="max-h-28 overflow-y-auto text-xs bg-muted/50 p-2 rounded text-muted-foreground font-mono whitespace-pre-wrap break-all">
-                  {tool.content}
-                </div>
-              </div>
-            ))
-          )}
-        </div>
       </div>
 
       <div className="p-4">

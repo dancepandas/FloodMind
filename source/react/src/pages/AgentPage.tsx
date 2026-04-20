@@ -50,7 +50,6 @@ const AgentPage = () => {
         />
         <ContextPanel
           files={uploadedFiles}
-          tools={toolActivities}
           workflow={workflow}
           selectedPreview={selectedPreview}
           onPreviewFile={handlePreviewFile}

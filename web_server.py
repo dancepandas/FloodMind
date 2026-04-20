@@ -945,6 +945,80 @@ def get_session_output_file(session_id: str, filename: str):
         return jsonify({'error': str(e)}), 500
 
 
+@app.route('/api/logs')
+def download_logs():
+    """打包下载 logs/ 目录下所有日志文件"""
+    try:
+        import zipfile
+        import io
+
+        logs_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'logs')
+        if not os.path.isdir(logs_dir):
+            return jsonify({'error': '日志目录不存在'}), 404
+
+        log_files = [f for f in os.listdir(logs_dir) if f.endswith('.log') or f.endswith('.txt')]
+        if not log_files:
+            return jsonify({'error': '没有日志文件'}), 404
+
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, 'w', zipfile.ZIP_DEFLATED) as zf:
+            for fname in sorted(log_files):
+                fpath = os.path.join(logs_dir, fname)
+                zf.write(fpath, fname)
+        buf.seek(0)
+
+        ts = datetime.now().strftime('%Y%m%d_%H%M%S')
+        return send_file(
+            buf,
+            mimetype='application/zip',
+            as_attachment=True,
+            download_name=f'logs_{ts}.zip',
+        )
+    except Exception as e:
+        logger.error(f"下载日志失败: {e}", exc_info=True)
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/sessions/<session_id>/outputs/download')
+def download_session_outputs(session_id: str):
+    """打包下载会话 outputs 目录下所有文件"""
+    try:
+        import zipfile
+        import io
+
+        output_dir = get_session_output_dir(session_id)
+        if not os.path.isdir(output_dir):
+            return jsonify({'error': '输出目录不存在'}), 404
+
+        all_files = []
+        for root, _dirs, files in os.walk(output_dir):
+            for fname in files:
+                fpath = os.path.join(root, fname)
+                arcname = os.path.relpath(fpath, output_dir)
+                all_files.append((fpath, arcname))
+
+        if not all_files:
+            return jsonify({'error': '没有输出文件'}), 404
+
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, 'w', zipfile.ZIP_DEFLATED) as zf:
+            for fpath, arcname in all_files:
+                zf.write(fpath, arcname)
+        buf.seek(0)
+
+        ts = datetime.now().strftime('%Y%m%d_%H%M%S')
+        safe_id = secure_filename(session_id)
+        return send_file(
+            buf,
+            mimetype='application/zip',
+            as_attachment=True,
+            download_name=f'{safe_id}_outputs_{ts}.zip',
+        )
+    except Exception as e:
+        logger.error(f"下载会话输出失败: {e}", exc_info=True)
+        return jsonify({'error': str(e)}), 500
+
+
 # ============================================
 # API 路由
 # ============================================

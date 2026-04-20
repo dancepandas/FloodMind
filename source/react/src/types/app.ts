@@ -11,7 +11,7 @@ export interface MessageBlock {
 
 export interface ChatMessage {
   id: string;
-  role: "user" | "assistant";
+  role: "user" | "assistant" | "system";
   content: string;
   reasoning?: string;
   rawReasoning?: string;
@@ -60,6 +60,24 @@ export interface GeneratedArtifact {
   download_url?: string;
   image_url?: string;
   image_data?: string;
+}
+
+export interface ReferenceLink {
+  title: string;
+  url?: string;
+  source?: string;
+}
+
+export interface ChatMessage {
+  id: string;
+  role: "user" | "assistant" | "system";
+  content: string;
+  reasoning?: string;
+  rawReasoning?: string;
+  blocks: MessageBlock[];
+  timestamp: string;
+  artifacts?: GeneratedArtifact[];
+  references?: ReferenceLink[];
 }
 
 export interface ToolActivity {

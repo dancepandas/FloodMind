@@ -181,3 +181,13 @@ export function createChatRequest(sessionId: string, message: string, uploadedFi
   });
   return response;
 }
+
+export function downloadLogsZip(): void {
+  log.info("downloadLogsZip");
+  window.open(buildApiUrl("/api/logs"), "_blank");
+}
+
+export function downloadSessionOutputs(sessionId: string): void {
+  log.info("downloadSessionOutputs", sessionId);
+  window.open(buildApiUrl(`/api/sessions/${encodeURIComponent(sessionId)}/outputs/download`), "_blank");
+}

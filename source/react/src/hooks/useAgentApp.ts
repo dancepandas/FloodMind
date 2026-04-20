@@ -2,6 +2,8 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   createChatRequest,
   deleteSession,
+  downloadLogsZip,
+  downloadSessionOutputs,
   fetchFilePreview,
   fetchSession,
   fetchSessionFiles,
@@ -14,11 +16,13 @@ import {
   updateSessionConfig,
   uploadFile,
 } from "@/api/agent";
+import { buildApiUrl } from "@/api/client";
 import {
   appendThoughtBlock,
   attachArtifact,
   createAssistantMessage,
   createUserMessage,
+  createSystemMessage,
   finalizeThoughtBlocks,
   fromServerMessage,
   setAssistantFinalContent,
@@ -94,35 +98,11 @@ export function useAgentApp() {
   }, []);
 
   const loadSession = useCallback(async (targetSessionId: string) => {
-    log.info("loadSession", targetSessionId);
-    const detail = await fetchSession(targetSessionId);
+    if (targetSessionId === sessionId) return;
+    log.info("loadSession: switching to", targetSessionId);
     setSessionId(targetSessionId);
-    setSelectedPreview(null);
-    setToolActivities([]);
-    setWorkflow(null);
     localStorage.setItem(STORAGE_KEY, targetSessionId);
-    const restoredMessages = (detail.messages || []).map(fromServerMessage);
-    log.info("loadSession → restored", restoredMessages.length, "messages");
-    const restoredArtifacts = (detail.artifacts || [])
-      .map((artifact) => normalizeArtifact(artifact as Record<string, unknown>))
-      .filter((artifact): artifact is GeneratedArtifact => artifact !== null);
-    if (restoredArtifacts.length > 0) {
-      log.info("loadSession →", restoredArtifacts.length, "artifacts to attach");
-      const lastAssistantIndex = [...restoredMessages].map((message, index) => ({ message, index })).reverse().find(({ message }) => message.role === "assistant")?.index;
-      if (lastAssistantIndex !== undefined) {
-        let targetMessage = restoredMessages[lastAssistantIndex];
-        restoredArtifacts.forEach((artifact) => {
-          targetMessage = attachArtifact(targetMessage, artifact);
-        });
-        restoredMessages[lastAssistantIndex] = targetMessage;
-      }
-    }
-    setMessages(restoredMessages);
-    await refreshFiles(targetSessionId);
-    if (detail.in_progress?.workflow) {
-      setWorkflow(detail.in_progress.workflow);
-    }
-  }, [refreshFiles]);
+  }, [sessionId]);
 
   useEffect(() => {
     localStorage.setItem(STORAGE_KEY, sessionId);
@@ -132,32 +112,67 @@ export function useAgentApp() {
     let active = true;
     log.info("App init effect: sessionId=", sessionId);
     (async () => {
+      setSelectedPreview(null);
+      setToolActivities([]);
+      setWorkflow(null);
+      let loadedMessages: ChatMessage[] = [];
       await initAgent(sessionId, config);
       if (!active) return;
       await refreshSessionIndex();
       try {
-        await loadSession(sessionId);
+        const detail = await fetchSession(sessionId);
         if (!active) return;
+        const restoredMessages = (detail.messages || []).map(fromServerMessage);
+        log.info("loadSession → restored", restoredMessages.length, "messages");
+        const restoredArtifacts = (detail.artifacts || [])
+          .map((artifact) => normalizeArtifact(artifact as Record<string, unknown>))
+          .filter((artifact): artifact is GeneratedArtifact => artifact !== null);
+        if (restoredArtifacts.length > 0) {
+          log.info("loadSession →", restoredArtifacts.length, "artifacts to attach");
+          const lastAssistantIndex = [...restoredMessages].map((message, index) => ({ message, index })).reverse().find(({ message }) => message.role === "assistant")?.index;
+          if (lastAssistantIndex !== undefined) {
+            let targetMessage = restoredMessages[lastAssistantIndex];
+            restoredArtifacts.forEach((artifact) => {
+              targetMessage = attachArtifact(targetMessage, artifact);
+            });
+            restoredMessages[lastAssistantIndex] = targetMessage;
+          }
+        }
+        loadedMessages = restoredMessages;
+        setMessages(restoredMessages);
+        if (detail.in_progress?.workflow) {
+          setWorkflow(detail.in_progress.workflow);
+        }
       } catch (err) {
         log.warn("loadSession failed, resetting state", err);
         setMessages([]);
         setToolActivities([]);
         setWorkflow(null);
-        await refreshFiles(sessionId);
       }
+      await refreshFiles(sessionId);
+      if (!active) return;
       const status = await fetchSessionStatus(sessionId);
+      if (!active) return;
       setRuntimeState({ isPaused: !!status.session_state?.is_paused });
       if (status.in_progress?.message_id) {
-        log.info("App init → restoring in_progress message", status.in_progress.message_id);
-        const restored = createAssistantMessage(status.in_progress.message_id);
-        let hydrated = restored;
-        if (status.in_progress.reasoning) hydrated = appendThoughtBlock(hydrated, status.in_progress.reasoning, false);
-        if (status.in_progress.content) hydrated = setAssistantFinalContent(hydrated, status.in_progress.content);
-        (status.in_progress.artifacts || []).forEach((artifact) => {
-          hydrated = attachArtifact(hydrated, artifact);
-        });
-        setMessages((prev) => [...prev, hydrated]);
-        setWorkflow(status.in_progress.workflow || null);
+        const inProgressId = status.in_progress.message_id;
+        const alreadyExists = loadedMessages.some(
+          (m) => m.id === inProgressId || (m.role === "assistant" && m.content === (status.in_progress?.content || "")),
+        );
+        if (alreadyExists) {
+          log.info("App init → in_progress already in restored messages, skipping", inProgressId);
+        } else {
+          log.info("App init → restoring in_progress message", inProgressId);
+          const restored = createAssistantMessage(inProgressId);
+          let hydrated = restored;
+          if (status.in_progress.reasoning) hydrated = appendThoughtBlock(hydrated, status.in_progress.reasoning, false);
+          if (status.in_progress.content) hydrated = setAssistantFinalContent(hydrated, status.in_progress.content);
+          (status.in_progress.artifacts || []).forEach((artifact) => {
+            hydrated = attachArtifact(hydrated, artifact);
+          });
+          setMessages((prev) => [...prev, hydrated]);
+        }
+        if (status.in_progress.workflow) setWorkflow(status.in_progress.workflow);
       }
     })().catch((err) => {
       log.error("App init effect failed", err);
@@ -166,7 +181,7 @@ export function useAgentApp() {
       active = false;
       readerRef.current?.cancel().catch(() => undefined);
     };
-  }, [sessionId, config, refreshFiles, refreshSessionIndex, loadSession]);
+  }, [sessionId, config, refreshFiles, refreshSessionIndex]);
 
   const pushToolActivity = useCallback((toolName: string, content: string, status: ToolActivity["status"]) => {
     setToolActivities((prev) => {
@@ -195,9 +210,77 @@ export function useAgentApp() {
     });
   }, []);
 
+  const SLASH_COMMANDS: Record<string, string> = {
+    "/help": "显示所有可用命令",
+    "/logs": "下载应用日志文件（zip）",
+    "/files": "下载当前会话输出文件（zip）",
+    "/clear": "清除当前会话记忆",
+    "/status": "查看当前会话状态",
+    "/config": "查看当前模型配置",
+  };
+
+  const handleSlashCommand = useCallback((cmd: string): boolean => {
+    const parts = cmd.split(/\s+/);
+    const command = parts[0].toLowerCase();
+
+    if (!SLASH_COMMANDS[command]) return false;
+
+    setInputValue("");
+
+    switch (command) {
+      case "/help": {
+        const lines = Object.entries(SLASH_COMMANDS).map(([k, v]) => `  ${k.padEnd(10)} ${v}`);
+        setMessages((prev) => [...prev, createSystemMessage(`可用命令：\n${lines.join("\n")}`)]);
+        break;
+      }
+      case "/logs": {
+        setMessages((prev) => [...prev, createSystemMessage("正在下载日志文件...")]);
+        downloadLogsZip();
+        break;
+      }
+      case "/files": {
+        setMessages((prev) => [...prev, createSystemMessage("正在下载会话输出文件...")]);
+        downloadSessionOutputs(sessionId);
+        break;
+      }
+      case "/clear": {
+        fetch(buildApiUrl("/api/clear"), {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ session_id: sessionId }),
+        })
+          .then(() => setMessages((prev) => [...prev, createSystemMessage("会话记忆已清除")]))
+          .catch((err) => setMessages((prev) => [...prev, createSystemMessage(`清除失败: ${err.message}`)]));
+        break;
+      }
+      case "/status": {
+        fetchSessionStatus(sessionId)
+          .then((res) => {
+            const info = JSON.stringify(res, null, 2);
+            setMessages((prev) => [...prev, createSystemMessage(`会话状态：\n${info}`)]);
+          })
+          .catch((err) => setMessages((prev) => [...prev, createSystemMessage(`获取状态失败: ${err.message}`)]));
+        break;
+      }
+      case "/config": {
+        fetch(buildApiUrl("/api/config"))
+          .then((r) => r.json())
+          .then((data) => {
+            const info = JSON.stringify(data, null, 2);
+            setMessages((prev) => [...prev, createSystemMessage(`模型配置：\n${info}`)]);
+          })
+          .catch((err) => setMessages((prev) => [...prev, createSystemMessage(`获取配置失败: ${err.message}`)]));
+        break;
+      }
+    }
+    return true;
+  }, [sessionId]);
+
   const handleSubmit = useCallback(async () => {
     const content = inputValue.trim();
     if (!content || isStreaming) return;
+
+    if (content.startsWith("/") && handleSlashCommand(content)) return;
 
     log.info("handleSubmit: sending message", content.slice(0, 80));
     const userMessage = createUserMessage(content);
@@ -265,6 +348,7 @@ export function useAgentApp() {
       log.info("handleSubmit: saving session");
       await saveSession(sessionId);
       await refreshSessionIndex();
+      setTimeout(() => { refreshSessionIndex(); }, 5000);
       log.info("handleSubmit: complete");
     }
   }, [config, inputValue, isStreaming, pushToolActivity, refreshSessionIndex, sessionId, uploadedFiles]);

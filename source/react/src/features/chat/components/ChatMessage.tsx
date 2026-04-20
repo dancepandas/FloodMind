@@ -1,8 +1,8 @@
 import { useEffect, useRef, useState } from "react";
-import { ChevronDown, ChevronRight, Bot, User, Download, X, ZoomIn } from "lucide-react";
+import { ChevronDown, ChevronRight, Bot, User, Download, X, ZoomIn, Terminal, ExternalLink, FileText } from "lucide-react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
-import type { ChatMessage as ChatMessageModel, GeneratedArtifact } from "@/types/app";
+import type { ChatMessage as ChatMessageModel, GeneratedArtifact, ReferenceLink } from "@/types/app";
 import { Dialog, DialogContent, DialogTitle, DialogDescription } from "@/components/ui/dialog";
 
 interface ChatMessageProps {
@@ -80,20 +80,25 @@ function ImagePreviewDialog({ artifact, open, onOpenChange }: { artifact: Genera
 
 export function ChatMessage({ message, onToggleThought }: ChatMessageProps) {
   const isUser = message.role === "user";
+  const isSystem = message.role === "system";
   const [previewArtifact, setPreviewArtifact] = useState<GeneratedArtifact | null>(null);
 
   return (
     <div className={`flex w-full mb-6 ${isUser ? "justify-end" : "justify-start"}`}>
       <div className={`flex gap-4 max-w-[85%] ${isUser ? "flex-row-reverse" : "flex-row"}`}>
         <div className="flex-shrink-0 mt-1">
-          <div className={`w-8 h-8 rounded-full flex items-center justify-center shadow-sm ${isUser ? "bg-primary text-primary-foreground" : "bg-muted text-foreground border border-border"}`}>
-            {isUser ? <User size={16} /> : <Bot size={18} />}
+          <div className={`w-8 h-8 rounded-full flex items-center justify-center shadow-sm ${isUser ? "bg-primary text-primary-foreground" : isSystem ? "bg-amber-100 text-amber-700 border border-amber-200" : "bg-muted text-foreground border border-border"}`}>
+            {isUser ? <User size={16} /> : isSystem ? <Terminal size={16} /> : <Bot size={18} />}
           </div>
         </div>
 
         <div className={`flex flex-col gap-2 ${isUser ? "items-end" : "items-start"}`}>
           {isUser ? (
             <div className="px-4 py-2.5 rounded-2xl rounded-tr-sm bg-primary text-primary-foreground shadow-sm text-sm whitespace-pre-wrap">
+              {message.content}
+            </div>
+          ) : isSystem ? (
+            <div className="px-4 py-3 rounded-2xl rounded-tl-sm bg-amber-50 border border-amber-200 shadow-sm text-sm text-amber-900 leading-relaxed whitespace-pre-wrap font-mono">
               {message.content}
             </div>
           ) : (
@@ -161,6 +166,16 @@ export function ChatMessage({ message, onToggleThought }: ChatMessageProps) {
                         )}
                       </div>
                     )}
+                    {!!message.references?.length && message.blocks[message.blocks.length - 1].id === block.id && (
+                      <div className="mt-3 pt-3 border-t border-border/60">
+                        <div className="text-[11px] font-medium text-muted-foreground mb-2">参考来源</div>
+                        <div className="flex flex-col gap-1.5">
+                          {message.references.map((ref, i) => (
+                            <ReferenceItem key={i} reference={ref} index={i + 1} />
+                          ))}
+                        </div>
+                      </div>
+                    )}
                   </div>
                 );
               })}
@@ -178,6 +193,40 @@ export function ChatMessage({ message, onToggleThought }: ChatMessageProps) {
           onOpenChange={(open) => { if (!open) setPreviewArtifact(null); }}
         />
       )}
+    </div>
+  );
+}
+
+function ReferenceItem({ reference, index }: { reference: ReferenceLink; index: number }) {
+  const isWeb = !!reference.url;
+  const displayTitle = reference.title.length > 60 ? reference.title.slice(0, 60) + "…" : reference.title;
+
+  if (isWeb) {
+    return (
+      <a
+        href={reference.url}
+        target="_blank"
+        rel="noopener noreferrer"
+        className="flex items-center gap-2 px-2 py-1.5 rounded-md text-xs hover:bg-muted/60 transition-colors group"
+      >
+        <span className="flex-shrink-0 w-5 h-5 rounded bg-primary/10 text-primary flex items-center justify-center text-[10px] font-semibold">
+          {index}
+        </span>
+        <ExternalLink size={12} className="flex-shrink-0 text-muted-foreground group-hover:text-primary transition-colors" />
+        <span className="truncate text-muted-foreground group-hover:text-foreground transition-colors">{displayTitle}</span>
+        {reference.source && <span className="flex-shrink-0 text-[10px] text-muted-foreground/60 ml-auto">{reference.source}</span>}
+      </a>
+    );
+  }
+
+  return (
+    <div className="flex items-center gap-2 px-2 py-1.5 rounded-md text-xs">
+      <span className="flex-shrink-0 w-5 h-5 rounded bg-primary/10 text-primary flex items-center justify-center text-[10px] font-semibold">
+        {index}
+      </span>
+      <FileText size={12} className="flex-shrink-0 text-muted-foreground" />
+      <span className="truncate text-muted-foreground">{displayTitle}</span>
+      {reference.source && <span className="flex-shrink-0 text-[10px] text-muted-foreground/60 ml-auto">{reference.source}</span>}
     </div>
   );
 }

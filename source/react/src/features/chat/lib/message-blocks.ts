@@ -28,6 +28,22 @@ export function createAssistantMessage(id?: string): ChatMessage {
   };
 }
 
+export function createSystemMessage(content: string): ChatMessage {
+  return {
+    id: uuid(),
+    role: "system",
+    content,
+    timestamp: new Date().toISOString(),
+    blocks: [
+      {
+        id: uuid(),
+        type: "answer",
+        content,
+      },
+    ],
+  };
+}
+
 export function appendThoughtBlock(message: ChatMessage, content: string, append = true): ChatMessage {
   const normalized = String(content || "").trim();
   if (!normalized) return message;
