@@ -24,7 +24,7 @@ models/         LLM 服务封装（qwen_llm_service.py）
 memory/         记忆系统（DualMemory：短期对话 + 长期记忆）
 rag/            RAG 检索（Embedding + VectorStore + Retriever）
 web_server.py   Flask Web 服务（REST API + NDJSON 流式推送）
-source/react/   React 前端
+web/            Web 前端（React + 旧版静态页）
 data/           运行时数据（sessions、vector_store、tool_error_memory）
 ```
 
@@ -69,7 +69,7 @@ data/           运行时数据（sessions、vector_store、tool_error_memory）
 ## word默认风格
 - 正文中文字体使用`宋体小四号`
 - 正文英文字体使用`Times New Roman小四号`
-- 正文文本格式`首行缩进两字符，两端对齐，单倍行距`
+- 正文文本格式`两端对齐，单倍行距`
 - 文本题目使用`黑体小二号，段后1行`
 - 一级标题使用`黑体四号，段后1行`
 - 二级标题使用`黑体小四号，段后1行`
@@ -77,6 +77,7 @@ data/           运行时数据（sessions、vector_store、tool_error_memory）
 - 表格表名使用`中文宋体五号，英文Times New Roman五号`
 - 表格内字体使用`中文宋体五号，英文Times New Roman五号`
 - 图名使用`中文宋体五号，英文Times New Roman五号`
+- 表格和图片必须有对应的表名和图名
 
 ## 绘图默认风格
 - 必须设置图例

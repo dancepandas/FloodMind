@@ -73,7 +73,7 @@ root_logger.addHandler(console_handler)
 logger = logging.getLogger(__name__)
 
 # 创建 Flask 应用
-REACT_DIST_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'source', 'react', 'dist')
+REACT_DIST_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'web', 'dist')
 LEGACY_WEB_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'web')
 react_frontend_flag = os.environ.get('USE_REACT_FRONTEND')
 if react_frontend_flag is None:
@@ -1296,7 +1296,6 @@ def chat():
             headers={
                 'Cache-Control': 'no-cache',
                 'X-Accel-Buffering': 'no',
-                'Connection': 'keep-alive',
             }
         )
         
@@ -1838,12 +1837,45 @@ if __name__ == '__main__':
     logger.info(f"最大会话数: {session_manager.config['max_active_sessions']}")
     
     try:
-        app.run(
-            host=args.host,
-            port=args.port,
-            debug=args.debug,
-            threaded=True
-        )
+        if args.debug:
+            app.run(
+                host=args.host,
+                port=args.port,
+                debug=True,
+                threaded=True
+            )
+        else:
+            import platform
+            if platform.system() == 'Windows':
+                from waitress import serve
+                logger.info(f"使用 waitress 生产服务器 (Windows)")
+                serve(app, host=args.host, port=args.port, threads=8, channel_timeout=300)
+            else:
+                from gunicorn.app.base import BaseApplication
+
+                class StandaloneApplication(BaseApplication):
+                    def __init__(self, application, options=None):
+                        self.options = options or {}
+                        self.application = application
+                        super().__init__()
+
+                    def load_config(self):
+                        for key, value in self.options.items():
+                            if key in self.cfg.settings and value is not None:
+                                self.cfg.set(key.lower(), value)
+
+                    def load(self):
+                        return self.application
+
+                options = {
+                    'bind': f'{args.host}:{args.port}',
+                    'workers': 4,
+                    'timeout': 300,
+                    'worker_class': 'gthread',
+                    'threads': 2,
+                }
+                logger.info(f"使用 gunicorn 生产服务器 (Linux)")
+                StandaloneApplication(app, options).run()
     finally:
         session_manager.stop_cleanup_thread()
         session_manager.save_all()
