@@ -29,6 +29,7 @@ export function ChatComposer({ value, disabled, isRunning, onChange, onSubmit, o
           <input
             ref={inputRef}
             type="file"
+            accept=".csv,.xlsx,.xls,.txt,.json,.docx,.pdf,.md"
             className="hidden"
             onChange={(event) => {
               const file = event.target.files?.[0];

@@ -38,6 +38,7 @@ _RETRY_GUARD_LOCK = threading.Lock()
 _RETRY_GUARD_STATE = {
     "signature": None,
     "consecutive_failures": 0,
+    "last_error_output": None,
 }
 _RETRY_GUARD_PROMPT = (
     "\n\n[重试保护提示]\n"
@@ -176,6 +177,23 @@ def _looks_like_error_output(output: str) -> bool:
     return any(marker in text for marker in error_markers)
 
 
+def _check_retry_guard_before_exec(tool_name: str, **signature_parts: Any) -> Optional[str]:
+    """在工具执行前检查是否已被重试保护拦截。返回拦截消息或 None。"""
+    signature = _build_call_signature(tool_name, **signature_parts)
+    with _RETRY_GUARD_LOCK:
+        if _RETRY_GUARD_STATE["signature"] == signature and _RETRY_GUARD_STATE["consecutive_failures"] >= 3:
+            last_err = _RETRY_GUARD_STATE.get("last_error_output") or "无详细错误信息"
+            sig_display = signature[:300]
+            _RETRY_GUARD_STATE["signature"] = None
+            _RETRY_GUARD_STATE["consecutive_failures"] = 0
+            _RETRY_GUARD_STATE["last_error_output"] = None
+            return (
+                f"[重试保护] 使用 [{sig_display}] 执行工具已经连续错误三次，请重新阅读 SKILL.md 文档，调整参数后再调用工具。\n\n"
+                f"完整报错信息：\n{last_err}"
+            )
+    return None
+
+
 def _apply_retry_guard(tool_name: str, signature: str, output: str) -> str:
     if not _looks_like_error_output(output):
         with _RETRY_GUARD_LOCK:
@@ -190,6 +208,7 @@ def _apply_retry_guard(tool_name: str, signature: str, output: str) -> str:
             _RETRY_GUARD_STATE["signature"] = signature
             _RETRY_GUARD_STATE["consecutive_failures"] = 1
 
+        _RETRY_GUARD_STATE["last_error_output"] = output.strip()[:2000]
         consecutive_failures = _RETRY_GUARD_STATE["consecutive_failures"]
 
     if consecutive_failures >= 3 and _RETRY_GUARD_PROMPT not in output:
@@ -724,6 +743,10 @@ def run_script(skill_name: str = "", script_name: str = "", args: Union[str, Lis
     skill_name = str(skill_name).strip().strip('"').strip("'")
     script_name = str(script_name).strip().strip('"').strip("'")
     
+    _retry_block = _check_retry_guard_before_exec("run_script", skill_name=skill_name, script_name=script_name, args=args)
+    if _retry_block:
+        return _retry_block
+    
     if not skill_name:
         return _finalize_tool_output("run_script", "错误：skill_name 参数不能为空", skill_name=skill_name, script_name=script_name, args=args)
 
@@ -885,6 +908,10 @@ def exec_bash(command: str = "", timeout: int = 120) -> str:
         timeout = parsed.get('timeout', timeout)
     
     command = str(command).strip()
+    
+    _retry_block = _check_retry_guard_before_exec("exec_bash", command=command, timeout=timeout)
+    if _retry_block:
+        return _retry_block
     
     if not command:
         return _finalize_tool_output("exec_bash", "错误：命令不能为空", command=command, timeout=timeout)

@@ -1,9 +1,10 @@
 import { useEffect, useRef, useState } from "react";
-import { ChevronDown, ChevronRight, Bot, User, Download, X, ZoomIn, Terminal, ExternalLink, FileText } from "lucide-react";
+import { ChevronDown, ChevronRight, Bot, User, Download, X, ZoomIn, Terminal, ExternalLink, FileText, Eye } from "lucide-react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import type { ChatMessage as ChatMessageModel, GeneratedArtifact, ReferenceLink } from "@/types/app";
 import { Dialog, DialogContent, DialogTitle, DialogDescription } from "@/components/ui/dialog";
+import { DocumentPreviewDialog, isPreviewable, getFileExt, getFileIcon } from "./DocumentPreviewDialog";
 
 interface ChatMessageProps {
   message: ChatMessageModel;
@@ -152,16 +153,38 @@ export function ChatMessage({ message, onToggleThought }: ChatMessageProps) {
                               </div>
                             </div>
                           ) : (
-                            <a
+                            <div
                               key={`${artifact.filepath}-${artifact.filename}`}
-                              href={artifact.download_url || "#"}
-                              download={artifact.filename}
-                              className="w-[33%] min-w-[220px] rounded-xl border border-border bg-muted/30 px-3 py-3 text-sm shadow-sm hover:border-primary/40 transition-colors"
-                              onClick={() => console.log("[ARTIFACT] 点击下载链接:", artifact.download_url)}
+                              className="w-[33%] min-w-[220px] rounded-xl border border-border bg-muted/30 text-sm shadow-sm hover:border-primary/40 transition-colors overflow-hidden"
                             >
-                              <div className="font-medium truncate">{artifact.filename}</div>
-                              <div className="text-xs text-muted-foreground mt-1">下载文件</div>
-                            </a>
+                              <div className="px-3 py-3 flex items-center gap-2.5">
+                                {getFileIcon(artifact.filename)}
+                                <div className="font-medium truncate flex-1">{artifact.filename}</div>
+                              </div>
+                              <div className="px-3 pb-2.5 flex items-center gap-1.5">
+                                {isPreviewable(artifact.filename) && (
+                                  <button
+                                    type="button"
+                                    onClick={() => setPreviewArtifact(artifact)}
+                                    className="inline-flex items-center gap-1 rounded-md px-2 py-1 text-xs text-primary hover:bg-primary/10 transition-colors"
+                                  >
+                                    <Eye size={13} />
+                                    预览
+                                  </button>
+                                )}
+                                {artifact.download_url && (
+                                  <a
+                                    href={artifact.download_url}
+                                    download={artifact.filename}
+                                    className="inline-flex items-center gap-1 rounded-md px-2 py-1 text-xs text-muted-foreground hover:text-foreground hover:bg-muted transition-colors"
+                                    onClick={(e) => e.stopPropagation()}
+                                  >
+                                    <Download size={13} />
+                                    下载
+                                  </a>
+                                )}
+                              </div>
+                            </div>
                           ),
                         )}
                       </div>
@@ -186,8 +209,15 @@ export function ChatMessage({ message, onToggleThought }: ChatMessageProps) {
           </span>
         </div>
       </div>
-      {previewArtifact && (
+      {previewArtifact && previewArtifact.type === "image_generated" && (
         <ImagePreviewDialog
+          artifact={previewArtifact}
+          open={!!previewArtifact}
+          onOpenChange={(open) => { if (!open) setPreviewArtifact(null); }}
+        />
+      )}
+      {previewArtifact && previewArtifact.type === "file_generated" && (
+        <DocumentPreviewDialog
           artifact={previewArtifact}
           open={!!previewArtifact}
           onOpenChange={(open) => { if (!open) setPreviewArtifact(null); }}

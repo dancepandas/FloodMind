@@ -1,5 +1,8 @@
-import { FileText, ListTree, Paperclip, X } from "lucide-react";
-import type { FilePreview, UploadedFileItem, WorkflowPlan } from "@/types/app";
+import { useState } from "react";
+import { FileText, ListTree, Paperclip, X, Eye } from "lucide-react";
+import type { FilePreview, GeneratedArtifact, UploadedFileItem, WorkflowPlan } from "@/types/app";
+import { isPreviewable } from "@/features/chat/components/DocumentPreviewDialog";
+import { DocumentPreviewDialog } from "@/features/chat/components/DocumentPreviewDialog";
 
 interface ContextPanelProps {
   files: UploadedFileItem[];
@@ -10,6 +13,21 @@ interface ContextPanelProps {
 }
 
 export function ContextPanel({ files, workflow, selectedPreview, onPreviewFile, onClosePreview }: ContextPanelProps) {
+  const [previewArtifact, setPreviewArtifact] = useState<GeneratedArtifact | null>(null);
+
+  function handleDocPreview(preview: FilePreview) {
+    if (!preview.download_url) return;
+    const ext = preview.file_name.split(".").pop()?.toLowerCase() || "";
+    const inlineUrl = `${preview.download_url}${preview.download_url.includes("?") ? "&" : "?"}inline=true`;
+    setPreviewArtifact({
+      type: "file_generated",
+      filename: preview.file_name,
+      filepath: "",
+      download_url: preview.download_url,
+      image_url: ext === "pdf" ? inlineUrl : undefined,
+    });
+  }
+
   return (
     <div className="w-[340px] h-full bg-[rgba(246,250,255,0.92)] border-l border-border flex flex-col flex-shrink-0 overflow-y-auto backdrop-blur-sm">
       <div className="p-4 border-b border-border">
@@ -41,12 +59,23 @@ export function ContextPanel({ files, workflow, selectedPreview, onPreviewFile, 
                 <div className="text-sm font-medium truncate">{selectedPreview.file_name}</div>
                 <div className="text-[11px] text-muted-foreground">预览</div>
               </div>
-              <button onClick={onClosePreview} className="text-muted-foreground hover:text-foreground">
-                <X size={14} />
-              </button>
+              <div className="flex items-center gap-1">
+                {selectedPreview.preview_type === "document" && selectedPreview.download_url && isPreviewable(selectedPreview.file_name) && (
+                  <button
+                    onClick={() => handleDocPreview(selectedPreview)}
+                    className="text-primary hover:bg-primary/10 rounded p-1 transition-colors"
+                    title="打开预览"
+                  >
+                    <Eye size={14} />
+                  </button>
+                )}
+                <button onClick={onClosePreview} className="text-muted-foreground hover:text-foreground">
+                  <X size={14} />
+                </button>
+              </div>
             </div>
             <div className="max-h-64 overflow-auto p-3 text-xs text-muted-foreground font-mono whitespace-pre-wrap">
-              <PreviewContent preview={selectedPreview} />
+              <PreviewContent preview={selectedPreview} onDocPreview={handleDocPreview} />
             </div>
           </div>
         )}
@@ -79,11 +108,19 @@ export function ContextPanel({ files, workflow, selectedPreview, onPreviewFile, 
           </div>
         )}
       </div>
+
+      {previewArtifact && (
+        <DocumentPreviewDialog
+          artifact={previewArtifact}
+          open={!!previewArtifact}
+          onOpenChange={(open) => { if (!open) setPreviewArtifact(null); }}
+        />
+      )}
     </div>
   );
 }
 
-function PreviewContent({ preview }: { preview: FilePreview }) {
+function PreviewContent({ preview, onDocPreview }: { preview: FilePreview; onDocPreview: (preview: FilePreview) => void }) {
   if (preview.preview_type === "text" || preview.preview_type === "missing" || preview.preview_type === "unsupported") {
     return <div>{preview.content || "暂无预览"}</div>;
   }
@@ -101,6 +138,24 @@ function PreviewContent({ preview }: { preview: FilePreview }) {
             <TablePreview columns={sheet.columns || []} rows={sheet.rows || []} />
           </div>
         ))}
+      </div>
+    );
+  }
+
+  if (preview.preview_type === "document") {
+    return (
+      <div className="flex flex-col items-center gap-3 py-4">
+        <FileText size={32} className="text-muted-foreground" />
+        <span className="text-muted-foreground">{preview.content || "该文件支持在线预览"}</span>
+        {preview.download_url && isPreviewable(preview.file_name) && (
+          <button
+            onClick={() => onDocPreview(preview)}
+            className="inline-flex items-center gap-1.5 rounded-md px-3 py-1.5 text-xs text-primary bg-primary/10 hover:bg-primary/20 transition-colors"
+          >
+            <Eye size={13} />
+            打开预览
+          </button>
+        )}
       </div>
     );
   }

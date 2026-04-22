@@ -95,7 +95,7 @@ os.makedirs(os.path.join(DATA_DIR, 'vector_store'), exist_ok=True)
 
 logger.info(f"DATA_DIR: {DATA_DIR}")
 
-ALLOWED_EXTENSIONS = {'csv', 'xlsx', 'xls', 'txt', 'json'}
+ALLOWED_EXTENSIONS = {'csv', 'xlsx', 'xls', 'txt', 'json', 'docx', 'pdf', 'md'}
 
 session_manager = SessionManager({
     "max_active_sessions": int(os.environ.get('MAX_SESSIONS', 10)),
@@ -135,6 +135,28 @@ ARTIFACT_FILENAME_PATTERN = re.compile(
 def allowed_file(filename: str) -> bool:
     """检查文件扩展名是否允许"""
     return '.' in filename and filename.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS
+
+
+def _safe_filename(filename: str) -> str:
+    """保留中文的文件名安全化处理，仅移除路径分隔符等危险字符。"""
+    import re
+    name, ext = os.path.splitext(filename)
+    name = re.sub(r'[\\/:*?"<>|]', '_', name).strip()
+    if not name:
+        name = 'file'
+    return f"{name}{ext}"
+
+
+def _dedup_filename(directory: str, filename: str) -> str:
+    """若目录下已存在同名文件，自动加编号，如 文件(1).docx。"""
+    target = os.path.join(directory, filename)
+    if not os.path.exists(target):
+        return filename
+    name, ext = os.path.splitext(filename)
+    counter = 1
+    while os.path.exists(os.path.join(directory, f"{name}({counter}){ext}")):
+        counter += 1
+    return f"{name}({counter}){ext}"
 
 
 def build_session_output_url(filepath: str, fallback_session_id: str) -> str:
@@ -195,6 +217,17 @@ def build_uploaded_file_preview(file_info: dict) -> dict:
                 'columns': [str(col) for col in df.columns.tolist()],
                 'rows': df.fillna('').astype(str).values.tolist(),
             })
+        return preview
+
+    if ext == '.md':
+        with open(file_path, 'r', encoding='utf-8', errors='replace') as handle:
+            preview['content'] = handle.read(6000)
+        preview['preview_type'] = 'text'
+        return preview
+
+    if ext in {'.docx', '.pdf'}:
+        preview['preview_type'] = 'document'
+        preview['content'] = '点击预览按钮查看文档内容。'
         return preview
 
     preview['content'] = '该文件类型暂不支持在线预览。'
@@ -751,11 +784,11 @@ def upload_file():
         
         # 生成唯一文件ID
         file_id = str(uuid.uuid4())
-        filename = secure_filename(filename)
+        filename = _safe_filename(filename)
         
-        # 保存文件
         session_dir = get_session_upload_dir(session_id)
-        file_path = os.path.join(session_dir, f"{file_id}_{filename}")
+        filename = _dedup_filename(session_dir, filename)
+        file_path = os.path.join(session_dir, filename)
         file.save(file_path)
         
         # 记录文件信息
@@ -836,10 +869,56 @@ def preview_uploaded_file(file_id: str):
 
         file_info = session_files[session_id][file_id]
         preview = build_uploaded_file_preview(file_info)
+        preview['download_url'] = f"/api/files/{file_id}/download?session_id={session_id}"
         return jsonify({'status': 'success', 'preview': preview})
     except Exception as e:
         logger.error(f"预览上传文件失败: {e}", exc_info=True)
         return jsonify({'status': 'error', 'message': str(e)}), 500
+
+
+@app.route('/api/files/<file_id>/download', methods=['GET'])
+def download_uploaded_file(file_id: str):
+    """下载或内联返回已上传的文件。"""
+    try:
+        session_id = request.args.get('session_id', 'default')
+        if session_id not in session_files or file_id not in session_files[session_id]:
+            return jsonify({'status': 'error', 'message': '文件不存在'}), 404
+
+        file_info = session_files[session_id][file_id]
+        file_path = file_info.get('path', '')
+        file_name = file_info.get('name', '')
+
+        if not os.path.exists(file_path):
+            return jsonify({'error': '文件不存在'}), 404
+
+        uploads_dir = os.path.realpath(get_session_upload_dir(session_id))
+        real_path = os.path.realpath(file_path)
+        if not real_path.startswith(uploads_dir):
+            return jsonify({'error': '非法路径'}), 403
+
+        inline = request.args.get('inline') == 'true'
+        ext = os.path.splitext(file_name)[1].lower()
+        mimetype_map = {
+            '.pdf': 'application/pdf',
+            '.docx': 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+            '.xlsx': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+            '.xls': 'application/vnd.ms-excel',
+            '.txt': 'text/plain',
+            '.json': 'application/json',
+            '.csv': 'text/csv',
+            '.md': 'text/markdown',
+        }
+        mimetype = mimetype_map.get(ext, 'application/octet-stream')
+
+        return send_file(
+            real_path,
+            mimetype=mimetype,
+            as_attachment=not inline,
+            download_name=file_name if not inline else None,
+        )
+    except Exception as e:
+        logger.error(f"下载上传文件失败: {e}", exc_info=True)
+        return jsonify({'error': str(e)}), 500
 
 
 @app.route('/api/download/<path:file_path>')
@@ -941,6 +1020,12 @@ def get_session_output_file(session_id: str, filename: str):
             return send_file(real_path, mimetype='image/jpeg')
 
         if ext in DOWNLOADABLE_EXTENSIONS:
+            if request.args.get('inline') == 'true':
+                return send_file(
+                    real_path,
+                    mimetype=DOWNLOADABLE_EXTENSIONS[ext],
+                    as_attachment=False,
+                )
             return send_file(
                 real_path,
                 mimetype=DOWNLOADABLE_EXTENSIONS[ext],

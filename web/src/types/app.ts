@@ -45,11 +45,12 @@ export interface FilePreview {
   file_id: string;
   file_name: string;
   size: number;
-  preview_type: "unsupported" | "missing" | "text" | "table" | "excel";
+  preview_type: "unsupported" | "missing" | "text" | "table" | "excel" | "document";
   content?: string;
   columns?: string[];
   rows?: string[][];
   sheets?: FilePreviewSheet[];
+  download_url?: string;
 }
 
 export interface GeneratedArtifact {

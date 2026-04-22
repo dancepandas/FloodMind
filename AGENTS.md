@@ -69,15 +69,23 @@ data/           运行时数据（sessions、vector_store、tool_error_memory）
 ## word默认风格
 - 正文中文字体使用`宋体小四号`
 - 正文英文字体使用`Times New Roman小四号`
-- 正文文本格式`两端对齐，单倍行距`
+- 正文文本格式`两端对齐，单倍行距，首行缩进二字符`
 - 文本题目使用`黑体小二号，段后1行`
 - 一级标题使用`黑体四号，段后1行`
 - 二级标题使用`黑体小四号，段后1行`
 - 三级标题使用`宋体小四号，段后1行`
-- 表格表名使用`中文宋体五号，英文Times New Roman五号`
+- 表格表名使用`中文宋体五号，英文Times New Roman五号，居中`
 - 表格内字体使用`中文宋体五号，英文Times New Roman五号`
 - 图名使用`中文宋体五号，英文Times New Roman五号`
 - 表格和图片必须有对应的表名和图名
+
+
+## PDF默认风格
+- PDF风格与word默认风格一致
+- 创建PDF时，可以先创建一个word文档，再将word文档转换为PDF
+
+## 文档声明
+- 在生成的word、excel、PDF等文件任务中，必须在文件内容最后加上“以上内容由FloodMind生成，请认真核对内容正确性”文字。
 
 ## 绘图默认风格
 - 必须设置图例
@@ -104,3 +112,8 @@ mpl.rcParams['axes.unicode_minus'] = False
 - 脚本输出路径只写文件名（`result.json`），不要写 `data/sessions/.../result.json`，否则路径嵌套导致文件找不到
 - Excel sheet 名称最长 31 字符，stationCode 过长时会被截断
 - matplotlib 在无头环境必须设置 `MPLBACKEND=Agg`
+
+## 依赖安装
+- 如果在执行tool或skill过程中返回关于依赖错误的问题时，可以根据具体错误信息运行 `pip install`  或  `npm install` 安装相应依赖
+- 使用 `pip install` 记得用清华或者阿里的pip镜像源
+
