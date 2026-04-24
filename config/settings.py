@@ -14,12 +14,13 @@ if os.getenv("PYTHON_IPV6", "0") != "1":
         return _orig_getaddrinfo(host, port, socket.AF_INET, type, proto, flags)
     socket.getaddrinfo = _ipv4_only
 
-try:
-    _create_unverified_https_context = ssl._create_unverified_context
-except AttributeError:
-    pass
-else:
-    ssl._create_default_https_context = _create_unverified_https_context
+if os.getenv("ALLOW_INSECURE_SSL", "0") == "1":
+    try:
+        _create_unverified_https_context = ssl._create_unverified_context
+    except AttributeError:
+        pass
+    else:
+        ssl._create_default_https_context = _create_unverified_https_context
 
 os.environ['HF_ENDPOINT'] = 'https://hf-mirror.com'
 

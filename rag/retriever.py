@@ -367,12 +367,12 @@ class KnowledgeRetriever:
         """
         top_k = top_k or self.top_k
         merged_filter = self._merge_metadata_filter(query, metadata_filter)
-        all_docs: List[Tuple[Document, float]] = []
+        all_docs: List[Tuple[Document, float, str]] = []
         
         if include_permanent:
             try:
                 results = self.permanent_store.search_with_scores(query, k=top_k, filter=merged_filter or None)
-                all_docs.extend(results)
+                all_docs.extend((doc, score, "vector") for doc, score in results)
             except Exception as e:
                 logger.warning(f"检索永久知识库失败: {e}")
         
@@ -380,7 +380,7 @@ class KnowledgeRetriever:
             try:
                 session_store = self.get_session_store(session_id)
                 results = session_store.search_with_scores(query, k=top_k, filter=merged_filter or None)
-                all_docs.extend(results)
+                all_docs.extend((doc, score, "vector") for doc, score in results)
             except Exception as e:
                 logger.warning(f"检索会话知识库失败: {e}")
         
@@ -390,13 +390,13 @@ class KnowledgeRetriever:
                 if not self._matches_metadata_filter(doc, merged_filter):
                     continue
                 score = self._simple_similarity(query, doc.page_content)
-                all_docs.append((doc, score))
-        
-        all_docs.sort(key=lambda x: x[1], reverse=True)
+                all_docs.append((doc, score, "small"))
+
+        all_docs.sort(key=lambda x: self._to_relevance_score(x[1], x[2]), reverse=True)
         top_docs = all_docs[:top_k]
-        
-        documents = [doc for doc, _ in top_docs]
-        scores = [score for _, score in top_docs]
+
+        documents = [doc for doc, _, _ in top_docs]
+        scores = [self._to_relevance_score(score, score_type) for _, score, score_type in top_docs]
         
         source_parts = []
         if include_permanent:
@@ -425,6 +425,19 @@ class KnowledgeRetriever:
             docs.extend(self._small_docs[session_id])
         
         return docs
+
+    @staticmethod
+    def _to_relevance_score(raw_score: float, score_type: str) -> float:
+        if score_type == "vector":
+            try:
+                score = max(float(raw_score), 0.0)
+            except (TypeError, ValueError):
+                return 0.0
+            return 1.0 / (1.0 + score)
+        try:
+            return float(raw_score)
+        except (TypeError, ValueError):
+            return 0.0
     
     def _simple_similarity(self, query: str, content: str) -> float:
         """简单的文本相似度计算（用于小文档）"""

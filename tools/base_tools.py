@@ -1,15 +1,14 @@
 """
 基础工具模块
 
-提供Agent执行技能所需的核心工具：
-1. get_skill - 获取技能详细说明（渐进式披露）
-2. run_script - 执行 Python 脚本
-3. exec_bash - 执行 Bash 命令
-4. read_file - 读取文件内容
-5. knowledge_search - 知识检索
-6. add_knowledge - 添加知识
+提供Agent执行技能所需的核心工具，所有工具统一使用 build_agent_tool 构建，
+具备完整的行为元数据（readonly/destructive/concurrency_safe/interrupt_behavior）。
 
-这些工具让Agent能够发现和执行skills中的技能。
+工具分类：
+- 只读工具: get_skill, search_artifacts, read_artifact, knowledge_search, search_memory, search_tool_error_memory
+- 写入工具: write_text_file, update_project_instructions, add_knowledge, add_memory
+- 执行工具: exec_bash, run_script, exec_python_file
+- 网络工具: web_search
 """
 
 import os
@@ -21,15 +20,25 @@ import shutil
 import hashlib
 import subprocess
 import threading
+import contextvars
 from functools import lru_cache
 from datetime import datetime
 from pathlib import Path
 from typing import Optional, Dict, Any, List, Union
 
-from langchain_core.tools import tool
 from pydantic import BaseModel, Field
 
-from tools.agent_tool import check_dangerous_command, check_path_permission, PermissionBehavior, UpdateProjectInstructionsInput, get_agents_md_path
+from tools.agent_tool import (
+    AgentTool,
+    ToolRegistry,
+    PermissionBehavior,
+    PermissionResult,
+    check_dangerous_command,
+    check_path_permission,
+    build_agent_tool,
+    UpdateProjectInstructionsInput,
+    get_agents_md_path,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -263,7 +272,7 @@ class RunScriptInput(BaseModel):
 class ExecBashInput(BaseModel):
     """执行 Bash 命令的输入参数"""
     command: str = Field(default="", description="要执行的 Bash 命令")
-    timeout: int = Field(default=60, description="超时时间（秒）")
+    timeout: int = Field(default=120, description="超时时间（秒）")
 
 
 class ExecPythonFileInput(BaseModel):
@@ -603,23 +612,28 @@ def _record_tool_error_memory(tool_name: str, output: str, **signature_parts: An
         _save_tool_error_index(entries)
 
 
-@tool(args_schema=GetSkillInput)
-def get_skill(skill_name: str = "") -> str:
-    """
-    获取技能的完整说明和执行方法。
-    
-    在执行任务前，先调用此工具了解技能的功能、参数和使用方法。
-    返回内容包括：技能描述、使用说明、可用脚本、参考文档。
-    
-    Args:
-        skill_name: 技能名称
-    """
+def _impl_get_skill(skill_name: str = "") -> str:
     parsed = _parse_json_if_needed(skill_name)
     if parsed:
         skill_name = parsed.get('skill_name', skill_name)
     
     skill_name = str(skill_name).strip().strip('"').strip("'")
     return _get_skill_cached(skill_name)
+
+
+get_skill = build_agent_tool(
+    name="get_skill",
+    description=(
+        "获取技能的完整说明和执行方法。"
+        "在执行任务前，先调用此工具了解技能的功能、参数和使用方法。"
+        "返回内容包括：技能描述、使用说明、可用脚本、参考文档。"
+    ),
+    args_schema=GetSkillInput,
+    func=_impl_get_skill,
+    is_readonly=True,
+    is_destructive=False,
+    is_concurrency_safe=True,
+)
 
 
 @lru_cache(maxsize=128)
@@ -677,9 +691,7 @@ def _get_skill_cached(skill_name: str) -> str:
     return _finalize_tool_output("get_skill", "\n".join(lines), skill_name=skill_name)
 
 
-@tool(args_schema=SearchToolErrorMemoryInput)
-def search_tool_error_memory(query: str = "", limit: int = 10) -> str:
-    """搜索全局工具错误记忆库，帮助避免重复踩坑。"""
+def _impl_search_tool_error_memory(query: str = "", limit: int = 10) -> str:
     query = (query or "").strip()
     if not query:
         return _finalize_tool_output("search_tool_error_memory", "错误：搜索关键词不能为空", query=query, limit=limit)
@@ -718,21 +730,18 @@ def search_tool_error_memory(query: str = "", limit: int = 10) -> str:
     return _finalize_tool_output("search_tool_error_memory", "\n".join(lines), query=query, limit=limit)
 
 
-@tool(args_schema=RunScriptInput)
-def run_script(skill_name: str = "", script_name: str = "", args: Union[str, List] = "", env: str = "{}") -> str:
-    """
-    执行技能中的 Python 脚本。
-    
-    在调用此工具前，必须先调用 get_skill 了解脚本用法。
-    脚本的工作目录已自动设为当前会话的输出目录，因此输出文件参数只写文件名（如 result.json），不要加任何目录前缀。
-    脚本的标准输出将作为结果返回。
-    
-    Args:
-        skill_name: 技能名称
-        script_name: 脚本文件名
-        args: 脚本参数（JSON数组或列表）。注意：--output_file 等输出路径参数只写文件名，不要加 data/sessions/ 等前缀
-        env: 环境变量（JSON对象格式）
-    """
+search_tool_error_memory = build_agent_tool(
+    name="search_tool_error_memory",
+    description="搜索全局工具错误记忆库，帮助避免重复踩坑。",
+    args_schema=SearchToolErrorMemoryInput,
+    func=_impl_search_tool_error_memory,
+    is_readonly=True,
+    is_destructive=False,
+    is_concurrency_safe=True,
+)
+
+
+def _impl_run_script(skill_name: str = "", script_name: str = "", args: Union[str, List] = "", env: str = "{}") -> str:
     parsed = _parse_json_if_needed(skill_name)
     if parsed and 'script_name' in parsed:
         skill_name = parsed.get('skill_name', skill_name)
@@ -817,7 +826,6 @@ def run_script(skill_name: str = "", script_name: str = "", args: Union[str, Lis
         import threading
         
         def read_stream(stream, lines, log_level):
-            """读取流并实时输出到日志"""
             for line in iter(stream.readline, ''):
                 if line:
                     lines.append(line)
@@ -882,26 +890,23 @@ def run_script(skill_name: str = "", script_name: str = "", args: Union[str, Lis
         )
 
 
-@tool(args_schema=ExecBashInput)
-def exec_bash(command: str = "", timeout: int = 120) -> str:
-    """
-    通过当前环境可用的 shell 执行命令。
+run_script = build_agent_tool(
+    name="run_script",
+    description=(
+        "执行技能中的 Python 脚本。"
+        "在调用此工具前，必须先调用 get_skill 了解脚本用法。"
+        "脚本的工作目录已自动设为当前会话的输出目录，因此输出文件参数只写文件名（如 result.json），不要加任何目录前缀。"
+        "脚本的标准输出将作为结果返回。"
+    ),
+    args_schema=RunScriptInput,
+    func=_impl_run_script,
+    is_readonly=False,
+    is_destructive=True,
+    is_concurrency_safe=False,
+)
 
-    用于执行系统命令，如文件操作、网络请求等。
-    注意：此工具会直接执行命令，请谨慎使用。
 
-    **环境信息：**
-    - 执行环境：自动选择可用 shell（优先 powershell/pwsh，其次 bash/sh）
-    - 当前 shell：由工具自动检测，不要假设固定是 PowerShell
-    - Python 命令：使用 `python` 或 `python3`
-    - 路径格式：跟随当前运行环境；Windows 用 Windows 路径，容器/Linux 用 POSIX 路径
-    - 不要在 command 中再嵌套 `powershell -Command`、`pwsh -Command`、`bash -lc` 或 `sh -lc`
-    - 复杂脚本优先写入 `.py` 文件，再用 `exec_python_file` 执行
-
-    Args:
-        command: 要执行的命令
-        timeout: 超时时间（秒）
-    """
+def _impl_exec_bash(command: str = "", timeout: int = 120) -> str:
     parsed = _parse_json_if_needed(command)
     if parsed:
         command = parsed.get('command', command)
@@ -975,28 +980,35 @@ def exec_bash(command: str = "", timeout: int = 120) -> str:
         return _finalize_tool_output("exec_bash", f"命令执行失败：{str(e)}", command=command, timeout=timeout)
 
 
-@tool(args_schema=ExecPythonFileInput)
-def exec_python_file(
+exec_bash = build_agent_tool(
+    name="exec_bash",
+    description=(
+        "通过当前环境可用的 shell 执行命令。"
+        "用于执行系统命令，如文件操作、网络请求等。"
+        "注意：此工具会直接执行命令，请谨慎使用。"
+        "**环境信息：**"
+        "- 执行环境：自动选择可用 shell（优先 powershell/pwsh，其次 bash/sh）"
+        "- 当前 shell：由工具自动检测，不要假设固定是 PowerShell"
+        "- Python 命令：使用 `python` 或 `python3`"
+        "- 路径格式：跟随当前运行环境；Windows 用 Windows 路径，容器/Linux 用 POSIX 路径"
+        "- 不要在 command 中再嵌套 `powershell -Command`、`pwsh -Command`、`bash -lc` 或 `sh -lc`"
+        "- 复杂脚本优先写入 `.py` 文件，再用 `exec_python_file` 执行"
+    ),
+    args_schema=ExecBashInput,
+    func=_impl_exec_bash,
+    is_readonly=False,
+    is_destructive=True,
+    is_concurrency_safe=False,
+)
+
+
+def _impl_exec_python_file(
     script_path: str = "",
     args: Union[str, List] = "",
     env: str = "{}",
     timeout: int = 900,
     workdir: str = "",
 ) -> str:
-    """
-    执行一个本地 Python 文件。
-
-    适用于先通过 `write_text_file` 写出临时 `.py` 脚本，再稳定执行该脚本。
-    相比 `python -c "..."` 更适合多行逻辑、文件转换和 JSON 生成场景。
-    脚本的工作目录已自动设为当前会话的输出目录，因此输出文件参数只写文件名（如 result.json），不要加任何目录前缀。
-
-    Args:
-        script_path: Python 文件路径
-        args: 脚本参数（JSON数组或列表）。注意：输出路径参数只写文件名，不要加 data/sessions/ 等前缀
-        env: 环境变量（JSON对象格式）
-        timeout: 超时时间（秒）
-        workdir: 工作目录，可选；默认为当前会话的输出目录
-    """
     parsed = _parse_json_if_needed(script_path)
     if parsed and 'script_path' in parsed:
         script_path = parsed.get('script_path', script_path)
@@ -1140,22 +1152,23 @@ def exec_python_file(
         )
 
 
-@tool(args_schema=WriteTextFileInput)
-def write_text_file(file_path: str = "", content: str = "", encoding: str = "utf-8") -> str:
-    """
-    直接写入文本文件。
+exec_python_file = build_agent_tool(
+    name="exec_python_file",
+    description=(
+        "执行一个本地 Python 文件。"
+        "适用于先通过 `write_text_file` 写出临时 `.py` 脚本，再稳定执行该脚本。"
+        "相比 `python -c \"...\"` 更适合多行逻辑、文件转换和 JSON 生成场景。"
+        "脚本的工作目录已自动设为当前会话的输出目录，因此输出文件参数只写文件名（如 result.json），不要加任何目录前缀。"
+    ),
+    args_schema=ExecPythonFileInput,
+    func=_impl_exec_python_file,
+    is_readonly=False,
+    is_destructive=True,
+    is_concurrency_safe=False,
+)
 
-    适用于生成临时 Python 脚本、JSON 文件、CSV 文件或其他文本文件，
-    可避免通过 PowerShell here-string 或复杂转义来写文件。
 
-    文件会自动写入当前会话的输出目录。file_path 只写文件名（如 generate_data.py），
-    不要加任何目录前缀（不要写 data/sessions/xxx.py，否则路径嵌套出错）。
-
-    Args:
-        file_path: 要写入的文件名或路径。只写文件名即可（如 result.json），不要加 data/sessions/ 等目录前缀
-        content: 完整文件内容
-        encoding: 文件编码
-    """
+def _impl_write_text_file(file_path: str = "", content: str = "", encoding: str = "utf-8") -> str:
     parsed = _parse_json_if_needed(file_path)
     if parsed and 'file_path' in parsed:
         file_path = parsed.get('file_path', file_path)
@@ -1181,6 +1194,13 @@ def write_text_file(file_path: str = "", content: str = "", encoding: str = "utf
             file_path=file_path,
             encoding=encoding,
         )
+    if perm.behavior == PermissionBehavior.ASK:
+        return _finalize_tool_output(
+            "write_text_file",
+            f"权限拒绝：需要用户确认: {perm.reason}",
+            file_path=file_path,
+            encoding=encoding,
+        )
 
     target_file = _resolve_path(file_path)
 
@@ -1203,14 +1223,24 @@ def write_text_file(file_path: str = "", content: str = "", encoding: str = "utf
         )
 
 
-@tool(args_schema=SearchArtifactsInput)
-def search_artifacts(query: str = "", scope: str = "current", limit: int = 10) -> str:
-    """
-    搜索当前会话或历史可复用产物。
+write_text_file = build_agent_tool(
+    name="write_text_file",
+    description=(
+        "直接写入文本文件。"
+        "适用于生成临时 Python 脚本、JSON 文件、CSV 文件或其他文本文件，"
+        "可避免通过 PowerShell here-string 或复杂转义来写文件。"
+        "文件会自动写入当前会话的输出目录。file_path 只写文件名（如 generate_data.py），"
+        "不要加任何目录前缀（不要写 data/sessions/xxx.py，否则路径嵌套出错）。"
+    ),
+    args_schema=WriteTextFileInput,
+    func=_impl_write_text_file,
+    is_readonly=False,
+    is_destructive=True,
+    is_concurrency_safe=False,
+)
 
-    默认优先搜索当前活跃会话的 outputs；如需跨会话复用脚本，使用 scope=`reusable`。
-    当前仅开放 `.py` 脚本的元信息检索，不直接返回文件内容。
-    """
+
+def _impl_search_artifacts(query: str = "", scope: str = "current", limit: int = 10) -> str:
     parsed = _parse_json_if_needed(query)
     if parsed and 'query' in parsed:
         query = parsed.get('query', query)
@@ -1267,14 +1297,22 @@ def search_artifacts(query: str = "", scope: str = "current", limit: int = 10) -
     )
 
 
-@tool(args_schema=CheckArtifactExistsInput)
-def check_artifact_exists(artifact_path: str = "", scope: str = "current") -> str:
-    """
-    检查目标产物是否真实存在。
+search_artifacts = build_agent_tool(
+    name="search_artifacts",
+    description=(
+        "搜索当前会话或历史可复用产物。"
+        "默认优先搜索当前活跃会话的 outputs；如需跨会话复用脚本，使用 scope=`reusable`。"
+        "当前仅开放 `.py` 脚本的元信息检索，不直接返回文件内容。"
+    ),
+    args_schema=SearchArtifactsInput,
+    func=_impl_search_artifacts,
+    is_readonly=True,
+    is_destructive=False,
+    is_concurrency_safe=True,
+)
 
-    优先按给定路径直接判断；如果传入的是文件名或相对路径，则在当前会话 outputs
-    或 reusable 范围内做文件名/后缀匹配，适合校验 `.xlsx`、`.docx`、`.pdf`、图片等二进制产物。
-    """
+
+def _impl_check_artifact_exists(artifact_path: str = "", scope: str = "current") -> str:
     parsed = _parse_json_if_needed(artifact_path)
     if parsed and 'artifact_path' in parsed:
         artifact_path = parsed.get('artifact_path', artifact_path)
@@ -1324,14 +1362,22 @@ def check_artifact_exists(artifact_path: str = "", scope: str = "current") -> st
     )
 
 
-@tool(args_schema=ReadArtifactInput)
-def read_artifact(artifact_path: str = "", max_chars: int = 12000) -> str:
-    """
-    读取文本类产物内容。
+check_artifact_exists = build_agent_tool(
+    name="check_artifact_exists",
+    description=(
+        "检查目标产物是否真实存在。"
+        "优先按给定路径直接判断；如果传入的是文件名或相对路径，则在当前会话 outputs"
+        "或 reusable 范围内做文件名/后缀匹配，适合校验 `.xlsx`、`.docx`、`.pdf`、图片等二进制产物。"
+    ),
+    args_schema=CheckArtifactExistsInput,
+    func=_impl_check_artifact_exists,
+    is_readonly=True,
+    is_destructive=False,
+    is_concurrency_safe=True,
+)
 
-    仅支持读取 `.py`、`.md`、`.txt`、`.json` 四类文本文件。
-    这是硬编码限制，用于避免误读超大 `.csv`、Excel、`.docx` 等文件，导致内存占用过大或上下文超限。
-    """
+
+def _impl_read_artifact(artifact_path: str = "", max_chars: int = 12000) -> str:
     parsed = _parse_json_if_needed(artifact_path)
     if parsed and 'artifact_path' in parsed:
         artifact_path = parsed.get('artifact_path', artifact_path)
@@ -1391,35 +1437,96 @@ def read_artifact(artifact_path: str = "", max_chars: int = 12000) -> str:
         )
 
 
-_RAG_CONFIG: Dict[str, Any] = {
-    "enabled": False,
-    "persist_dir": "./data/vector_store",
-    "embedding_model": "BAAI/bge-base-zh-v1.5",
-    "top_k": 5,
-    "session_id": None,
-}
+read_artifact = build_agent_tool(
+    name="read_artifact",
+    description=(
+        "读取文本类产物内容。"
+        "仅支持读取 `.py`、`.md`、`.txt`、`.json` 四类文本文件。"
+        "这是硬编码限制，用于避免误读超大 `.csv`、Excel、`.docx` 等文件，导致内存占用过大或上下文超限。"
+    ),
+    args_schema=ReadArtifactInput,
+    func=_impl_read_artifact,
+    is_readonly=True,
+    is_destructive=False,
+    is_concurrency_safe=True,
+)
 
-_RETRIEVER_INSTANCE: Optional[Any] = None
 
-_SESSION_CONTEXT: Dict[str, Any] = {
-    "session_id": None,
-    "output_dir": None,
-}
+class _RAGConfigManager:
+    def __init__(self):
+        self._config: Dict[str, Any] = {
+            "enabled": False,
+            "persist_dir": "./data/vector_store",
+            "embedding_model": "BAAI/bge-base-zh-v1.5",
+            "top_k": 5,
+            "session_id": None,
+        }
+        self._retriever: Optional[Any] = None
+
+    def get(self, key: str, default: Any = None) -> Any:
+        return self._config.get(key, default)
+
+    def update(self, **kwargs) -> None:
+        self._config.update(kwargs)
+        self._retriever = None
+        logger.info(f"RAG 配置已更新: {kwargs}")
+
+    @property
+    def retriever(self) -> Optional[Any]:
+        return self._retriever
+
+    @retriever.setter
+    def retriever(self, value: Optional[Any]) -> None:
+        self._retriever = value
+
+
+_RAG_CONFIG = _RAGConfigManager()
+_rag_cfg_var: contextvars.ContextVar[Dict[str, Any]] = contextvars.ContextVar(
+    "rag_config",
+    default={},
+)
+
+_session_ctx_var: contextvars.ContextVar[Dict[str, Any]] = contextvars.ContextVar(
+    "session_context",
+)
+
+
+class _SessionContextProxy:
+    def get(self, key: str, default: Any = None) -> Any:
+        return _session_ctx_var.get({}).get(key, default)
+
+    def __getitem__(self, key: str) -> Any:
+        return _session_ctx_var.get({}).get(key)
+
+    def __setitem__(self, key: str, value: Any) -> None:
+        ctx = dict(_session_ctx_var.get({}))
+        ctx[key] = value
+        _session_ctx_var.set(ctx)
+
+
+_SESSION_CONTEXT = _SessionContextProxy()
 
 
 def set_session_context(session_id: str, output_dir: Optional[str] = None):
-    global _SESSION_CONTEXT
-    _SESSION_CONTEXT["session_id"] = session_id
+    ctx = {
+        "session_id": session_id,
+        "output_dir": None,
+    }
     if output_dir:
-        _SESSION_CONTEXT["output_dir"] = output_dir
+        ctx["output_dir"] = output_dir
         os.makedirs(output_dir, exist_ok=True)
     else:
-        _SESSION_CONTEXT["output_dir"] = str(_SESSION_ROOT / session_id / "outputs")
-        os.makedirs(_SESSION_CONTEXT["output_dir"], exist_ok=True)
+        ctx["output_dir"] = str(_SESSION_ROOT / session_id / "outputs")
+        os.makedirs(ctx["output_dir"], exist_ok=True)
+    _session_ctx_var.set(ctx)
 
 
 def get_current_session_output_dir() -> Optional[str]:
-    return _SESSION_CONTEXT.get("output_dir")
+    return _session_ctx_var.get({}).get("output_dir")
+
+
+def get_current_session_id() -> Optional[str]:
+    return _session_ctx_var.get({}).get("session_id")
 
 
 def set_rag_config(
@@ -1429,45 +1536,52 @@ def set_rag_config(
     top_k: int = 5,
     session_id: Optional[str] = None,
 ):
-    """
-    配置 RAG 系统（由 flood_agent 调用）
-    
-    Args:
-        enabled: 是否启用 RAG
-        persist_dir: 向量库持久化目录
-        embedding_model: Embedding 模型名称
-        top_k: 检索返回结果数量
-        session_id: 会话ID
-    """
-    global _RAG_CONFIG, _RETRIEVER_INSTANCE
-    
-    _RAG_CONFIG = {
+    cfg = {
         "enabled": enabled,
         "persist_dir": persist_dir,
         "embedding_model": embedding_model,
         "top_k": top_k,
         "session_id": session_id,
     }
-    
-    _RETRIEVER_INSTANCE = None
-    
-    logger.info(f"RAG 配置已更新: enabled={enabled}, persist_dir={persist_dir}")
+    _rag_cfg_var.set(cfg)
+    _RAG_CONFIG.update(
+        enabled=enabled,
+        persist_dir=persist_dir,
+        embedding_model=embedding_model,
+        top_k=top_k,
+        session_id=session_id,
+    )
+
+
+_retriever_lock = threading.Lock()
 
 
 def _get_retriever():
-    """获取检索器实例（懒加载）"""
-    global _RETRIEVER_INSTANCE
-    
-    if not _RAG_CONFIG.get("enabled", False):
+    active_cfg = {**_RAG_CONFIG._config, **_rag_cfg_var.get({})}
+    if not active_cfg.get("enabled", False):
         logger.info("RAG 未启用")
         return None
-    
-    if _RETRIEVER_INSTANCE is None:
+
+    retriever_key = (
+        active_cfg.get("persist_dir", "./data/vector_store"),
+        active_cfg.get("embedding_model", "BAAI/bge-base-zh-v1.5"),
+        int(active_cfg.get("top_k", 5) or 5),
+    )
+
+    if getattr(_RAG_CONFIG, "_retriever_key", None) == retriever_key and _RAG_CONFIG.retriever is not None:
+        return _RAG_CONFIG.retriever
+
+    with _retriever_lock:
+        if getattr(_RAG_CONFIG, "_retriever_key", None) == retriever_key and _RAG_CONFIG.retriever is not None:
+            return _RAG_CONFIG.retriever
         try:
             from rag.retriever import KnowledgeRetriever
-            persist_dir = _RAG_CONFIG.get("persist_dir", "./data/vector_store")
-            embedding_model = _RAG_CONFIG.get("embedding_model", "BAAI/bge-base-zh-v1.5")
-            top_k = _RAG_CONFIG.get("top_k", 5)
+            from rag.embeddings import EmbeddingManager
+            persist_dir, embedding_model, top_k = retriever_key
+
+            if getattr(_RAG_CONFIG, "_retriever_key", None) != retriever_key:
+                KnowledgeRetriever.reset()
+                EmbeddingManager.reset()
             
             logger.info(f"初始化检索器: persist_dir={persist_dir}, embedding_model={embedding_model}, top_k={top_k}")
             
@@ -1480,20 +1594,23 @@ def _get_retriever():
             else:
                 logger.warning(f"永久知识库目录不存在: {permanent_dir}")
             
-            _RETRIEVER_INSTANCE = KnowledgeRetriever(
+            retriever = KnowledgeRetriever(
                 persist_dir=persist_dir,
                 embedding_model=embedding_model,
                 top_k=top_k,
             )
             
-            doc_count = _RETRIEVER_INSTANCE.permanent_store.get_document_count()
+            doc_count = retriever.permanent_store.get_document_count()
             logger.info(f"永久知识库文档数: {doc_count}")
+            
+            _RAG_CONFIG.retriever = retriever
+            _RAG_CONFIG._retriever_key = retriever_key
             
         except Exception as e:
             logger.error(f"初始化检索器失败: {e}", exc_info=True)
             return None
     
-    return _RETRIEVER_INSTANCE
+    return _RAG_CONFIG.retriever
 
 
 class KnowledgeSearchInput(BaseModel):
@@ -1516,8 +1633,7 @@ class AddKnowledgeInput(BaseModel):
     force_method: Optional[str] = Field(default=None, description="强制处理方式: 'context' 或 'vector'")
 
 
-@tool(args_schema=KnowledgeSearchInput)
-def knowledge_search(
+def _impl_knowledge_search(
     query: str = "",
     top_k: int = 5,
     asset_kind: str = "",
@@ -1527,18 +1643,6 @@ def knowledge_search(
     folder_level_3: str = "",
     filename: str = "",
 ) -> str:
-    """
-    从知识库中检索相关参考资料。
-    
-    用于查找专业知识、历史案例、技术文档等。
-    
-    Args:
-        query: 检索查询文本
-        top_k: 返回结果数量（默认5）
-    
-    Returns:
-        相关文档片段，包含来源信息
-    """
     parsed = _parse_json_if_needed(query)
     if parsed:
         query = parsed.get('query', query)
@@ -1575,7 +1679,7 @@ def knowledge_search(
         )
     
     try:
-        session_id = _RAG_CONFIG.get("session_id")
+        session_id = _rag_cfg_var.get({}).get("session_id") or get_current_session_id()
         result = retriever.search(
             query=query,
             session_id=session_id,
@@ -1622,28 +1726,26 @@ def knowledge_search(
         )
 
 
-@tool(args_schema=AddKnowledgeInput)
-def add_knowledge(
+knowledge_search = build_agent_tool(
+    name="knowledge_search",
+    description=(
+        "从知识库中检索相关参考资料。"
+        "用于查找专业知识、历史案例、技术文档等。"
+    ),
+    args_schema=KnowledgeSearchInput,
+    func=_impl_knowledge_search,
+    is_readonly=True,
+    is_destructive=False,
+    is_concurrency_safe=True,
+)
+
+
+def _impl_add_knowledge(
     content: str = "",
     file_path: str = "",
     doc_name: str = "",
     force_method: Optional[str] = None,
 ) -> str:
-    """
-    将文档添加到知识库。
-    
-    小文档（<10KB）会作为临时上下文注入对话，
-    大文档会存入向量库供后续检索。
-    
-    Args:
-        content: 文档文本内容（与file_path二选一）
-        file_path: 文件路径（与content二选一）
-        doc_name: 文档名称（可选，用于标识）
-        force_method: 强制指定处理方式 - 'context'（上下文）或 'vector'（向量库）
-    
-    Returns:
-        处理结果说明
-    """
     parsed = _parse_json_if_needed(content)
     if parsed and 'content' in parsed:
         content = parsed.get('content', content)
@@ -1663,7 +1765,7 @@ def add_knowledge(
         return _finalize_tool_output("add_knowledge", "RAG 功能未启用。请在配置中启用 RAG。", content=content, file_path=file_path, doc_name=doc_name)
     
     try:
-        session_id = _RAG_CONFIG.get("session_id")
+        session_id = _rag_cfg_var.get({}).get("session_id") or get_current_session_id()
         
         metadata = {}
         if doc_name:
@@ -1725,6 +1827,21 @@ def add_knowledge(
         )
 
 
+add_knowledge = build_agent_tool(
+    name="add_knowledge",
+    description=(
+        "将文档添加到知识库。"
+        "小文档（<10KB）会作为临时上下文注入对话，"
+        "大文档会存入向量库供后续检索。"
+    ),
+    args_schema=AddKnowledgeInput,
+    func=_impl_add_knowledge,
+    is_readonly=False,
+    is_destructive=False,
+    is_concurrency_safe=False,
+)
+
+
 class WebSearchInput(BaseModel):
     """网络搜索的输入参数"""
     query: str = Field(default="", description="搜索关键词")
@@ -1734,35 +1851,13 @@ class WebSearchInput(BaseModel):
     site: str = Field(default="", description="指定站点搜索，如 baidu.com")
 
 
-@tool(args_schema=WebSearchInput)
-def web_search(
+def _impl_web_search(
     query: str = "",
     count: int = 10,
     freshness: str = "py",
     search_types: str = "web",
     site: str = "",
 ) -> str:
-    """
-    网络搜索工具，用于获取实时网络信息。
-    
-    当用户需要搜索最新新闻、实时信息、网络资料时使用此工具。
-    支持时间范围筛选和站点限定搜索。
-    
-    Args:
-        query: 搜索关键词（必填）
-        count: 返回结果数量，默认10，最大50
-        freshness: 时间范围筛选
-            - pd: 过去24小时
-            - pw: 过去7天
-            - pm: 过去31天
-            - py: 过去365天
-            - YYYY-MM-DDtoYYYY-MM-DD: 指定日期范围
-        search_types: 搜索类型 (web/video/image)，多个用逗号分隔
-        site: 指定站点搜索
-    
-    Returns:
-        搜索结果的JSON格式字符串
-    """
     parsed = _parse_json_if_needed(query)
     if parsed and 'query' in parsed:
         query = parsed.get('query', query)
@@ -1936,14 +2031,35 @@ def web_search(
         return _finalize_tool_output("web_search", f"搜索失败: {str(e)}", query=query, count=count, freshness=freshness, search_types=search_types, site=site)
 
 
-_MEMORY_INSTANCE: Optional[Any] = None
+web_search = build_agent_tool(
+    name="web_search",
+    description=(
+        "网络搜索工具，用于获取实时网络信息。"
+        "当用户需要搜索最新新闻、实时信息、网络资料时使用此工具。"
+        "支持时间范围筛选和站点限定搜索。"
+    ),
+    args_schema=WebSearchInput,
+    func=_impl_web_search,
+    is_readonly=True,
+    is_destructive=False,
+    is_concurrency_safe=True,
+)
+
+
+_memory_var: contextvars.ContextVar[Optional[Any]] = contextvars.ContextVar(
+    "memory_instance",
+    default=None,
+)
 
 
 def set_memory_instance(memory: Any):
     """设置记忆系统实例（由 flood_agent 调用）"""
-    global _MEMORY_INSTANCE
-    _MEMORY_INSTANCE = memory
+    _memory_var.set(memory)
     logger.info("记忆系统实例已设置")
+
+
+def get_memory_instance() -> Optional[Any]:
+    return _memory_var.get()
 
 
 class AddMemoryInput(BaseModel):
@@ -1952,25 +2068,7 @@ class AddMemoryInput(BaseModel):
     entry_type: str = Field(default="note", description="记忆类型: note(备注), preference(偏好), decision(决策), rule(规则)")
 
 
-@tool(args_schema=AddMemoryInput)
-def add_memory(content: str = "", entry_type: str = "note") -> str:
-    """
-    将重要内容添加到长期记忆。
-    
-    当用户明确要求记住某事，或识别到重要的决策、偏好、规则时使用此工具。
-    长期记忆会在后续对话中持续保留。
-    
-    Args:
-        content: 要记录的内容（必填）
-        entry_type: 记忆类型
-            - note: 一般备注
-            - preference: 用户偏好
-            - decision: 重要决策
-            - rule: 重要规则
-    
-    Returns:
-        操作结果
-    """
+def _impl_add_memory(content: str = "", entry_type: str = "note") -> str:
     parsed = _parse_json_if_needed(content)
     if parsed and 'content' in parsed:
         content = parsed.get('content', content)
@@ -1986,12 +2084,13 @@ def add_memory(content: str = "", entry_type: str = "note") -> str:
     if entry_type not in valid_types:
         entry_type = "note"
     
-    if _MEMORY_INSTANCE is None:
+    memory_instance = get_memory_instance()
+    if memory_instance is None:
         return _finalize_tool_output("add_memory", "错误：记忆系统未初始化", content=content, entry_type=entry_type)
     
     try:
-        if hasattr(_MEMORY_INSTANCE, 'add_long_term_memory'):
-            success = _MEMORY_INSTANCE.add_long_term_memory(content, entry_type)
+        if hasattr(memory_instance, 'add_long_term_memory'):
+            success = memory_instance.add_long_term_memory(content, entry_type)
             if success:
                 return _finalize_tool_output("add_memory", f"已记录到长期记忆：{content}", content=content, entry_type=entry_type)
             else:
@@ -2003,6 +2102,21 @@ def add_memory(content: str = "", entry_type: str = "note") -> str:
         return _finalize_tool_output("add_memory", f"添加长期记忆失败: {str(e)}", content=content, entry_type=entry_type)
 
 
+add_memory = build_agent_tool(
+    name="add_memory",
+    description=(
+        "将重要内容添加到长期记忆。"
+        "当用户明确要求记住某事，或识别到重要的决策、偏好、规则时使用此工具。"
+        "长期记忆会在后续对话中持续保留。"
+    ),
+    args_schema=AddMemoryInput,
+    func=_impl_add_memory,
+    is_readonly=False,
+    is_destructive=False,
+    is_concurrency_safe=False,
+)
+
+
 class SearchMemoryInput(BaseModel):
     """搜索记忆的输入参数"""
     keywords: Union[str, List[str]] = Field(default="", description="搜索关键词或正则表达式")
@@ -2010,27 +2124,11 @@ class SearchMemoryInput(BaseModel):
     max_results: int = Field(default=5, description="最大返回结果数")
 
 
-@tool(args_schema=SearchMemoryInput)
-def search_memory(
+def _impl_search_memory(
     keywords: Union[str, List[str]] = "",
     search_type: str = "conversation",
     max_results: int = 5,
 ) -> str:
-    """
-    在记忆系统中搜索内容。
-
-    当需要查找之前对话中的具体内容、或搜索Skills文档中的信息时使用此工具。
-
-    Args:
-        keywords: 搜索关键词（必填），支持正则表达式
-        search_type: 搜索范围
-            - conversation: 只搜索完整对话历史
-            - global: 搜索对话历史和Skills文档
-        max_results: 最大返回结果数（默认5条）
-
-    Returns:
-        格式化后的搜索结果，包含匹配的上下文片段
-    """
     parsed = _parse_json_if_needed(keywords)
     if parsed and isinstance(parsed, (str, list)):
         keywords = parsed
@@ -2043,17 +2141,18 @@ def search_memory(
     if not keywords:
         return _finalize_tool_output("search_memory", "错误：搜索关键词不能为空", keywords=keywords, search_type=search_type, max_results=max_results)
 
-    if _MEMORY_INSTANCE is None:
+    memory_instance = get_memory_instance()
+    if memory_instance is None:
         return _finalize_tool_output("search_memory", "错误：记忆系统未初始化", keywords=keywords, search_type=search_type, max_results=max_results)
 
     try:
-        if not hasattr(_MEMORY_INSTANCE, 'search_history'):
+        if not hasattr(memory_instance, 'search_history'):
             return _finalize_tool_output("search_memory", "错误：记忆系统不支持搜索功能", keywords=keywords, search_type=search_type, max_results=max_results)
 
         if search_type == "global":
-            results = _MEMORY_INSTANCE.global_search(keywords, max_results)
+            results = memory_instance.global_search(keywords, max_results)
         else:
-            results = _MEMORY_INSTANCE.search_history(keywords, max_results)
+            results = memory_instance.search_history(keywords, max_results)
 
         if not results or "未找到" in results:
             return _finalize_tool_output("search_memory", f"未找到与 '{keywords}' 相关的内容", keywords=keywords, search_type=search_type, max_results=max_results)
@@ -2063,6 +2162,20 @@ def search_memory(
     except Exception as e:
         logger.error(f"搜索记忆失败: {e}")
         return _finalize_tool_output("search_memory", f"搜索记忆失败: {str(e)}", keywords=keywords, search_type=search_type, max_results=max_results)
+
+
+search_memory = build_agent_tool(
+    name="search_memory",
+    description=(
+        "在记忆系统中搜索内容。"
+        "当需要查找之前对话中的具体内容、或搜索Skills文档中的信息时使用此工具。"
+    ),
+    args_schema=SearchMemoryInput,
+    func=_impl_search_memory,
+    is_readonly=True,
+    is_destructive=False,
+    is_concurrency_safe=True,
+)
 
 
 def _backup_agents_md(path: Path) -> bool:
@@ -2103,29 +2216,12 @@ def _rebuild_agents_md(sections: List[Dict[str, Any]]) -> str:
     return "\n\n".join(parts) + "\n"
 
 
-@tool(args_schema=UpdateProjectInstructionsInput)
-def update_project_instructions(
+def _impl_update_project_instructions(
     action: str = "append",
     content: str = "",
     section_title: str = "",
     scope: str = "project",
 ) -> str:
-    """
-    修改项目级或全局 AGENTS.md 指令文件，用于持久化用户偏好和规则。
-
-    写入前会自动备份原文件。此工具影响所有后续对话，请务必先向用户确认。
-
-    Args:
-        action: 操作类型
-            - append: 在文件末尾追加内容（自动创建"用户偏好"章节或追加到已有章节）
-            - replace_section: 替换指定章节的全部内容
-            - remove_section: 删除指定章节
-        content: 要追加或替换的内容（纯文本即可，工具自动处理格式）
-        section_title: 章节标题（replace_section/remove_section 时必填）
-        scope: 作用域
-            - project: 本项目的 AGENTS.md
-            - global: 全局 ~/.floodagent/AGENTS.md（跨项目生效）
-    """
     from tools.agent_tool import get_agents_md_path
 
     parsed = _parse_json_if_needed(action)
@@ -2269,6 +2365,42 @@ def update_project_instructions(
         )
 
 
+update_project_instructions = build_agent_tool(
+    name="update_project_instructions",
+    description=(
+        "修改项目级或全局 AGENTS.md 指令文件，用于持久化用户偏好和规则。"
+        "写入前会自动备份原文件。此工具影响所有后续对话，请务必先向用户确认。"
+    ),
+    args_schema=UpdateProjectInstructionsInput,
+    func=_impl_update_project_instructions,
+    is_readonly=False,
+    is_destructive=True,
+    is_concurrency_safe=False,
+)
+
+
+def _register_all_tools():
+    ToolRegistry.clear()
+    ToolRegistry.register(get_skill)
+    ToolRegistry.register(run_script)
+    ToolRegistry.register(search_tool_error_memory)
+    ToolRegistry.register(exec_bash)
+    ToolRegistry.register(exec_python_file)
+    ToolRegistry.register(write_text_file)
+    ToolRegistry.register(search_artifacts)
+    ToolRegistry.register(check_artifact_exists)
+    ToolRegistry.register(read_artifact)
+    ToolRegistry.register(knowledge_search)
+    ToolRegistry.register(add_knowledge)
+    ToolRegistry.register(web_search)
+    ToolRegistry.register(add_memory)
+    ToolRegistry.register(search_memory)
+    ToolRegistry.register(update_project_instructions)
+
+
+_register_all_tools()
+
+
 __all__ = [
     'get_skill',
     'run_script',
@@ -2278,15 +2410,16 @@ __all__ = [
     'search_artifacts',
     'check_artifact_exists',
     'read_artifact',
-    'read_file',
     'knowledge_search',
     'add_knowledge',
     'web_search',
     'add_memory',
     'search_memory',
+    'search_tool_error_memory',
     'update_project_instructions',
     'reset_retry_guard',
     'set_skill_registry',
     'set_rag_config',
     'set_memory_instance',
+    '_register_all_tools',
 ]

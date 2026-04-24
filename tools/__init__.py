@@ -1,20 +1,14 @@
 """
 工具模块
 
-提供Agent执行技能所需的基础工具：
-- get_skill: 获取技能详细说明
-- run_script: 执行Python脚本
-- exec_bash: 执行Shell命令
-- exec_python_file: 执行本地Python文件
-- write_text_file: 直接写入文本文件
-- search_artifacts: 搜索当前会话或历史可复用 Python 脚本
-- read_artifact: 读取 `.py`、`.md`、`.txt`、`.json` 文本文件
-- read_file: 读取文件内容
-- knowledge_search: 知识检索
-- add_knowledge: 添加知识到知识库
-- web_search: 网络搜索
-- add_memory: 添加长期记忆
-- search_memory: 搜索记忆（对话历史/Skills）
+提供Agent执行技能所需的基础工具，所有工具统一使用 build_agent_tool 构建，
+具备完整的行为元数据（readonly/destructive/concurrency_safe/interrupt_behavior）。
+
+工具分类：
+- 只读工具: get_skill, search_artifacts, read_artifact, knowledge_search, search_memory, search_tool_error_memory
+- 写入工具: write_text_file, update_project_instructions, add_knowledge, add_memory
+- 执行工具: exec_bash, run_script, exec_python_file
+- 网络工具: web_search
 """
 
 from tools.base_tools import (
@@ -39,17 +33,21 @@ from tools.base_tools import (
     set_memory_instance,
     set_session_context,
     get_current_session_output_dir,
+    _register_all_tools,
 )
 
 from tools.agent_tool import (
     AgentTool,
+    ToolRegistry,
     PermissionBehavior,
     PermissionResult,
     ValidationResult,
-    UpdateProjectInstructionsInput,
+    InterruptBehavior,
+    TOOL_DEFAULTS,
     check_dangerous_command,
     check_path_permission,
     build_agent_tool,
+    UpdateProjectInstructionsInput,
     get_agents_md_path,
 )
 
@@ -75,10 +73,14 @@ __all__ = [
     'set_memory_instance',
     'set_session_context',
     'get_current_session_output_dir',
+    '_register_all_tools',
     'AgentTool',
+    'ToolRegistry',
     'PermissionBehavior',
     'PermissionResult',
     'ValidationResult',
+    'InterruptBehavior',
+    'TOOL_DEFAULTS',
     'check_dangerous_command',
     'check_path_permission',
     'build_agent_tool',

@@ -20,6 +20,18 @@ from typing import Any, Dict, List, Optional, Callable
 logger = logging.getLogger(__name__)
 
 
+def validate_session_id(session_id: str) -> str:
+    session_id = str(session_id or "").strip()
+    if not session_id:
+        raise ValueError("session_id 不能为空")
+    if len(session_id) > 128:
+        raise ValueError("session_id 过长")
+    allowed = set("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_.")
+    if any(ch not in allowed for ch in session_id):
+        raise ValueError("session_id 含非法字符")
+    return session_id
+
+
 @dataclass
 class SessionInfo:
     """会话信息"""
@@ -170,6 +182,7 @@ class SessionManager:
         Returns:
             (SessionInfo, agent) 元组
         """
+        session_id = validate_session_id(session_id)
         with self._lock:
             if session_id in self._sessions:
                 info = self._sessions[session_id]
@@ -211,6 +224,7 @@ class SessionManager:
     
     def _create_session_dir(self, session_id: str):
         """创建会话目录结构"""
+        session_id = validate_session_id(session_id)
         session_dir = self.get_session_dir(session_id)
         (session_dir / "memory").mkdir(parents=True, exist_ok=True)
         (session_dir / "uploads").mkdir(parents=True, exist_ok=True)
@@ -227,6 +241,7 @@ class SessionManager:
     
     def _restore_session(self, session_id: str, agent_factory: Optional[Callable]) -> Any:
         """从磁盘恢复会话"""
+        session_id = validate_session_id(session_id)
         session_dir = self.get_session_dir(session_id)
         session_file = session_dir / "session.json"
         
@@ -264,6 +279,7 @@ class SessionManager:
     
     def _evict_session(self, session_id: str, agent_factory: Optional[Callable] = None):
         """淘汰会话（持久化后释放内存）"""
+        session_id = validate_session_id(session_id)
         if session_id not in self._agents:
             return
         
@@ -291,6 +307,7 @@ class SessionManager:
     
     def get_session_dir(self, session_id: str) -> Path:
         """获取会话目录路径"""
+        session_id = validate_session_id(session_id)
         return self.sessions_dir / session_id
     
     def get_memory_dir(self, session_id: str) -> Path:
@@ -307,6 +324,7 @@ class SessionManager:
     
     def touch_session(self, session_id: str):
         """更新会话活跃时间"""
+        session_id = validate_session_id(session_id)
         with self._lock:
             if session_id in self._sessions:
                 self._sessions[session_id].touch()
@@ -314,6 +332,7 @@ class SessionManager:
     
     def increment_message_count(self, session_id: str):
         """增加消息计数"""
+        session_id = validate_session_id(session_id)
         with self._lock:
             if session_id in self._sessions:
                 self._sessions[session_id].message_count += 1
@@ -321,6 +340,7 @@ class SessionManager:
 
     def update_session_title(self, session_id: str, title: str):
         """更新会话标题"""
+        session_id = validate_session_id(session_id)
         with self._lock:
             if session_id in self._sessions:
                 self._sessions[session_id].title = title
@@ -343,20 +363,24 @@ class SessionManager:
     
     def get_session_info(self, session_id: str) -> Optional[SessionInfo]:
         """获取会话信息"""
+        session_id = validate_session_id(session_id)
         with self._lock:
             self._reconcile_session_index_with_disk()
             return self._sessions.get(session_id)
     
     def has_active_agent(self, session_id: str) -> bool:
         """检查会话是否有活跃的 Agent"""
+        session_id = validate_session_id(session_id)
         return session_id in self._agents
     
     def get_agent(self, session_id: str) -> Optional[Any]:
         """获取会话的 Agent"""
+        session_id = validate_session_id(session_id)
         return self._agents.get(session_id)
     
     def get_session_title(self, session_id: str) -> str:
         """获取会话标题（优先使用保存的标题，否则从第一条用户消息提取）"""
+        session_id = validate_session_id(session_id)
         info = self._sessions.get(session_id)
         if info and info.title:
             return info.title
@@ -381,6 +405,7 @@ class SessionManager:
     
     def get_session_messages(self, session_id: str) -> List[Dict[str, str]]:
         """获取会话的对话历史（用于前端恢复）"""
+        session_id = validate_session_id(session_id)
         agent = self.get_agent(session_id)
         if agent and hasattr(agent, 'memory') and hasattr(agent.memory, 'get_chat_history_for_frontend'):
             try:
@@ -415,6 +440,7 @@ class SessionManager:
     
     def delete_session(self, session_id: str):
         """删除会话（包括所有数据）"""
+        session_id = validate_session_id(session_id)
         with self._lock:
             if session_id in self._agents:
                 del self._agents[session_id]

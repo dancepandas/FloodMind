@@ -153,16 +153,54 @@ class LongTermMemory:
         
         return False
     
-    def get_context(self, max_entries: int = 10) -> str:
+    def get_context(self, max_entries: int = 10, keywords: Optional[List[str]] = None) -> str:
         if not self.entries:
             return ""
         
-        recent = self.entries[-max_entries:]
+        scored = self._score_entries(keywords)
+        top = scored[:max_entries]
+        
         lines = ["[长期记忆]"]
-        for e in recent:
-            lines.append(f"- {e['content']}")
+        for entry in top:
+            lines.append(f"- {entry['content']}")
         
         return "\n".join(lines)
+
+    def _score_entries(self, keywords: Optional[List[str]] = None) -> List[Dict[str, Any]]:
+        now = datetime.now()
+        scored = []
+        for entry in self.entries:
+            age_hours = 0.0
+            try:
+                ts = datetime.strptime(entry.get("timestamp", ""), "%Y-%m-%d %H:%M")
+                age_hours = max(0, (now - ts).total_seconds() / 3600)
+            except (ValueError, TypeError):
+                age_hours = 720.0
+
+            time_score = 1.0 / (1.0 + age_hours / 168.0)
+
+            type_scores = {
+                "rule": 2.0,
+                "preference": 1.5,
+                "decision": 1.3,
+                "note": 1.0,
+            }
+            type_score = type_scores.get(entry.get("type", "note"), 1.0)
+
+            relevance_score = 0.0
+            if keywords:
+                content_lower = entry.get("content", "").lower()
+                for kw in keywords:
+                    if kw.lower() in content_lower:
+                        relevance_score += 1.0
+
+            final_score = time_score * type_score + relevance_score * 2.0
+            scored_entry = dict(entry)
+            scored_entry["_score"] = final_score
+            scored.append(scored_entry)
+
+        scored.sort(key=lambda e: e.get("_score", 0), reverse=True)
+        return scored
     
     def clear(self):
         self._init_file()
@@ -184,6 +222,25 @@ class ContextCompressor:
 5. 不要编造或添加信息
 
 直接输出摘要内容，不要其他解释："""
+
+    DISTILL_PROMPT = """请将以下已有摘要和新增对话内容统一蒸馏为一份简洁摘要：
+
+【已有摘要】
+{existing_summary}
+
+【新增对话】
+{new_conversation}
+
+要求：
+1. 将已有摘要和新对话内容合并为一份统一的摘要
+2. 输出长度不超过 {max_chars} 字符
+3. 保留最重要的决策、结论、用户偏好和规则
+4. 省略冗余细节和中间过程
+5. 如果已有摘要中的信息在新对话中被修正，以新信息为准
+
+直接输出蒸馏后的摘要，不要其他解释："""
+
+    MAX_SUMMARY_CHARS = 2000
 
     def __init__(self, llm: Optional[BaseLanguageModel] = None):
         self.llm = llm
@@ -212,6 +269,28 @@ class ContextCompressor:
         except Exception as e:
             logger.error(f"[上下文压缩] AI压缩失败: {e}")
             return self._simple_compress(messages)
+
+    def distill(self, existing_summary: str, new_conversation_text: str) -> str:
+        if not self.llm:
+            combined = f"{existing_summary}\n\n{new_conversation_text}"
+            return combined[:self.MAX_SUMMARY_CHARS]
+
+        try:
+            prompt = self.DISTILL_PROMPT.format(
+                existing_summary=existing_summary,
+                new_conversation=new_conversation_text,
+                max_chars=self.MAX_SUMMARY_CHARS,
+            )
+            response = self.llm.invoke(prompt)
+            summary = response.content if hasattr(response, "content") else str(response)
+            summary = summary.strip()
+            logger.info(f"[摘要蒸馏] {len(existing_summary)} + {len(new_conversation_text)} -> {len(summary)} 字符")
+            return summary
+        except Exception as e:
+            logger.error(f"[摘要蒸馏] 失败: {e}")
+            new_budget = min(len(new_conversation_text), int(self.MAX_SUMMARY_CHARS * 0.7))
+            old_budget = self.MAX_SUMMARY_CHARS - new_budget
+            return existing_summary[-old_budget:] + "\n\n" + new_conversation_text[:new_budget]
     
     def _simple_compress(self, messages: List[BaseMessage]) -> str:
         lines = ["[对话摘要]"]
@@ -244,6 +323,8 @@ class DualMemory:
     
     COMPRESS_THRESHOLD = 16
     KEEP_RECENT_TURNS = 6
+    TOKEN_BUDGET_RATIO = 0.8
+    CHARS_PER_TOKEN = 1.5
     
     def __init__(
         self,
@@ -305,7 +386,7 @@ class DualMemory:
             self.full_chat_history.add_user_message(message)
             self._turn_count += 1
             
-            if self._turn_count >= self.COMPRESS_THRESHOLD:
+            if self._should_compress():
                 self._compress_history()
         
         logger.debug(f"[记忆] 添加用户消息，当前轮数: {self._turn_count}")
@@ -387,6 +468,19 @@ class DualMemory:
         with self._lock:
             return list(self.chat_history.messages)
     
+    def _estimate_tokens(self) -> int:
+        total_chars = len(self._compressed_summary)
+        for msg in self.chat_history.messages:
+            total_chars += len(str(msg.content))
+        return int(total_chars / self.CHARS_PER_TOKEN)
+
+    def _should_compress(self) -> bool:
+        if self._turn_count >= self.COMPRESS_THRESHOLD:
+            return True
+        estimated_tokens = self._estimate_tokens()
+        budget = int(self.context_window * self.TOKEN_BUDGET_RATIO)
+        return estimated_tokens > budget
+
     def _compress_history(self):
         messages = list(self.chat_history.messages)
         
@@ -398,12 +492,15 @@ class DualMemory:
 
         self._emit_status("compressing", "正在压缩较早的会话上下文，请稍候...")
 
-        new_summary = self.compressor.compress(old_messages)
-        
+        new_conversation_text = self.compressor._messages_to_text(old_messages)
+
         if self._compressed_summary:
-            self._compressed_summary = f"{self._compressed_summary}\n\n[新摘要]\n{new_summary}"
+            self._compressed_summary = self.compressor.distill(
+                existing_summary=self._compressed_summary,
+                new_conversation_text=new_conversation_text,
+            )
         else:
-            self._compressed_summary = new_summary
+            self._compressed_summary = self.compressor.compress(old_messages)
         
         self.chat_history = ChatMessageHistory()
         for msg in recent_messages:
@@ -414,25 +511,8 @@ class DualMemory:
         
         self._turn_count = len(recent_messages) // 2
 
-        logger.info(f"[上下文压缩] 完成，保留最近 {self._turn_count} 轮对话")
+        logger.info(f"[上下文压缩] 完成，保留最近 {self._turn_count} 轮对话，摘要长度 {len(self._compressed_summary)} 字符")
         self._emit_status("compressed", f"会话压缩完成，已保留最近 {self._turn_count} 轮对话。")
-    
-    def get_history_text(self, user_input: Optional[str] = None) -> str:
-        parts: List[str] = []
-        
-        with self._lock:
-            long_term_context = self.long_term_memory.get_context()
-            if long_term_context:
-                parts.append(long_term_context)
-            
-            if self._compressed_summary:
-                parts.append(f"[历史摘要]\n{self._compressed_summary}")
-            
-            if self.chat_history.messages:
-                recent = self._messages_to_text(list(self.chat_history.messages))
-                parts.append(f"[当前对话]\n{recent}")
-        
-        return "\n\n".join(parts) if parts else "无历史对话"
     
     def _messages_to_text(self, messages: List[BaseMessage]) -> str:
         lines = []
@@ -442,6 +522,13 @@ class DualMemory:
             elif isinstance(msg, AIMessage):
                 lines.append(f"助手: {msg.content}")
         return "\n".join(lines)
+
+    @staticmethod
+    def _extract_keywords(text: str, max_keywords: int = 5) -> List[str]:
+        import re as _re
+        segments = _re.split(r'[，。、；：？！\s,;:?!()\[\]{}]+\s*', text)
+        keywords = [s.strip() for s in segments if s.strip() and 2 <= len(s) <= 20]
+        return keywords[:max_keywords]
     
     def clear(self):
         with self._lock:
@@ -452,21 +539,7 @@ class DualMemory:
             self._last_tool_use = {}
             self._turn_count = 0
         logger.info("[记忆] 短期记忆已清空")
-    
-    def clear_all(self):
-        with self._lock:
-            self.chat_history.clear()
-            self.full_chat_history.clear()
-            self._compressed_summary = ""
-            self._recent_reusable_result = ""
-            self._last_tool_use = {}
-            self._turn_count = 0
-            self.long_term_memory.clear()
-        logger.info("[记忆] 所有记忆已清空")
-    
-    def get_chat_history(self) -> ChatMessageHistory:
-        return self.chat_history
-    
+
     def to_dict(self) -> Dict[str, Any]:
         with self._lock:
             return {
@@ -480,8 +553,8 @@ class DualMemory:
     def add_long_term_memory(self, content: str, entry_type: str = "note") -> bool:
         return self.long_term_memory.add_entry(content, entry_type)
     
-    def get_long_term_context(self) -> str:
-        return self.long_term_memory.get_context()
+    def get_long_term_context(self, keywords: Optional[List[str]] = None) -> str:
+        return self.long_term_memory.get_context(keywords=keywords)
 
     def search_history(self, keywords: Union[str, List[str]], max_results: int = 5) -> str:
         """

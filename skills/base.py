@@ -16,11 +16,6 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class Skill:
-    """
-    技能类
-    
-    表示一个可执行的技能，包含元数据、使用说明和资源。
-    """
     name: str
     description: str
     prompt: str = ""
@@ -28,17 +23,11 @@ class Skill:
     references: List[str] = field(default_factory=list)
     is_knowledge_only: bool = False
     skill_dir: Optional[Path] = None
+    version: str = "1.0"
+    provides_tools: List[str] = field(default_factory=list)
+    category: str = "execution"
     
     def get_script_path(self, script_name: str) -> Optional[Path]:
-        """
-        获取脚本的完整路径
-        
-        Args:
-            script_name: 脚本文件名
-            
-        Returns:
-            脚本的完整路径，如果不存在则返回 None
-        """
         if not self.skill_dir:
             return None
         
@@ -47,9 +36,35 @@ class Skill:
             return script_path
         
         return None
+
+    def has_tools(self) -> bool:
+        if self.provides_tools:
+            return True
+        tools_path = self.skill_dir / "tools.py" if self.skill_dir else None
+        return tools_path is not None and tools_path.exists()
+
+    def load_tools_module(self) -> Optional[Any]:
+        if not self.skill_dir:
+            return None
+        tools_path = self.skill_dir / "tools.py"
+        if not tools_path.exists():
+            return None
+        import importlib.util
+        try:
+            spec = importlib.util.spec_from_file_location(
+                f"skill_tools_{self.name}",
+                str(tools_path),
+            )
+            if spec and spec.loader:
+                module = importlib.util.module_from_spec(spec)
+                spec.loader.exec_module(module)
+                return module
+        except Exception as e:
+            logger.warning(f"加载 skill {self.name} 的 tools.py 失败: {e}")
+        return None
     
     def __repr__(self) -> str:
-        return f"Skill(name={self.name}, scripts={len(self.scripts)}, refs={len(self.references)})"
+        return f"Skill(name={self.name}, v={self.version}, scripts={len(self.scripts)}, tools={self.provides_tools})"
 
 
 def _parse_skill_md(skill_md_path: Path) -> Optional[Skill]:
@@ -117,7 +132,10 @@ def _parse_skill_md(skill_md_path: Path) -> Optional[Skill]:
             scripts=scripts,
             references=references,
             is_knowledge_only=is_knowledge_only,
-            skill_dir=skill_dir
+            skill_dir=skill_dir,
+            version=str(frontmatter.get('version', '1.0')),
+            provides_tools=frontmatter.get('provides_tools', []),
+            category=frontmatter.get('category', 'execution' if scripts else 'knowledge'),
         )
         
         logger.debug(f"解析技能: {skill.name} (scripts={len(scripts)}, refs={len(references)})")
@@ -189,17 +207,6 @@ def discover_skills_from_roots(roots: List[Path]) -> List[Skill]:
 
 
 def generate_skill_catalog(skills: List[Skill]) -> str:
-    """
-    生成技能目录
-    
-    为 Agent 生成一个简洁的技能目录字符串，用于系统提示。
-    
-    Args:
-        skills: 技能列表
-        
-    Returns:
-        技能目录字符串
-    """
     if not skills:
         return "当前没有可用技能。"
     
@@ -207,7 +214,12 @@ def generate_skill_catalog(skills: List[Skill]) -> str:
     
     for skill in skills:
         desc = skill.description if skill.description else "请调用 get_skill 获取详细说明"
-        lines.append(f"- **{skill.name}**：{desc}")
+        suffix = ""
+        if skill.provides_tools:
+            suffix = f" [提供工具: {', '.join(skill.provides_tools)}]"
+        elif skill.has_tools():
+            suffix = " [提供工具: 详见 tools.py / get_skill]"
+        lines.append(f"- **{skill.name}**（{skill.category}）：{desc}{suffix}")
     
     lines.extend([
         "",

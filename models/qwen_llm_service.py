@@ -215,16 +215,22 @@ def get_qwen_llm_service(api_key: str, model_name: str = "qwen-flash",
         QwenLLMService实例
     """
     global _llm_service
-    
-    need_recreate = False
-    if _llm_service is None:
-        need_recreate = True
-    elif _llm_service.enable_reasoning != enable_reasoning:
-        logger.info(f"推理模式配置变更: {_llm_service.enable_reasoning} -> {enable_reasoning}，重新创建实例")
-        need_recreate = True
-    elif _llm_service.enable_search != enable_search:
-        logger.info(f"搜索配置变更: {_llm_service.enable_search} -> {enable_search}，重新创建实例")
-        need_recreate = True
+    current_signature = {
+        "api_key": api_key,
+        "model_name": model_name,
+        "temperature": temperature,
+        "max_tokens": max_tokens,
+        "enable_search": enable_search,
+        "enable_reasoning": enable_reasoning,
+        "reasoning_model": reasoning_model,
+        "base_url": os.getenv("QWEN_BASE_URL", "https://dashscope.aliyuncs.com/compatible-mode/v1"),
+    }
+
+    previous_signature = getattr(_llm_service, "_config_signature", None) if _llm_service else None
+    need_recreate = _llm_service is None or previous_signature != current_signature
+
+    if need_recreate and previous_signature is not None:
+        logger.info("Qwen 配置变更，重新创建实例")
     
     if need_recreate:
         try:
@@ -243,4 +249,5 @@ def get_qwen_llm_service(api_key: str, model_name: str = "qwen-flash",
             enable_reasoning=enable_reasoning,
             reasoning_model=reasoning_model
         )
+        _llm_service._config_signature = current_signature
     return _llm_service

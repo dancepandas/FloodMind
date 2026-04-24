@@ -15,6 +15,7 @@ import json
 import os
 import queue
 import re
+import contextvars
 import threading
 import time
 from dataclasses import dataclass, field
@@ -32,10 +33,15 @@ from models.qwen_llm_service import QwenLLMService
 from memory import SimpleMemory, DualMemory
 from skills import SKILL_REGISTRY
 from skills.base import Skill
-from tools import get_skill, run_script, exec_bash, exec_python_file, write_text_file, search_tool_error_memory, search_artifacts, check_artifact_exists, read_artifact, knowledge_search, add_knowledge, web_search, add_memory, search_memory, update_project_instructions, set_rag_config, set_memory_instance, reset_retry_guard
+from tools import get_skill, run_script, exec_bash, exec_python_file, write_text_file, search_tool_error_memory, search_artifacts, check_artifact_exists, read_artifact, knowledge_search, web_search, add_memory, search_memory, update_project_instructions, set_rag_config, set_memory_instance, reset_retry_guard
+from tools.agent_tool import PermissionManager, PermissionRule, PermissionBehavior, set_permission_manager, get_permission_manager, ToolRegistry
+from agent.context_runtime import ContextRuntime
+from agent.task_runtime import TaskTracker, TaskType, TaskResult
 from config.settings import settings
 
 logger = logging.getLogger(__name__)
+
+_active_input_var: contextvars.ContextVar[str] = contextvars.ContextVar("active_user_input", default="")
 
 
 class SpecialistTaskInput(BaseModel):
@@ -52,7 +58,7 @@ class CreatePlanInput(BaseModel):
 class _FunctionsStreamCallback(BaseCallbackHandler):
     """OpenAI Functions Agent 的流式输出回调"""
 
-    def __init__(self, q: queue.Queue, enable_reasoning: bool = False):
+    def __init__(self, q: queue.Queue, enable_reasoning: bool = False, task_tracker: Optional[TaskTracker] = None):
         super().__init__()
         self._q = q
         self._current_tool_name = None
@@ -67,7 +73,20 @@ class _FunctionsStreamCallback(BaseCallbackHandler):
         self._first_llm_call = True
         self._initial_enable_reasoning = enable_reasoning
         self._reasoning_emit_buffer = ""
+        self._task_tracker = task_tracker
+        self._current_task_id: Optional[str] = None
         logger.info(f"[Reasoning Callback] 初始化, enable_reasoning={enable_reasoning}")
+
+    @staticmethod
+    def _tool_task_type(tool_name: str) -> TaskType:
+        return {
+            "run_script": TaskType.SCRIPT_EXECUTION,
+            "exec_bash": TaskType.BASH_COMMAND,
+            "exec_python_file": TaskType.PYTHON_FILE,
+            "write_text_file": TaskType.FILE_WRITE,
+            "knowledge_search": TaskType.KNOWLEDGE_SEARCH,
+            "delegate_execution_specialist": TaskType.AGENT_DELEGATION,
+        }.get(tool_name, TaskType.PLAN_STEP)
 
     def _flush_reasoning_buffer(self) -> None:
         if not self._reasoning_emit_buffer:
@@ -158,6 +177,14 @@ class _FunctionsStreamCallback(BaseCallbackHandler):
         self._has_tool_call = True
         self._current_tool_name = tool_name
         self._current_tool_input = input_str or ""
+        if self._task_tracker is not None:
+            task = self._task_tracker.create_task(
+                task_type=self._tool_task_type(tool_name),
+                title=tool_name,
+                input_data={"tool_input": self._current_tool_input},
+            )
+            self._task_tracker.start_task(task.task_id)
+            self._current_task_id = task.task_id
         self._q.put(("tool_status", {"tool_name": tool_name, "status": "running"}))
 
     def on_tool_end(self, output: str, **kwargs) -> None:
@@ -171,9 +198,22 @@ class _FunctionsStreamCallback(BaseCallbackHandler):
                 "tool_input": self._current_tool_input,
                 "content": output_str,
             }))
+        if self._task_tracker is not None and self._current_task_id:
+            if "错误" in output_str or "失败" in output_str:
+                self._task_tracker.fail_task(self._current_task_id, error=output_str[:200])
+            else:
+                self._task_tracker.complete_task(
+                    self._current_task_id,
+                    result=TaskResult(
+                        output=output_str[:500],
+                        tool_name=tool_name or "",
+                        tool_input={"tool_input": self._current_tool_input},
+                    ),
+                )
 
         self._current_tool_name = None
         self._current_tool_input = ""
+        self._current_task_id = None
         # 重置 _has_tool_call，这样下一次 LLM 调用时可以启用思考阶段
         self._has_tool_call = False
 
@@ -184,8 +224,11 @@ class _FunctionsStreamCallback(BaseCallbackHandler):
             "status": "error",
             "content": str(error),
         }))
+        if self._task_tracker is not None and self._current_task_id:
+            self._task_tracker.fail_task(self._current_task_id, error=str(error)[:200])
         self._current_tool_name = None
         self._current_tool_input = ""
+        self._current_task_id = None
 
     def on_chain_start(self, serialized, inputs, **kwargs):
         """链开始"""
@@ -212,6 +255,52 @@ class _FunctionsStreamCallback(BaseCallbackHandler):
         """LLM 错误"""
         self._flush_reasoning_buffer()
         self._q.put(("reasoning", str(error)))
+
+
+class _TaskTrackingCallback(BaseCallbackHandler):
+    def __init__(self, task_tracker: TaskTracker):
+        super().__init__()
+        self._task_tracker = task_tracker
+        self._current_tool_name = ""
+        self._current_tool_input = ""
+        self._current_task_id: Optional[str] = None
+
+    def on_tool_start(self, serialized: dict, input_str: str, **kwargs) -> None:
+        tool_name = serialized.get("name", "unknown")
+        self._current_tool_name = tool_name
+        self._current_tool_input = input_str or ""
+        task = self._task_tracker.create_task(
+            task_type=_FunctionsStreamCallback._tool_task_type(tool_name),
+            title=tool_name,
+            input_data={"tool_input": self._current_tool_input},
+        )
+        self._task_tracker.start_task(task.task_id)
+        self._current_task_id = task.task_id
+
+    def on_tool_end(self, output: str, **kwargs) -> None:
+        output_str = str(output or "")
+        if self._current_task_id:
+            if "错误" in output_str or "失败" in output_str:
+                self._task_tracker.fail_task(self._current_task_id, error=output_str[:200])
+            else:
+                self._task_tracker.complete_task(
+                    self._current_task_id,
+                    result=TaskResult(
+                        output=output_str[:500],
+                        tool_name=self._current_tool_name,
+                        tool_input={"tool_input": self._current_tool_input},
+                    ),
+                )
+        self._current_task_id = None
+        self._current_tool_name = ""
+        self._current_tool_input = ""
+
+    def on_tool_error(self, error: BaseException, **kwargs) -> None:
+        if self._current_task_id:
+            self._task_tracker.fail_task(self._current_task_id, error=str(error)[:200])
+        self._current_task_id = None
+        self._current_tool_name = ""
+        self._current_tool_input = ""
 
 
 @dataclass
@@ -302,7 +391,7 @@ class AgentLoopState:
 
 class FloodAgent:
     """洪水预报智能体类 - 使用 OpenAI Functions Agent"""
-    SYSTEM_PROMPT = """你是大水云开发的调度 agent。
+    SYSTEM_PROMPT = """你是FloodMind，是大水云开发的洪水预报智能体。
 
 ## 当前系统时间
 {current_time_context}
@@ -515,15 +604,35 @@ class FloodAgent:
             top_k=settings.rag.top_k,
         )
 
+        perm_mgr = PermissionManager.create_default()
+        perm_mgr.set_on_ask_callback(self._on_permission_ask)
+        perm_mgr.add_allow_rule(PermissionRule(
+            name="allow_session_output",
+            pattern=r"data[\\/\\\\]+sessions",
+            behavior=PermissionBehavior.ALLOW,
+            reason="会话输出目录默认允许写入",
+        ))
+        set_permission_manager(perm_mgr)
+
+        self.task_tracker = TaskTracker()
+        self.task_tracker.add_listener(self._on_task_event)
+
+        self._context_runtime = ContextRuntime(
+            context_window=kwargs.get("context_window", 32768),
+        )
+        self._context_runtime.prefetch()
+
         self.skills: List[Skill] = skills if skills is not None else SKILL_REGISTRY
         self.base_tools: List[BaseTool] = [get_skill, search_artifacts, read_artifact, knowledge_search, web_search, search_memory, update_project_instructions]
 
         skill_catalog = "\n".join(
-            f"- {s.name}: {s.description}" for s in self.skills
+            f"- {s.name}: {s.description}"
+            + (f" (v{s.version})" if s.version and s.version != "1.0" else "")
+            + (f" [provides: {', '.join(s.provides_tools)}]" if s.provides_tools else "")
+            for s in self.skills
         ) + "\n- get_skill: 按需获取任意技能的完整参数说明"
 
         self._skill_catalog = skill_catalog
-        self._active_user_input = ""
         self._active_user_message = ""
         self._step_start_time = 0.0
         self._abort_check = None
@@ -552,6 +661,13 @@ class FloodAgent:
         self._executors["orchestrator"] = self.agent_executor
 
         logger.info("洪水预报智能体初始化成功（OpenAI Functions Agent）")
+        tool_meta = ToolRegistry.metadata_table()
+        perm_mgr_ref = get_permission_manager()
+        logger.info(f"工具注册表: {len(tool_meta)} 个工具, "
+                     f"只读={len(ToolRegistry.readonly_tools())}, "
+                     f"破坏性={len(ToolRegistry.destructive_tools())}, "
+                     f"权限规则: {len(perm_mgr_ref._deny_rules)} deny / {len(perm_mgr_ref._allow_rules)} allow"
+                     if perm_mgr_ref else "权限管理器未初始化")
         
         if enable_chronos_warmup is None:
             enable_chronos_warmup = settings.agent.enable_chronos_warmup
@@ -559,42 +675,16 @@ class FloodAgent:
         if enable_chronos_warmup:
             self._warmup_chronos()
 
-    @staticmethod
-    def _load_project_context() -> str:
-        parts = []
-
-        global_path = Path.home() / ".floodagent" / "AGENTS.md"
-        global_ctx = FloodAgent._read_agents_md(global_path, label="全局级指令")
-        if global_ctx:
-            parts.append(global_ctx)
-
-        project_path = Path(__file__).resolve().parent.parent / "AGENTS.md"
-        cwd_path = Path.cwd() / "AGENTS.md"
-        project_ctx = FloodAgent._read_agents_md(cwd_path, label="项目级指令")
-        if not project_ctx:
-            project_ctx = FloodAgent._read_agents_md(project_path, label="项目级指令")
-        if project_ctx:
-            parts.append(project_ctx)
-
-        return "\n\n".join(parts)
+    def _load_project_context(self) -> str:
+        return self._context_runtime.load_project_rules()
 
     @staticmethod
-    def _read_agents_md(path: Path, label: str = "项目级指令") -> str:
-        if not path.exists():
-            return ""
-        try:
-            content = path.read_text(encoding="utf-8").strip()
-            if not content:
-                return ""
-            lines = content.splitlines()
-            filtered = [line for line in lines if not line.startswith("#")]
-            body = "\n".join(line for line in filtered if line.strip())
-            if not body:
-                return ""
-            return f"## {label}（来自 {path.name}）\n{body}"
-        except Exception as e:
-            logger.warning(f"读取 {path} 失败: {e}")
-            return ""
+    def _get_current_time_context() -> str:
+        return ContextRuntime.load_current_time_static()
+
+    @staticmethod
+    def _get_current_system_context() -> str:
+        return ContextRuntime.load_system_env_static()
 
     def _build_prompt(self, system_prompt: str, *, include_memory: bool = True, include_chat_history: bool = True) -> ChatPromptTemplate:
         formatted = system_prompt.format(
@@ -761,7 +851,7 @@ class FloodAgent:
             "stage_label": stage_label,
             "result_type": "intermediate",
             "status": "completed",
-            "user_goal": self._active_user_input,
+            "user_goal": _active_input_var.get(),
             "task": task,
             "skill_name": skill_name,
             "summary": output,
@@ -908,55 +998,89 @@ class FloodAgent:
             return self.memory.get_messages()
         return []
 
-    def _get_long_term_memory_message(self) -> Optional[SystemMessage]:
-        """获取长期记忆作为系统消息"""
-        context = self.memory.get_long_term_context() if hasattr(self.memory, 'get_long_term_context') else ""
-        if context:
-            return SystemMessage(content=context)
-        return None
-
     @staticmethod
     def _get_current_time_context() -> str:
-        now = datetime.now().astimezone()
-        timezone_name = now.tzname() or "本地时区"
-        return (
-            f"当前系统时间: {now.strftime('%Y-%m-%d %H:%M:%S %z')}\n"
-            f"ISO时间: {now.isoformat()}\n"
-            f"当前时区: {timezone_name}\n"
-            f"今天是: {now.strftime('%Y-%m-%d')}\n"
-            f"当前星期: 星期{'一二三四五六日'[now.weekday()]}"
-        )
+        return ContextRuntime.load_current_time_static()
 
     @staticmethod
     def _get_current_system_context() -> str:
-        import platform
-        shell_name = "powershell.exe / pwsh" if os.name == "nt" else "bash / sh"
-        path_style = "Windows" if os.name == "nt" else "POSIX"
-        return (
-            f"操作系统: {platform.system()} {platform.release()}\n"
-            f"Python 版本: {platform.python_version()}\n"
-            f"exec_bash shell 策略: 自动选择当前可用 shell\n"
-            f"当前环境优先 shell: {shell_name}\n"
-            f"路径风格: {path_style}"
-        )
+        return ContextRuntime.load_system_env_static()
 
     def _build_context_messages(self) -> List[SystemMessage]:
-        """构造每轮都要注入的系统上下文消息。"""
-        context_messages: List[SystemMessage] = []
+        long_term_ctx = self.memory.get_long_term_context(
+            keywords=self._extract_context_keywords()
+        ) if hasattr(self.memory, 'get_long_term_context') else ""
+        if long_term_ctx:
+            self._context_runtime.set_long_term_memory(long_term_ctx)
+        else:
+            self._context_runtime.set_long_term_memory("")
 
-        long_term_memory = self._get_long_term_memory_message()
-        if long_term_memory:
-            context_messages.append(long_term_memory)
+        recent_result = self.memory.get_recent_reusable_result() if hasattr(self.memory, 'get_recent_reusable_result') else ""
+        if recent_result and recent_result.strip():
+            self._context_runtime.set_recent_result(
+                "[最近一次可复用结果]\n"
+                "以下内容来自当前会话最近一次已完成的分析/预测/统计结果。"
+                "如果用户当前任务是继续加工、生成文档、绘图或整理汇总，优先直接复用这份结果，"
+                "不要默认重新运行上游分析。\n\n"
+                + recent_result.strip()
+            )
+        else:
+            self._context_runtime.set_recent_result("")
 
-        recent_result_message = self._get_recent_result_message()
-        if recent_result_message:
-            context_messages.append(recent_result_message)
+        last_tool_use = self.memory.get_last_tool_use() if hasattr(self.memory, 'get_last_tool_use') else {}
+        if last_tool_use and last_tool_use.get("tool_name"):
+            tool_name = str(last_tool_use.get("tool_name", "")).strip()
+            tool_input = str(last_tool_use.get("tool_input", "")).strip()
+            tool_output = str(last_tool_use.get("tool_output", "")).strip()
+            sections = [
+                "[最近一次工具执行记录]",
+                f"工具名: {tool_name}",
+            ]
+            if tool_input:
+                sections.append(f"工具输入:\n{tool_input}")
+            if tool_output:
+                sections.append(f"工具输出:\n{tool_output}")
+            sections.append("如果用户当前任务是在上一轮执行结果基础上继续，请优先复用这次工具执行记录，而不是默认重跑。")
+            self._context_runtime.set_last_tool_use("\n\n".join(sections))
+        else:
+            self._context_runtime.set_last_tool_use("")
 
-        last_tool_use_message = self._get_last_tool_use_message()
-        if last_tool_use_message:
-            context_messages.append(last_tool_use_message)
+        rag_result = self._get_rag_context()
+        if rag_result:
+            self._context_runtime.set_rag_context(rag_result)
+        else:
+            self._context_runtime.set_rag_context("")
 
-        return context_messages
+        messages = self._context_runtime.build_context_messages()
+        est_tokens = self._context_runtime.estimate_tokens()
+        if est_tokens > self._context_runtime.context_window:
+            logger.warning(f"上下文 token 估计 {est_tokens} 超出窗口 {self._context_runtime.context_window}")
+        return messages
+
+    def _get_rag_context(self) -> str:
+        try:
+            from tools.base_tools import _get_retriever, get_current_session_id
+            retriever = _get_retriever()
+            if not retriever:
+                return ""
+            user_input = _active_input_var.get()
+            if not user_input:
+                return ""
+            session_id = get_current_session_id()
+            result = retriever.search(query=user_input, top_k=3, session_id=session_id)
+            if result and result.documents:
+                return result.to_context_text()
+        except Exception as e:
+            logger.debug(f"RAG 上下文获取失败: {e}")
+        return ""
+
+    def _extract_context_keywords(self) -> List[str]:
+        user_input = _active_input_var.get()
+        if not user_input:
+            return []
+        import re as _re
+        segments = _re.split(r'[，。、；：\s,;:\n]+', user_input)
+        return [s for s in segments if len(s) >= 2][:5]
 
     @staticmethod
     def _looks_like_file_heavy_task(user_input: str) -> bool:
@@ -986,6 +1110,22 @@ class FloodAgent:
         )
         state = AgentLoopState(original_input=user_input, user_message=user_message, plan=existing_plan, plan_steps=[initial_step])
         return state
+
+    @staticmethod
+    def _result_includes_tool_call(result: Dict[str, Any], tool_name: str) -> bool:
+        for step in result.get("intermediate_steps", []):
+            if not isinstance(step, (list, tuple)) or len(step) < 1:
+                continue
+            action = step[0]
+            if getattr(action, "tool", "") == tool_name:
+                return True
+        return False
+
+    @staticmethod
+    def _requires_create_plan(result: Dict[str, Any]) -> bool:
+        # 只有当主 agent 实际开始委派执行单元时，才强制要求先创建执行计划。
+        # 对于问候、直接问答、纯检索类请求，允许直接回答而不触发 create_plan。
+        return FloodAgent._result_includes_tool_call(result, "delegate_execution_specialist")
 
     @staticmethod
     def _extract_user_message(enhanced_input: str) -> str:
@@ -1040,7 +1180,7 @@ class FloodAgent:
             payload = dict(delegated_payload or {})
             payload.setdefault("stage", stage_name)
             payload.setdefault("result_type", "intermediate")
-            payload.setdefault("user_goal", self._active_user_input)
+            payload.setdefault("user_goal", _active_input_var.get())
             payload["summary"] = text
             payload["artifacts"] = output_artifacts
             if self._artifacts_satisfy_user_goal(payload):
@@ -1664,6 +1804,9 @@ class FloodAgent:
             if self._abort_check and self._abort_check():
                 logger.info("Agent loop aborted by external signal")
                 state.terminal_status = "aborted"
+                for t in self.task_tracker.running_tasks():
+                    self.task_tracker.kill_task(t.task_id, reason="用户中止")
+                logger.info(f"任务统计: {self.task_tracker.summary()}")
                 self._persist_loop_state(state)
                 break
 
@@ -1721,6 +1864,13 @@ class FloodAgent:
             stage_output = (result.get("output", "") or "").strip()
             if executor_name != "orchestrator":
                 stage_output = self._normalize_specialist_output(result, stage_output)
+            if (
+                executor_name == "orchestrator"
+                and state.plan is None
+                and self._requires_create_plan(result)
+                and not self._result_includes_tool_call(result, "create_plan")
+            ):
+                stage_output = "未先调用 create_plan 创建执行计划。"
 
             payload = self._extract_result_payload(executor_name, result, stage_output)
             verification = self._verify_step_result(step, payload, stage_output)
@@ -1836,9 +1986,10 @@ class FloodAgent:
                 agent_input["long_term_memory"] = context_messages
 
         reset_retry_guard()
-        if callbacks:
-            return executor.invoke(agent_input, config={"callbacks": callbacks})
-        return executor.invoke(agent_input)
+        runtime_callbacks = list(callbacks or [])
+        if not runtime_callbacks:
+            runtime_callbacks.append(_TaskTrackingCallback(self.task_tracker))
+        return executor.invoke(agent_input, config={"callbacks": runtime_callbacks})
 
     def _record_intermediate_steps(self, result: Dict[str, Any]) -> List[Dict[str, str]]:
         recorded_tool_calls: List[Dict[str, str]] = []
@@ -1954,7 +2105,7 @@ class FloodAgent:
 
         if FloodAgent._artifacts_satisfy_user_goal(payload):
             return False
-        return False
+        return True
 
     @staticmethod
     def _artifacts_satisfy_user_goal(payload: Optional[Dict[str, Any]]) -> bool:
@@ -2102,39 +2253,17 @@ class FloodAgent:
     def _remember_tool_use(self, tool_name: str, tool_input: str = "", tool_output: str = ""):
         if hasattr(self.memory, 'set_last_tool_use') and tool_name:
             self.memory.set_last_tool_use(tool_name=tool_name, tool_input=tool_input, tool_output=tool_output)
+        if tool_name == "update_project_instructions":
+            self._context_runtime.invalidate_cache("project_rules")
 
-    def _get_recent_result_message(self) -> Optional[SystemMessage]:
-        recent_result = self.memory.get_recent_reusable_result() if hasattr(self.memory, 'get_recent_reusable_result') else ""
-        if recent_result:
-            return SystemMessage(
-                content=(
-                    "[最近一次可复用结果]\n"
-                    "以下内容来自当前会话最近一次已完成的分析/预测/统计结果。"
-                    "如果用户当前任务是继续加工、生成文档、绘图或整理汇总，优先直接复用这份结果，"
-                    "不要默认重新运行上游分析。\n\n"
-                    f"{recent_result}"
-                )
-            )
-        return None
+    @staticmethod
+    def _on_permission_ask(tool_name: str, tool_input: Dict[str, Any], reason: str) -> bool:
+        logger.warning(f"[权限确认] 工具 {tool_name} 请求用户确认: {reason}，自动拒绝")
+        return False
 
-    def _get_last_tool_use_message(self) -> Optional[SystemMessage]:
-        last_tool_use = self.memory.get_last_tool_use() if hasattr(self.memory, 'get_last_tool_use') else {}
-        tool_name = (last_tool_use or {}).get("tool_name", "").strip()
-        if not tool_name:
-            return None
-
-        tool_input = (last_tool_use.get("tool_input", "") or "").strip()
-        tool_output = (last_tool_use.get("tool_output", "") or "").strip()
-        sections = [
-            "[最近一次工具执行记录]",
-            f"工具名: {tool_name}",
-        ]
-        if tool_input:
-            sections.append(f"工具输入:\n{tool_input}")
-        if tool_output:
-            sections.append(f"工具输出:\n{tool_output}")
-        sections.append("如果用户当前任务是在上一轮执行结果基础上继续，请优先复用这次工具执行记录，而不是默认重跑。")
-        return SystemMessage(content="\n\n".join(sections))
+    def _on_task_event(self, event: str, task) -> None:
+        if event in ("completed", "failed", "killed"):
+            logger.info(f"[TaskTracker] 任务 {task.task_id} ({task.title or task.task_type.value}) -> {event}, detail: {task.to_dict()}")
 
     def run(self, user_input: str) -> str:
         """
@@ -2148,7 +2277,7 @@ class FloodAgent:
         """
         try:
             logger.info(f"收到用户输入: {user_input[:50]}...")
-            self._active_user_input = user_input
+            _active_input_var.set(user_input)
 
             active_notice = None
             if hasattr(self.memory, 'add_user_message'):
@@ -2179,7 +2308,7 @@ class FloodAgent:
             logger.error(error_msg)
             return f"抱歉，处理您的请求时出错了：{str(e)}"
         finally:
-            self._active_user_input = ""
+            _active_input_var.set("")
 
     def get_memory_summary(self) -> Dict[str, Any]:
         """获取记忆摘要"""
@@ -2203,7 +2332,7 @@ class FloodAgent:
         """
         try:
             logger.info(f"收到用户输入(流式): {user_input[:50]}...")
-            self._active_user_input = user_input
+            _active_input_var.set(user_input)
             self._active_user_message = user_message
 
             if hasattr(self.memory, 'set_status_callback'):
@@ -2353,7 +2482,7 @@ class FloodAgent:
 
             def _run_loop() -> None:
                 try:
-                    callback = _FunctionsStreamCallback(q, enable_reasoning=enable_reasoning)
+                    callback = _FunctionsStreamCallback(q, enable_reasoning=enable_reasoning, task_tracker=self.task_tracker)
                     loop_state = self._run_agent_loop(
                         user_input,
                         callbacks=[callback],
@@ -2366,7 +2495,8 @@ class FloodAgent:
                 finally:
                     q.put(("__done__", ""))
 
-            t = threading.Thread(target=_run_loop, daemon=True)
+            current_ctx = contextvars.copy_context()
+            t = threading.Thread(target=lambda: current_ctx.run(_run_loop), daemon=True)
             t.start()
 
             while True:
@@ -2434,7 +2564,7 @@ class FloodAgent:
                 self.memory.set_status_callback(None)
             yield {"type": "reasoning", "content": f"抱歉，处理您的请求时出错了：{str(e)}"}
         finally:
-            self._active_user_input = ""
+            _active_input_var.set("")
 
     def chat_stream(self, message: str):
         """流式对话接口（stream方法的别名）"""

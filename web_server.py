@@ -13,6 +13,7 @@ import base64
 import logging
 import re
 import threading
+import hashlib
 from typing import Dict, Any, Optional
 from datetime import datetime
 from pathlib import Path
@@ -30,6 +31,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from config.settings import settings
 from models import QwenLLMService, get_qwen_llm_service
 from memory import SimpleMemory, DualMemory, SessionManager
+from memory.session_manager import validate_session_id
 from agent import FloodAgent
 from tools import set_rag_config, set_memory_instance, set_session_context
 
@@ -108,10 +110,13 @@ session_manager = SessionManager({
 })
 
 session_files: Dict[str, Dict[str, dict]] = {}
+session_files_lock = threading.RLock()
 
 session_states: Dict[str, Dict[str, Any]] = {}
+session_states_lock = threading.RLock()
 
 session_abort_flags: Dict[str, bool] = {}
+session_abort_flags_lock = threading.RLock()
 
 IMAGE_EXTENSIONS = {'.png', '.jpg', '.jpeg'}
 DOWNLOADABLE_EXTENSIONS = {
@@ -130,6 +135,108 @@ ARTIFACT_FILENAME_PATTERN = re.compile(
     r'`?([\w\-\u4e00-\u9fff]+\.(?:png|jpg|jpeg|docx|pdf|pptx|xlsx|md|txt))`?',
     re.IGNORECASE,
 )
+
+
+def _require_session_id(raw_session_id: Optional[str]) -> str:
+    return validate_session_id(raw_session_id or "default")
+
+
+def _is_within_dir(path: str, base_dir: str) -> bool:
+    try:
+        return os.path.commonpath([os.path.realpath(path), os.path.realpath(base_dir)]) == os.path.realpath(base_dir)
+    except ValueError:
+        return False
+
+
+def _public_file_info(file_info: dict) -> dict:
+    return {
+        'id': file_info.get('id', ''),
+        'name': file_info.get('name', ''),
+        'size': file_info.get('size', 0),
+        'upload_time': file_info.get('upload_time', ''),
+    }
+
+
+def _stable_upload_file_id(filename: str) -> str:
+    return hashlib.sha1(str(filename).encode("utf-8")).hexdigest()[:16]
+
+
+def _get_upload_index_path(session_id: str) -> Path:
+    return session_manager.get_session_dir(session_id) / "uploads_index.json"
+
+
+def _save_session_files(session_id: str) -> None:
+    with session_files_lock:
+        records = list(session_files.get(session_id, {}).values())
+    _get_upload_index_path(session_id).write_text(
+        json.dumps(records, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+
+
+def _load_session_files(session_id: str) -> Dict[str, dict]:
+    session_id = _require_session_id(session_id)
+    uploads_dir = Path(get_session_upload_dir(session_id))
+    index_path = _get_upload_index_path(session_id)
+    records: Dict[str, dict] = {}
+
+    if index_path.exists():
+        try:
+            data = json.loads(index_path.read_text(encoding="utf-8"))
+            if isinstance(data, list):
+                for item in data:
+                    if not isinstance(item, dict):
+                        continue
+                    file_id = str(item.get("id", "")).strip()
+                    file_name = str(item.get("name", "")).strip()
+                    file_path = str(item.get("path", "")).strip()
+                    if not file_id or not file_name or not file_path or not os.path.isfile(file_path):
+                        continue
+                    records[file_id] = {
+                        "id": file_id,
+                        "name": file_name,
+                        "path": file_path,
+                        "size": int(item.get("size", 0) or 0),
+                        "upload_time": str(item.get("upload_time", "") or ""),
+                    }
+        except Exception as e:
+            logger.warning(f"读取上传文件索引失败: {e}")
+
+    if not records and uploads_dir.exists():
+        for path in sorted(uploads_dir.iterdir()):
+            if not path.is_file():
+                continue
+            file_id = _stable_upload_file_id(path.name)
+            records[file_id] = {
+                "id": file_id,
+                "name": path.name,
+                "path": str(path),
+                "size": path.stat().st_size,
+                "upload_time": datetime.fromtimestamp(path.stat().st_mtime).isoformat(),
+            }
+
+    with session_files_lock:
+        session_files[session_id] = records
+    if records:
+        _save_session_files(session_id)
+    return records
+
+
+def _get_session_files_map(session_id: str) -> Dict[str, dict]:
+    session_id = _require_session_id(session_id)
+    with session_files_lock:
+        cached = session_files.get(session_id)
+    if cached is not None:
+        return cached
+    return _load_session_files(session_id)
+
+
+def _remove_session_files(session_id: str) -> None:
+    with session_files_lock:
+        session_files.pop(session_id, None)
+    index_path = _get_upload_index_path(session_id)
+    if index_path.exists():
+        index_path.unlink()
 
 
 def allowed_file(filename: str) -> bool:
@@ -310,7 +417,6 @@ def build_artifact_event(filepath: str, fallback_session_id: str, emitted_paths:
     url = build_session_output_url(real_path, fallback_session_id)
     file_info = {
         'filename': os.path.basename(real_path),
-        'filepath': real_path,
         'size': os.path.getsize(real_path),
     }
 
@@ -393,14 +499,15 @@ def stream_json_line(payload: dict[str, Any]) -> str:
 
 
 def ensure_session_state(session_id: str) -> dict[str, Any]:
-    state = session_states.setdefault(session_id, {})
-    state.setdefault('enable_search', False)
-    state.setdefault('enable_rag', True)
-    state.setdefault('enable_reasoning', True)
-    state.setdefault('is_paused', False)
-    state.setdefault('is_streaming', False)
-    state.setdefault('stream_snapshot', None)
-    return state
+    with session_states_lock:
+        state = session_states.setdefault(session_id, {})
+        state.setdefault('enable_search', False)
+        state.setdefault('enable_rag', True)
+        state.setdefault('enable_reasoning', True)
+        state.setdefault('is_paused', False)
+        state.setdefault('is_streaming', False)
+        state.setdefault('stream_snapshot', None)
+        return state
 
 
 def init_stream_snapshot(session_id: str, message_id: str) -> dict[str, Any]:
@@ -428,6 +535,10 @@ def touch_stream_snapshot(session_id: str) -> Optional[dict[str, Any]]:
     return snapshot
 
 
+def _sanitize_artifact_event(event: dict[str, Any]) -> dict[str, Any]:
+    return {k: v for k, v in (event or {}).items() if k != 'filepath'}
+
+
 def finish_stream_snapshot(session_id: str) -> None:
     state = ensure_session_state(session_id)
     state['is_streaming'] = False
@@ -444,7 +555,7 @@ def list_session_artifact_events(session_id: str) -> list[dict[str, Any]]:
         try:
             data = json.loads(Path(artifacts_file).read_text(encoding='utf-8'))
             if isinstance(data, list):
-                return data
+                return [_sanitize_artifact_event(item) for item in data if isinstance(item, dict)]
         except Exception as e:
             logger.warning(f"读取最终成果文件记录失败: {e}")
     return []
@@ -453,7 +564,7 @@ def list_session_artifact_events(session_id: str) -> list[dict[str, Any]]:
 def save_session_artifact_events(session_id: str, artifact_events: list[dict[str, Any]]) -> None:
     artifacts_file = os.path.join(str(session_manager.get_session_dir(session_id)), 'approved_artifacts.json')
     Path(artifacts_file).write_text(
-        json.dumps(artifact_events, ensure_ascii=False, indent=2),
+        json.dumps([_sanitize_artifact_event(item) for item in artifact_events], ensure_ascii=False, indent=2),
         encoding='utf-8',
     )
 
@@ -565,6 +676,7 @@ def filter_system_info(content: str) -> str:
 
 def create_agent_for_session(session_id: str, enable_search: bool = False, enable_rag: Optional[bool] = None, enable_reasoning: bool = True) -> FloodAgent:
     """为会话创建 Agent 实例"""
+    session_id = _require_session_id(session_id)
     logger.info(f"创建新的智能体实例: {session_id}")
     
     if enable_rag is None:
@@ -614,6 +726,7 @@ def create_agent_for_session(session_id: str, enable_search: bool = False, enabl
 
 def get_or_create_agent(session_id: str) -> FloodAgent:
     """获取或创建会话智能体"""
+    session_id = _require_session_id(session_id)
     session_manager.touch_session(session_id)
     
     set_session_context(
@@ -625,7 +738,8 @@ def get_or_create_agent(session_id: str) -> FloodAgent:
     if agent:
         return agent
     
-    state = session_states.get(session_id, {})
+    with session_states_lock:
+        state = dict(session_states.get(session_id, {}))
     enable_search = state.get('enable_search', False)
     enable_rag = state.get('enable_rag', settings.rag.enabled)
     enable_reasoning = state.get('enable_reasoning', True)
@@ -642,11 +756,13 @@ def get_or_create_agent(session_id: str) -> FloodAgent:
 
 def get_session_upload_dir(session_id: str) -> str:
     """获取会话上传目录"""
+    session_id = _require_session_id(session_id)
     return str(session_manager.get_upload_dir(session_id))
 
 
 def get_session_output_dir(session_id: str) -> str:
     """获取会话输出目录"""
+    session_id = _require_session_id(session_id)
     return str(session_manager.get_output_dir(session_id))
 
 
@@ -768,7 +884,7 @@ def upload_file():
             return jsonify({'status': 'error', 'message': '没有选择文件'}), 400
         
         file = request.files['file']
-        session_id = request.form.get('session_id', 'default')
+        session_id = _require_session_id(request.form.get('session_id', 'default'))
         session_manager.get_or_create_session(session_id, agent_factory=None)
         
         filename = file.filename or ''
@@ -792,16 +908,17 @@ def upload_file():
         file.save(file_path)
         
         # 记录文件信息
-        if session_id not in session_files:
-            session_files[session_id] = {}
-        
-        session_files[session_id][file_id] = {
+        session_file_map = _get_session_files_map(session_id)
+        session_file_map[file_id] = {
             'id': file_id,
             'name': filename,
             'path': file_path,
             'size': os.path.getsize(file_path),
             'upload_time': datetime.now().isoformat()
         }
+        with session_files_lock:
+            session_files[session_id] = session_file_map
+        _save_session_files(session_id)
         
         logger.info(f"文件上传成功: {filename} -> {file_path}")
         
@@ -809,7 +926,6 @@ def upload_file():
             'status': 'success',
             'file_id': file_id,
             'file_name': filename,
-            'file_path': file_path,
             'size': os.path.getsize(file_path)
         })
         
@@ -823,16 +939,20 @@ def delete_file(file_id: str):
     """删除上传的文件"""
     try:
         data = request.get_json() or {}
-        session_id = data.get('session_id', 'default')
+        session_id = _require_session_id(data.get('session_id', 'default'))
         
-        if session_id in session_files and file_id in session_files[session_id]:
-            file_info = session_files[session_id][file_id]
+        session_file_map = _get_session_files_map(session_id)
+        if file_id in session_file_map:
+            file_info = session_file_map[file_id]
             file_path = file_info.get('path')
             
             if file_path and os.path.exists(file_path):
                 os.remove(file_path)
             
-            del session_files[session_id][file_id]
+            del session_file_map[file_id]
+            with session_files_lock:
+                session_files[session_id] = session_file_map
+            _save_session_files(session_id)
             logger.info(f"文件已删除: {file_id}")
         
         return jsonify({'status': 'success', 'message': '文件已删除'})
@@ -846,11 +966,9 @@ def delete_file(file_id: str):
 def list_files():
     """列出会话的所有文件"""
     try:
-        session_id = request.args.get('session_id', 'default')
+        session_id = _require_session_id(request.args.get('session_id', 'default'))
         
-        files = []
-        if session_id in session_files:
-            files = list(session_files[session_id].values())
+        files = [_public_file_info(item) for item in _get_session_files_map(session_id).values()]
         
         return jsonify({'status': 'success', 'files': files})
         
@@ -863,11 +981,12 @@ def list_files():
 def preview_uploaded_file(file_id: str):
     """预览会话中已上传的文件内容。"""
     try:
-        session_id = request.args.get('session_id', 'default')
-        if session_id not in session_files or file_id not in session_files[session_id]:
+        session_id = _require_session_id(request.args.get('session_id', 'default'))
+        session_file_map = _get_session_files_map(session_id)
+        if file_id not in session_file_map:
             return jsonify({'status': 'error', 'message': '文件不存在'}), 404
 
-        file_info = session_files[session_id][file_id]
+        file_info = session_file_map[file_id]
         preview = build_uploaded_file_preview(file_info)
         preview['download_url'] = f"/api/files/{file_id}/download?session_id={session_id}"
         return jsonify({'status': 'success', 'preview': preview})
@@ -880,11 +999,12 @@ def preview_uploaded_file(file_id: str):
 def download_uploaded_file(file_id: str):
     """下载或内联返回已上传的文件。"""
     try:
-        session_id = request.args.get('session_id', 'default')
-        if session_id not in session_files or file_id not in session_files[session_id]:
+        session_id = _require_session_id(request.args.get('session_id', 'default'))
+        session_file_map = _get_session_files_map(session_id)
+        if file_id not in session_file_map:
             return jsonify({'status': 'error', 'message': '文件不存在'}), 404
 
-        file_info = session_files[session_id][file_id]
+        file_info = session_file_map[file_id]
         file_path = file_info.get('path', '')
         file_name = file_info.get('name', '')
 
@@ -893,7 +1013,7 @@ def download_uploaded_file(file_id: str):
 
         uploads_dir = os.path.realpath(get_session_upload_dir(session_id))
         real_path = os.path.realpath(file_path)
-        if not real_path.startswith(uploads_dir):
+        if not _is_within_dir(real_path, uploads_dir):
             return jsonify({'error': '非法路径'}), 403
 
         inline = request.args.get('inline') == 'true'
@@ -928,45 +1048,31 @@ def download_file(file_path: str):
         from urllib.parse import unquote
         file_path = unquote(file_path)
         
-        logger.info(f"请求下载文件: {file_path}")
-        logger.info(f"DATA_DIR: {DATA_DIR}")
+        logger.info("请求下载文件")
         
         abs_path = None
         
         if file_path.startswith('/app/data/sessions/'):
             abs_path = file_path
-            logger.info(f"Docker绝对路径: {abs_path}")
         elif file_path.startswith('sessions/'):
             abs_path = os.path.join(DATA_DIR, file_path)
-            logger.info(f"相对路径(sessions/): {abs_path}")
         elif '/' in file_path and not file_path.startswith('/'):
             parts = file_path.split('/')
             if len(parts) >= 3 and parts[0].startswith('session-'):
                 abs_path = os.path.join(DATA_DIR, 'sessions', file_path)
-                logger.info(f"会话相对路径: {abs_path}")
-        
+
         if abs_path is None:
             abs_path = os.path.abspath(file_path)
-            logger.info(f"转换为绝对路径: {abs_path}")
         
         sessions_dir = os.path.join(DATA_DIR, "sessions")
         sessions_dir_abs = os.path.abspath(sessions_dir)
         
-        logger.info(f"解析后路径: {abs_path}")
-        logger.info(f"会话目录: {sessions_dir_abs}")
-        logger.info(f"文件存在: {os.path.exists(abs_path) if abs_path else 'N/A'}")
-        
-        if abs_path and os.path.exists(abs_path):
-            logger.info(f"文件目录内容: {os.listdir(os.path.dirname(abs_path))}")
-        
-        if not os.path.abspath(abs_path).startswith(sessions_dir_abs):
+        if not _is_within_dir(abs_path, sessions_dir_abs):
             logger.warning(f"非法文件路径访问: {abs_path}, 允许的目录: {sessions_dir_abs}")
             return jsonify({'error': f'非法文件路径'}), 403
         
         if not os.path.exists(abs_path):
             logger.warning(f"文件不存在: {abs_path}")
-            if os.path.exists(sessions_dir_abs):
-                logger.info(f"会话目录内容: {os.listdir(sessions_dir_abs)}")
             return jsonify({'error': f'文件不存在'}), 404
         
         if not os.access(abs_path, os.R_OK):
@@ -992,6 +1098,7 @@ def download_file(file_path: str):
 def get_session_output_file(session_id: str, filename: str):
     """获取会话输出目录中的文件（图片等）"""
     try:
+        session_id = _require_session_id(session_id)
         output_dir = get_session_output_dir(session_id)
         file_path = os.path.join(output_dir, filename)
         
@@ -999,7 +1106,7 @@ def get_session_output_file(session_id: str, filename: str):
 
         real_path = os.path.realpath(file_path)
         real_output_dir = os.path.realpath(output_dir)
-        if not real_path.startswith(real_output_dir):
+        if not _is_within_dir(real_path, real_output_dir):
             logger.warning(f"[OUTPUT_FILE] 非法路径: real_path={real_path}, real_output_dir={real_output_dir}")
             return jsonify({'error': '非法路径'}), 403
         
@@ -1078,6 +1185,7 @@ def download_logs():
 def download_session_outputs(session_id: str):
     """打包下载会话 outputs 目录下所有文件"""
     try:
+        session_id = _require_session_id(session_id)
         import zipfile
         import io
 
@@ -1122,7 +1230,7 @@ def init_agent():
     """初始化智能体"""
     try:
         data = request.get_json()
-        session_id = data.get('session_id', 'default')
+        session_id = _require_session_id(data.get('session_id', 'default'))
         enable_search = data.get('enable_search', False)
         enable_rag = data.get('enable_rag', True)
         enable_reasoning = data.get('enable_reasoning', True)
@@ -1156,7 +1264,7 @@ def chat():
     """流式聊天接口"""
     try:
         data = request.get_json()
-        session_id = data.get('session_id', 'default')
+        session_id = _require_session_id(data.get('session_id', 'default'))
         message = data.get('message', '')
         uploaded_files = data.get('uploaded_files', [])
         enable_reasoning = data.get('enable_reasoning', True)
@@ -1167,12 +1275,14 @@ def chat():
         if not message:
             return jsonify({'error': '消息不能为空'}), 400
 
+        session_manager.get_or_create_session(session_id, agent_factory=None)
         session_manager.increment_message_count(session_id)
         session_info = session_manager.get_session_info(session_id)
         if session_info and session_info.message_count == 1 and not session_info.title:
             schedule_session_title_generation(session_id, message)
         
-        session_abort_flags[session_id] = False
+        with session_abort_flags_lock:
+            session_abort_flags[session_id] = False
 
         state = ensure_session_state(session_id)
         state['is_paused'] = False
@@ -1193,11 +1303,12 @@ def chat():
         file_context += f"上传目录: {session_upload_dir}\n"
         file_context += "生成文件时，请使用输出目录路径。\n"
         
-        if uploaded_files and session_id in session_files:
+        session_file_map = _get_session_files_map(session_id)
+        if uploaded_files and session_file_map:
             available_files = []
             for file_id in uploaded_files:
-                if file_id in session_files[session_id]:
-                    file_info = session_files[session_id][file_id]
+                if file_id in session_file_map:
+                    file_info = session_file_map[file_id]
                     available_files.append(file_info)
             
             if available_files:
@@ -1219,7 +1330,9 @@ def chat():
                 is_workflow_stream = False
 
                 for chunk in agent.stream(enhanced_message, enable_reasoning=enable_reasoning, user_message=message, abort_check=lambda: session_abort_flags.get(session_id, False)):
-                    if session_abort_flags.get(session_id, False):
+                    with session_abort_flags_lock:
+                        is_aborted = session_abort_flags.get(session_id, False)
+                    if is_aborted:
                         finish_stream_snapshot(session_id)
                         yield stream_json_line({'type': 'error', 'content': '会话已被用户暂停'})
                         yield stream_json_line({'type': 'stream_end'})
@@ -1394,7 +1507,7 @@ def clear_memory():
     """清空会话记忆"""
     try:
         data = request.get_json() or {}
-        session_id = data.get('session_id', 'default')
+        session_id = _require_session_id(data.get('session_id', 'default'))
         
         agent = session_manager.get_agent(session_id)
         if agent:
@@ -1442,7 +1555,7 @@ def save_current_session():
     """保存当前会话的对话历史"""
     try:
         data = request.get_json() or {}
-        session_id = data.get('session_id', 'default')
+        session_id = _require_session_id(data.get('session_id', 'default'))
         
         agent = session_manager.get_agent(session_id)
         if agent and hasattr(agent.memory, 'save_chat_history'):
@@ -1505,6 +1618,7 @@ def get_session_stats():
 def get_session(session_id: str):
     """获取会话详情（包括对话历史）"""
     try:
+        session_id = _require_session_id(session_id)
         info = session_manager.get_session_info(session_id)
         if not info:
             return jsonify({
@@ -1522,9 +1636,17 @@ def get_session(session_id: str):
                 'content': filter_system_info(msg.get('content', ''))
             }
             if msg.get('reasoning'):
-                filtered_msg['reasoning'] = msg.get('reasoning', '')
+                filtered_msg['reasoning'] = filter_system_info(msg.get('reasoning', ''))
             if msg.get('tool_calls'):
-                filtered_msg['tool_calls'] = msg.get('tool_calls', [])
+                filtered_msg['tool_calls'] = [
+                    {
+                        'tool_name': item.get('tool_name', ''),
+                        'tool_input': filter_system_info(str(item.get('tool_input', ''))),
+                        'tool_output': filter_system_info(str(item.get('tool_output', ''))),
+                    }
+                    for item in msg.get('tool_calls', [])
+                    if isinstance(item, dict)
+                ]
             filtered_messages.append(filtered_msg)
         
         return jsonify({
@@ -1549,10 +1671,10 @@ def get_session(session_id: str):
 def delete_session_route(session_id: str):
     """删除会话"""
     try:
+        session_id = _require_session_id(session_id)
         session_manager.delete_session(session_id)
         
-        if session_id in session_files:
-            del session_files[session_id]
+        _remove_session_files(session_id)
         
         logger.info(f"已删除会话: {session_id}")
         
@@ -1602,7 +1724,7 @@ def get_config():
 def get_memory_stats():
     """获取记忆系统统计信息"""
     try:
-        session_id = request.args.get('session_id', 'default')
+        session_id = _require_session_id(request.args.get('session_id', 'default'))
         
         agent = session_manager.get_agent(session_id)
         if agent:
@@ -1631,7 +1753,7 @@ def trigger_heartbeat():
     """手动触发心跳归纳"""
     try:
         data = request.get_json() or {}
-        session_id = data.get('session_id', 'default')
+        session_id = _require_session_id(data.get('session_id', 'default'))
         
         agent = session_manager.get_agent(session_id)
         if agent:
@@ -1664,7 +1786,7 @@ def search_long_term_memory():
     """搜索长期记忆"""
     try:
         data = request.get_json() or {}
-        session_id = data.get('session_id', 'default')
+        session_id = _require_session_id(data.get('session_id', 'default'))
         query = data.get('query', '')
         top_k = data.get('top_k', 5)
         
@@ -1705,7 +1827,7 @@ def add_long_term_memory():
     """手动添加长期记忆"""
     try:
         data = request.get_json() or {}
-        session_id = data.get('session_id', 'default')
+        session_id = _require_session_id(data.get('session_id', 'default'))
         content = data.get('content', '')
         entry_type = data.get('type', 'note')
         
@@ -1746,13 +1868,11 @@ def pause_session():
     """暂停会话"""
     try:
         data = request.get_json() or {}
-        session_id = data.get('session_id', 'default')
+        session_id = _require_session_id(data.get('session_id', 'default'))
         
-        session_abort_flags[session_id] = True
-        
-        if session_id not in session_states:
-            session_states[session_id] = {}
-        session_states[session_id]['is_paused'] = True
+        with session_abort_flags_lock:
+            session_abort_flags[session_id] = True
+        ensure_session_state(session_id)['is_paused'] = True
         
         logger.info(f"会话已暂停: {session_id}")
         
@@ -1773,13 +1893,11 @@ def resume_session():
     """恢复会话"""
     try:
         data = request.get_json() or {}
-        session_id = data.get('session_id', 'default')
+        session_id = _require_session_id(data.get('session_id', 'default'))
         
-        session_abort_flags[session_id] = False
-        
-        if session_id not in session_states:
-            session_states[session_id] = {}
-        session_states[session_id]['is_paused'] = False
+        with session_abort_flags_lock:
+            session_abort_flags[session_id] = False
+        ensure_session_state(session_id)['is_paused'] = False
         
         logger.info(f"会话已恢复: {session_id}")
         
@@ -1799,7 +1917,7 @@ def resume_session():
 def get_session_status():
     """获取会话状态"""
     try:
-        session_id = request.args.get('session_id', 'default')
+        session_id = _require_session_id(request.args.get('session_id', 'default'))
         state = ensure_session_state(session_id)
         
         return jsonify({
@@ -1820,38 +1938,32 @@ def update_session_config():
     """更新会话配置（搜索、RAG和推理模式功能开关）"""
     try:
         data = request.get_json() or {}
-        session_id = data.get('session_id', 'default')
+        session_id = _require_session_id(data.get('session_id', 'default'))
         enable_search = data.get('enable_search')
         enable_rag = data.get('enable_rag')
         enable_reasoning = data.get('enable_reasoning')
         
-        if session_id not in session_states:
-            session_states[session_id] = {
-                'enable_search': False,
-                'enable_rag': True,
-                'enable_reasoning': True,
-                'is_paused': False,
-            }
+        state = ensure_session_state(session_id)
         
         config_changed = False
         status_messages = []
         
-        if enable_search is not None and enable_search != session_states[session_id].get('enable_search'):
-            session_states[session_id]['enable_search'] = enable_search
+        if enable_search is not None and enable_search != state.get('enable_search'):
+            state['enable_search'] = enable_search
             config_changed = True
             status_msg = f"联网搜索功能已{'启用' if enable_search else '关闭'}"
             status_messages.append(status_msg)
             logger.info(f"会话 {session_id} {status_msg}")
         
-        if enable_rag is not None and enable_rag != session_states[session_id].get('enable_rag'):
-            session_states[session_id]['enable_rag'] = enable_rag
+        if enable_rag is not None and enable_rag != state.get('enable_rag'):
+            state['enable_rag'] = enable_rag
             config_changed = True
             status_msg = f"知识库检索(RAG)功能已{'启用' if enable_rag else '关闭'}"
             status_messages.append(status_msg)
             logger.info(f"会话 {session_id} {status_msg}")
         
-        if enable_reasoning is not None and enable_reasoning != session_states[session_id].get('enable_reasoning'):
-            session_states[session_id]['enable_reasoning'] = enable_reasoning
+        if enable_reasoning is not None and enable_reasoning != state.get('enable_reasoning'):
+            state['enable_reasoning'] = enable_reasoning
             config_changed = True
             status_msg = f"深度思考模式已{'启用' if enable_reasoning else '关闭'}"
             status_messages.append(status_msg)
@@ -1875,9 +1987,9 @@ def update_session_config():
             'status': 'success',
             'message': '配置已更新',
             'config': {
-                'enable_search': session_states[session_id].get('enable_search', False),
-                'enable_rag': session_states[session_id].get('enable_rag', True),
-                'enable_reasoning': session_states[session_id].get('enable_reasoning', True),
+                'enable_search': state.get('enable_search', False),
+                'enable_rag': state.get('enable_rag', True),
+                'enable_reasoning': state.get('enable_reasoning', True),
             }
         })
     except Exception as e:
