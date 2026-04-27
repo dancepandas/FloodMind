@@ -7,6 +7,7 @@
 export {}
 declare global {
   const Activity: typeof import('react').Activity
+  const AlarmClock: typeof import('lucide-react').AlarmClock
   const ArrowLeft: typeof import('lucide-react').ArrowLeft
   const ArrowRight: typeof import('lucide-react').ArrowRight
   const Badge: typeof import('lucide-react').Badge
@@ -14,6 +15,7 @@ declare global {
   const Bot: typeof import('lucide-react').Bot
   const Brain: typeof import('lucide-react').Brain
   const Calendar: typeof import('lucide-react').Calendar
+  const CalendarClock: typeof import('lucide-react').CalendarClock
   const CheckIcon: typeof import('lucide-react').CheckIcon
   const ChevronDown: typeof import('lucide-react').ChevronDown
   const ChevronDownIcon: typeof import('lucide-react').ChevronDownIcon
@@ -52,6 +54,7 @@ declare global {
   const Pause: typeof import('lucide-react').Pause
   const Play: typeof import('lucide-react').Play
   const Plus: typeof import('lucide-react').Plus
+  const RefreshCw: typeof import('lucide-react').RefreshCw
   const Route: typeof import('lucide-react').Route
   const Search: typeof import('lucide-react').Search
   const SearchIcon: typeof import('lucide-react').SearchIcon

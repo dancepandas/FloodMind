@@ -33,7 +33,7 @@ from models.qwen_llm_service import QwenLLMService
 from memory import SimpleMemory, DualMemory
 from skills import SKILL_REGISTRY
 from skills.base import Skill
-from tools import get_skill, run_script, exec_bash, exec_python_file, write_text_file, search_tool_error_memory, search_artifacts, check_artifact_exists, read_artifact, knowledge_search, web_search, add_memory, search_memory, update_project_instructions, set_rag_config, set_memory_instance, reset_retry_guard
+from tools import get_skill, run_script, exec_bash, exec_python_file, write_text_file, search_tool_error_memory, search_artifacts, check_artifact_exists, read_artifact, knowledge_search, web_search, add_memory, search_memory, update_project_instructions, create_scheduled_task, list_scheduled_tasks, cancel_scheduled_task, set_rag_config, set_memory_instance, reset_retry_guard
 from tools.agent_tool import PermissionManager, PermissionRule, PermissionBehavior, set_permission_manager, get_permission_manager, ToolRegistry
 from agent.context_runtime import ContextRuntime
 from agent.task_runtime import TaskTracker, TaskType, TaskResult
@@ -418,6 +418,17 @@ class FloodAgent:
 - `web_search`：检索网络资料（knowledge_search搜索结果不够支撑回答时，搜索网络资料补充）
 - `search_memory`：检索历史对话和技能文档
 - `update_project_instructions`：将用户偏好或规则写入 AGENTS.md，使其在后续所有对话中生效
+- `create_scheduled_task`：创建后台定时任务，用户要求未来、每天、定时、自动执行任务时使用
+- `list_scheduled_tasks`：查询当前会话的定时任务
+- `cancel_scheduled_task`：取消或停用定时任务
+
+## 定时任务处理
+当用户表达“每天、明天、某个时间、定时、自动、后台执行、提前安排任务”等需求时：
+1. 你必须先调用 `create_plan`，再调用 `create_scheduled_task` 写入任务列表，不要立即执行业务任务。
+2. `command` 只保留未来真正要执行的业务任务，必须去掉“每天/定时/几点执行”等调度表达，避免后台执行时再次创建定时任务。
+3. 每日重复任务使用 `repeat="daily"` 和 `run_time="HH:MM"`；一次性任务使用 `repeat="none"` 和 `scheduled_at`。
+4. 任务默认绑定当前会话，用户后续可从前端查看该任务生成的新增文件。
+5. 用户询问已有定时任务时调用 `list_scheduled_tasks`；用户取消定时任务时调用 `cancel_scheduled_task`。
 
 ## 用户偏好处理
 当用户表达长期偏好、规则或习惯时（如"以后都用PNG格式"、"不要生成PDF"）：
@@ -506,11 +517,9 @@ class FloodAgent:
 - 最终输出不要包含完整路径
 - 最终输出不要包含会话环境内部信息
 - 最终只返回用户需要知道的文件名和结果
-- 需要直接展示的最终输出，需要按照标准 Markdown 格式文本输出
-- 涉及10条以上长度的数据时，都需要整理一份excel文件输出
-- 用户没有明确要求生成报告时，规划任务阶段不要创建report产物需求
+- 需要直接展示的最终输出，需要按照标准 Markdown 格式输出
+- 最终输非必要不要生成文件
 - 涉及报告生成任务时，若用户明确指定文件格式则按照用户指定格式生成，否则就生成docx文件
-- 最终输出要总结任务成果，不要只是干巴巴的返回一个文件
 """
 
     EXECUTION_SPECIALIST_PROMPT = """你是 Execution Specialist 执行单元。
@@ -623,7 +632,7 @@ class FloodAgent:
         self._context_runtime.prefetch()
 
         self.skills: List[Skill] = skills if skills is not None else SKILL_REGISTRY
-        self.base_tools: List[BaseTool] = [get_skill, search_artifacts, read_artifact, knowledge_search, web_search, search_memory, update_project_instructions]
+        self.base_tools: List[BaseTool] = [get_skill, search_artifacts, read_artifact, knowledge_search, web_search, search_memory, update_project_instructions, create_scheduled_task, list_scheduled_tasks, cancel_scheduled_task]
 
         skill_catalog = "\n".join(
             f"- {s.name}: {s.description}"
@@ -2480,6 +2489,23 @@ class FloodAgent:
                     return []
                 return [event]
 
+            @staticmethod
+            def _is_llm_token_error(exc: BaseException) -> bool:
+                error_str = str(exc)
+                token_error_codes = ("Arrearage", "QuotaExhausted", "InsufficientBalance", "AccountArrears")
+                if any(code in error_str for code in token_error_codes):
+                    return True
+                if "overdue-payment" in error_str.lower():
+                    return True
+                if "account is in good standing" in error_str.lower():
+                    return True
+                if "余额不足" in error_str or "欠费" in error_str or "额度不足" in error_str:
+                    return True
+                cause = getattr(exc, "__cause__", None) or getattr(exc, "__context__", None)
+                if cause and any(code in str(cause) for code in token_error_codes):
+                    return True
+                return False
+
             def _run_loop() -> None:
                 try:
                     callback = _FunctionsStreamCallback(q, enable_reasoning=enable_reasoning, task_tracker=self.task_tracker)
@@ -2491,7 +2517,10 @@ class FloodAgent:
                     )
                     result_holder["state"] = loop_state
                 except Exception as exc:
-                    q.put(("error", str(exc)))
+                    if _is_llm_token_error(exc):
+                        q.put(("llm_token_error", str(exc)))
+                    else:
+                        q.put(("error", str(exc)))
                 finally:
                     q.put(("__done__", ""))
 
@@ -2502,6 +2531,9 @@ class FloodAgent:
             while True:
                 event_type, content = q.get()
                 if event_type == "__done__":
+                    break
+                if event_type == "llm_token_error":
+                    yield {"type": "llm_token_error", "content": "LLM模型服务账号Token余额不足，无法提供服务"}
                     break
                 if event_type == "error":
                     raise RuntimeError(content)

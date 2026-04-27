@@ -43,7 +43,7 @@ export function ChatArea({
   }, [isStreaming]);
 
   return (
-    <div className="flex-1 flex flex-col h-full bg-[linear-gradient(180deg,rgba(255,255,255,0.58)_0%,rgba(239,246,255,0.72)_100%)] relative min-w-0">
+    <div className="flex-1 flex flex-col h-full bg-background relative min-w-0">
       {messages.length === 0 ? (
         <WelcomePage onQuickAction={(text) => { onInputChange(text); onSubmit(); }} />
       ) : (

@@ -47,40 +47,40 @@ const quickActions = [
 export function WelcomePage({ onQuickAction }: WelcomePageProps) {
   return (
     <div className="flex-1 flex flex-col items-center justify-center px-6 py-10 overflow-y-auto">
-      <div className="w-full max-w-3xl flex flex-col items-center gap-10">
-        <div className="flex flex-col items-center gap-4">
-          <div className="w-16 h-16 rounded-2xl bg-primary flex items-center justify-center text-primary-foreground shadow-lg shadow-primary/25">
-            <Bot size={36} />
+      <div className="w-full max-w-3xl flex flex-col items-center gap-12">
+        <div className="flex flex-col items-center gap-5">
+          <div className="w-14 h-14 rounded-2xl bg-primary/8 flex items-center justify-center text-primary">
+            <Bot size={28} />
           </div>
           <div className="text-center">
-            <h1 className="text-3xl font-bold text-foreground tracking-tight">
+            <h1 className="text-2xl font-semibold text-foreground tracking-tight">
               FloodMind
             </h1>
-            <p className="mt-2 text-muted-foreground text-base">
+            <p className="mt-2 text-muted-foreground text-sm leading-relaxed max-w-[50ch]">
               智能洪水预报助手 — 对话即可完成预报、分析与报告
             </p>
           </div>
         </div>
 
-        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4 w-full">
+        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3 w-full">
           {features.map(({ icon: Icon, title, description }) => (
             <div
               key={title}
-              className="group flex flex-col gap-2.5 p-4 rounded-xl bg-card border border-border hover:border-primary/30 hover:shadow-sm transition-all"
+              className="group flex flex-col gap-2.5 p-4 rounded-xl bg-card border border-border/60 hover:border-primary/20 transition-all duration-200"
             >
-              <div className="w-9 h-9 rounded-lg bg-primary/10 flex items-center justify-center text-primary group-hover:bg-primary/15 transition-colors">
-                <Icon size={18} />
+              <div className="w-8 h-8 rounded-lg bg-primary/6 flex items-center justify-center text-primary group-hover:bg-primary/10 transition-colors duration-200">
+                <Icon size={16} />
               </div>
               <div>
-                <div className="text-sm font-semibold text-foreground">{title}</div>
-                <div className="text-xs text-muted-foreground mt-0.5 leading-relaxed">{description}</div>
+                <div className="text-[13px] font-semibold text-foreground">{title}</div>
+                <div className="text-[11px] text-muted-foreground/70 mt-0.5 leading-relaxed">{description}</div>
               </div>
             </div>
           ))}
         </div>
 
         <div className="flex flex-col items-center gap-3 w-full">
-          <span className="text-xs text-muted-foreground font-medium tracking-wide">
+          <span className="text-[11px] text-muted-foreground/50 font-medium tracking-widest uppercase">
             快速开始
           </span>
           <div className="flex flex-wrap justify-center gap-2">
@@ -88,7 +88,7 @@ export function WelcomePage({ onQuickAction }: WelcomePageProps) {
               <button
                 key={action}
                 onClick={() => onQuickAction?.(action)}
-                className="px-4 py-2 text-sm rounded-full bg-secondary/80 text-secondary-foreground border border-border hover:bg-primary hover:text-primary-foreground hover:border-primary transition-all cursor-pointer"
+                className="px-4 py-2 text-[13px] rounded-full bg-secondary/60 text-secondary-foreground border border-border/60 hover:bg-primary hover:text-primary-foreground hover:border-primary transition-all duration-200 cursor-pointer active:scale-[0.97]"
               >
                 {action}
               </button>

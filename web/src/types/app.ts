@@ -56,7 +56,7 @@ export interface FilePreview {
 export interface GeneratedArtifact {
   type: "file_generated" | "image_generated";
   filename: string;
-  filepath: string;
+  filepath?: string;
   size?: number;
   download_url?: string;
   image_url?: string;
@@ -123,4 +123,32 @@ export interface StreamSnapshot {
   is_streaming?: boolean;
   artifacts?: GeneratedArtifact[];
   workflow?: WorkflowPlan;
+}
+
+export interface ScheduledTaskArtifact {
+  filename: string;
+  download_url: string;
+  size?: number;
+  created_at?: string;
+}
+
+export interface ScheduledTask {
+  id: string;
+  session_id: string;
+  command: string;
+  repeat: "none" | "daily" | string;
+  enabled: boolean;
+  run_time?: string;
+  scheduled_at?: string;
+  next_run_at?: string;
+  status: "pending" | "running" | "completed" | "failed" | "disabled" | string;
+  last_status?: string;
+  last_run_at?: string;
+  last_finished_at?: string;
+  last_result?: string;
+  last_error?: string;
+  artifacts?: ScheduledTaskArtifact[];
+  attempt_count?: number;
+  created_at?: string;
+  updated_at?: string;
 }

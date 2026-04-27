@@ -347,6 +347,26 @@ class ReadArtifactInput(BaseModel):
     max_chars: int = Field(default=12000, description="最多读取字符数，默认12000")
 
 
+class CreateScheduledTaskInput(BaseModel):
+    """创建定时任务的输入参数"""
+    command: str = Field(default="", description="未来到点后交给Agent执行的自然语言任务，不要包含定时表达")
+    repeat: str = Field(default="none", description="重复规则：none 或 daily")
+    run_time: str = Field(default="", description="每日任务执行时间，HH:MM")
+    scheduled_at: str = Field(default="", description="一次性任务执行时间，ISO格式或 YYYY-MM-DD HH:MM:SS")
+    timezone: str = Field(default="Asia/Shanghai", description="时区标识，默认 Asia/Shanghai")
+    enabled: bool = Field(default=True, description="是否启用任务")
+
+
+class ListScheduledTasksInput(BaseModel):
+    """查询定时任务的输入参数"""
+    include_all_sessions: bool = Field(default=False, description="是否查询所有会话任务，默认只查当前会话")
+
+
+class CancelScheduledTaskInput(BaseModel):
+    """取消定时任务的输入参数"""
+    task_id: str = Field(default="", description="要取消的定时任务ID")
+
+
 _SKILL_REGISTRY: List[Any] = []
 _SESSION_ROOT = _PROJECT_ROOT / "data" / "sessions"
 _REUSABLE_SCRIPT_EXTENSIONS = {".py"}
@@ -2379,6 +2399,134 @@ update_project_instructions = build_agent_tool(
 )
 
 
+def _impl_create_scheduled_task(
+    command: str = "",
+    repeat: str = "none",
+    run_time: str = "",
+    scheduled_at: str = "",
+    timezone: str = "Asia/Shanghai",
+    enabled: bool = True,
+) -> str:
+    try:
+        from agent.scheduled_task_runtime import get_scheduled_task_runtime
+
+        session_id = get_current_session_id() or "default"
+        task = get_scheduled_task_runtime().create_task(
+            session_id=session_id,
+            command=command,
+            repeat=repeat,
+            run_time=run_time,
+            scheduled_at=scheduled_at,
+            timezone=timezone,
+            enabled=enabled,
+        )
+        payload = {
+            "message": "定时任务已创建",
+            "task": task,
+        }
+        return _finalize_tool_output(
+            "create_scheduled_task",
+            json.dumps(payload, ensure_ascii=False, indent=2),
+            command=command,
+            repeat=repeat,
+            run_time=run_time,
+            scheduled_at=scheduled_at,
+        )
+    except Exception as e:
+        logger.error(f"创建定时任务失败: {e}", exc_info=True)
+        return _finalize_tool_output(
+            "create_scheduled_task",
+            f"创建定时任务失败: {e}",
+            command=command,
+            repeat=repeat,
+            run_time=run_time,
+            scheduled_at=scheduled_at,
+        )
+
+
+create_scheduled_task = build_agent_tool(
+    name="create_scheduled_task",
+    description=(
+        "创建后台定时任务。当用户要求在未来某个时间、每天、定时、自动执行某项任务时使用。"
+        "command 只能填写未来真正要执行的业务任务，不要包含'每天/定时/明天几点'等调度表达；"
+        "每日任务使用 repeat=daily 和 run_time=HH:MM，一次性任务使用 repeat=none 和 scheduled_at。"
+    ),
+    args_schema=CreateScheduledTaskInput,
+    func=_impl_create_scheduled_task,
+    is_readonly=False,
+    is_destructive=False,
+    is_concurrency_safe=False,
+)
+
+
+def _impl_list_scheduled_tasks(include_all_sessions: bool = True) -> str:
+    try:
+        from agent.scheduled_task_runtime import get_scheduled_task_runtime
+
+        session_id = "" if include_all_sessions else (get_current_session_id() or "default")
+        tasks = get_scheduled_task_runtime().list_tasks(session_id=session_id)
+        payload = {
+            "message": "已查询定时任务",
+            "count": len(tasks),
+            "tasks": tasks,
+        }
+        return _finalize_tool_output(
+            "list_scheduled_tasks",
+            json.dumps(payload, ensure_ascii=False, indent=2),
+            include_all_sessions=include_all_sessions,
+        )
+    except Exception as e:
+        logger.error(f"查询定时任务失败: {e}", exc_info=True)
+        return _finalize_tool_output(
+            "list_scheduled_tasks",
+            f"查询定时任务失败: {e}",
+            include_all_sessions=include_all_sessions,
+        )
+
+
+list_scheduled_tasks = build_agent_tool(
+    name="list_scheduled_tasks",
+    description="查询定时任务列表。默认查询所有会话的定时任务。",
+    args_schema=ListScheduledTasksInput,
+    func=_impl_list_scheduled_tasks,
+    is_readonly=True,
+    is_destructive=False,
+    is_concurrency_safe=True,
+)
+
+
+def _impl_cancel_scheduled_task(task_id: str = "") -> str:
+    try:
+        from agent.scheduled_task_runtime import get_scheduled_task_runtime
+
+        if not str(task_id or "").strip():
+            return _finalize_tool_output("cancel_scheduled_task", "取消定时任务失败: task_id 不能为空", task_id=task_id)
+        task = get_scheduled_task_runtime().cancel_task(task_id)
+        payload = {
+            "message": "定时任务已取消",
+            "task": task,
+        }
+        return _finalize_tool_output(
+            "cancel_scheduled_task",
+            json.dumps(payload, ensure_ascii=False, indent=2),
+            task_id=task_id,
+        )
+    except Exception as e:
+        logger.error(f"取消定时任务失败: {e}", exc_info=True)
+        return _finalize_tool_output("cancel_scheduled_task", f"取消定时任务失败: {e}", task_id=task_id)
+
+
+cancel_scheduled_task = build_agent_tool(
+    name="cancel_scheduled_task",
+    description="取消或停用一个后台定时任务。用户要求取消、停用定时任务时使用。",
+    args_schema=CancelScheduledTaskInput,
+    func=_impl_cancel_scheduled_task,
+    is_readonly=False,
+    is_destructive=False,
+    is_concurrency_safe=False,
+)
+
+
 def _register_all_tools():
     ToolRegistry.clear()
     ToolRegistry.register(get_skill)
@@ -2396,6 +2544,9 @@ def _register_all_tools():
     ToolRegistry.register(add_memory)
     ToolRegistry.register(search_memory)
     ToolRegistry.register(update_project_instructions)
+    ToolRegistry.register(create_scheduled_task)
+    ToolRegistry.register(list_scheduled_tasks)
+    ToolRegistry.register(cancel_scheduled_task)
 
 
 _register_all_tools()
@@ -2417,9 +2568,14 @@ __all__ = [
     'search_memory',
     'search_tool_error_memory',
     'update_project_instructions',
+    'create_scheduled_task',
+    'list_scheduled_tasks',
+    'cancel_scheduled_task',
     'reset_retry_guard',
     'set_skill_registry',
     'set_rag_config',
     'set_memory_instance',
+    'set_session_context',
+    'get_current_session_output_dir',
     '_register_all_tools',
 ]

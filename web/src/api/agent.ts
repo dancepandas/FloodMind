@@ -4,6 +4,7 @@ import type {
   FilePreview,
   SessionConfig,
   SessionSummary,
+  ScheduledTask,
   StreamSnapshot,
   UploadedFileItem,
 } from "@/types/app";
@@ -50,6 +51,12 @@ interface SessionStatusResponse {
   status: string;
   in_progress?: StreamSnapshot | null;
   session_state?: Record<string, unknown>;
+}
+
+interface ScheduledTasksResponse {
+  status: string;
+  count: number;
+  tasks: ScheduledTask[];
 }
 
 export async function initAgent(sessionId: string, config: SessionConfig): Promise<InitResponse> {
@@ -155,6 +162,21 @@ export async function saveSession(sessionId: string): Promise<void> {
 export async function deleteSession(sessionId: string): Promise<void> {
   log.info("deleteSession", sessionId);
   await apiFetch<{ status: string }>(`/api/sessions/${encodeURIComponent(sessionId)}`, {
+    method: "DELETE",
+  });
+}
+
+export async function fetchScheduledTasks(sessionId?: string): Promise<ScheduledTask[]> {
+  log.debug("fetchScheduledTasks", sessionId || "all");
+  const params = sessionId ? `session_id=${encodeURIComponent(sessionId)}` : "include_all=1";
+  const data = await apiFetch<ScheduledTasksResponse>(`/api/scheduled-tasks?${params}`);
+  log.info("fetchScheduledTasks →", data.tasks?.length || 0, "tasks");
+  return data.tasks || [];
+}
+
+export async function deleteScheduledTask(taskId: string): Promise<void> {
+  log.info("deleteScheduledTask", taskId);
+  await apiFetch<{ status: string }>(`/api/scheduled-tasks/${encodeURIComponent(taskId)}`, {
     method: "DELETE",
   });
 }

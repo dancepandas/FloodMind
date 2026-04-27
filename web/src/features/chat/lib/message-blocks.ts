@@ -143,9 +143,17 @@ export function setAssistantFinalContent(message: ChatMessage, content: string):
   };
 }
 
+function artifactKey(artifact: GeneratedArtifact): string {
+  if (artifact.download_url) return artifact.download_url;
+  if (artifact.image_url) return artifact.image_url;
+  if (artifact.filepath) return `${artifact.filepath}:${artifact.filename}`;
+  return `${artifact.type}:${artifact.filename}`;
+}
+
 export function attachArtifact(message: ChatMessage, artifact: GeneratedArtifact): ChatMessage {
   const artifacts = [...(message.artifacts || [])];
-  if (!artifacts.find((item) => item.filepath === artifact.filepath && item.filename === artifact.filename)) {
+  const key = artifactKey(artifact);
+  if (!artifacts.find((item) => artifactKey(item) === key)) {
     artifacts.push(artifact);
   }
   return { ...message, artifacts };

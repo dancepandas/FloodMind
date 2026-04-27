@@ -53,15 +53,14 @@ function generateSessionId() {
 function normalizeArtifact(raw: Record<string, unknown>): GeneratedArtifact | null {
   const type = raw.type;
   const filename = raw.filename;
-  const filepath = raw.filepath;
-  if ((type !== "file_generated" && type !== "image_generated") || typeof filename !== "string" || typeof filepath !== "string") {
+  if ((type !== "file_generated" && type !== "image_generated") || typeof filename !== "string") {
     return null;
   }
 
   return {
     type,
     filename,
-    filepath,
+    filepath: typeof raw.filepath === "string" ? raw.filepath : undefined,
     size: typeof raw.size === "number" ? raw.size : undefined,
     download_url: typeof raw.download_url === "string" ? raw.download_url : undefined,
     image_url: typeof raw.image_url === "string" ? raw.image_url : undefined,

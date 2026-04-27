@@ -33,6 +33,7 @@ from models import QwenLLMService, get_qwen_llm_service
 from memory import SimpleMemory, DualMemory, SessionManager
 from memory.session_manager import validate_session_id
 from agent import FloodAgent
+from agent.scheduled_task_runtime import get_scheduled_task_runtime
 from tools import set_rag_config, set_memory_instance, set_session_context
 
 # 配置日志
@@ -555,16 +556,51 @@ def list_session_artifact_events(session_id: str) -> list[dict[str, Any]]:
         try:
             data = json.loads(Path(artifacts_file).read_text(encoding='utf-8'))
             if isinstance(data, list):
-                return [_sanitize_artifact_event(item) for item in data if isinstance(item, dict)]
+                items = [_sanitize_artifact_event(item) for item in data if isinstance(item, dict)]
+                for item in items:
+                    filename = item.get('filename', '')
+                    if not item.get('download_url') and filename:
+                        item['download_url'] = f"/api/sessions/{session_id}/outputs/{filename}"
+                    if item.get('type') == 'image_generated' and not item.get('image_url') and item.get('download_url'):
+                        item['image_url'] = item['download_url']
+                return items
         except Exception as e:
             logger.warning(f"读取最终成果文件记录失败: {e}")
     return []
 
 
+def _artifact_dedup_key(event: dict[str, Any]) -> str:
+    url = event.get('download_url') or event.get('image_url', '')
+    if url:
+        return str(url)
+    return f"{event.get('type', '')}:{event.get('filename', '')}"
+
+
 def save_session_artifact_events(session_id: str, artifact_events: list[dict[str, Any]]) -> None:
     artifacts_file = os.path.join(str(session_manager.get_session_dir(session_id)), 'approved_artifacts.json')
+    existing: list[dict[str, Any]] = []
+    if os.path.exists(artifacts_file):
+        try:
+            data = json.loads(Path(artifacts_file).read_text(encoding='utf-8'))
+            if isinstance(data, list):
+                existing = [item for item in data if isinstance(item, dict)]
+        except Exception:
+            pass
+    new_sanitized = [_sanitize_artifact_event(item) for item in artifact_events]
+    seen: set[str] = set()
+    merged: list[dict[str, Any]] = []
+    for item in existing:
+        key = _artifact_dedup_key(item)
+        if key not in seen:
+            seen.add(key)
+            merged.append(item)
+    for item in new_sanitized:
+        key = _artifact_dedup_key(item)
+        if key not in seen:
+            seen.add(key)
+            merged.append(item)
     Path(artifacts_file).write_text(
-        json.dumps([_sanitize_artifact_event(item) for item in artifact_events], ensure_ascii=False, indent=2),
+        json.dumps(merged, ensure_ascii=False, indent=2),
         encoding='utf-8',
     )
 
@@ -1389,6 +1425,12 @@ def chat():
                             yield stream_json_line({'type': 'reasoning', 'content': chunk.get('content', '')})
                         continue
 
+                    if chunk.get("type") == "llm_token_error":
+                        finish_stream_snapshot(session_id)
+                        yield stream_json_line({'type': 'error', 'content': 'LLM模型服务账号Token余额不足，无法提供服务'})
+                        yield stream_json_line({'type': 'stream_end'})
+                        return
+
                     if chunk.get("type") == "memory_status":
                         touch_stream_snapshot(session_id)
                         yield stream_json_line(chunk)
@@ -1718,6 +1760,80 @@ def get_config():
             {'name': 'write_word_document', 'desc': '生成 Word 报告'},
         ]
     })
+
+
+@app.route('/api/scheduled-tasks', methods=['GET'])
+def list_scheduled_task_api():
+    """查询定时任务列表。"""
+    try:
+        session_id = request.args.get('session_id', '')
+        include_all = request.args.get('include_all', '0') == '1'
+        if session_id:
+            session_id = _require_session_id(session_id)
+        tasks = get_scheduled_task_runtime().list_tasks(session_id='' if include_all else session_id)
+        return jsonify({
+            'status': 'success',
+            'count': len(tasks),
+            'tasks': tasks,
+        })
+    except Exception as e:
+        logger.error(f"查询定时任务失败: {e}", exc_info=True)
+        return jsonify({'status': 'error', 'message': str(e)}), 500
+
+
+@app.route('/api/scheduled-tasks/<task_id>', methods=['GET'])
+def get_scheduled_task_api(task_id: str):
+    """查询定时任务详情。"""
+    try:
+        task = get_scheduled_task_runtime().get_task(task_id)
+        if not task:
+            return jsonify({'status': 'error', 'message': '定时任务不存在'}), 404
+        return jsonify({'status': 'success', 'task': task})
+    except Exception as e:
+        logger.error(f"查询定时任务详情失败: {e}", exc_info=True)
+        return jsonify({'status': 'error', 'message': str(e)}), 500
+
+
+@app.route('/api/scheduled-tasks/<task_id>', methods=['PATCH'])
+def update_scheduled_task_api(task_id: str):
+    """修改定时任务基础字段。"""
+    try:
+        data = request.get_json() or {}
+        updates = {key: data[key] for key in ('command', 'enabled', 'run_time', 'scheduled_at', 'repeat', 'status') if key in data}
+        task = get_scheduled_task_runtime().update_task(task_id, **updates)
+        return jsonify({'status': 'success', 'task': task})
+    except Exception as e:
+        logger.error(f"修改定时任务失败: {e}", exc_info=True)
+        return jsonify({'status': 'error', 'message': str(e)}), 400
+
+
+@app.route('/api/scheduled-tasks/<task_id>', methods=['DELETE'])
+def delete_scheduled_task_api(task_id: str):
+    """删除定时任务。"""
+    try:
+        task = get_scheduled_task_runtime().delete_task(task_id)
+        return jsonify({'status': 'success', 'task': task})
+    except Exception as e:
+        logger.error(f"删除定时任务失败: {e}", exc_info=True)
+        return jsonify({'status': 'error', 'message': str(e)}), 400
+
+
+@app.route('/api/scheduled-tasks/<task_id>/artifacts', methods=['GET'])
+def list_scheduled_task_artifacts_api(task_id: str):
+    """查询定时任务最近一次新增产物。"""
+    try:
+        task = get_scheduled_task_runtime().get_task(task_id)
+        if not task:
+            return jsonify({'status': 'error', 'message': '定时任务不存在'}), 404
+        return jsonify({
+            'status': 'success',
+            'task_id': task_id,
+            'session_id': task.get('session_id', ''),
+            'artifacts': task.get('artifacts', []) or [],
+        })
+    except Exception as e:
+        logger.error(f"查询定时任务产物失败: {e}", exc_info=True)
+        return jsonify({'status': 'error', 'message': str(e)}), 500
 
 
 @app.route('/api/memory/stats', methods=['GET'])

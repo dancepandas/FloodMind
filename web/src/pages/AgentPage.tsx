@@ -28,8 +28,8 @@ const AgentPage = () => {
   } = useAgentApp();
 
   return (
-    <div className="min-h-screen bg-[linear-gradient(180deg,#f5f9ff_0%,#eef5ff_100%)] text-foreground font-sans">
-      <div className="w-full h-screen flex overflow-hidden bg-background/90 shadow-custom relative backdrop-blur-sm">
+    <div className="min-h-screen bg-background text-foreground font-sans">
+      <div className="w-full h-screen flex overflow-hidden relative">
         <Sidebar
           sessions={sessions}
           activeSessionId={sessionId}
@@ -49,6 +49,7 @@ const AgentPage = () => {
           onToggleThought={toggleThought}
         />
         <ContextPanel
+          sessionId={sessionId}
           files={uploadedFiles}
           workflow={workflow}
           selectedPreview={selectedPreview}

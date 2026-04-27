@@ -13,26 +13,31 @@ interface ChatMessageProps {
 
 function ThoughtBlock({ message, block, onToggleThought }: { message: ChatMessageModel; block: ChatMessageModel["blocks"][number]; onToggleThought: (messageId: string, blockId: string) => void }) {
   const contentRef = useRef<HTMLDivElement>(null);
+  const scrollRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
-    if (block.isStreaming && !block.isCollapsed && contentRef.current) {
-      contentRef.current.scrollTop = contentRef.current.scrollHeight;
+    if (block.isStreaming && !block.isCollapsed && scrollRef.current) {
+      const el = scrollRef.current;
+      el.scrollTo({ top: el.scrollHeight, behavior: "smooth" });
     }
   }, [block.content, block.isStreaming, block.isCollapsed]);
 
   return (
-    <div className={`w-full transition-all duration-300 ${block.isArchived ? "opacity-40" : "opacity-100"}`}>
+    <div className={`w-full max-w-full transition-all duration-300 ${block.isArchived ? "opacity-40" : "opacity-100"}`}>
       <button
         type="button"
         onClick={() => onToggleThought(message.id, block.id)}
-        className="flex items-center gap-2 text-xs font-medium text-muted-foreground hover:text-foreground transition-colors px-2 py-1.5 rounded-md hover:bg-muted/50"
+        className="flex items-center gap-2 text-xs font-medium text-muted-foreground/80 hover:text-foreground transition-colors duration-150 px-2 py-1.5 rounded-lg hover:bg-muted/40"
       >
-        {block.isCollapsed ? <ChevronRight size={14} /> : <ChevronDown size={14} />}
-        <span className={`inline-block h-2.5 w-2.5 rounded-full ${block.isStreaming ? "bg-primary animate-pulse" : "bg-primary/70"}`} />
+        {block.isCollapsed ? <ChevronRight size={13} /> : <ChevronDown size={13} />}
+        <span className={`inline-block h-2 w-2 rounded-full ${block.isStreaming ? "bg-primary animate-pulse" : "bg-primary/60"}`} />
         <span>{block.isStreaming ? "Thinking..." : "Thought Process"}</span>
       </button>
-      <div className={`mt-1 ml-2 pl-4 pr-3 py-2.5 border-l-2 border-primary/30 bg-muted/20 rounded-r-md text-sm text-muted-foreground whitespace-pre-wrap leading-relaxed transition-all duration-300 overflow-hidden ${block.isCollapsed ? "max-h-0 opacity-0 py-0 mt-0" : "max-h-32 overflow-y-auto opacity-100"}`}>
-        <div ref={contentRef} className="opacity-70">{block.content}</div>
+      <div
+        ref={scrollRef}
+        className={`mt-1 ml-2 pl-4 pr-3 py-2.5 border border-primary/[0.06] border-l-2 border-l-primary/20 bg-primary/[0.02] shadow-[inset_0_1px_0_rgba(255,255,255,0.5)] rounded-r-lg text-sm text-muted-foreground leading-relaxed transition-all duration-300 overflow-x-hidden overflow-y-auto ${block.isCollapsed ? "max-h-0 opacity-0 py-0 mt-0 border-0" : "max-h-40 opacity-100"}`}
+      >
+        <div ref={contentRef} className="opacity-70 whitespace-pre-wrap break-words max-w-[65ch]">{block.content}</div>
       </div>
     </div>
   );
@@ -55,22 +60,22 @@ function ImagePreviewDialog({ artifact, open, onOpenChange }: { artifact: Genera
               <a
                 href={artifact.download_url}
                 download={artifact.filename}
-                className="rounded-full bg-white/20 backdrop-blur-sm p-2 text-white hover:bg-white/30 transition-colors"
+                className="rounded-full bg-white/15 backdrop-blur-sm p-2 text-white/90 hover:bg-white/25 transition-colors duration-150"
                 title="下载图片"
               >
-                <Download size={18} />
+                <Download size={17} />
               </a>
             )}
             <button
               type="button"
               onClick={() => onOpenChange(false)}
-              className="rounded-full bg-white/20 backdrop-blur-sm p-2 text-white hover:bg-white/30 transition-colors"
+              className="rounded-full bg-white/15 backdrop-blur-sm p-2 text-white/90 hover:bg-white/25 transition-colors duration-150"
               title="关闭"
             >
-              <X size={18} />
+              <X size={17} />
             </button>
           </div>
-          <div className="absolute bottom-3 left-3 text-white/70 text-xs bg-black/40 backdrop-blur-sm px-2 py-1 rounded">
+          <div className="absolute bottom-3 left-3 text-white/60 text-xs bg-black/30 backdrop-blur-sm px-2.5 py-1 rounded-lg">
             {artifact.filename}
           </div>
         </div>
@@ -85,21 +90,21 @@ export function ChatMessage({ message, onToggleThought }: ChatMessageProps) {
   const [previewArtifact, setPreviewArtifact] = useState<GeneratedArtifact | null>(null);
 
   return (
-    <div className={`flex w-full mb-6 ${isUser ? "justify-end" : "justify-start"}`}>
-      <div className={`flex gap-4 max-w-[85%] ${isUser ? "flex-row-reverse" : "flex-row"}`}>
-        <div className="flex-shrink-0 mt-1">
-          <div className={`w-8 h-8 rounded-full flex items-center justify-center shadow-sm ${isUser ? "bg-primary text-primary-foreground" : isSystem ? "bg-amber-100 text-amber-700 border border-amber-200" : "bg-muted text-foreground border border-border"}`}>
-            {isUser ? <User size={16} /> : isSystem ? <Terminal size={16} /> : <Bot size={18} />}
+    <div className={`flex w-full mb-5 ${isUser ? "justify-end" : "justify-start"}`}>
+      <div className={`flex gap-3.5 max-w-[85%] ${isUser ? "flex-row-reverse" : "flex-row"}`}>
+        <div className="flex-shrink-0 mt-0.5">
+          <div className={`w-8 h-8 rounded-full flex items-center justify-center ${isUser ? "bg-primary/10 text-primary" : isSystem ? "bg-amber-50 text-amber-600" : "bg-muted text-foreground"}`}>
+            {isUser ? <User size={15} /> : isSystem ? <Terminal size={15} /> : <Bot size={16} />}
           </div>
         </div>
 
         <div className={`flex flex-col gap-2 ${isUser ? "items-end" : "items-start"}`}>
           {isUser ? (
-            <div className="px-4 py-2.5 rounded-2xl rounded-tr-sm bg-primary text-primary-foreground shadow-sm text-sm whitespace-pre-wrap">
+            <div className="px-4 py-2.5 rounded-2xl rounded-tr-md bg-primary text-primary-foreground shadow-sm text-sm whitespace-pre-wrap">
               {message.content}
             </div>
           ) : isSystem ? (
-            <div className="px-4 py-3 rounded-2xl rounded-tl-sm bg-amber-50 border border-amber-200 shadow-sm text-sm text-amber-900 leading-relaxed whitespace-pre-wrap font-mono">
+            <div className="px-4 py-3 rounded-2xl rounded-tl-md bg-amber-50/80 border border-amber-200/60 shadow-sm text-sm text-amber-900 leading-relaxed whitespace-pre-wrap font-mono">
               {message.content}
             </div>
           ) : (
@@ -110,7 +115,7 @@ export function ChatMessage({ message, onToggleThought }: ChatMessageProps) {
                 }
 
                 return (
-                  <div key={block.id} className={`px-4 py-3 rounded-2xl rounded-tl-sm bg-background border border-border shadow-sm text-sm text-foreground leading-relaxed transition-all duration-300 ${block.isArchived ? "opacity-50 scale-[0.99]" : "opacity-100"}`}>
+                  <div key={block.id} className={`px-4 py-3 rounded-2xl rounded-tl-md bg-card border border-border/80 text-sm text-foreground leading-relaxed transition-all duration-300 ${block.isArchived ? "opacity-50 scale-[0.99]" : "opacity-100"}`}>
                     <div className="prose prose-sm max-w-none prose-headings:text-foreground prose-p:text-foreground prose-strong:text-foreground prose-li:text-foreground prose-code:text-foreground prose-code:bg-muted prose-code:px-1 prose-code:rounded prose-table:text-foreground prose-th:bg-muted prose-th:border-border prose-td:border-border">
                       <ReactMarkdown remarkPlugins={[remarkGfm]}>{block.content}</ReactMarkdown>
                     </div>
@@ -119,12 +124,12 @@ export function ChatMessage({ message, onToggleThought }: ChatMessageProps) {
                         {message.artifacts.map((artifact) =>
                           artifact.type === "image_generated" ? (
                             <div
-                              key={`${artifact.filepath}-${artifact.filename}`}
-                              className="w-[33%] min-w-[220px] overflow-hidden rounded-xl border border-border bg-muted/30 text-sm shadow-sm hover:border-primary/40 transition-colors group"
+                              key={artifact.download_url || artifact.image_url || `${artifact.type}-${artifact.filename}`}
+                              className="w-[33%] min-w-[220px] overflow-hidden rounded-xl border border-border/80 bg-card text-sm hover:border-primary/30 transition-all duration-200 group"
                             >
                               {artifact.image_url && (
                                 <div
-                                  className="relative h-28 w-full overflow-hidden border-b border-border cursor-pointer"
+                                  className="relative h-28 w-full overflow-hidden border-b border-border/60 cursor-pointer"
                                   onClick={() => setPreviewArtifact(artifact)}
                                 >
                                   <img
@@ -132,18 +137,18 @@ export function ChatMessage({ message, onToggleThought }: ChatMessageProps) {
                                     alt={artifact.filename}
                                     className="h-full w-full object-cover"
                                   />
-                                  <div className="absolute inset-0 bg-black/0 group-hover:bg-black/20 transition-colors flex items-center justify-center">
-                                    <ZoomIn size={24} className="text-white opacity-0 group-hover:opacity-80 transition-opacity" />
+                                  <div className="absolute inset-0 bg-black/0 group-hover:bg-black/15 transition-colors duration-200 flex items-center justify-center">
+                                    <ZoomIn size={22} className="text-white opacity-0 group-hover:opacity-80 transition-opacity duration-200" />
                                   </div>
                                 </div>
                               )}
-                              <div className="px-3 py-3 flex items-center justify-between">
-                                <div className="font-medium truncate flex-1">{artifact.filename}</div>
+                              <div className="px-3 py-2.5 flex items-center justify-between">
+                                <div className="font-medium truncate flex-1 text-[13px]">{artifact.filename}</div>
                                 {artifact.download_url && (
                                   <a
                                     href={artifact.download_url}
                                     download={artifact.filename}
-                                    className="ml-2 flex-shrink-0 rounded-md p-1.5 text-muted-foreground hover:text-primary hover:bg-muted transition-colors"
+                                    className="ml-2 flex-shrink-0 rounded-lg p-1.5 text-muted-foreground/60 hover:text-primary hover:bg-primary/5 transition-colors duration-150"
                                     title="下载图片"
                                     onClick={(e) => e.stopPropagation()}
                                   >
@@ -154,19 +159,19 @@ export function ChatMessage({ message, onToggleThought }: ChatMessageProps) {
                             </div>
                           ) : (
                             <div
-                              key={`${artifact.filepath}-${artifact.filename}`}
-                              className="w-[33%] min-w-[220px] rounded-xl border border-border bg-muted/30 text-sm shadow-sm hover:border-primary/40 transition-colors overflow-hidden"
+                              key={artifact.download_url || `${artifact.type}-${artifact.filename}`}
+                              className="w-[33%] min-w-[220px] rounded-xl border border-border/80 bg-card text-sm hover:border-primary/30 transition-all duration-200 overflow-hidden"
                             >
-                              <div className="px-3 py-3 flex items-center gap-2.5">
+                              <div className="px-3 py-2.5 flex items-center gap-2.5">
                                 {getFileIcon(artifact.filename)}
-                                <div className="font-medium truncate flex-1">{artifact.filename}</div>
+                                <div className="font-medium truncate flex-1 text-[13px]">{artifact.filename}</div>
                               </div>
                               <div className="px-3 pb-2.5 flex items-center gap-1.5">
                                 {isPreviewable(artifact.filename) && (
                                   <button
                                     type="button"
                                     onClick={() => setPreviewArtifact(artifact)}
-                                    className="inline-flex items-center gap-1 rounded-md px-2 py-1 text-xs text-primary hover:bg-primary/10 transition-colors"
+                                    className="inline-flex items-center gap-1 rounded-lg px-2 py-1 text-xs text-primary hover:bg-primary/5 transition-colors duration-150"
                                   >
                                     <Eye size={13} />
                                     预览
@@ -176,7 +181,7 @@ export function ChatMessage({ message, onToggleThought }: ChatMessageProps) {
                                   <a
                                     href={artifact.download_url}
                                     download={artifact.filename}
-                                    className="inline-flex items-center gap-1 rounded-md px-2 py-1 text-xs text-muted-foreground hover:text-foreground hover:bg-muted transition-colors"
+                                    className="inline-flex items-center gap-1 rounded-lg px-2 py-1 text-xs text-muted-foreground hover:text-foreground hover:bg-muted/60 transition-colors duration-150"
                                     onClick={(e) => e.stopPropagation()}
                                   >
                                     <Download size={13} />
@@ -190,7 +195,7 @@ export function ChatMessage({ message, onToggleThought }: ChatMessageProps) {
                       </div>
                     )}
                     {!!message.references?.length && message.blocks[message.blocks.length - 1].id === block.id && (
-                      <div className="mt-3 pt-3 border-t border-border/60">
+                      <div className="mt-3 pt-3 border-t border-border/50">
                         <div className="text-[11px] font-medium text-muted-foreground mb-2">参考来源</div>
                         <div className="flex flex-col gap-1.5">
                           {message.references.map((ref, i) => (
@@ -204,7 +209,7 @@ export function ChatMessage({ message, onToggleThought }: ChatMessageProps) {
               })}
             </div>
           )}
-          <span className="text-[10px] text-muted-foreground px-1">
+          <span className="text-[10px] text-muted-foreground/50 px-1">
             {new Date(message.timestamp).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}
           </span>
         </div>
@@ -237,26 +242,26 @@ function ReferenceItem({ reference, index }: { reference: ReferenceLink; index: 
         href={reference.url}
         target="_blank"
         rel="noopener noreferrer"
-        className="flex items-center gap-2 px-2 py-1.5 rounded-md text-xs hover:bg-muted/60 transition-colors group"
+        className="flex items-center gap-2 px-2 py-1.5 rounded-lg text-xs hover:bg-muted/40 transition-colors duration-150 group"
       >
-        <span className="flex-shrink-0 w-5 h-5 rounded bg-primary/10 text-primary flex items-center justify-center text-[10px] font-semibold">
+        <span className="flex-shrink-0 w-5 h-5 rounded-md bg-primary/8 text-primary flex items-center justify-center text-[10px] font-semibold">
           {index}
         </span>
-        <ExternalLink size={12} className="flex-shrink-0 text-muted-foreground group-hover:text-primary transition-colors" />
-        <span className="truncate text-muted-foreground group-hover:text-foreground transition-colors">{displayTitle}</span>
-        {reference.source && <span className="flex-shrink-0 text-[10px] text-muted-foreground/60 ml-auto">{reference.source}</span>}
+        <ExternalLink size={11} className="flex-shrink-0 text-muted-foreground/50 group-hover:text-primary transition-colors duration-150" />
+        <span className="truncate text-muted-foreground group-hover:text-foreground transition-colors duration-150">{displayTitle}</span>
+        {reference.source && <span className="flex-shrink-0 text-[10px] text-muted-foreground/40 ml-auto">{reference.source}</span>}
       </a>
     );
   }
 
   return (
-    <div className="flex items-center gap-2 px-2 py-1.5 rounded-md text-xs">
-      <span className="flex-shrink-0 w-5 h-5 rounded bg-primary/10 text-primary flex items-center justify-center text-[10px] font-semibold">
+    <div className="flex items-center gap-2 px-2 py-1.5 rounded-lg text-xs">
+      <span className="flex-shrink-0 w-5 h-5 rounded-md bg-primary/8 text-primary flex items-center justify-center text-[10px] font-semibold">
         {index}
       </span>
-      <FileText size={12} className="flex-shrink-0 text-muted-foreground" />
+      <FileText size={11} className="flex-shrink-0 text-muted-foreground/50" />
       <span className="truncate text-muted-foreground">{displayTitle}</span>
-      {reference.source && <span className="flex-shrink-0 text-[10px] text-muted-foreground/60 ml-auto">{reference.source}</span>}
+      {reference.source && <span className="flex-shrink-0 text-[10px] text-muted-foreground/40 ml-auto">{reference.source}</span>}
     </div>
   );
 }
