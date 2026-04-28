@@ -9,6 +9,7 @@ FloodMind 统一启动入口
 """
 
 import argparse
+import locale
 import logging
 import os
 import signal
@@ -18,6 +19,7 @@ import threading
 from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parent
+_CONSOLE_ENCODING = locale.getpreferredencoding() or "utf-8"
 
 
 def _stream_output(proc: subprocess.Popen, prefix: str, stop_event: threading.Event) -> None:
@@ -25,7 +27,7 @@ def _stream_output(proc: subprocess.Popen, prefix: str, stop_event: threading.Ev
         for raw_line in proc.stdout:
             if stop_event.is_set():
                 break
-            line = raw_line.decode("utf-8", errors="replace").rstrip()
+            line = raw_line.decode(_CONSOLE_ENCODING, errors="replace").rstrip()
             if line:
                 print(f"[{prefix}] {line}", flush=True)
     except Exception:
@@ -77,7 +79,7 @@ def main() -> int:
 
     web_proc = start_web_server(args.host, args.port)
     procs.append(web_proc)
-    t = threading.Thread(target=_stream_output, args=(web_proc, "web"), daemon=True)
+    t = threading.Thread(target=_stream_output, args=(web_proc, "web", stop_event), daemon=True)
     t.start()
     threads.append(t)
     print(f"[start] Web Server 已启动 -> http://{args.host}:{args.port}", flush=True)
@@ -85,7 +87,7 @@ def main() -> int:
     if not args.no_scheduler:
         sched_proc = start_scheduler()
         procs.append(sched_proc)
-        t = threading.Thread(target=_stream_output, args=(sched_proc, "scheduler"), daemon=True)
+        t = threading.Thread(target=_stream_output, args=(sched_proc, "scheduler", stop_event), daemon=True)
         t.start()
         threads.append(t)
         print("[start] Scheduler 已启动", flush=True)
