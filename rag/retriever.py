@@ -367,11 +367,12 @@ class KnowledgeRetriever:
         """
         top_k = top_k or self.top_k
         merged_filter = self._merge_metadata_filter(query, metadata_filter)
+        chromadb_filter = self._to_chromadb_where(merged_filter)
         all_docs: List[Tuple[Document, float, str]] = []
         
         if include_permanent:
             try:
-                results = self.permanent_store.search_with_scores(query, k=top_k, filter=merged_filter or None)
+                results = self.permanent_store.search_with_scores(query, k=top_k, filter=chromadb_filter)
                 all_docs.extend((doc, score, "vector") for doc, score in results)
             except Exception as e:
                 logger.warning(f"检索永久知识库失败: {e}")
@@ -379,7 +380,7 @@ class KnowledgeRetriever:
         if include_session and session_id:
             try:
                 session_store = self.get_session_store(session_id)
-                results = session_store.search_with_scores(query, k=top_k, filter=merged_filter or None)
+                results = session_store.search_with_scores(query, k=top_k, filter=chromadb_filter)
                 all_docs.extend((doc, score, "vector") for doc, score in results)
             except Exception as e:
                 logger.warning(f"检索会话知识库失败: {e}")
@@ -498,6 +499,15 @@ class KnowledgeRetriever:
         explicit = self._normalize_filter(metadata_filter)
         inferred = self._infer_filter_from_query(query)
         return {**inferred, **explicit}
+
+    @staticmethod
+    def _to_chromadb_where(flat_filter: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        if not flat_filter:
+            return None
+        if len(flat_filter) == 1:
+            key, value = next(iter(flat_filter.items()))
+            return {key: value}
+        return {"$and": [{k: v} for k, v in flat_filter.items()]}
 
     @staticmethod
     def _matches_metadata_filter(doc: Document, metadata_filter: Dict[str, Any]) -> bool:

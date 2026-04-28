@@ -15,17 +15,34 @@ Usage:
 """
 
 import os
+import platform
+import shutil
 import socket
 import subprocess
 import tempfile
 from pathlib import Path
 
 
+def _find_soffice() -> str:
+    if platform.system() == "Windows":
+        candidates = [
+            r"C:\Program Files\LibreOffice\program\soffice.exe",
+            r"C:\Program Files (x86)\LibreOffice\program\soffice.exe",
+        ]
+        for p in candidates:
+            if os.path.exists(p):
+                return p
+    found = shutil.which("soffice")
+    if found:
+        return found
+    return "soffice"
+
+
 def get_soffice_env() -> dict:
     env = os.environ.copy()
     env["SAL_USE_VCLPLUGIN"] = "svp"
 
-    if _needs_shim():
+    if platform.system() != "Windows" and _needs_shim():
         shim = _ensure_shim()
         env["LD_PRELOAD"] = str(shim)
 
@@ -34,7 +51,8 @@ def get_soffice_env() -> dict:
 
 def run_soffice(args: list[str], **kwargs) -> subprocess.CompletedProcess:
     env = get_soffice_env()
-    return subprocess.run(["soffice"] + args, env=env, **kwargs)
+    soffice = _find_soffice()
+    return subprocess.run([soffice] + args, env=env, **kwargs)
 
 
 
@@ -42,6 +60,8 @@ _SHIM_SO = Path(tempfile.gettempdir()) / "lo_socket_shim.so"
 
 
 def _needs_shim() -> bool:
+    if not hasattr(socket, "AF_UNIX"):
+        return False
     try:
         s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         s.close()
