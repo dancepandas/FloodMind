@@ -22,6 +22,38 @@ PROJECT_ROOT = Path(__file__).resolve().parent
 _CONSOLE_ENCODING = locale.getpreferredencoding() or "utf-8"
 
 
+_BANNER = r"""
+███████╗ ██╗       ██████╗   ██████╗  ██████╗  ███╗   ███╗ ██╗ ███╗   ██╗ ██████╗  █▀▄ █▀▀ ▀█▀ █▀█
+██╔════╝ ██║      ██╔═══██╗ ██╔═══██╗ ██╔══██╗ ████╗ ████║ ██║ ████╗  ██║ ██╔══██╗ █▀▄ █▀▀  █  █▀█
+█████╗   ██║      ██║   ██║ ██║   ██║ ██║  ██║ ██╔████╔██║ ██║ ██╔██╗ ██║ ██║  ██║ ▀▀  ▀▀▀  ▀  ▀ ▀
+██╔══╝   ██║      ██║   ██║ ██║   ██║ ██║  ██║ ██║╚██╔╝██║ ██║ ██║╚██╗██║ ██║  ██║
+██║      ███████╗ ╚██████╔╝ ╚██████╔╝ ██████╔╝ ██║ ╚═╝ ██║ ██║ ██║ ╚████║ ██████╔╝
+╚═╝      ╚══════╝  ╚═════╝   ╚═════╝  ╚═════╝  ╚═╝     ╚═╝ ╚═╝ ╚═╝  ╚═══╝ ╚═════╝ 
+                                                                          
+"""
+
+def _print_banner(host: str, port: int, no_scheduler: bool) -> None:
+    cyan = "\033[36m"
+    blue = "\033[34m"
+    green = "\033[32m"
+    bold = "\033[1m"
+    dim = "\033[2m"
+    reset = "\033[0m"
+
+    if sys.platform == "win32":
+        try:
+            os.system("")
+        except Exception:
+            pass
+
+    print(f"{cyan}{_BANNER}{reset}", flush=True)
+
+    version = "1.0.0"
+    print(f"  {green}{bold}FloodMind{reset}  {dim}v{version}{reset}", flush=True)
+    print(f"  {blue}:: 大水云洪水预报智能体 ::{reset}", flush=True)
+    print(flush=True)
+
+
 def _stream_output(proc: subprocess.Popen, prefix: str, stop_event: threading.Event) -> None:
     try:
         for raw_line in proc.stdout:
@@ -60,6 +92,8 @@ def main() -> int:
     parser.add_argument("--port", type=int, default=13014, help="Web 服务器端口 (默认 13014)")
     parser.add_argument("--no-scheduler", action="store_true", help="不启动定时任务调度器")
     args = parser.parse_args()
+
+    _print_banner(args.host, args.port, args.no_scheduler)
 
     stop_event = threading.Event()
     procs: list[subprocess.Popen] = []
