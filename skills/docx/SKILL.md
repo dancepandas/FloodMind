@@ -533,6 +533,40 @@ Word文档创建成功: report.docx
 路径: D:\output\report.docx
 ```
 
+### convert_docx_to_pdf.py - Word 转 PDF
+
+将 `create_docx.py` 生成的 Word 文档转换为 PDF。
+
+**必要条件（任选其一）：**
+- LibreOffice 已安装（推荐，跨平台）
+- Windows + Microsoft Word + comtypes（`pip install comtypes`）
+- Windows + docx2pdf（`pip install docx2pdf`）
+
+**用法：**
+```bash
+python convert_docx_to_pdf.py --input report.docx
+python convert_docx_to_pdf.py --input report.docx --output report.pdf
+python convert_docx_to_pdf.py --input report.docx --output_dir ./output
+```
+
+**参数：**
+| 参数 | 必填 | 默认值 | 说明 |
+|------|------|--------|------|
+| --input | ✅ | - | 输入的 .docx 文件路径 |
+| --output | ❌ | 同名.pdf | 输出的 PDF 文件路径 |
+| --output_dir | ❌ | 输入文件同目录 | 输出目录（与 --output 互斥） |
+
+**调用示例：**
+```
+run_script(
+    skill_name='docx',
+    script_name='convert_docx_to_pdf.py',
+    args='["--input", "report.docx"]'
+)
+```
+
+**转换优先级：** LibreOffice → comtypes(MS Word) → docx2pdf
+
 ---
 
 ## Editing Existing Documents
