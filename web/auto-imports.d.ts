@@ -16,6 +16,7 @@ declare global {
   const Brain: typeof import('lucide-react').Brain
   const Calendar: typeof import('lucide-react').Calendar
   const CalendarClock: typeof import('lucide-react').CalendarClock
+  const CheckCircle2: typeof import('lucide-react').CheckCircle2
   const CheckIcon: typeof import('lucide-react').CheckIcon
   const ChevronDown: typeof import('lucide-react').ChevronDown
   const ChevronDownIcon: typeof import('lucide-react').ChevronDownIcon
@@ -70,6 +71,7 @@ declare global {
   const User: typeof import('lucide-react').User
   const Wrench: typeof import('lucide-react').Wrench
   const X: typeof import('lucide-react').X
+  const XCircle: typeof import('lucide-react').XCircle
   const XIcon: typeof import('lucide-react').XIcon
   const Zap: typeof import('lucide-react').Zap
   const ZoomIn: typeof import('lucide-react').ZoomIn

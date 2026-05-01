@@ -1,10 +1,11 @@
 import { useEffect, useRef, useState } from "react";
-import { ChevronDown, ChevronRight, Bot, User, Download, X, ZoomIn, Terminal, ExternalLink, FileText, Eye } from "lucide-react";
+import { ChevronDown, ChevronRight, Bot, User, Download, X, ZoomIn, Terminal, ExternalLink, FileText, Eye, Loader2, CheckCircle2, XCircle, Wrench } from "lucide-react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
-import type { ChatMessage as ChatMessageModel, GeneratedArtifact, ReferenceLink } from "@/types/app";
+import type { ChatMessage as ChatMessageModel, GeneratedArtifact, ReferenceLink, ActionDetail } from "@/types/app";
 import { Dialog, DialogContent, DialogTitle, DialogDescription } from "@/components/ui/dialog";
 import { DocumentPreviewDialog, isPreviewable, getFileExt, getFileIcon } from "./DocumentPreviewDialog";
+import { getToolDisplayName } from "@/features/chat/lib/message-blocks";
 
 interface ChatMessageProps {
   message: ChatMessageModel;
@@ -38,6 +39,80 @@ function ThoughtBlock({ message, block, onToggleThought }: { message: ChatMessag
         className={`mt-1 ml-2 pl-4 pr-3 py-2.5 border border-primary/[0.06] border-l-2 border-l-primary/20 bg-primary/[0.02] shadow-[inset_0_1px_0_rgba(255,255,255,0.5)] rounded-r-lg text-sm text-muted-foreground leading-relaxed transition-all duration-300 overflow-x-hidden overflow-y-auto ${block.isCollapsed ? "max-h-0 opacity-0 py-0 mt-0 border-0" : "max-h-40 opacity-100"}`}
       >
         <div ref={contentRef} className="opacity-70 whitespace-pre-wrap break-words max-w-[65ch]">{block.content}</div>
+      </div>
+    </div>
+  );
+}
+
+function ActionStatusIcon({ status }: { status: ActionDetail["status"] }) {
+  if (status === "running") {
+    return <Loader2 size={12} className="text-primary animate-spin" />;
+  }
+  if (status === "done") {
+    return <CheckCircle2 size={12} className="text-emerald-500" />;
+  }
+  return <XCircle size={12} className="text-red-400" />;
+}
+
+function ActionBlock({ block, onToggleThought, message }: { block: ChatMessageModel["blocks"][number]; onToggleThought: (messageId: string, blockId: string) => void; message: ChatMessageModel }) {
+  const actions = block.actions || [];
+  const isStreaming = block.isStreaming;
+  const isCollapsed = block.isCollapsed;
+  const isArchived = block.isArchived;
+
+  const runningCount = actions.filter((a) => a.status === "running").length;
+  const doneCount = actions.filter((a) => a.status === "done").length;
+  const errorCount = actions.filter((a) => a.status === "error").length;
+
+  const headerLabel = isStreaming
+    ? `执行中... (${runningCount > 0 ? `${runningCount}项进行中` : ""}${doneCount > 0 ? ` ${doneCount}项完成` : ""})`
+    : isArchived
+      ? `已执行 ${actions.length} 项操作`
+      : `${actions.length} 项操作`;
+
+  return (
+    <div className={`w-full max-w-full transition-all duration-300 ${isArchived ? "opacity-50" : "opacity-100"}`}>
+      <button
+        type="button"
+        onClick={() => onToggleThought(message.id, block.id)}
+        className="flex items-center gap-2 text-xs font-medium text-muted-foreground/80 hover:text-foreground transition-colors duration-150 px-2 py-1.5 rounded-lg hover:bg-muted/40"
+      >
+        {isCollapsed ? <ChevronRight size={13} /> : <ChevronDown size={13} />}
+        {isStreaming ? (
+          <Loader2 size={13} className="text-primary animate-spin" />
+        ) : (
+          <Wrench size={12} className="text-muted-foreground/60" />
+        )}
+        <span>{headerLabel}</span>
+      </button>
+      <div
+        className={`mt-1 ml-2 pl-4 pr-3 py-2 border border-emerald-500/[0.06] border-l-2 border-l-emerald-500/20 bg-emerald-500/[0.02] rounded-r-lg text-xs leading-relaxed transition-all duration-300 overflow-hidden ${isCollapsed ? "max-h-0 opacity-0 py-0 mt-0 border-0" : "max-h-60 opacity-100 overflow-y-auto"}`}
+      >
+        <div className="flex flex-col gap-1.5">
+          {actions.map((action, idx) => (
+            <div key={idx} className="flex flex-col">
+              <div className="flex items-center gap-2 py-0.5">
+                <ActionStatusIcon status={action.status} />
+                <span className={`font-mono ${action.status === "running" ? "text-foreground" : action.status === "done" ? "text-muted-foreground" : "text-red-400"}`}>
+                  {action.delegation?.label || getToolDisplayName(action.toolName)}
+                </span>
+                {action.status === "running" && (
+                  <span className="text-[10px] text-muted-foreground/50">执行中...</span>
+                )}
+              </div>
+              {action.status === "done" && action.delegation?.summary && (
+                <div className="ml-5 text-[10px] text-muted-foreground/50 max-h-16 overflow-y-auto whitespace-pre-wrap break-all">
+                  {action.delegation.summary.slice(0, 300)}
+                </div>
+              )}
+              {action.status === "error" && action.content && (
+                <div className="ml-5 text-[10px] text-red-400/70 truncate max-w-[400px]">
+                  {action.content.slice(0, 80).replace(/\n/g, " ")}
+                </div>
+              )}
+            </div>
+          ))}
+        </div>
       </div>
     </div>
   );
@@ -109,9 +184,13 @@ export function ChatMessage({ message, onToggleThought }: ChatMessageProps) {
             </div>
           ) : (
             <div className="flex flex-col gap-3 w-full">
-              {message.blocks.filter((block) => block.type === "thought" || !block.isArchived).map((block) => {
+              {message.blocks.filter((block) => !block.isArchived).map((block) => {
                 if (block.type === "thought") {
                   return <ThoughtBlock key={block.id} message={message} block={block} onToggleThought={onToggleThought} />;
+                }
+
+                if (block.type === "action") {
+                  return <ActionBlock key={block.id} block={block} onToggleThought={onToggleThought} message={message} />;
                 }
 
                 return (

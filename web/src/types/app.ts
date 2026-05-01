@@ -1,4 +1,16 @@
-export type MessageBlockType = "thought" | "answer";
+export type MessageBlockType = "thought" | "action" | "answer";
+
+export interface ActionDetail {
+  toolName: string;
+  status: "running" | "done" | "error";
+  content: string;
+  delegation?: {
+    task: string;
+    skill_name?: string;
+    label: string;
+    summary?: string;
+  };
+}
 
 export interface MessageBlock {
   id: string;
@@ -7,6 +19,7 @@ export interface MessageBlock {
   isCollapsed?: boolean;
   isStreaming?: boolean;
   isArchived?: boolean;
+  actions?: ActionDetail[];
 }
 
 export interface ChatMessage {

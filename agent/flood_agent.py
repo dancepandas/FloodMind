@@ -185,7 +185,7 @@ class _FunctionsStreamCallback(BaseCallbackHandler):
             )
             self._task_tracker.start_task(task.task_id)
             self._current_task_id = task.task_id
-        self._q.put(("tool_status", {"tool_name": tool_name, "status": "running"}))
+        self._q.put(("tool_status", {"tool_name": tool_name, "status": "running", "tool_input": self._current_tool_input}))
 
     def on_tool_end(self, output: str, **kwargs) -> None:
         """工具执行结束"""

@@ -11,6 +11,7 @@ import {
   fetchSessionStatus,
   initAgent,
   pauseSession,
+  resumeStreamRequest,
   resumeSession,
   saveSession,
   updateSessionConfig,
@@ -155,21 +156,71 @@ export function useAgentApp() {
       setRuntimeState({ isPaused: !!status.session_state?.is_paused });
       if (status.in_progress?.message_id) {
         const inProgressId = status.in_progress.message_id;
-        const alreadyExists = loadedMessages.some(
-          (m) => m.id === inProgressId || (m.role === "assistant" && m.content === (status.in_progress?.content || "")),
-        );
-        if (alreadyExists) {
-          log.info("App init → in_progress already in restored messages, skipping", inProgressId);
+        const isStillStreaming = status.in_progress.is_streaming;
+
+        if (isStillStreaming) {
+          log.info("App init → resuming in_progress stream", inProgressId);
+          const assistantMessage = createAssistantMessage(inProgressId);
+          setMessages((prev) => [...prev, assistantMessage]);
+          setIsStreaming(true);
+
+          try {
+            const response = await resumeStreamRequest(sessionId);
+            if (response.ok && response.body) {
+              const reader = response.body.getReader();
+              readerRef.current = reader;
+              const decoder = new TextDecoder();
+              let buffer = "";
+
+              const updateAssistant = (updater: (message: ChatMessage) => ChatMessage) => {
+                setMessages((prev) => prev.map((message) => (message.id === inProgressId ? updater(message) : message)));
+              };
+
+              while (true) {
+                const { done, value } = await reader.read();
+                if (done) break;
+                buffer += decoder.decode(value, { stream: true });
+                const lines = buffer.split("\n");
+                buffer = lines.pop() || "";
+                for (const line of lines) {
+                  const trimmed = line.trim();
+                  if (!trimmed) continue;
+                  try {
+                    const data = JSON.parse(trimmed) as Record<string, any>;
+                    applyStreamEvent(data, {
+                      updateAssistant,
+                      pushToolActivity,
+                      setWorkflow,
+                    });
+                  } catch (parseErr) {
+                    log.warn("Resume stream JSON parse error", trimmed.slice(0, 200), parseErr);
+                  }
+                }
+              }
+            }
+          } catch (err) {
+            log.warn("Resume stream failed, falling back to snapshot", err);
+          } finally {
+            setIsStreaming(false);
+            readerRef.current = null;
+          }
         } else {
-          log.info("App init → restoring in_progress message", inProgressId);
-          const restored = createAssistantMessage(inProgressId);
-          let hydrated = restored;
-          if (status.in_progress.reasoning) hydrated = appendThoughtBlock(hydrated, status.in_progress.reasoning, false);
-          if (status.in_progress.content) hydrated = setAssistantFinalContent(hydrated, status.in_progress.content);
-          (status.in_progress.artifacts || []).forEach((artifact) => {
-            hydrated = attachArtifact(hydrated, artifact);
-          });
-          setMessages((prev) => [...prev, hydrated]);
+          const alreadyExists = loadedMessages.some(
+            (m) => m.id === inProgressId || (m.role === "assistant" && m.content === (status.in_progress?.content || "")),
+          );
+          if (alreadyExists) {
+            log.info("App init → in_progress already in restored messages, skipping", inProgressId);
+          } else {
+            log.info("App init → restoring completed in_progress message", inProgressId);
+            const restored = createAssistantMessage(inProgressId);
+            let hydrated = restored;
+            if (status.in_progress.reasoning) hydrated = appendThoughtBlock(hydrated, status.in_progress.reasoning, false);
+            if (status.in_progress.content) hydrated = setAssistantFinalContent(hydrated, status.in_progress.content);
+            (status.in_progress.artifacts || []).forEach((artifact) => {
+              hydrated = attachArtifact(hydrated, artifact);
+            });
+            setMessages((prev) => [...prev, hydrated]);
+          }
         }
         if (status.in_progress.workflow) setWorkflow(status.in_progress.workflow);
       }

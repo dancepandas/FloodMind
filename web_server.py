@@ -499,6 +499,20 @@ def stream_json_line(payload: dict[str, Any]) -> str:
     return json.dumps(payload, ensure_ascii=False) + "\n"
 
 
+def _buffered_yield(buf: list, payload: dict) -> str:
+    line = stream_json_line(payload)
+    buf.append(line)
+    return line
+    """将流事件编码为 NDJSON 行。"""
+    return json.dumps(payload, ensure_ascii=False) + "\n"
+
+
+def _serialize_snapshot(snapshot: Optional[dict]) -> Optional[dict]:
+    if not snapshot:
+        return None
+    return {k: v for k, v in snapshot.items() if k not in ('event_buffer', 'resume_event')}
+
+
 def ensure_session_state(session_id: str) -> dict[str, Any]:
     with session_states_lock:
         state = session_states.setdefault(session_id, {})
@@ -523,6 +537,8 @@ def init_stream_snapshot(session_id: str, message_id: str) -> dict[str, Any]:
         'workflow': None,
         'is_streaming': True,
         'updated_at': datetime.now().isoformat(),
+        'event_buffer': [],
+        'resume_event': threading.Event(),
     }
     state['is_streaming'] = True
     state['stream_snapshot'] = snapshot
@@ -547,6 +563,9 @@ def finish_stream_snapshot(session_id: str) -> None:
     if snapshot:
         snapshot['is_streaming'] = False
         snapshot['updated_at'] = datetime.now().isoformat()
+        resume_event = snapshot.get('resume_event')
+        if resume_event:
+            resume_event.set()
 
 
 def list_session_artifact_events(session_id: str) -> list[dict[str, Any]]:
@@ -1364,14 +1383,18 @@ def chat():
                 approved_artifact_paths: list[str] = []
                 streamed_text_parts: list[str] = []
                 is_workflow_stream = False
+                event_buffer = snapshot['event_buffer']
+
+                def emit(payload: dict):
+                    return _buffered_yield(event_buffer, payload)
 
                 for chunk in agent.stream(enhanced_message, enable_reasoning=enable_reasoning, user_message=message, abort_check=lambda: session_abort_flags.get(session_id, False)):
                     with session_abort_flags_lock:
                         is_aborted = session_abort_flags.get(session_id, False)
                     if is_aborted:
                         finish_stream_snapshot(session_id)
-                        yield stream_json_line({'type': 'error', 'content': '会话已被用户暂停'})
-                        yield stream_json_line({'type': 'stream_end'})
+                        yield emit({'type': 'error', 'content': '会话已被用户暂停'})
+                        yield emit({'type': 'stream_end'})
                         return
                     
                     if not isinstance(chunk, dict):
@@ -1415,25 +1438,25 @@ def chat():
                             workflow_snapshot['steps'] = updated_steps
                         snapshot['workflow'] = workflow_snapshot
                         touch_stream_snapshot(session_id)
-                        yield stream_json_line(chunk)
+                        yield emit(chunk)
                         continue
 
                     if chunk.get("type") == "reasoning":
                         if enable_reasoning or is_workflow_stream:
                             snapshot['raw_reasoning'] += chunk.get('content', '')
                             touch_stream_snapshot(session_id)
-                            yield stream_json_line({'type': 'reasoning', 'content': chunk.get('content', '')})
+                            yield emit({'type': 'reasoning', 'content': chunk.get('content', '')})
                         continue
 
                     if chunk.get("type") == "llm_token_error":
                         finish_stream_snapshot(session_id)
-                        yield stream_json_line({'type': 'error', 'content': 'LLM模型服务账号Token余额不足，无法提供服务'})
-                        yield stream_json_line({'type': 'stream_end'})
+                        yield emit({'type': 'error', 'content': 'LLM模型服务账号Token余额不足，无法提供服务'})
+                        yield emit({'type': 'stream_end'})
                         return
 
                     if chunk.get("type") == "memory_status":
                         touch_stream_snapshot(session_id)
-                        yield stream_json_line(chunk)
+                        yield emit(chunk)
                         continue
 
                     if chunk.get("type") == "tool_status":
@@ -1442,10 +1465,25 @@ def chat():
                             'tool_name': chunk.get('tool_name', ''),
                             'status': chunk.get('status', 'running'),
                         }
+                        tool_input = chunk.get('tool_input', '')
+                        if tool_input and chunk.get('tool_name', '') == 'delegate_execution_specialist':
+                            try:
+                                parsed = json.loads(tool_input) if isinstance(tool_input, str) else tool_input
+                                if isinstance(parsed, dict):
+                                    task_desc = parsed.get('task', '')
+                                    skill_name = parsed.get('skill_name', '')
+                                    if task_desc:
+                                        safe_chunk['delegation'] = {
+                                            'task': task_desc,
+                                            'skill_name': skill_name,
+                                            'label': f"执行专家: {task_desc}" + (f" (skill: {skill_name})" if skill_name else ""),
+                                        }
+                            except (json.JSONDecodeError, TypeError):
+                                safe_chunk['delegation'] = {'task': str(tool_input)[:200], 'label': f"执行专家: {str(tool_input)[:100]}"}
                         if chunk.get('status') == 'error':
                             safe_chunk['content'] = '工具执行失败，智能体正在继续处理。'
                         touch_stream_snapshot(session_id)
-                        yield stream_json_line(safe_chunk)
+                        yield emit(safe_chunk)
                         continue
 
                     if chunk.get("type") == "tool_result":
@@ -1462,9 +1500,31 @@ def chat():
                         if validated_paths:
                             approved_artifact_paths = validated_paths
 
+                        result_event = {'type': 'tool_result', 'tool_name': tool_name, 'content': filtered_content}
+
+                        if tool_name == 'delegate_execution_specialist':
+                            try:
+                                payload = json.loads(original_content)
+                                if isinstance(payload, dict):
+                                    task_desc = payload.get('task', '')
+                                    summary = payload.get('summary', '')
+                                    stage_label = payload.get('stage_label', 'Execution Specialist')
+                                    skill_name = payload.get('skill_name', '')
+                                    label = f"{stage_label}: {task_desc}" if task_desc else stage_label
+                                    if skill_name:
+                                        label += f" (skill: {skill_name})"
+                                    result_event['delegation'] = {
+                                        'task': task_desc,
+                                        'summary': summary[:500] if summary else '',
+                                        'label': label,
+                                        'skill_name': skill_name,
+                                    }
+                            except (json.JSONDecodeError, TypeError):
+                                pass
+
                         snapshot['tool_results'].append({'tool_name': tool_name, 'content': filtered_content})
                         touch_stream_snapshot(session_id)
-                        yield stream_json_line({'type': 'tool_result', 'tool_name': tool_name, 'content': filtered_content})
+                        yield emit(result_event)
                         continue
 
                     if chunk.get("type") == "token" and chunk.get("content"):
@@ -1474,7 +1534,7 @@ def chat():
                         snapshot['content'] += chunk['content']
                         touch_stream_snapshot(session_id)
 
-                    yield stream_json_line(chunk)
+                    yield emit(chunk)
 
                 final_text = ''.join(streamed_text_parts)
                 approved_artifact_paths = resolve_artifact_references(session_id, approved_artifact_paths, final_text)
@@ -1506,15 +1566,15 @@ def chat():
                             logger.warning(f"更新会话最终展示文案失败: {e}")
                     snapshot['content'] = final_override_content
                     touch_stream_snapshot(session_id)
-                    yield stream_json_line({'type': 'final_override', 'content': final_override_content})
+                    yield emit({'type': 'final_override', 'content': final_override_content})
 
                 for artifact_event in approved_artifact_events:
                     logger.info(f"[ARTIFACT] sending SSE event: type={artifact_event.get('type')}, filename={artifact_event.get('filename')}, image_url={artifact_event.get('image_url', '')}, download_url={artifact_event.get('download_url', '')}")
-                    yield stream_json_line(artifact_event)
+                    yield emit(artifact_event)
 
                 finish_stream_snapshot(session_id)
                 logger.info(f"[ARTIFACT] stream finished, sending stream_end. SSE stream connection will close now.")
-                yield stream_json_line({'type': 'stream_end'})
+                yield emit({'type': 'stream_end'})
 
                 session_info = session_manager.get_session_info(session_id)
                 if session_info and not session_info.title:
@@ -1527,8 +1587,8 @@ def chat():
                     'type': 'error',
                     'content': f'处理请求时出错: {str(e)}'
                 }
-                yield stream_json_line(error_msg)
-                yield stream_json_line({'type': 'stream_end'})
+                yield emit(error_msg)
+                yield emit({'type': 'stream_end'})
         
         return Response(
             generate(),
@@ -1542,6 +1602,41 @@ def chat():
     except Exception as e:
         logger.error(f"聊天接口错误: {e}")
         return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/stream/resume', methods=['GET'])
+def stream_resume():
+    """恢复断开的流式连接，回放已缓冲的事件并继续流式输出"""
+    session_id = _require_session_id(request.args.get('session_id', 'default'))
+    state = ensure_session_state(session_id)
+    snapshot = state.get('stream_snapshot')
+
+    if not snapshot or not snapshot.get('is_streaming'):
+        return jsonify({'status': 'idle', 'message': '没有正在进行的流'}), 200
+
+    def replay_and_continue():
+        event_buffer = snapshot.get('event_buffer', [])
+        for line in event_buffer:
+            yield line
+
+        resume_event = snapshot.get('resume_event')
+        if resume_event and snapshot.get('is_streaming'):
+            while snapshot.get('is_streaming'):
+                resume_event.wait(timeout=2.0)
+                resume_event.clear()
+                new_events = snapshot.get('event_buffer', [])[len(event_buffer):]
+                for line in new_events:
+                    yield line
+                event_buffer = snapshot.get('event_buffer', [])
+
+    return Response(
+        replay_and_continue(),
+        mimetype='application/x-ndjson',
+        headers={
+            'Cache-Control': 'no-cache',
+            'X-Accel-Buffering': 'no',
+        }
+    )
 
 
 @app.route('/api/clear', methods=['POST'])
@@ -1699,7 +1794,7 @@ def get_session(session_id: str):
             },
             'messages': filtered_messages,
             'artifacts': list_session_artifact_events(session_id),
-            'in_progress': ensure_session_state(session_id).get('stream_snapshot'),
+            'in_progress': _serialize_snapshot(ensure_session_state(session_id).get('stream_snapshot')),
         })
     except Exception as e:
         logger.error(f"获取会话详情失败: {e}")
@@ -2039,7 +2134,7 @@ def get_session_status():
         return jsonify({
             'status': 'success',
             'session_state': state,
-            'in_progress': state.get('stream_snapshot')
+            'in_progress': _serialize_snapshot(state.get('stream_snapshot'))
         })
     except Exception as e:
         logger.error(f"获取会话状态失败: {e}")

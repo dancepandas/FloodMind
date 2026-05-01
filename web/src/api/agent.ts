@@ -204,6 +204,11 @@ export function createChatRequest(sessionId: string, message: string, uploadedFi
   return response;
 }
 
+export function resumeStreamRequest(sessionId: string): Promise<Response> {
+  log.info("resumeStreamRequest", { sessionId });
+  return fetch(buildApiUrl(`/api/stream/resume?session_id=${encodeURIComponent(sessionId)}`));
+}
+
 export function downloadLogsZip(): void {
   log.info("downloadLogsZip");
   window.open(buildApiUrl("/api/logs"), "_blank");

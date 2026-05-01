@@ -1,4 +1,5 @@
 import {
+  appendActionBlock,
   appendAnswerBlock,
   appendThoughtBlock,
   attachArtifact,
@@ -117,18 +118,23 @@ export function applyStreamEvent(data: Record<string, any>, handlers: StreamHand
 
   if (data.type === "tool_status") {
     const status = data.status === "error" ? "error" : "running";
-    log.info(`[${eventType}] tool="${data.tool_name}" status="${status}"`);
-    pushToolActivity(data.tool_name || "tool", data.content || "", status);
+    const toolName = data.tool_name || "tool";
+    log.info(`[${eventType}] tool="${toolName}" status="${status}"`);
+    pushToolActivity(toolName, data.content || "", status);
+    const delegation = data.delegation || undefined;
+    updateAssistant((message) => appendActionBlock(message, toolName, status, data.content || "", delegation));
     return;
   }
 
   if (data.type === "tool_result") {
     const contentPreview = (data.content || "").slice(0, 120);
-    log.info(`[${eventType}] tool="${data.tool_name}" content=${contentPreview.length > 0 ? `"${contentPreview}…"` : "(empty)"}`);
-    pushToolActivity(data.tool_name || "tool", data.content || "", "done");
-
-    const toolName = data.tool_name || "";
+    const toolName = data.tool_name || "tool";
     const rawContent = data.content || "";
+    log.info(`[${eventType}] tool="${toolName}" content=${contentPreview.length > 0 ? `"${contentPreview}…"` : "(empty)"}`);
+    pushToolActivity(toolName, rawContent, "done");
+    const delegation = data.delegation || undefined;
+    updateAssistant((message) => appendActionBlock(message, toolName, "done", rawContent, delegation));
+
     let refs: ReferenceLink[] | null = null;
     if (toolName === "knowledge_search") {
       refs = parseKnowledgeReferences(rawContent);
