@@ -65,6 +65,10 @@ export function applyStreamEvent(data: Record<string, any>, handlers: StreamHand
   const { updateAssistant, pushToolActivity, setWorkflow } = handlers;
   const eventType = data.type || "(no type)";
 
+  if (data.type === "heartbeat") {
+    return;
+  }
+
   if (data.type === "reasoning") {
     log.debug(`[${eventType}] len=${(data.content || "").length}`);
     updateAssistant((message) => appendThoughtBlock(message, data.content || "", true));

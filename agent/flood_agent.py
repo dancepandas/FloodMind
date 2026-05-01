@@ -2529,7 +2529,11 @@ class FloodAgent:
             t.start()
 
             while True:
-                event_type, content = q.get()
+                try:
+                    event_type, content = q.get(timeout=15)
+                except queue.Empty:
+                    yield {"type": "heartbeat"}
+                    continue
                 if event_type == "__done__":
                     break
                 if event_type == "llm_token_error":

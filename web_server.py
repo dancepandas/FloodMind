@@ -499,9 +499,11 @@ def stream_json_line(payload: dict[str, Any]) -> str:
     return json.dumps(payload, ensure_ascii=False) + "\n"
 
 
-def _buffered_yield(buf: list, payload: dict) -> str:
+def _buffered_yield(buf: list, payload: dict, resume_event: Optional[threading.Event] = None) -> str:
     line = stream_json_line(payload)
     buf.append(line)
+    if resume_event:
+        resume_event.set()
     return line
     """将流事件编码为 NDJSON 行。"""
     return json.dumps(payload, ensure_ascii=False) + "\n"
@@ -1384,9 +1386,10 @@ def chat():
                 streamed_text_parts: list[str] = []
                 is_workflow_stream = False
                 event_buffer = snapshot['event_buffer']
+                resume_event = snapshot['resume_event']
 
                 def emit(payload: dict):
-                    return _buffered_yield(event_buffer, payload)
+                    return _buffered_yield(event_buffer, payload, resume_event)
 
                 for chunk in agent.stream(enhanced_message, enable_reasoning=enable_reasoning, user_message=message, abort_check=lambda: session_abort_flags.get(session_id, False)):
                     with session_abort_flags_lock:
@@ -1589,6 +1592,10 @@ def chat():
                 }
                 yield emit(error_msg)
                 yield emit({'type': 'stream_end'})
+            finally:
+                if snapshot.get('is_streaming'):
+                    finish_stream_snapshot(session_id)
+                    logger.info("generate() interrupted, force-finished stream snapshot")
         
         return Response(
             generate(),
@@ -1616,18 +1623,34 @@ def stream_resume():
 
     def replay_and_continue():
         event_buffer = snapshot.get('event_buffer', [])
-        for line in event_buffer:
-            yield line
+        replayed = 0
+        stale_rounds = 0
+        max_stale_rounds = 6
 
-        resume_event = snapshot.get('resume_event')
-        if resume_event and snapshot.get('is_streaming'):
-            while snapshot.get('is_streaming'):
-                resume_event.wait(timeout=2.0)
+        while True:
+            buf_len = len(event_buffer)
+            while replayed < buf_len:
+                yield event_buffer[replayed]
+                replayed += 1
+                stale_rounds = 0
+
+            if not snapshot.get('is_streaming'):
+                break
+
+            resume_event = snapshot.get('resume_event')
+            if resume_event:
+                resume_event.wait(timeout=5.0)
                 resume_event.clear()
-                new_events = snapshot.get('event_buffer', [])[len(event_buffer):]
-                for line in new_events:
-                    yield line
-                event_buffer = snapshot.get('event_buffer', [])
+            else:
+                time.sleep(0.5)
+
+            if len(event_buffer) == buf_len:
+                stale_rounds += 1
+                if stale_rounds >= max_stale_rounds:
+                    logger.info("stream_resume: no new events for 30s, closing")
+                    break
+            else:
+                stale_rounds = 0
 
     return Response(
         replay_and_continue(),
@@ -2131,9 +2154,11 @@ def get_session_status():
         session_id = _require_session_id(request.args.get('session_id', 'default'))
         state = ensure_session_state(session_id)
         
+        safe_state = {k: v for k, v in state.items() if k != 'stream_snapshot'}
+        safe_state['stream_snapshot'] = _serialize_snapshot(state.get('stream_snapshot'))
         return jsonify({
             'status': 'success',
-            'session_state': state,
+            'session_state': safe_state,
             'in_progress': _serialize_snapshot(state.get('stream_snapshot'))
         })
     except Exception as e:
@@ -2229,7 +2254,7 @@ def internal_error(error):
 # ============================================
 if __name__ == '__main__':
     import argparse
-    
+
     parser = argparse.ArgumentParser(description='FloodAgent Web Server')
     parser.add_argument('--host', default='0.0.0.0', help='主机地址')
     parser.add_argument('--port', type=int, default=13014, help='端口号')
