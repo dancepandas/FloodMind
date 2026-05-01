@@ -30,9 +30,10 @@ A .docx file is a ZIP archive containing XML files.
 | Create new document | Use `create_docx.py` - see Creating New Documents below |
 | Edit existing document | Unpack → edit XML → repack - see Editing Existing Documents below |
 
-## 当前项目中的首选做法
+## 当前项目中的首选做法，使用默认需求
 
 - 在本项目里，创建新的 Word 报告时，优先使用 `run_script(skill_name='docx', script_name='create_docx.py', ...)`
+- 在本项目里，创建新的 PDF 报告时，优先创建docx文档，再使用`run_script(skill_name='docx', script_name='convert_docx_to_pdf.py', ...)`进行转换
 - 不要临时改用其他未声明脚本或外部生成方案
 - 如果报告中需要插入已生成图片，必须把图片路径写进 `--content`，不要只在正文里描述"图片已生成"
 - 推荐使用 Markdown 图片语法：`![](/absolute/path/to/image.png)`
@@ -91,6 +92,7 @@ A .docx file is a ZIP archive containing XML files.
   ]
 }
 ```
+## 当前项目中的备选做法，在用户有特殊的格式需求、文档编辑、文档协作任务时参考
 
 ### Converting .doc to .docx
 
