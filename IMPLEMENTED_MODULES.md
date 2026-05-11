@@ -6,6 +6,12 @@
 
 ## 1. 启动入口与运行进程
 
+### 统一启动入口
+- 功能：同时启动 Web 服务和定时任务调度器，一条命令完成全部启动；支持指定端口、跳过调度器。
+- 实现文件：`start.py`
+- 关键函数：`main`、`start_web_server`、`start_scheduler`、`_stream_output`
+- 常用命令：`python start.py`、`python start.py --port 8080`、`python start.py --no-scheduler`
+
 ### Web 服务入口
 - 功能：启动 Flask 后端，提供聊天、文件、会话、日志、定时任务查询等 API，并托管前端静态资源。
 - 实现文件：`web_server.py`
@@ -35,6 +41,14 @@
 ### 配置包导出
 - 功能：提供配置模块包级导出。
 - 实现文件：`config/__init__.py`
+
+### YAML 配置文件
+- 功能：本地化部署配置，包含数据目录、会话管理、文件清理、记忆系统、Qwen 推理模式等参数。
+- 实现文件：`config.yaml`
+
+### 环境变量示例
+- 功能：提供 `.env` 文件模板，列出所有必需和可选环境变量。
+- 实现文件：`.env.example`
 
 ## 3. LLM 服务模块
 
@@ -224,6 +238,10 @@
 - 功能：从文档构建或更新本地知识库。
 - 实现文件：`scripts/build_knowledge_base.py`
 
+### Qwen 推理模式检查脚本
+- 功能：验证 Qwen 推理模式（reasoning）是否正常工作，测试 invoke 和 stream 两种调用方式。
+- 实现文件：`scripts/check_qwen_reasoning.py`
+
 ## 12. Skill 系统模块
 
 ### Skill 发现与注册
@@ -243,8 +261,9 @@
 - 导出脚本：`skills/jingzhou-hydro/scripts/export_jingzhou_hydro_result_to_excel.py`
 
 ### 敖江水文模型 Skill
-- 功能：运行敖江水文模型相关预测任务。
+- 功能：运行敖江案例水文模型相关预测任务，包含站点归一化、任务类型判定、stationCode 映射和联合预报拆解。
 - 实现文件：`skills/aojiang-hydro/scripts/run_aojiang_hydro_model.py`
+- 站点文档：`skills/aojiang-hydro/station.md`
 
 ### TSLM / Chronos 预测 Skill
 - 功能：提供时序预测能力。
@@ -261,13 +280,24 @@
 - Office 工具文件：`skills/xlsx/scripts/office/*.py`
 
 ### Word 文档 Skill
-- 功能：创建 Word 文档、批注、接受修订、处理 Office OpenXML。
-- 实现文件：`skills/docx/scripts/create_docx.py`、`skills/docx/scripts/comment.py`、`skills/docx/scripts/accept_changes.py`
+- 功能：创建 Word 文档、批注、接受修订、Word 转 PDF、处理 Office OpenXML。
+- 实现文件：`skills/docx/scripts/create_docx.py`、`skills/docx/scripts/comment.py`、`skills/docx/scripts/accept_changes.py`、`skills/docx/scripts/convert_docx_to_pdf.py`
 - Office 工具文件：`skills/docx/scripts/office/*.py`
 
 ### CSV 预览 Skill
 - 功能：预览 CSV 数据内容。
 - 实现文件：`skills/csv/scripts/preview_data.py`
+
+### 绘图 Skill
+- 功能：知识引导型绘图技能，根据用户需求动态编写 Python 绘图脚本并执行，支持折线图、柱状图、散点图、箱线图、热力图、双轴图、组合图等。
+- 类型：知识型 skill（无固定脚本，通过 `write_text_file` + `exec_python_file` 动态执行）
+- 实现文件：`skills/plotting/SKILL.md`、`skills/plotting/plotting_guide.md`
+- 推荐库：matplotlib + pandas
+
+### 文档协作 Skill
+- 功能：引导用户通过三阶段结构化流程（上下文收集 → 迭代精炼 → 读者测试）协作创作文档，适用于 PRD、设计文档、决策文档、技术规范等。
+- 类型：知识型 skill（无脚本，提供协作写作指导流程）
+- 实现文件：`skills/doc-coauthoring/SKILL.md`
 
 ## 13. 前端 React 应用模块
 
@@ -282,6 +312,10 @@
 ### 应用状态 Hook
 - 功能：管理会话、消息、上传文件、流式事件、工作流状态、预览状态、暂停恢复等前端核心状态。
 - 实现文件：`web/src/hooks/useAgentApp.ts`
+
+### 移动端检测 Hook
+- 功能：检测当前视口是否为移动端（768px 断点），用于响应式布局。
+- 实现文件：`web/src/hooks/use-mobile.ts`
 
 ### API 客户端
 - 功能：封装后端 API 请求、聊天流请求、文件上传下载、会话操作、定时任务查询删除。
@@ -323,12 +357,46 @@
 - 功能：定义消息、文件、工作流、会话、定时任务等 TypeScript 类型。
 - 实现文件：`web/src/types/app.ts`、`web/src/types/agent.ts`
 
+### 前端工具函数
+- 功能：通用工具函数（cn 类名合并等）。
+- 实现文件：`web/src/lib/utils.ts`
+
+### 前端日志模块
+- 功能：前端分级日志（debug/info/warn/error），开发环境输出 debug 级别，生产环境输出 info 级别。
+- 实现文件：`web/src/lib/logger.ts`
+
+### 欢迎页组件
+- 功能：首次进入时展示产品功能介绍和快捷操作入口。
+- 实现文件：`web/src/components/WelcomePage.tsx`
+
 ### 样式和 UI 基础组件
 - 功能：TailwindCSS 主题变量、全局样式、通用 UI 组件。
 - 实现文件：`web/src/index.css`
 - UI 组件目录：`web/src/components/ui/`
 
-## 14. 日志和运行数据模块
+## 14. 绘图环境与字体配置模块
+
+### Matplotlib 全局配置
+- 功能：设置 Agg 后端、中文字体回退链、坐标轴样式、DPI 等全局绘图参数。
+- 实现文件：`matplotlibrc`
+
+### Python 启动字体补丁
+- 功能：Python 启动时自动加载 `source/` 目录下的自定义字体，配置中文字体回退链，修补 `findfont` 以解决中文字体缺失问题。
+- 实现文件：`sitecustomize.py`
+
+### 自定义字体资源
+- 功能：存放项目使用的中文字体文件（如文鼎PL简报宋），供绘图和文档生成使用。
+- 实现文件：`source/文鼎PL简报宋.ttf`
+
+## 15. 测试模块
+
+### Runtime 回归测试
+- 功能：验证核心模块的关键行为，包括会话 ID 路径穿越防护、文件写入权限检查、Context Runtime token 预算裁剪、向量分数转换、Skill 目录生成、上传文件索引恢复、Agent Loop 中间结果强制继续逻辑、流式线程上下文变量传递。
+- 实现文件：`tests/test_runtime_regressions.py`
+- 测试类：`RuntimeRegressionTests`
+- 运行命令：`python -m pytest tests/` 或 `python tests/test_runtime_regressions.py`
+
+## 16. 日志和运行数据模块
 
 ### 日志输出
 - 功能：Web 服务、主程序、后台调度器按日期滚动写日志。
@@ -345,11 +413,16 @@
 - RAG 数据使用文件：`rag/vector_store.py`
 - 工具错误记忆使用文件：`tools/base_tools.py`
 
-## 15. 部署和运行方式
+### HuggingFace 模型缓存
+- 功能：缓存 Embedding 模型（BAAI/bge-base-zh-v1.5）等 HuggingFace 模型文件，避免重复下载。
+- 目录：`model_cache/`
+
+## 17. 部署和运行方式
 
 ### Windows Server 当前推荐常驻方式
-- Web 服务：`python web_server.py`
-- 后台定时任务：`python scheduler.py`
+- 统一启动（推荐）：`python start.py`
+- 仅 Web 服务：`python web_server.py`
+- 仅后台定时任务：`python scheduler.py`
 - 可选命令行交互：`python main.py`
 
 ### 前端构建

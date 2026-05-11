@@ -1473,6 +1473,8 @@ read_artifact = build_agent_tool(
 
 
 class _RAGConfigManager:
+    _RETRIEVER_KEYS = ("persist_dir", "embedding_model", "top_k")
+
     def __init__(self):
         self._config: Dict[str, Any] = {
             "enabled": False,
@@ -1487,9 +1489,15 @@ class _RAGConfigManager:
         return self._config.get(key, default)
 
     def update(self, **kwargs) -> None:
+        retriever_changed = any(
+            kwargs.get(k) != self._config.get(k) for k in self._RETRIEVER_KEYS
+        )
         self._config.update(kwargs)
-        self._retriever = None
-        logger.info(f"RAG 配置已更新: {kwargs}")
+        if retriever_changed:
+            self._retriever = None
+            logger.info(f"RAG 核心配置已变更，retriever 将重建: {kwargs}")
+        else:
+            logger.info(f"RAG 会话级配置已更新（retriever 保持复用）: {kwargs}")
 
     @property
     def retriever(self) -> Optional[Any]:

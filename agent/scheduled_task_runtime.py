@@ -169,9 +169,10 @@ class ScheduledTaskRuntime:
                 return task
         raise ValueError(f"定时任务不存在: {task_id}")
 
-    def claim_due_tasks(self, *, lookback_minutes: int = 60, limit: int = 1) -> List[Dict[str, Any]]:
+    def claim_due_tasks(self, *, lookback_minutes: int = 60, lookahead_minutes: int = 0, limit: int = 1) -> List[Dict[str, Any]]:
         now = _now()
         earliest = now - timedelta(minutes=max(0, int(lookback_minutes)))
+        latest = now + timedelta(minutes=max(0, int(lookahead_minutes)))
         claimed: List[Dict[str, Any]] = []
         with self._lock:
             data = self._load_unlocked()
@@ -189,7 +190,7 @@ class ScheduledTaskRuntime:
                 except ValueError:
                     logger.warning("定时任务 next_run_at 无效: %s", task.get("id"))
                     continue
-                if due_at > now:
+                if due_at > latest:
                     continue
                 if due_at < earliest:
                     self._mark_missed(task, now)

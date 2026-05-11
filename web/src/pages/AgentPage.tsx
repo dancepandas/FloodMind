@@ -15,7 +15,10 @@ const AgentPage = () => {
     runtimeState,
     inputValue,
     isStreaming,
+    availableModels,
+    config,
     setInputValue,
+    setConfig,
     handleSubmit,
     handleUpload,
     handlePreviewFile,
@@ -42,11 +45,14 @@ const AgentPage = () => {
           inputValue={inputValue}
           isStreaming={isStreaming}
           isPaused={runtimeState.isPaused}
+          availableModels={availableModels}
+          config={config}
           onInputChange={setInputValue}
           onSubmit={handleSubmit}
           onPause={handlePauseResume}
           onUpload={handleUpload}
           onToggleThought={toggleThought}
+          onConfigChange={setConfig}
         />
         <ContextPanel
           sessionId={sessionId}

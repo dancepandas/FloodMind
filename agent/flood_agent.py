@@ -22,7 +22,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 from typing import Optional, Dict, Any, List, Tuple
-from langchain_classic.agents import AgentExecutor, create_openai_functions_agent
+from langchain_classic.agents import AgentExecutor, create_tool_calling_agent
 from langchain_core.callbacks import BaseCallbackHandler
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 from langchain_core.tools import BaseTool, StructuredTool
@@ -52,13 +52,13 @@ class SpecialistTaskInput(BaseModel):
 class CreatePlanInput(BaseModel):
     user_goal: str = Field(description="用户的原始意图描述，不含系统注入的上下文信息")
     deliverables: str = Field(description="预期最终交付物类型，逗号分隔。可选: image, excel, report, other")
-    steps: str = Field(description="执行步骤JSON数组，每个元素含title、executor、skill_name(可选)、purpose、expected_deliverables(JSON数组)")
+    steps: Any = Field(description="执行步骤JSON数组，每个元素含title、executor、skill_name(可选)、purpose、expected_deliverables(JSON数组)")
 
 
 class _FunctionsStreamCallback(BaseCallbackHandler):
     """OpenAI Functions Agent 的流式输出回调"""
 
-    def __init__(self, q: queue.Queue, enable_reasoning: bool = False, task_tracker: Optional[TaskTracker] = None):
+    def __init__(self, q: queue.Queue, enable_reasoning: bool = False, task_tracker: Optional[TaskTracker] = None, model_name: str = ""):
         super().__init__()
         self._q = q
         self._current_tool_name = None
@@ -75,7 +75,8 @@ class _FunctionsStreamCallback(BaseCallbackHandler):
         self._reasoning_emit_buffer = ""
         self._task_tracker = task_tracker
         self._current_task_id: Optional[str] = None
-        logger.info(f"[Reasoning Callback] 初始化, enable_reasoning={enable_reasoning}")
+        self._model_name = model_name.lower()
+        logger.info(f"[Reasoning Callback] 初始化, enable_reasoning={enable_reasoning}, model_name={model_name}")
 
     @staticmethod
     def _tool_task_type(tool_name: str) -> TaskType:
@@ -121,46 +122,53 @@ class _FunctionsStreamCallback(BaseCallbackHandler):
     def on_llm_new_token(self, token: str, **kwargs) -> None:
         """LLM 生成新 token"""
         if self._enable_reasoning:
-            chunk = kwargs.get('chunk')
-            if chunk and hasattr(chunk, 'message'):
-                msg = chunk.message
-
-                reasoning = None
-                if hasattr(msg, 'reasoning_content'):
-                    reasoning = msg.reasoning_content
-                elif hasattr(msg, 'additional_kwargs'):
-                    additional_kwargs = msg.additional_kwargs
-                    if additional_kwargs:
-                        reasoning = additional_kwargs.get('reasoning_content')
-
-                if reasoning:
-                    reasoning_text = str(reasoning)
-                    # DashScope OpenAI 兼容接口返回的是增量 delta.reasoning_content；
-                    # 但为了兼容少数可能返回累计文本的提供方，这里同时支持两种模式。
-                    if self._reasoning_buffer and reasoning_text.startswith(self._reasoning_buffer):
-                        new_reasoning = reasoning_text[len(self._reasoning_buffer):]
-                        self._reasoning_buffer = reasoning_text
-                    else:
-                        new_reasoning = reasoning_text
-                        self._reasoning_buffer += reasoning_text
-
-                    if new_reasoning:
-                        self._append_reasoning_chunk(new_reasoning)
-                        return
-
-            if not self._is_in_thinking_phase and token:
-                self._q.put(("token", token))
+            self._on_llm_new_token_qwen(token, **kwargs)
         else:
-            # 无 reasoning 模式下也先缓冲 token；
-            # 如果随后发生工具调用，说明这些内容只是内部规划，不应透传给前端。
             if token:
                 self._pending_tokens.append(token)
+
+    def _on_llm_new_token_qwen(self, token: str, **kwargs) -> None:
+        chunk = kwargs.get('chunk')
+        if chunk and hasattr(chunk, 'message'):
+            msg = chunk.message
+
+            reasoning = None
+            if hasattr(msg, 'reasoning_content'):
+                reasoning = msg.reasoning_content
+            elif hasattr(msg, 'additional_kwargs'):
+                additional_kwargs = msg.additional_kwargs
+                if additional_kwargs:
+                    reasoning = additional_kwargs.get('reasoning_content')
+
+            if reasoning:
+                if self._is_in_thinking_phase:
+                    self._is_in_thinking_phase = True
+                reasoning_text = str(reasoning)
+                if self._reasoning_buffer and reasoning_text.startswith(self._reasoning_buffer):
+                    new_reasoning = reasoning_text[len(self._reasoning_buffer):]
+                    self._reasoning_buffer = reasoning_text
+                else:
+                    new_reasoning = reasoning_text
+                    self._reasoning_buffer += reasoning_text
+
+                if new_reasoning:
+                    self._append_reasoning_chunk(new_reasoning)
+                return
+            elif self._is_in_thinking_phase:
+                self._is_in_thinking_phase = False
+                self._flush_reasoning_buffer()
+
+        if not self._is_in_thinking_phase and token:
+            self._q.put(("token", token))
 
     def on_llm_end(self, response, **kwargs):
         """LLM 生成结束"""
         logger.info(f"[LLM End] _is_in_thinking_phase={self._is_in_thinking_phase}, _has_tool_call={self._has_tool_call}, pending_tokens={len(self._pending_tokens)}")
-        # 不在这里发送 pending_tokens，因为此时还不知道是否有工具调用
-        # pending_tokens 会在 on_tool_start 或 _run finally 中发送
+        if self._pending_tokens:
+            combined = "".join(self._pending_tokens)
+            if combined.strip():
+                self._q.put(("token", combined))
+            self._pending_tokens = []
         self._flush_reasoning_buffer()
         self._is_in_thinking_phase = False
 
@@ -408,6 +416,9 @@ class FloodAgent:
 ## 角色边界
 - 不负责亲自编写脚本、执行脚本、生成 Excel、构造 input.json、运行模型等具体任务
 - 不负责在没有校验的情况下直接宣布任务完成
+- 如问好之类的简单问题直接回答就行
+- 不要把任务复杂化
+- 不要过度思考
 
 ## 可用工具
 - `create_plan`：【必须首先调用】创建结构化执行计划，明确用户意图、预期交付物和执行步骤
@@ -516,10 +527,7 @@ class FloodAgent:
 ## 输出规范
 - 最终输出不要包含完整路径
 - 最终输出不要包含会话环境内部信息
-- 最终只返回用户需要知道的文件名和结果
-- 需要直接展示的最终输出，需要按照标准 Markdown 格式输出
-- 最终输非必要不要生成文件
-- 涉及报告生成任务时，若用户明确指定文件格式则按照用户指定格式生成，否则就生成docx文件
+- 标准 Markdown 格式输出
 """
 
     EXECUTION_SPECIALIST_PROMPT = """你是 Execution Specialist 执行单元。
@@ -573,6 +581,7 @@ class FloodAgent:
         memory: Optional[Any] = None,
         skills: Optional[List[Skill]] = None,
         enable_chronos_warmup: Optional[bool] = None,
+        enable_search: bool = False,
         **kwargs,
     ):
         """
@@ -632,7 +641,10 @@ class FloodAgent:
         self._context_runtime.prefetch()
 
         self.skills: List[Skill] = skills if skills is not None else SKILL_REGISTRY
-        self.base_tools: List[BaseTool] = [get_skill, search_artifacts, read_artifact, knowledge_search, web_search, search_memory, update_project_instructions, create_scheduled_task, list_scheduled_tasks, cancel_scheduled_task]
+        self._enable_search = enable_search
+        self.base_tools: List[BaseTool] = [get_skill, search_artifacts, read_artifact, knowledge_search, search_memory, update_project_instructions, create_scheduled_task, list_scheduled_tasks, cancel_scheduled_task]
+        if enable_search:
+            self.base_tools.append(web_search)
 
         skill_catalog = "\n".join(
             f"- {s.name}: {s.description}"
@@ -661,7 +673,7 @@ class FloodAgent:
         logger.info(f"加载技能: {[s.name for s in self.skills]}，工具数: {len(self.tools)}")
 
         self.prompt = self._build_prompt(self.SYSTEM_PROMPT)
-        self.agent = create_openai_functions_agent(
+        self.agent = create_tool_calling_agent(
             llm=llm_service.get_llm(),
             tools=self.tools,
             prompt=self.prompt,
@@ -728,7 +740,7 @@ class FloodAgent:
 
     def _build_specialized_executor(self, system_prompt: str, tools: List[BaseTool], max_iterations: int = 30) -> AgentExecutor:
         prompt = self._build_prompt(system_prompt, include_memory=False, include_chat_history=False)
-        agent = create_openai_functions_agent(
+        agent = create_tool_calling_agent(
             llm=self.llm_service.get_llm(),
             tools=tools,
             prompt=prompt,
@@ -874,8 +886,9 @@ class FloodAgent:
 
         agent_ref = self
 
-        def create_plan(user_goal: str = "", deliverables: str = "", steps: str = "") -> str:
-            return agent_ref._handle_create_plan(user_goal, deliverables, steps)
+        def create_plan(user_goal: str = "", deliverables: str = "", steps: Any = "") -> str:
+            steps_str = json.dumps(steps, ensure_ascii=False) if isinstance(steps, (list, dict)) else str(steps)
+            return agent_ref._handle_create_plan(user_goal, deliverables, steps_str)
 
         return [
             StructuredTool.from_function(
@@ -988,13 +1001,23 @@ class FloodAgent:
         except Exception as e:
             logger.warning(f"保存 execution_plan.json 失败: {e}")
 
+    _chronos_warmup_done = False
+    _chronos_warmup_lock = threading.Lock()
+
     @staticmethod
     def _warmup_chronos():
-        """后台预热 Chronos-2 模型，避免首次预测冷启动延迟"""
+        """后台预热 Chronos-2 模型，全局只启动一次"""
+        with FloodAgent._chronos_warmup_lock:
+            if FloodAgent._chronos_warmup_done:
+                logger.info("Chronos-2 预热已完成，跳过重复预热")
+                return
+
         def _warmup():
             try:
                 from skills.chronos_pipeline import get_pipeline
                 get_pipeline()
+                with FloodAgent._chronos_warmup_lock:
+                    FloodAgent._chronos_warmup_done = True
             except Exception as e:
                 logger.warning(f"Chronos-2 预热失败（不影响功能）: {e}")
         t = threading.Thread(target=_warmup, daemon=True, name="chronos-warmup")
@@ -1998,7 +2021,8 @@ class FloodAgent:
         runtime_callbacks = list(callbacks or [])
         if not runtime_callbacks:
             runtime_callbacks.append(_TaskTrackingCallback(self.task_tracker))
-        return executor.invoke(agent_input, config={"callbacks": runtime_callbacks})
+        result = executor.invoke(agent_input, config={"callbacks": runtime_callbacks})
+        return result
 
     def _record_intermediate_steps(self, result: Dict[str, Any]) -> List[Dict[str, str]]:
         recorded_tool_calls: List[Dict[str, str]] = []
@@ -2508,7 +2532,7 @@ class FloodAgent:
 
             def _run_loop() -> None:
                 try:
-                    callback = _FunctionsStreamCallback(q, enable_reasoning=enable_reasoning, task_tracker=self.task_tracker)
+                    callback = _FunctionsStreamCallback(q, enable_reasoning=enable_reasoning, task_tracker=self.task_tracker, model_name=self.llm_service.model_name)
                     loop_state = self._run_agent_loop(
                         user_input,
                         callbacks=[callback],

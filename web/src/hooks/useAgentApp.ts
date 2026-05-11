@@ -9,6 +9,7 @@ import {
   fetchSessionFiles,
   fetchSessions,
   fetchSessionStatus,
+  fetchModels,
   initAgent,
   pauseSession,
   resumeStreamRequest,
@@ -35,6 +36,7 @@ import type {
   ChatMessage,
   FilePreview,
   GeneratedArtifact,
+  ModelOption,
   SessionConfig,
   SessionRuntimeState,
   SessionSummary,
@@ -83,9 +85,14 @@ export function useAgentApp() {
   const [selectedPreview, setSelectedPreview] = useState<FilePreview | null>(null);
   const [inputValue, setInputValue] = useState("");
   const [isStreaming, setIsStreaming] = useState(false);
-  const [config, setConfig] = useState<SessionConfig>({ enable_search: false, enable_rag: true, enable_reasoning: true });
+  const [availableModels, setAvailableModels] = useState<ModelOption[]>([]);
+  const [config, setConfig] = useState<SessionConfig>({ model_key: "qwen_36_plus", enable_search: false, enable_rag: true, enable_reasoning: true });
   const [runtimeState, setRuntimeState] = useState<SessionRuntimeState>({ isPaused: false });
   const readerRef = useRef<ReadableStreamDefaultReader<Uint8Array> | null>(null);
+  const configRef = useRef(config);
+  configRef.current = config;
+  const initializedSessionRef = useRef<string | null>(null);
+  const initPromiseRef = useRef<Promise<void> | null>(null);
 
   const refreshSessionIndex = useCallback(async () => {
     const items = await fetchSessions();
@@ -110,128 +117,165 @@ export function useAgentApp() {
 
   useEffect(() => {
     let active = true;
-    log.info("App init effect: sessionId=", sessionId);
     (async () => {
-      setSelectedPreview(null);
-      setToolActivities([]);
-      setWorkflow(null);
-      let loadedMessages: ChatMessage[] = [];
-      await initAgent(sessionId, config);
-      if (!active) return;
-      await refreshSessionIndex();
       try {
-        const detail = await fetchSession(sessionId);
+        const modelsRes = await fetchModels();
         if (!active) return;
-        const restoredMessages = (detail.messages || []).map(fromServerMessage);
-        log.info("loadSession → restored", restoredMessages.length, "messages");
-        const restoredArtifacts = (detail.artifacts || [])
-          .map((artifact) => normalizeArtifact(artifact as Record<string, unknown>))
-          .filter((artifact): artifact is GeneratedArtifact => artifact !== null);
-        if (restoredArtifacts.length > 0) {
-          log.info("loadSession →", restoredArtifacts.length, "artifacts to attach");
-          const lastAssistantIndex = [...restoredMessages].map((message, index) => ({ message, index })).reverse().find(({ message }) => message.role === "assistant")?.index;
-          if (lastAssistantIndex !== undefined) {
-            let targetMessage = restoredMessages[lastAssistantIndex];
-            restoredArtifacts.forEach((artifact) => {
-              targetMessage = attachArtifact(targetMessage, artifact);
-            });
-            restoredMessages[lastAssistantIndex] = targetMessage;
-          }
-        }
-        loadedMessages = restoredMessages;
-        setMessages(restoredMessages);
-        if (detail.in_progress?.workflow) {
-          setWorkflow(detail.in_progress.workflow);
+        const models = modelsRes.models || [];
+        setAvailableModels(models);
+        const defaultModel = models.find((m) => m.is_default) || models[0];
+        if (defaultModel) {
+          setConfig((prev) =>
+            prev.model_key === defaultModel.key ? prev : { ...prev, model_key: defaultModel.key }
+          );
         }
       } catch (err) {
-        log.warn("loadSession failed, resetting state", err);
-        setMessages([]);
+        log.warn("fetchModels failed, using defaults", err);
+      }
+    })();
+    return () => { active = false; };
+  }, []);
+
+  useEffect(() => {
+    if (initializedSessionRef.current === sessionId) return;
+    if (initPromiseRef.current) return;
+
+    let active = true;
+    log.info("Session init effect: sessionId=", sessionId);
+
+    const run = async () => {
+      try {
+        setSelectedPreview(null);
         setToolActivities([]);
         setWorkflow(null);
-      }
-      await refreshFiles(sessionId);
-      if (!active) return;
-      const status = await fetchSessionStatus(sessionId);
-      if (!active) return;
-      setRuntimeState({ isPaused: !!status.session_state?.is_paused });
-      if (status.in_progress?.message_id) {
-        const inProgressId = status.in_progress.message_id;
-        const isStillStreaming = status.in_progress.is_streaming;
 
-        if (isStillStreaming) {
-          log.info("App init → resuming in_progress stream", inProgressId);
-          const assistantMessage = createAssistantMessage(inProgressId);
-          setMessages((prev) => [...prev, assistantMessage]);
-          setIsStreaming(true);
+        await initAgent(sessionId, configRef.current);
+        if (!active) return;
+        initializedSessionRef.current = sessionId;
 
-          try {
-            const response = await resumeStreamRequest(sessionId);
-            if (response.ok && response.body) {
-              const reader = response.body.getReader();
-              readerRef.current = reader;
-              const decoder = new TextDecoder();
-              let buffer = "";
+        await refreshSessionIndex();
+        if (!active) return;
 
-              const updateAssistant = (updater: (message: ChatMessage) => ChatMessage) => {
-                setMessages((prev) => prev.map((message) => (message.id === inProgressId ? updater(message) : message)));
-              };
+        let loadedMessages: ChatMessage[] = [];
+        try {
+          const detail = await fetchSession(sessionId);
+          if (!active) return;
+          const restoredMessages = (detail.messages || []).map(fromServerMessage);
+          log.info("loadSession → restored", restoredMessages.length, "messages");
+          const restoredArtifacts = (detail.artifacts || [])
+            .map((artifact) => normalizeArtifact(artifact as Record<string, unknown>))
+            .filter((artifact): artifact is GeneratedArtifact => artifact !== null);
+          if (restoredArtifacts.length > 0) {
+            log.info("loadSession →", restoredArtifacts.length, "artifacts to attach");
+            const lastAssistantIndex = [...restoredMessages].map((message, index) => ({ message, index })).reverse().find(({ message }) => message.role === "assistant")?.index;
+            if (lastAssistantIndex !== undefined) {
+              let targetMessage = restoredMessages[lastAssistantIndex];
+              restoredArtifacts.forEach((artifact) => {
+                targetMessage = attachArtifact(targetMessage, artifact);
+              });
+              restoredMessages[lastAssistantIndex] = targetMessage;
+            }
+          }
+          loadedMessages = restoredMessages;
+          setMessages(restoredMessages);
+          if (detail.in_progress?.workflow) {
+            setWorkflow(detail.in_progress.workflow);
+          }
+        } catch (err) {
+          log.warn("loadSession failed, resetting state", err);
+          setMessages([]);
+          setToolActivities([]);
+          setWorkflow(null);
+        }
+        await refreshFiles(sessionId);
+        if (!active) return;
+        const status = await fetchSessionStatus(sessionId);
+        if (!active) return;
+        setRuntimeState({ isPaused: !!status.session_state?.is_paused });
+        if (status.in_progress?.message_id) {
+          const inProgressId = status.in_progress.message_id;
+          const isStillStreaming = status.in_progress.is_streaming;
 
-              while (true) {
-                const { done, value } = await reader.read();
-                if (done) break;
-                buffer += decoder.decode(value, { stream: true });
-                const lines = buffer.split("\n");
-                buffer = lines.pop() || "";
-                for (const line of lines) {
-                  const trimmed = line.trim();
-                  if (!trimmed) continue;
-                  try {
-                    const data = JSON.parse(trimmed) as Record<string, any>;
-                    applyStreamEvent(data, {
-                      updateAssistant,
-                      pushToolActivity,
-                      setWorkflow,
-                    });
-                  } catch (parseErr) {
-                    log.warn("Resume stream JSON parse error", trimmed.slice(0, 200), parseErr);
+          if (isStillStreaming) {
+            log.info("App init → resuming in_progress stream", inProgressId);
+            const assistantMessage = createAssistantMessage(inProgressId);
+            setMessages((prev) => [...prev, assistantMessage]);
+            setIsStreaming(true);
+
+            try {
+              const response = await resumeStreamRequest(sessionId);
+              if (response.ok && response.body) {
+                const reader = response.body.getReader();
+                readerRef.current = reader;
+                const decoder = new TextDecoder();
+                let buffer = "";
+
+                const updateAssistant = (updater: (message: ChatMessage) => ChatMessage) => {
+                  setMessages((prev) => prev.map((message) => (message.id === inProgressId ? updater(message) : message)));
+                };
+
+                while (true) {
+                  const { done, value } = await reader.read();
+                  if (done) break;
+                  buffer += decoder.decode(value, { stream: true });
+                  const lines = buffer.split("\n");
+                  buffer = lines.pop() || "";
+                  for (const line of lines) {
+                    const trimmed = line.trim();
+                    if (!trimmed) continue;
+                    try {
+                      const data = JSON.parse(trimmed) as Record<string, any>;
+                      applyStreamEvent(data, {
+                        updateAssistant,
+                        pushToolActivity,
+                        setWorkflow,
+                      });
+                    } catch (parseErr) {
+                      log.warn("Resume stream JSON parse error", trimmed.slice(0, 200), parseErr);
+                    }
                   }
                 }
               }
+            } catch (err) {
+              log.warn("Resume stream failed, falling back to snapshot", err);
+            } finally {
+              setIsStreaming(false);
+              readerRef.current = null;
             }
-          } catch (err) {
-            log.warn("Resume stream failed, falling back to snapshot", err);
-          } finally {
-            setIsStreaming(false);
-            readerRef.current = null;
-          }
-        } else {
-          const alreadyExists = loadedMessages.some(
-            (m) => m.id === inProgressId || (m.role === "assistant" && m.content === (status.in_progress?.content || "")),
-          );
-          if (alreadyExists) {
-            log.info("App init → in_progress already in restored messages, skipping", inProgressId);
           } else {
-            log.info("App init → restoring completed in_progress message", inProgressId);
-            const restored = createAssistantMessage(inProgressId);
-            let hydrated = restored;
-            if (status.in_progress.reasoning) hydrated = appendThoughtBlock(hydrated, status.in_progress.reasoning, false);
-            if (status.in_progress.content) hydrated = setAssistantFinalContent(hydrated, status.in_progress.content);
-            (status.in_progress.artifacts || []).forEach((artifact) => {
-              hydrated = attachArtifact(hydrated, artifact);
-            });
-            setMessages((prev) => [...prev, hydrated]);
+            const alreadyExists = loadedMessages.some(
+              (m) => m.id === inProgressId || (m.role === "assistant" && m.content === (status.in_progress?.content || "")),
+            );
+            if (alreadyExists) {
+              log.info("App init → in_progress already in restored messages, skipping", inProgressId);
+            } else {
+              log.info("App init → restoring completed in_progress message", inProgressId);
+              const restored = createAssistantMessage(inProgressId);
+              let hydrated = restored;
+              if (status.in_progress.reasoning) hydrated = appendThoughtBlock(hydrated, status.in_progress.reasoning, false);
+              if (status.in_progress.content) hydrated = setAssistantFinalContent(hydrated, status.in_progress.content);
+              (status.in_progress.artifacts || []).forEach((artifact) => {
+                hydrated = attachArtifact(hydrated, artifact);
+              });
+              setMessages((prev) => [...prev, hydrated]);
+            }
           }
+          if (status.in_progress.workflow) setWorkflow(status.in_progress.workflow);
         }
-        if (status.in_progress.workflow) setWorkflow(status.in_progress.workflow);
+      } finally {
+        initPromiseRef.current = null;
       }
-    })().catch((err) => {
-      log.error("App init effect failed", err);
+    };
+
+    initPromiseRef.current = run().catch((err) => {
+      log.error("Session init effect failed", err);
     });
+
     return () => {
       active = false;
       readerRef.current?.cancel().catch(() => undefined);
     };
-  }, [sessionId, config, refreshFiles, refreshSessionIndex]);
+  }, [sessionId, refreshFiles, refreshSessionIndex]);
 
   const pushToolActivity = useCallback((toolName: string, content: string, status: ToolActivity["status"]) => {
     setToolActivities((prev) => {
@@ -474,6 +518,7 @@ export function useAgentApp() {
     runtimeState,
     inputValue,
     isStreaming,
+    availableModels,
     setInputValue,
     handleSubmit,
     handleUpload,

@@ -24,7 +24,6 @@ def main() -> None:
         reasoning_model=os.getenv("QWEN_REASONING_MODEL", "qwen-plus"),
         temperature=0.1,
         max_tokens=512,
-        enable_search=False,
         enable_reasoning=True,
     )
 

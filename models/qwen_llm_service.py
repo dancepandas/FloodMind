@@ -2,12 +2,12 @@
 Qwen模型服务模块
 
 基于LangChain集成Qwen API，提供统一的大模型调用接口。
-优化版本：提升响应速度
+支持阿里云百炼平台所有 OpenAI 兼容模型（Qwen/GLM/DeepSeek/Kimi/MiniMax 等）。
 """
 
 import logging
 import os
-from typing import Any, Mapping, Optional
+from typing import Any, Dict, Mapping, Optional
 
 import openai
 from langchain_openai import ChatOpenAI
@@ -80,7 +80,7 @@ class QwenLLMService:
 
     def __init__(self, api_key: str, model_name: str = "qwen-flash",
                  temperature: float = 0.3, max_tokens: int = 2048,
-                 enable_search: bool = True, enable_reasoning: bool = False,
+                 enable_reasoning: bool = False,
                  reasoning_model: str = "qwen-plus"):
         """
         初始化Qwen大模型服务
@@ -90,7 +90,6 @@ class QwenLLMService:
             model_name: 模型名称（推荐 qwen2.5-flash 速度更快）
             temperature: 温度参数（0-1），控制输出随机性
             max_tokens: 最大生成token数
-            enable_search: 是否启用模型自带搜索能力
             enable_reasoning: 是否启用推理模式
             reasoning_model: 推理模式使用的模型名称
         """
@@ -98,7 +97,7 @@ class QwenLLMService:
         self.model_name = model_name
         self.temperature = temperature
         self.max_tokens = max_tokens
-        self.enable_search = enable_search
+        self.enable_search = False
         self.enable_reasoning = enable_reasoning
         self.reasoning_model = reasoning_model
         self.base_url = os.getenv("QWEN_BASE_URL", "https://dashscope.aliyuncs.com/compatible-mode/v1")
@@ -108,7 +107,7 @@ class QwenLLMService:
             actual_model = reasoning_model
             actual_temperature = min(temperature, 0.2)  # 推理模式使用更低温度
             reasoning_max_tokens = min(4096, max(1024, max_tokens))  # 推理需要更多token空间
-            extra_body = {"enable_search": enable_search}
+            extra_body = {}
             if enable_reasoning:
                 extra_body["enable_thinking"] = True
             logger.info(f"推理模式已启用 - 使用模型: {actual_model}, 温度: {actual_temperature}")
@@ -116,7 +115,7 @@ class QwenLLMService:
             actual_model = model_name
             actual_temperature = temperature
             reasoning_max_tokens = max_tokens
-            extra_body = {"enable_search": enable_search}
+            extra_body = {}
 
         self.llm = QwenReasoningChatOpenAI(
             model=actual_model,
@@ -132,7 +131,7 @@ class QwenLLMService:
         )
 
         mode_str = "推理模式" if enable_reasoning else "标准模式"
-        logger.info(f"Qwen大模型服务初始化成功 - {mode_str} - 模型: {actual_model}, 搜索能力: {enable_search}, base_url: {self.base_url}")
+        logger.info(f"Qwen大模型服务初始化成功 - {mode_str} - 模型: {actual_model}, base_url: {self.base_url}")
     
     def get_llm(self) -> ChatOpenAI:
         """
@@ -196,18 +195,16 @@ _llm_service: Optional[QwenLLMService] = None
 
 def get_qwen_llm_service(api_key: str, model_name: str = "qwen-flash",
                         temperature: float = 0.3, max_tokens: int = 2048,
-                        enable_search: bool = False,
                         enable_reasoning: bool = False,
                         reasoning_model: str = "qwen-plus") -> QwenLLMService:
     """
-    获取全局Qwen大模型服务实例
+    获取全局Qwen大模型服务实例（向后兼容接口）
 
     Args:
         api_key: API密钥
         model_name: 模型名称
         temperature: 温度参数
         max_tokens: 最大token数
-        enable_search: 是否启用模型自带搜索能力
         enable_reasoning: 是否启用推理模式
         reasoning_model: 推理模式使用的模型名称
 
@@ -220,7 +217,6 @@ def get_qwen_llm_service(api_key: str, model_name: str = "qwen-flash",
         "model_name": model_name,
         "temperature": temperature,
         "max_tokens": max_tokens,
-        "enable_search": enable_search,
         "enable_reasoning": enable_reasoning,
         "reasoning_model": reasoning_model,
         "base_url": os.getenv("QWEN_BASE_URL", "https://dashscope.aliyuncs.com/compatible-mode/v1"),
@@ -245,9 +241,76 @@ def get_qwen_llm_service(api_key: str, model_name: str = "qwen-flash",
             model_name=model_name,
             temperature=temperature,
             max_tokens=max_tokens,
-            enable_search=enable_search,
             enable_reasoning=enable_reasoning,
             reasoning_model=reasoning_model
         )
         _llm_service._config_signature = current_signature
     return _llm_service
+
+
+def create_llm_service_from_preset(
+    model_key: str,
+    *,
+    enable_reasoning: bool = False,
+) -> QwenLLMService:
+    """
+    根据模型预设 key 创建 LLM 服务实例（不使用全局单例）。
+
+    Args:
+        model_key: 模型预设 key，如 "qwen_36_plus"、"glm_51" 等
+        enable_reasoning: 是否启用推理模式
+
+    Returns:
+        QwenLLMService 实例
+    """
+    from config.model_presets import get_preset, resolve_api_key, resolve_base_url
+
+    preset = get_preset(model_key)
+    if preset is None:
+        raise ValueError(f"未知的模型预设: {model_key}")
+
+    api_key = resolve_api_key(preset)
+    base_url = resolve_base_url(preset)
+
+    if enable_reasoning and preset.get("supports_reasoning"):
+        actual_model = preset["model_name"]
+        actual_temperature = preset.get("thinking_temperature", 0.2)
+        actual_max_tokens = preset.get("thinking_max_tokens", 4096)
+    else:
+        actual_model = preset["model_name"]
+        actual_temperature = preset.get("default_temperature", 0.3)
+        actual_max_tokens = preset.get("default_max_tokens", 4096)
+        enable_reasoning = False
+
+    extra_body: Dict[str, Any] = {}
+    if enable_reasoning:
+        extra_body["enable_thinking"] = True
+
+    llm = QwenReasoningChatOpenAI(
+        model=actual_model,
+        api_key=api_key,
+        base_url=base_url,
+        temperature=actual_temperature,
+        max_tokens=actual_max_tokens,
+        timeout=90,
+        streaming=True,
+        extra_body=extra_body,
+        frequency_penalty=0.0,
+        presence_penalty=0.0,
+    )
+
+    service = QwenLLMService.__new__(QwenLLMService)
+    service.api_key = api_key
+    service.model_name = actual_model
+    service.temperature = actual_temperature
+    service.max_tokens = actual_max_tokens
+    service.enable_search = False
+    service.enable_reasoning = enable_reasoning
+    service.reasoning_model = actual_model
+    service.base_url = base_url
+    service.llm = llm
+
+    mode_str = "推理模式" if enable_reasoning else "标准模式"
+    logger.info("LLM 服务创建成功 - %s - 模型: %s, base_url: %s", mode_str, actual_model, base_url)
+
+    return service

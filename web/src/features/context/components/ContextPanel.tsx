@@ -31,7 +31,7 @@ export function ContextPanel({ sessionId, files, workflow, selectedPreview, onPr
   }
 
   return (
-    <div className="w-[340px] h-full bg-card/60 border-l border-border/60 flex flex-col flex-shrink-0 backdrop-blur-sm">
+    <div className="w-[340px] h-full bg-card/40 border-l border-border/40 flex flex-col flex-shrink-0 backdrop-blur-sm">
       {/* 上下文文件 */}
       <div className="flex-1 min-h-0 flex flex-col border-b border-border/40">
         <div className="shrink-0 px-5 pt-5 pb-2">

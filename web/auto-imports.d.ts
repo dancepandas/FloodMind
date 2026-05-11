@@ -23,11 +23,13 @@ declare global {
   const ChevronLeftIcon: typeof import('lucide-react').ChevronLeftIcon
   const ChevronRight: typeof import('lucide-react').ChevronRight
   const ChevronRightIcon: typeof import('lucide-react').ChevronRightIcon
+  const ChevronUp: typeof import('lucide-react').ChevronUp
   const ChevronUpIcon: typeof import('lucide-react').ChevronUpIcon
   const CircleCheckIcon: typeof import('lucide-react').CircleCheckIcon
   const CircleIcon: typeof import('lucide-react').CircleIcon
   const CloudRain: typeof import('lucide-react').CloudRain
   const Command: typeof import('lucide-react').Command
+  const Database: typeof import('lucide-react').Database
   const Download: typeof import('lucide-react').Download
   const ExternalLink: typeof import('lucide-react').ExternalLink
   const Eye: typeof import('lucide-react').Eye
@@ -37,6 +39,7 @@ declare global {
   const FileType: typeof import('lucide-react').FileType
   const Form: typeof import('lucide-react').Form
   const Fragment: typeof import('react').Fragment
+  const Globe: typeof import('lucide-react').Globe
   const GripVerticalIcon: typeof import('lucide-react').GripVerticalIcon
   const History: typeof import('lucide-react').History
   const Home: typeof import('lucide-react').Home

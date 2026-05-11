@@ -7,6 +7,7 @@ import type {
   ScheduledTask,
   StreamSnapshot,
   UploadedFileItem,
+  ModelsResponse,
 } from "@/types/app";
 
 const log = createLogger("Agent");
@@ -36,6 +37,7 @@ interface FilePreviewResponse {
 
 interface InitResponse {
   status: string;
+  model_key: string;
   model_name: string;
   enable_search: boolean;
   enable_rag: boolean;
@@ -44,7 +46,7 @@ interface InitResponse {
 
 interface ConfigResponse {
   status: string;
-  config: SessionConfig;
+  config: SessionConfig & { model_name?: string };
 }
 
 interface SessionStatusResponse {
@@ -66,11 +68,11 @@ export async function initAgent(sessionId: string, config: SessionConfig): Promi
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ session_id: sessionId, ...config }),
   });
-  log.info("initAgent →", result.model_name, { search: result.enable_search, rag: result.enable_rag, reasoning: result.enable_reasoning });
+  log.info("initAgent →", result.model_key, result.model_name, { search: result.enable_search, rag: result.enable_rag, reasoning: result.enable_reasoning });
   return result;
 }
 
-export async function updateSessionConfig(sessionId: string, config: SessionConfig): Promise<ConfigResponse> {
+export async function updateSessionConfig(sessionId: string, config: Partial<SessionConfig>): Promise<ConfigResponse> {
   log.info("updateSessionConfig", { sessionId, config });
   const result = await apiFetch<ConfigResponse>("/api/session/config", {
     method: "POST",
@@ -78,6 +80,13 @@ export async function updateSessionConfig(sessionId: string, config: SessionConf
     body: JSON.stringify({ session_id: sessionId, ...config }),
   });
   log.info("updateSessionConfig → OK");
+  return result;
+}
+
+export async function fetchModels(): Promise<ModelsResponse> {
+  log.info("fetchModels");
+  const result = await apiFetch<ModelsResponse>("/api/models");
+  log.info("fetchModels →", result.models?.length || 0, "models, default:", result.default_model_key);
   return result;
 }
 

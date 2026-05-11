@@ -28,7 +28,7 @@ export function ScheduledTaskResultDialog({ task, open, onOpenChange }: Schedule
       <DialogContent className="sm:max-w-2xl max-h-[85vh] flex flex-col">
         <DialogHeader>
           <DialogTitle className="flex items-center gap-2">
-            <AlarmClock size={20} className="text-primary" />
+            <AlarmClock size={20} className="text-primary" strokeWidth={1.8} />
             定时任务结果
           </DialogTitle>
           <DialogDescription className="truncate">{task.command}</DialogDescription>
@@ -46,9 +46,9 @@ export function ScheduledTaskResultDialog({ task, open, onOpenChange }: Schedule
             </div>
           )}
 
-          <div className="rounded-lg border border-border">
-            <div className="flex items-center gap-1.5 px-3 py-2 border-b border-border bg-muted/30">
-              <FileText size={14} className="text-muted-foreground" />
+          <div className="rounded-lg border border-border/60">
+            <div className="flex items-center gap-1.5 px-3 py-2 border-b border-border/40 bg-muted/20">
+              <FileText size={14} className="text-muted-foreground/60" strokeWidth={1.8} />
               <span className="text-xs font-medium text-muted-foreground">执行结果</span>
             </div>
             <div className="max-h-[280px] overflow-y-auto px-3 py-2">
@@ -62,10 +62,10 @@ export function ScheduledTaskResultDialog({ task, open, onOpenChange }: Schedule
             </div>
           </div>
 
-          <div className="rounded-lg border border-border">
-            <div className="flex items-center justify-between px-3 py-2 border-b border-border bg-muted/30">
+          <div className="rounded-lg border border-border/60">
+            <div className="flex items-center justify-between px-3 py-2 border-b border-border/40 bg-muted/20">
               <div className="flex items-center gap-1.5">
-                <Download size={14} className="text-muted-foreground" />
+                <Download size={14} className="text-muted-foreground/60" strokeWidth={1.8} />
                 <span className="text-xs font-medium text-muted-foreground">本次新增文件</span>
               </div>
               {artifacts.length > 0 && (
@@ -85,7 +85,7 @@ export function ScheduledTaskResultDialog({ task, open, onOpenChange }: Schedule
                       href={buildApiUrl(artifact.download_url)}
                       target="_blank"
                       rel="noreferrer"
-                      className="flex items-center justify-between gap-2 rounded-md border border-border bg-background px-2.5 py-2 text-xs text-foreground hover:border-primary/40 hover:text-primary transition-colors"
+                      className="flex items-center justify-between gap-2 rounded-lg border border-border/50 bg-background px-2.5 py-2 text-xs text-foreground hover:border-primary/30 hover:text-primary transition-colors duration-150"
                     >
                       <span className="truncate">{artifact.filename}</span>
                       <span className="flex items-center gap-1.5 shrink-0 text-muted-foreground">

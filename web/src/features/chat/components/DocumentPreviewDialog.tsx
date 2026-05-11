@@ -25,10 +25,10 @@ function isPreviewable(filename: string): boolean {
 
 function getFileIcon(filename: string) {
   const ext = getFileExt(filename);
-  if (ext === "pdf") return <FileType size={20} className="text-red-500" />;
-  if (["docx", "doc"].includes(ext)) return <FileText size={20} className="text-blue-500" />;
-  if (["xlsx", "xls"].includes(ext)) return <FileSpreadsheet size={20} className="text-green-600" />;
-  return <FileText size={20} className="text-muted-foreground" />;
+  if (ext === "pdf") return <FileType size={20} className="text-red-500" strokeWidth={1.8} />;
+  if (["docx", "doc"].includes(ext)) return <FileText size={20} className="text-blue-500" strokeWidth={1.8} />;
+  if (["xlsx", "xls"].includes(ext)) return <FileSpreadsheet size={20} className="text-green-600" strokeWidth={1.8} />;
+  return <FileText size={20} className="text-muted-foreground" strokeWidth={1.8} />;
 }
 
 function getPreviewUrl(downloadUrl: string | undefined): string {

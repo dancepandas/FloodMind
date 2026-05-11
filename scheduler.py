@@ -22,7 +22,8 @@ from agent import FloodAgent
 from agent.scheduled_task_runtime import ScheduledTaskRuntime
 from config.settings import settings
 from memory import DualMemory, SessionManager
-from models import get_qwen_llm_service
+from models import get_qwen_llm_service, create_llm_service_from_preset
+from config.model_presets import get_default_model_key
 from tools import set_rag_config, set_session_context
 
 
@@ -80,14 +81,10 @@ def create_agent_for_session(session_manager: SessionManager, session_id: str) -
         session_id=session_id,
     )
 
-    llm_service = get_qwen_llm_service(
-        api_key=settings.qwen.api_key,
-        model_name=settings.qwen.model_name,
-        temperature=settings.qwen.temperature,
-        max_tokens=settings.qwen.max_tokens,
-        enable_search=settings.qwen.enable_search,
+    model_key = get_default_model_key()
+    llm_service = create_llm_service_from_preset(
+        model_key,
         enable_reasoning=settings.qwen.enable_reasoning,
-        reasoning_model=settings.qwen.reasoning_model,
     )
     memory = DualMemory(
         max_history=settings.agent.max_history,
@@ -151,8 +148,8 @@ def seconds_until_next_hour() -> float:
     return max(1.0, (next_hour - now).total_seconds())
 
 
-def run_once(runtime: ScheduledTaskRuntime, session_manager: SessionManager, lookback_minutes: int, limit: int) -> int:
-    tasks = runtime.claim_due_tasks(lookback_minutes=lookback_minutes, limit=limit)
+def run_once(runtime: ScheduledTaskRuntime, session_manager: SessionManager, lookback_minutes: int, lookahead_minutes: int, limit: int) -> int:
+    tasks = runtime.claim_due_tasks(lookback_minutes=lookback_minutes, lookahead_minutes=lookahead_minutes, limit=limit)
     if not tasks:
         logger.info("心跳完成：无到期任务")
         return 0
@@ -166,6 +163,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="FloodMind scheduled task scheduler")
     parser.add_argument("--once", action="store_true", help="只执行一次心跳扫描")
     parser.add_argument("--lookback-minutes", type=int, default=int(os.environ.get("SCHEDULER_LOOKBACK_MINUTES", 60)))
+    parser.add_argument("--lookahead-minutes", type=int, default=int(os.environ.get("SCHEDULER_LOOKAHEAD_MINUTES", 60)))
     parser.add_argument("--limit", type=int, default=int(os.environ.get("SCHEDULER_MAX_TASKS_PER_HEARTBEAT", 1)))
     args = parser.parse_args()
 
@@ -179,14 +177,14 @@ def main() -> int:
 
     try:
         if args.once:
-            run_once(runtime, session_manager, args.lookback_minutes, args.limit)
+            run_once(runtime, session_manager, args.lookback_minutes, args.lookahead_minutes, args.limit)
             return 0
-        run_once(runtime, session_manager, args.lookback_minutes, args.limit)
+        run_once(runtime, session_manager, args.lookback_minutes, args.lookahead_minutes, args.limit)
         while True:
             sleep_seconds = seconds_until_next_hour()
             logger.info("距离下一次整点心跳 %.0f 秒", sleep_seconds)
             time.sleep(sleep_seconds)
-            run_once(runtime, session_manager, args.lookback_minutes, args.limit)
+            run_once(runtime, session_manager, args.lookback_minutes, args.lookahead_minutes, args.limit)
     except KeyboardInterrupt:
         logger.info("Scheduler 收到退出信号")
     finally:

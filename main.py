@@ -78,9 +78,8 @@ def init_agent() -> FloodAgent:
             model_name=settings.qwen.model_name,
             temperature=settings.qwen.temperature,
             max_tokens=settings.qwen.max_tokens,
-            enable_search=settings.qwen.enable_search
         )
-        logger.info(f"✓ 大模型服务初始化完成 - {settings.qwen.model_name}, 搜索能力: {settings.qwen.enable_search}")
+        logger.info(f"✓ 大模型服务初始化完成 - {settings.qwen.model_name}")
     except ValueError as e:
         logger.error(f"✗ 大模型服务初始化失败: {e}")
         logger.error("请设置环境变量: DASHSCOPE_API_KEY")

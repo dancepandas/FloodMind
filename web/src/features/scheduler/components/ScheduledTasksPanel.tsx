@@ -45,7 +45,7 @@ export function ScheduledTasksPanel() {
       <div className="shrink-0 px-5 pt-5 pb-2">
         <div className="flex items-center justify-between gap-2">
           <div className="flex items-center gap-2 text-foreground font-medium text-[13px] tracking-tight">
-            <AlarmClock size={16} className="text-muted-foreground" />
+            <AlarmClock size={16} className="text-muted-foreground/60" strokeWidth={1.8} />
             <h3>定时任务</h3>
           </div>
           <button
@@ -91,7 +91,7 @@ export function ScheduledTasksPanel() {
 function TaskCard({ task, onDelete, onViewResult }: { task: ScheduledTask; onDelete: (taskId: string) => void; onViewResult: (task: ScheduledTask) => void }) {
   const hasResult = !!task.last_result || !!task.last_error || (task.artifacts || []).length > 0;
   return (
-    <div className="rounded-xl border border-border/60 bg-background hover:border-border transition-colors duration-150 overflow-hidden">
+    <div className="rounded-xl border border-border/50 bg-background hover:border-border/80 transition-colors duration-200 overflow-hidden shadow-[0_1px_3px_-1px_rgba(0,0,0,0.03)]">
       <div className="p-3">
         <div className="flex items-start justify-between gap-2">
           <div className="min-w-0 flex-1">

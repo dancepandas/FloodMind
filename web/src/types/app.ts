@@ -119,9 +119,25 @@ export interface WorkflowPlan {
 }
 
 export interface SessionConfig {
+  model_key: string;
   enable_search: boolean;
   enable_rag: boolean;
   enable_reasoning: boolean;
+}
+
+export interface ModelOption {
+  key: string;
+  label: string;
+  description: string;
+  supports_reasoning: boolean;
+  supports_search: boolean;
+  is_default: boolean;
+}
+
+export interface ModelsResponse {
+  status: string;
+  default_model_key: string;
+  models: ModelOption[];
 }
 
 export interface SessionRuntimeState {

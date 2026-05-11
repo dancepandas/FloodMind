@@ -29,7 +29,8 @@ load_dotenv()
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from config.settings import settings
-from models import QwenLLMService, get_qwen_llm_service
+from models import QwenLLMService, get_qwen_llm_service, create_llm_service_from_preset
+from config.model_presets import get_preset, get_default_model_key, get_models_list, resolve_api_key, resolve_base_url
 from memory import SimpleMemory, DualMemory, SessionManager
 from memory.session_manager import validate_session_id
 from agent import FloodAgent
@@ -354,7 +355,6 @@ def _generate_session_title(message: str) -> str:
         model_name=settings.qwen.model_name,
         temperature=0.2,
         max_tokens=60,
-        enable_search=False,
         enable_reasoning=False,
         reasoning_model=settings.qwen.reasoning_model,
     )
@@ -518,6 +518,7 @@ def _serialize_snapshot(snapshot: Optional[dict]) -> Optional[dict]:
 def ensure_session_state(session_id: str) -> dict[str, Any]:
     with session_states_lock:
         state = session_states.setdefault(session_id, {})
+        state.setdefault('model_key', get_default_model_key())
         state.setdefault('enable_search', False)
         state.setdefault('enable_rag', True)
         state.setdefault('enable_reasoning', True)
@@ -731,23 +732,28 @@ def filter_system_info(content: str) -> str:
     return filtered
 
 
-def create_agent_for_session(session_id: str, enable_search: bool = False, enable_rag: Optional[bool] = None, enable_reasoning: bool = True) -> FloodAgent:
+def create_agent_for_session(session_id: str, enable_search: bool = False, enable_rag: Optional[bool] = None, enable_reasoning: bool = True, model_key: Optional[str] = None) -> FloodAgent:
     """为会话创建 Agent 实例"""
     session_id = _require_session_id(session_id)
     logger.info(f"创建新的智能体实例: {session_id}")
     
     if enable_rag is None:
         enable_rag = settings.rag.enabled
-    
-    llm_service = get_qwen_llm_service(
-        api_key=settings.qwen.api_key,
-        model_name=settings.qwen.model_name,
-        temperature=settings.qwen.temperature,
-        max_tokens=settings.qwen.max_tokens,
-        enable_search=enable_search,
-        enable_reasoning=enable_reasoning,
-        reasoning_model=settings.qwen.reasoning_model,
-    )
+
+    if model_key:
+        llm_service = create_llm_service_from_preset(
+            model_key,
+            enable_reasoning=enable_reasoning,
+        )
+    else:
+        llm_service = get_qwen_llm_service(
+            api_key=settings.qwen.api_key,
+            model_name=settings.qwen.model_name,
+            temperature=settings.qwen.temperature,
+            max_tokens=settings.qwen.max_tokens,
+            enable_reasoning=enable_reasoning,
+            reasoning_model=settings.qwen.reasoning_model,
+        )
     
     memory_dir = session_manager.get_memory_dir(session_id)
     memory = DualMemory(
@@ -761,6 +767,7 @@ def create_agent_for_session(session_id: str, enable_search: bool = False, enabl
         llm_service=llm_service,
         memory=memory,
         memory_type="dual",
+        enable_search=enable_search,
     )
     
     logger.info(f"RAG 配置: enabled={enable_rag}, persist_dir={settings.rag.persist_dir}")
@@ -800,11 +807,12 @@ def get_or_create_agent(session_id: str) -> FloodAgent:
     enable_search = state.get('enable_search', False)
     enable_rag = state.get('enable_rag', settings.rag.enabled)
     enable_reasoning = state.get('enable_reasoning', True)
-    
+    model_key = state.get('model_key') or get_default_model_key()
+
     _, agent = session_manager.get_or_create_session(
         session_id,
         agent_factory=lambda sid: create_agent_for_session(
-            sid, enable_search=enable_search, enable_rag=enable_rag, enable_reasoning=enable_reasoning
+            sid, enable_search=enable_search, enable_rag=enable_rag, enable_reasoning=enable_reasoning, model_key=model_key
         )
     )
     
@@ -1291,18 +1299,26 @@ def init_agent():
         enable_search = data.get('enable_search', False)
         enable_rag = data.get('enable_rag', True)
         enable_reasoning = data.get('enable_reasoning', True)
+        model_key = data.get('model_key', '').strip()
 
         state = ensure_session_state(session_id)
         state['enable_search'] = enable_search
         state['enable_rag'] = enable_rag
         state['enable_reasoning'] = enable_reasoning
+        if model_key and get_preset(model_key):
+            state['model_key'] = model_key
         
         agent = get_or_create_agent(session_id)
+
+        effective_model_key = state.get('model_key', get_default_model_key())
+        preset = get_preset(effective_model_key)
+        model_label = preset['label'] if preset else effective_model_key
         
         return jsonify({
             'status': 'success',
             'message': '智能体初始化成功',
-            'model_name': settings.qwen.model_name,
+            'model_key': effective_model_key,
+            'model_name': model_label,
             'enable_search': enable_search,
             'enable_rag': enable_rag,
             'enable_reasoning': enable_reasoning,
@@ -1865,11 +1881,31 @@ def favicon():
     return ('', 204)
 
 
+@app.route('/api/models', methods=['GET'])
+def list_models():
+    """获取可用模型列表"""
+    try:
+        models = get_models_list()
+        default_key = get_default_model_key()
+        return jsonify({
+            'status': 'success',
+            'default_model_key': default_key,
+            'models': models,
+        })
+    except Exception as e:
+        logger.error(f"获取模型列表失败: {e}")
+        return jsonify({'status': 'error', 'message': str(e)}), 500
+
+
 @app.route('/api/config', methods=['GET'])
 def get_config():
     """获取配置信息"""
+    default_key = get_default_model_key()
+    preset = get_preset(default_key)
+    model_label = preset['label'] if preset else default_key
     return jsonify({
-        'model_name': settings.qwen.model_name,
+        'model_key': default_key,
+        'model_name': model_label,
         'tools': [
             {'name': 'read_data_file', 'desc': '读取数据文件'},
             {'name': 'prepare_forecast_input', 'desc': '提取预测输入'},
@@ -2171,18 +2207,32 @@ def get_session_status():
 
 @app.route('/api/session/config', methods=['POST'])
 def update_session_config():
-    """更新会话配置（搜索、RAG和推理模式功能开关）"""
+    """更新会话配置（模型、搜索、RAG和推理模式功能开关）"""
     try:
         data = request.get_json() or {}
         session_id = _require_session_id(data.get('session_id', 'default'))
         enable_search = data.get('enable_search')
         enable_rag = data.get('enable_rag')
         enable_reasoning = data.get('enable_reasoning')
+        model_key = data.get('model_key')
         
         state = ensure_session_state(session_id)
         
         config_changed = False
         status_messages = []
+        
+        if model_key is not None and model_key != state.get('model_key'):
+            preset = get_preset(model_key)
+            if preset is None:
+                return jsonify({'status': 'error', 'message': f'未知的模型: {model_key}'}), 400
+            state['model_key'] = model_key
+            config_changed = True
+            status_msg = f"模型已切换为 {preset['label']}"
+            status_messages.append(status_msg)
+            logger.info(f"会话 {session_id} {status_msg}")
+            if not preset.get('supports_reasoning') and state.get('enable_reasoning'):
+                state['enable_reasoning'] = False
+                status_messages.append("深度思考模式已关闭（当前模型不支持）")
         
         if enable_search is not None and enable_search != state.get('enable_search'):
             state['enable_search'] = enable_search
@@ -2199,6 +2249,10 @@ def update_session_config():
             logger.info(f"会话 {session_id} {status_msg}")
         
         if enable_reasoning is not None and enable_reasoning != state.get('enable_reasoning'):
+            effective_model_key = state.get('model_key', get_default_model_key())
+            preset = get_preset(effective_model_key)
+            if enable_reasoning and preset and not preset.get('supports_reasoning'):
+                return jsonify({'status': 'error', 'message': f'当前模型 {preset["label"]} 不支持深度思考'}), 400
             state['enable_reasoning'] = enable_reasoning
             config_changed = True
             status_msg = f"深度思考模式已{'启用' if enable_reasoning else '关闭'}"
@@ -2219,10 +2273,15 @@ def update_session_config():
                 del session_manager._agents[session_id]
                 logger.info(f"会话 {session_id} Agent实例已清除，将在下次请求时重新创建")
         
+        effective_model_key = state.get('model_key', get_default_model_key())
+        preset = get_preset(effective_model_key)
+        model_label = preset['label'] if preset else effective_model_key
         return jsonify({
             'status': 'success',
             'message': '配置已更新',
             'config': {
+                'model_key': effective_model_key,
+                'model_name': model_label,
                 'enable_search': state.get('enable_search', False),
                 'enable_rag': state.get('enable_rag', True),
                 'enable_reasoning': state.get('enable_reasoning', True),

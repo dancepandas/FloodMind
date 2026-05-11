@@ -24,21 +24,32 @@ function ThoughtBlock({ message, block, onToggleThought }: { message: ChatMessag
   }, [block.content, block.isStreaming, block.isCollapsed]);
 
   return (
-    <div className={`w-full max-w-full transition-all duration-300 ${block.isArchived ? "opacity-40" : "opacity-100"}`}>
+    <div className={`w-full max-w-full transition-all duration-300 ${block.isArchived ? "opacity-30" : "opacity-100"}`}>
       <button
         type="button"
         onClick={() => onToggleThought(message.id, block.id)}
-        className="flex items-center gap-2 text-xs font-medium text-muted-foreground/80 hover:text-foreground transition-colors duration-150 px-2 py-1.5 rounded-lg hover:bg-muted/40"
+        className="flex items-center gap-2.5 text-[11px] font-semibold tracking-wide text-muted-foreground/70 hover:text-foreground transition-colors duration-200 px-1.5 py-1.5 rounded-md hover:bg-muted/30"
       >
-        {block.isCollapsed ? <ChevronRight size={13} /> : <ChevronDown size={13} />}
-        <span className={`inline-block h-2 w-2 rounded-full ${block.isStreaming ? "bg-primary animate-pulse" : "bg-primary/60"}`} />
-        <span>{block.isStreaming ? "Thinking..." : "Thought Process"}</span>
+        {block.isCollapsed ? <ChevronRight size={12} strokeWidth={2} /> : <ChevronDown size={12} strokeWidth={2} />}
+        <div className={`relative flex items-center justify-center ${block.isStreaming ? "" : ""}`}>
+          <span className={`h-[6px] w-[6px] rounded-full ${block.isStreaming ? "bg-primary shadow-[0_0_6px_rgba(59,107,208,0.5)]" : "bg-primary/50"}`} />
+          {block.isStreaming && <span className="absolute h-[6px] w-[6px] rounded-full bg-primary/40 animate-ping" />}
+        </div>
+        <span className="uppercase">{block.isStreaming ? "Thinking" : "Thought"}</span>
       </button>
       <div
         ref={scrollRef}
-        className={`mt-1 ml-2 pl-4 pr-3 py-2.5 border border-primary/[0.06] border-l-2 border-l-primary/20 bg-primary/[0.02] shadow-[inset_0_1px_0_rgba(255,255,255,0.5)] rounded-r-lg text-sm text-muted-foreground leading-relaxed transition-all duration-300 overflow-x-hidden overflow-y-auto ${block.isCollapsed ? "max-h-0 opacity-0 py-0 mt-0 border-0" : "max-h-40 opacity-100"}`}
+        className={`mt-1 ml-3 pl-4 pr-3 py-2.5 rounded-r-lg text-[12px] text-muted-foreground/70 leading-relaxed transition-all duration-300 overflow-x-hidden overflow-y-auto ${block.isCollapsed ? "max-h-0 opacity-0 py-0 mt-0" : "max-h-40 opacity-100"}`}
+        style={{
+          background: "linear-gradient(135deg, rgba(59,107,208,0.04) 0%, rgba(59,107,208,0.01) 100%)",
+          borderLeft: "2px solid rgba(59,107,208,0.25)",
+          boxShadow: "inset 2px 0 6px -4px rgba(59,107,208,0.08), 0 1px 2px -1px rgba(0,0,0,0.03)",
+          borderTop: "1px solid rgba(59,107,208,0.06)",
+          borderRight: "1px solid rgba(59,107,208,0.04)",
+          borderBottom: "1px solid rgba(59,107,208,0.04)",
+        }}
       >
-        <div ref={contentRef} className="opacity-70 whitespace-pre-wrap break-words max-w-[65ch]">{block.content}</div>
+        <div ref={contentRef} className="whitespace-pre-wrap break-words max-w-[65ch]">{block.content}</div>
       </div>
     </div>
   );
@@ -46,12 +57,17 @@ function ThoughtBlock({ message, block, onToggleThought }: { message: ChatMessag
 
 function ActionStatusIcon({ status }: { status: ActionDetail["status"] }) {
   if (status === "running") {
-    return <Loader2 size={12} className="text-primary animate-spin" />;
+    return (
+      <span className="relative flex items-center justify-center w-3.5 h-3.5">
+        <span className="absolute w-3.5 h-3.5 rounded-full bg-primary/20 animate-ping" />
+        <span className="w-2 h-2 rounded-full bg-primary shadow-[0_0_4px_rgba(59,107,208,0.4)]" />
+      </span>
+    );
   }
   if (status === "done") {
-    return <CheckCircle2 size={12} className="text-emerald-500" />;
+    return <CheckCircle2 size={13} className="text-emerald-500" strokeWidth={2} />;
   }
-  return <XCircle size={12} className="text-red-400" />;
+  return <XCircle size={13} className="text-red-400" strokeWidth={2} />;
 }
 
 function ActionBlock({ block, onToggleThought, message }: { block: ChatMessageModel["blocks"][number]; onToggleThought: (messageId: string, blockId: string) => void; message: ChatMessageModel }) {
@@ -65,48 +81,59 @@ function ActionBlock({ block, onToggleThought, message }: { block: ChatMessageMo
   const errorCount = actions.filter((a) => a.status === "error").length;
 
   const headerLabel = isStreaming
-    ? `执行中... (${runningCount > 0 ? `${runningCount}项进行中` : ""}${doneCount > 0 ? ` ${doneCount}项完成` : ""})`
+    ? `执行中${runningCount > 0 ? ` · ${runningCount}项进行中` : ""}${doneCount > 0 ? ` · ${doneCount}项完成` : ""}`
     : isArchived
       ? `已执行 ${actions.length} 项操作`
       : `${actions.length} 项操作`;
 
   return (
-    <div className={`w-full max-w-full transition-all duration-300 ${isArchived ? "opacity-50" : "opacity-100"}`}>
+    <div className={`w-full max-w-full transition-all duration-300 ${isArchived ? "opacity-35" : "opacity-100"}`}>
       <button
         type="button"
         onClick={() => onToggleThought(message.id, block.id)}
-        className="flex items-center gap-2 text-xs font-medium text-muted-foreground/80 hover:text-foreground transition-colors duration-150 px-2 py-1.5 rounded-lg hover:bg-muted/40"
+        className="flex items-center gap-2.5 text-[11px] font-semibold tracking-wide text-muted-foreground/70 hover:text-foreground transition-colors duration-200 px-1.5 py-1.5 rounded-md hover:bg-muted/30"
       >
-        {isCollapsed ? <ChevronRight size={13} /> : <ChevronDown size={13} />}
+        {isCollapsed ? <ChevronRight size={12} strokeWidth={2} /> : <ChevronDown size={12} strokeWidth={2} />}
         {isStreaming ? (
-          <Loader2 size={13} className="text-primary animate-spin" />
+          <span className="relative flex items-center justify-center">
+            <span className="h-[6px] w-[6px] rounded-full bg-emerald-500 shadow-[0_0_6px_rgba(16,185,129,0.5)]" />
+            <span className="absolute h-[6px] w-[6px] rounded-full bg-emerald-500/40 animate-ping" />
+          </span>
         ) : (
-          <Wrench size={12} className="text-muted-foreground/60" />
+          <Wrench size={11} className="text-muted-foreground/50" strokeWidth={2} />
         )}
-        <span>{headerLabel}</span>
+        <span className="uppercase">{headerLabel}</span>
       </button>
       <div
-        className={`mt-1 ml-2 pl-4 pr-3 py-2 border border-emerald-500/[0.06] border-l-2 border-l-emerald-500/20 bg-emerald-500/[0.02] rounded-r-lg text-xs leading-relaxed transition-all duration-300 overflow-hidden ${isCollapsed ? "max-h-0 opacity-0 py-0 mt-0 border-0" : "max-h-60 opacity-100 overflow-y-auto"}`}
+        className={`mt-1 ml-3 pl-4 pr-3 py-2.5 rounded-r-lg text-[12px] leading-relaxed transition-all duration-300 overflow-hidden ${isCollapsed ? "max-h-0 opacity-0 py-0 mt-0" : "max-h-60 opacity-100 overflow-y-auto"}`}
+        style={{
+          background: "linear-gradient(135deg, rgba(16,185,129,0.04) 0%, rgba(16,185,129,0.01) 100%)",
+          borderLeft: "2px solid rgba(16,185,129,0.25)",
+          boxShadow: "inset 2px 0 6px -4px rgba(16,185,129,0.08), 0 1px 2px -1px rgba(0,0,0,0.03)",
+          borderTop: "1px solid rgba(16,185,129,0.06)",
+          borderRight: "1px solid rgba(16,185,129,0.04)",
+          borderBottom: "1px solid rgba(16,185,129,0.04)",
+        }}
       >
-        <div className="flex flex-col gap-1.5">
+        <div className="flex flex-col gap-2">
           {actions.map((action, idx) => (
             <div key={idx} className="flex flex-col">
-              <div className="flex items-center gap-2 py-0.5">
+              <div className="flex items-center gap-2.5 py-0.5">
                 <ActionStatusIcon status={action.status} />
-                <span className={`font-mono ${action.status === "running" ? "text-foreground" : action.status === "done" ? "text-muted-foreground" : "text-red-400"}`}>
+                <span className={`text-[12px] font-medium tracking-tight ${action.status === "running" ? "text-foreground" : action.status === "done" ? "text-muted-foreground/80" : "text-red-400"}`}>
                   {action.delegation?.label || getToolDisplayName(action.toolName)}
                 </span>
                 {action.status === "running" && (
-                  <span className="text-[10px] text-muted-foreground/50">执行中...</span>
+                  <span className="text-[10px] text-muted-foreground/45 font-medium">running</span>
                 )}
               </div>
               {action.status === "done" && action.delegation?.summary && (
-                <div className="ml-5 text-[10px] text-muted-foreground/50 max-h-16 overflow-y-auto whitespace-pre-wrap break-all">
+                <div className="ml-6 text-[11px] text-muted-foreground/50 max-h-16 overflow-y-auto whitespace-pre-wrap break-all leading-relaxed">
                   {action.delegation.summary.slice(0, 300)}
                 </div>
               )}
               {action.status === "error" && action.content && (
-                <div className="ml-5 text-[10px] text-red-400/70 truncate max-w-[400px]">
+                <div className="ml-6 text-[11px] text-red-400/70 truncate max-w-[400px]">
                   {action.content.slice(0, 80).replace(/\n/g, " ")}
                 </div>
               )}
@@ -165,17 +192,17 @@ export function ChatMessage({ message, onToggleThought }: ChatMessageProps) {
   const [previewArtifact, setPreviewArtifact] = useState<GeneratedArtifact | null>(null);
 
   return (
-    <div className={`flex w-full mb-5 ${isUser ? "justify-end" : "justify-start"}`}>
-      <div className={`flex gap-3.5 max-w-[85%] ${isUser ? "flex-row-reverse" : "flex-row"}`}>
+    <div className={`flex w-full mb-6 ${isUser ? "justify-end" : "justify-start"}`}>
+      <div className={`flex gap-3 max-w-[85%] ${isUser ? "flex-row-reverse" : "flex-row"}`}>
         <div className="flex-shrink-0 mt-0.5">
-          <div className={`w-8 h-8 rounded-full flex items-center justify-center ${isUser ? "bg-primary/10 text-primary" : isSystem ? "bg-amber-50 text-amber-600" : "bg-muted text-foreground"}`}>
-            {isUser ? <User size={15} /> : isSystem ? <Terminal size={15} /> : <Bot size={16} />}
+          <div className={`w-8 h-8 rounded-full flex items-center justify-center shadow-[0_2px_8px_-2px_rgba(0,0,0,0.06)] ${isUser ? "bg-primary/10 text-primary" : isSystem ? "bg-amber-50 text-amber-600" : "bg-gradient-to-br from-primary/12 to-primary/4 text-primary"}`}>
+            {isUser ? <User size={15} strokeWidth={1.8} /> : isSystem ? <Terminal size={15} strokeWidth={1.8} /> : <img src="/floodmind-icon.svg" alt="FloodMind" className="w-4.5 h-4.5" />}
           </div>
         </div>
 
         <div className={`flex flex-col gap-2 ${isUser ? "items-end" : "items-start"}`}>
           {isUser ? (
-            <div className="px-4 py-2.5 rounded-2xl rounded-tr-md bg-primary text-primary-foreground shadow-sm text-sm whitespace-pre-wrap">
+            <div className="px-4 py-2.5 rounded-2xl rounded-tr-md bg-primary text-primary-foreground shadow-[0_2px_8px_-2px_rgba(59,107,208,0.15)] text-sm whitespace-pre-wrap leading-relaxed">
               {message.content}
             </div>
           ) : isSystem ? (
@@ -194,7 +221,7 @@ export function ChatMessage({ message, onToggleThought }: ChatMessageProps) {
                 }
 
                 return (
-                  <div key={block.id} className={`px-4 py-3 rounded-2xl rounded-tl-md bg-card border border-border/80 text-sm text-foreground leading-relaxed transition-all duration-300 ${block.isArchived ? "opacity-50 scale-[0.99]" : "opacity-100"}`}>
+                  <div key={block.id} className={`px-4 py-3 rounded-2xl rounded-tl-md bg-card border border-border/60 text-sm text-foreground leading-relaxed transition-all duration-300 shadow-[0_1px_4px_-1px_rgba(0,0,0,0.03)] ${block.isArchived ? "opacity-50 scale-[0.99]" : "opacity-100"}`}>
                     <div className="prose prose-sm max-w-none prose-headings:text-foreground prose-p:text-foreground prose-strong:text-foreground prose-li:text-foreground prose-code:text-foreground prose-code:bg-muted prose-code:px-1 prose-code:rounded prose-table:text-foreground prose-th:bg-muted prose-th:border-border prose-td:border-border">
                       <ReactMarkdown remarkPlugins={[remarkGfm]}>{block.content}</ReactMarkdown>
                     </div>
