@@ -2323,6 +2323,15 @@ if __name__ == '__main__':
     
     session_manager.start_cleanup_thread()
     
+    logger.info("预加载 Embedding 模型与知识检索器...")
+    try:
+        from tools.base_tools import _get_retriever, set_rag_config
+        set_rag_config(enabled=True, persist_dir="./data/vector_store", embedding_model="BAAI/bge-base-zh-v1.5", top_k=10, session_id=None)
+        _get_retriever()
+        logger.info("Embedding 模型与知识检索器预加载完成")
+    except Exception as e:
+        logger.warning(f"预加载知识检索器失败（不影响功能）: {e}")
+    
     logger.info(f"启动 FloodAgent Web 服务器")
     logger.info(f"访问地址: http://{args.host}:{args.port}")
     logger.info(f"数据目录: {DATA_DIR}")
