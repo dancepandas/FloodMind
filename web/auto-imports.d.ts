@@ -27,8 +27,10 @@ declare global {
   const ChevronUpIcon: typeof import('lucide-react').ChevronUpIcon
   const CircleCheckIcon: typeof import('lucide-react').CircleCheckIcon
   const CircleIcon: typeof import('lucide-react').CircleIcon
+  const Clock: typeof import('lucide-react').Clock
   const CloudRain: typeof import('lucide-react').CloudRain
   const Command: typeof import('lucide-react').Command
+  const Cpu: typeof import('lucide-react').Cpu
   const Database: typeof import('lucide-react').Database
   const Download: typeof import('lucide-react').Download
   const ExternalLink: typeof import('lucide-react').ExternalLink
@@ -37,6 +39,7 @@ declare global {
   const FileSpreadsheet: typeof import('lucide-react').FileSpreadsheet
   const FileText: typeof import('lucide-react').FileText
   const FileType: typeof import('lucide-react').FileType
+  const FolderOpen: typeof import('lucide-react').FolderOpen
   const Form: typeof import('lucide-react').Form
   const Fragment: typeof import('react').Fragment
   const Globe: typeof import('lucide-react').Globe
@@ -72,6 +75,8 @@ declare global {
   const Trash2: typeof import('lucide-react').Trash2
   const TriangleAlertIcon: typeof import('lucide-react').TriangleAlertIcon
   const User: typeof import('lucide-react').User
+  const Waves: typeof import('lucide-react').Waves
+  const Wifi: typeof import('lucide-react').Wifi
   const Wrench: typeof import('lucide-react').Wrench
   const X: typeof import('lucide-react').X
   const XCircle: typeof import('lucide-react').XCircle

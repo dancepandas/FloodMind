@@ -1,106 +1,131 @@
-import { CloudRain, BarChart3, FileText, Zap, Search, Brain } from "lucide-react";
+import { CloudRain, BarChart3, FileText, ArrowRight, Waves, Cpu, Database, Zap } from "lucide-react";
 
 interface WelcomePageProps {
   onQuickAction?: (text: string) => void;
 }
 
-const features = [
+const taskCards = [
   {
     icon: CloudRain,
-    title: "洪水预报",
-    description: "多模型融合智能预报，覆盖多种水文模型",
-    accent: "from-blue-500/12 to-cyan-500/8",
+    title: "运行洪水预报",
+    description: "上传雨量或水位数据，自动调用模型脚本，输出预报结果与过程线",
+    action: "帮我运行一次洪水预报",
+    accent: "primary",
+    gradient: "from-primary/8 via-primary/4 to-transparent",
+    borderHover: "hover:border-primary/30",
+    iconBg: "bg-primary/8 text-primary",
+    arrowColor: "text-primary/50 group-hover:text-primary",
   },
   {
     icon: BarChart3,
-    title: "数据分析",
-    description: "自动处理水文数据，生成可视化图表与报告",
-    accent: "from-emerald-500/12 to-teal-500/8",
+    title: "分析水文数据",
+    description: "识别数据异常、统计过程线特征、生成可视化图表与对比分析",
+    action: "分析当前流域的降雨数据",
+    accent: "emerald",
+    gradient: "from-emerald-600/8 via-emerald-600/4 to-transparent",
+    borderHover: "hover:border-emerald-600/30",
+    iconBg: "bg-emerald-600/8 text-emerald-600",
+    arrowColor: "text-emerald-600/50 group-hover:text-emerald-600",
   },
   {
     icon: FileText,
-    title: "报告生成",
-    description: "一键生成 Word/PDF 格式的专业预报报告",
-    accent: "from-violet-500/12 to-purple-500/8",
-  },
-  {
-    icon: Search,
-    title: "知识检索",
-    description: "RAG 驱动的水文领域知识库，精准检索资料",
-    accent: "from-amber-500/12 to-orange-500/8",
-  },
-  {
-    icon: Brain,
-    title: "深度推理",
-    description: "推理模式对复杂水文问题进行深度分析",
-    accent: "from-rose-500/12 to-pink-500/8",
-  },
-  {
-    icon: Zap,
-    title: "工具调用",
-    description: "自动调度计算脚本与数据处理工具执行任务",
-    accent: "from-sky-500/12 to-indigo-500/8",
+    title: "生成专业报告",
+    description: "汇总预报结论、图表和参数，一键输出 Word / PDF 格式报告",
+    action: "生成洪水预报报告",
+    accent: "amber",
+    gradient: "from-amber-600/8 via-amber-600/4 to-transparent",
+    borderHover: "hover:border-amber-600/30",
+    iconBg: "bg-amber-600/8 text-amber-600",
+    arrowColor: "text-amber-600/50 group-hover:text-amber-600",
   },
 ];
 
 const quickActions = [
-  "帮我运行一次洪水预报",
-  "分析当前流域的降雨数据",
-  "生成洪水预报报告",
   "查询水文模型参数说明",
+  "对比不同模型预报结果",
+  "绘制降雨等值线图",
+  "导出站点数据为Excel",
+];
+
+const capabilities = [
+  { icon: Waves, label: "多模型融合" },
+  { icon: Cpu, label: "深度推理" },
+  { icon: Database, label: "RAG 知识库" },
+  { icon: Zap, label: "工具链执行" },
 ];
 
 export function WelcomePage({ onQuickAction }: WelcomePageProps) {
   return (
-    <div className="flex-1 flex flex-col items-center justify-center px-6 py-10 overflow-y-auto">
-      <div className="w-full max-w-3xl flex flex-col items-center gap-14 animate-fade-in-up">
-        <div className="flex flex-col items-center gap-5">
+    <div className="flex-1 flex flex-col items-center justify-center px-6 py-8 overflow-y-auto relative">
+      <div className="absolute inset-0 hydro-grid-bg opacity-60 pointer-events-none" />
+      <div className="absolute inset-x-0 top-0 h-64 hydro-radial-glow pointer-events-none" />
+
+      <div className="w-full max-w-2xl flex flex-col items-center gap-10 relative z-10 animate-fade-in-up">
+        <div className="flex flex-col items-center gap-4">
           <div className="relative">
-            <div className="w-16 h-16 rounded-2xl bg-gradient-to-br from-primary/15 to-primary/5 flex items-center justify-center shadow-[0_8px_24px_-6px_rgba(59,107,208,0.15)]">
-              <img src="/floodmind-icon.svg" alt="FloodMind" className="w-9 h-9 text-primary" style={{ filter: "drop-shadow(0 1px 2px rgba(59,107,208,0.2))" }} />
+            <div className="w-14 h-14 rounded-xl bg-gradient-to-br from-primary/12 to-primary/3 flex items-center justify-center border border-primary/10 shadow-[0_8px_24px_-6px_rgba(38,92,178,0.12)]">
+              <img src="/floodmind-icon.svg" alt="FloodMind" className="w-8 h-8" style={{ filter: "drop-shadow(0 1px 2px rgba(38,92,178,0.15))" }} />
             </div>
-            <div className="absolute -top-1 -right-1 w-3.5 h-3.5 rounded-full bg-emerald-400 border-2 border-background shadow-sm">
-              <div className="w-full h-full rounded-full bg-emerald-400 animate-ping opacity-40" />
+            <div className="absolute -top-0.5 -right-0.5 w-3 h-3 rounded-full bg-emerald-500 border-2 border-background">
+              <div className="w-full h-full rounded-full bg-emerald-500 animate-ping opacity-30" />
             </div>
           </div>
           <div className="text-center">
-            <h1 className="text-[28px] font-bold text-foreground tracking-tight leading-none">
+            <h1 className="text-2xl font-bold text-foreground tracking-tight leading-none">
               FloodMind
             </h1>
-            <p className="mt-3 text-muted-foreground/80 text-[14px] leading-relaxed max-w-[52ch]">
-              智能洪水预报助手 — 对话即可完成预报、分析与报告
+            <p className="mt-2.5 text-muted-foreground text-[13px] leading-relaxed max-w-[48ch]">
+              把洪水预报任务交给 Agent 执行 — 规划、计算、分析、制图、报告，端到端完成
             </p>
+          </div>
+          <div className="flex items-center gap-3 mt-1">
+            {capabilities.map(({ icon: Icon, label }) => (
+              <div key={label} className="flex items-center gap-1.5 px-2.5 py-1 rounded-md bg-muted/50 border border-border/40">
+                <Icon size={11} className="text-muted-foreground/60" strokeWidth={1.8} />
+                <span className="text-[10px] text-muted-foreground/70 font-medium tracking-tight">{label}</span>
+              </div>
+            ))}
           </div>
         </div>
 
-        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3 w-full">
-          {features.map(({ icon: Icon, title, description, accent }, i) => (
-            <div
+        <div className="flex flex-col gap-2.5 w-full">
+          <div className="px-1 mb-1">
+            <span className="text-[10px] font-semibold text-muted-foreground/40 tracking-[0.14em] uppercase">
+              任务启动
+            </span>
+          </div>
+          {taskCards.map(({ icon: Icon, title, description, action, gradient, borderHover, iconBg, arrowColor }, i) => (
+            <button
               key={title}
-              className="group relative flex flex-col gap-3 p-4 rounded-xl bg-card border border-border/50 hover:border-primary/20 transition-all duration-300 hover:shadow-[0_4px_16px_-4px_rgba(0,0,0,0.06)]"
-              style={{ animationDelay: `${i * 60}ms` }}
+              onClick={() => onQuickAction?.(action)}
+              className={`group relative w-full flex items-start gap-4 p-4 rounded-xl bg-card border border-border/50 ${borderHover} transition-all duration-300 hover:shadow-[0_4px_20px_-4px_rgba(0,0,0,0.06)] text-left cursor-pointer active:scale-[0.995]`}
+              style={{ animationDelay: `${i * 80}ms` }}
             >
-              <div className={`w-9 h-9 rounded-lg bg-gradient-to-br ${accent} flex items-center justify-center text-primary group-hover:scale-105 transition-transform duration-300`}>
-                <Icon size={17} strokeWidth={1.8} />
+              <div className={`absolute inset-0 rounded-xl bg-gradient-to-r ${gradient} opacity-0 group-hover:opacity-100 transition-opacity duration-500 pointer-events-none`} />
+              <div className={`relative w-10 h-10 rounded-lg ${iconBg} flex items-center justify-center flex-shrink-0`}>
+                <Icon size={18} strokeWidth={1.6} />
               </div>
-              <div>
-                <div className="text-[13px] font-semibold text-foreground tracking-tight">{title}</div>
-                <div className="text-[11px] text-muted-foreground/65 mt-1 leading-relaxed">{description}</div>
+              <div className="relative flex-1 min-w-0">
+                <div className="flex items-center gap-2">
+                  <span className="text-[13px] font-semibold text-foreground tracking-tight">{title}</span>
+                  <ArrowRight size={12} className={`${arrowColor} transition-all duration-300 group-hover:translate-x-0.5`} strokeWidth={2} />
+                </div>
+                <p className="text-[11px] text-muted-foreground/60 mt-1 leading-relaxed">{description}</p>
               </div>
-            </div>
+            </button>
           ))}
         </div>
 
-        <div className="flex flex-col items-center gap-3.5 w-full">
-          <span className="text-[10px] text-muted-foreground/40 font-semibold tracking-[0.15em] uppercase">
-            快速开始
+        <div className="flex flex-col items-center gap-3 w-full">
+          <span className="text-[10px] text-muted-foreground/35 font-semibold tracking-[0.14em] uppercase">
+            快速指令
           </span>
-          <div className="flex flex-wrap justify-center gap-2">
+          <div className="flex flex-wrap justify-center gap-1.5">
             {quickActions.map((action) => (
               <button
                 key={action}
                 onClick={() => onQuickAction?.(action)}
-                className="px-4 py-2 text-[13px] rounded-full bg-secondary/50 text-secondary-foreground/80 border border-border/50 hover:bg-primary hover:text-primary-foreground hover:border-primary hover:shadow-[0_4px_12px_-2px_rgba(59,107,208,0.2)] transition-all duration-250 cursor-pointer active:scale-[0.97]"
+                className="px-3 py-1.5 text-[12px] rounded-lg bg-secondary/60 text-muted-foreground/75 border border-border/40 hover:bg-primary/8 hover:text-primary hover:border-primary/20 transition-all duration-250 cursor-pointer active:scale-[0.97] font-medium"
               >
                 {action}
               </button>

@@ -407,21 +407,41 @@ class FloodAgent:
 {project_context}
 
 ## 角色职责
-你只负责四类事情：
+你负责五类事情：
 1. 分析用户意图和最终目标
 2. 规划任务步骤
 3. 把步骤分发给执行单元
 4. 汇总执行结果并回答用户
+5. 直接完成轻量无副作用任务（见下方"轻量执行边界"）
 
 ## 角色边界
-- 不负责亲自编写脚本、执行脚本、生成 Excel、构造 input.json、运行模型等具体任务
-- 不负责在没有校验的情况下直接宣布任务完成
+### 轻量执行边界（主 Agent 可直接完成）
+以下类型的任务你可以直接完成，无需分发给执行单元：
+- 意图澄清、任务拆解、计划生成
+- 小规模文本整理、摘要、格式化（数据量 ≤ 10 条）
+- 简单参数校验、路径校验、结果一致性检查
+- 只读查询类工具调用（knowledge_search、search_artifacts、read_artifact、get_skill、search_memory）
+- 不产生持久副作用的轻量计算
+- 对执行单元结果的补充解释、质量检查、重试决策
+- 简单问答、问候、知识解释
+
+### 必须委派边界（主 Agent 严禁直接执行）
+以下类型的任务必须分发给执行单元，不得亲自执行：
+- 写文件、生成 Word/Excel/PDF
+- 跑模型、跑脚本、批量数据处理
+- 调用外部系统或产生业务副作用
+- 构造复杂 JSON / 大数据表（数据量 > 10 条）
+- 多步骤领域任务（预报、调度、报告生成等）
+- 任何需要权限确认、可破坏、不可逆的操作
+- run_script、exec_python_file、exec_bash、write_text_file 等执行类工具
+
+### 通用原则
 - 如问好之类的简单问题直接回答就行
 - 不要把任务复杂化
 - 不要过度思考
 
 ## 可用工具
-- `create_plan`：【必须首先调用】创建结构化执行计划，明确用户意图、预期交付物和执行步骤
+- `create_plan`：【delegated / requires_plan 时必须调用】创建结构化执行计划，明确用户意图、预期交付物和执行步骤。lightweight 任务无需调用此工具
 - `get_skill`：查看 skill 的详细说明、脚本、参数和规则
 - `search_artifacts`：搜索当前会话或历史可复用产物
 - `read_artifact`：读取文本类产物
@@ -467,7 +487,20 @@ class FloodAgent:
 {skill_catalog}
 
 ## 调度工作流
-### 0. 创建执行计划（强制）
+### 0. 任务分级判断（强制）
+在处理用户请求时，你必须先判断任务级别：
+- **lightweight**：轻量无副作用任务（简单问答、只读查询、小规模文本整理 ≤10 条、参数校验等）→ 直接完成，无需 create_plan，无需委派
+- **delegated**：单步重任务（写文件、跑脚本、生成 Excel/PDF、批量数据等）→ 调用 create_plan 后委派执行单元
+- **requires_plan**：多步骤业务流程（预报+导出、分析+绘图+报告等）→ 调用 create_plan 后按步骤委派
+
+判断规则：
+- 涉及 run_script / exec_python_file / exec_bash / write_text_file → 至少是 delegated
+- 涉及文件产物（Excel/Word/PDF/PNG等）→ 至少是 delegated
+- 数据量 > 10 条 → 至少是 delegated
+- 多步骤领域任务 → requires_plan
+- 只读查询、简单问答、小文本整理 → lightweight
+
+### 1. 创建执行计划（delegated / requires_plan 时强制）
 在分发任何执行任务之前，你必须先调用 `create_plan` 工具：
 - user_goal: 用户的原始意图（不要包含上下文注入信息）
 - deliverables: 预期最终交付物类型，逗号分隔（image/excel/report/other）
@@ -517,12 +550,13 @@ class FloodAgent:
 3. 如果未完成，还缺什么
 
 ## 调度原则
-1. 只做规划、分发、汇总
+1. 默认负责规划、分发、汇总；同时允许直接完成轻量无副作用任务
 2. 如果有相关 skill，先查 skill，再决定是否委派
 3. 对执行单元只传当前这一步的执行指令，不传用户原始长输入和多余会话背景
 4. 严禁把超长 JSON 直接塞进任务描述
 5. 必须严格遵循 SKILL.md 及相关文档
 6. 不要过度解读任务，调度执行单元要谨慎！
+7. 凡涉及持久化产物、脚本执行、外部调用、批量数据、领域计算或权限风险的任务，必须分发给执行单元
 
 ## 输出规范
 - 最终输出不要包含完整路径
@@ -900,7 +934,7 @@ class FloodAgent:
             StructuredTool.from_function(
                 func=create_plan,
                 name="create_plan",
-                description="【必须首先调用】在分发任何执行任务之前，你必须先调用此工具创建结构化执行计划。明确用户意图、预期交付物和执行步骤。",
+                description="【delegated / requires_plan 时必须调用】在分发任何执行任务之前，先调用此工具创建结构化执行计划。明确用户意图、预期交付物和执行步骤。lightweight 任务（简单问答、只读查询等）无需调用此工具。",
                 args_schema=CreatePlanInput,
             ),
         ]
@@ -1126,8 +1160,6 @@ class FloodAgent:
 
     @staticmethod
     def _select_execution_plan(user_input: str) -> List[str]:
-        # 当前默认始终先由主 agent 统一理解和规划，避免在任务尚未澄清前
-        # 就因为规则命中而提前切到执行单元，导致执行顺序和展示逻辑混乱。
         return ["orchestrator"]
 
     def _build_initial_loop_state(self, user_input: str) -> AgentLoopState:
@@ -1137,7 +1169,7 @@ class FloodAgent:
             step_id="step-1",
             title="理解目标并开始执行",
             executor="orchestrator",
-            purpose="先由主 agent 理解最终目标、选择技能与执行单元，并产出第一轮结果。",
+            purpose="先由主 agent 理解最终目标、判断任务级别、选择技能与执行单元，并产出第一轮结果。",
             input_text=user_input,
         )
         state = AgentLoopState(original_input=user_input, user_message=user_message, plan=existing_plan, plan_steps=[initial_step])
@@ -1156,7 +1188,9 @@ class FloodAgent:
     @staticmethod
     def _requires_create_plan(result: Dict[str, Any]) -> bool:
         # 只有当主 agent 实际开始委派执行单元时，才强制要求先创建执行计划。
-        # 对于问候、直接问答、纯检索类请求，允许直接回答而不触发 create_plan。
+        # 对于问候、直接问答、纯检索类请求、轻量无副作用任务，允许直接回答而不触发 create_plan。
+        # lightweight 任务（只读查询、小文本整理等）无需 create_plan。
+        # delegated / requires_plan 任务（涉及执行类工具或委派）必须先 create_plan。
         return FloodAgent._result_includes_tool_call(result, "delegate_execution_specialist")
 
     @staticmethod

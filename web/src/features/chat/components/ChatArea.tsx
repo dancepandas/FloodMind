@@ -53,8 +53,9 @@ export function ChatArea({
       {messages.length === 0 ? (
         <WelcomePage onQuickAction={(text) => { onInputChange(text); onSubmit(); }} />
       ) : (
-        <div ref={scrollContainerRef} className="flex-1 overflow-y-auto px-6 py-6 scroll-smooth">
-          <div className="w-full flex flex-col">
+        <div ref={scrollContainerRef} className="flex-1 overflow-y-auto px-4 py-5 scroll-smooth relative">
+          <div className="absolute inset-0 hydro-grid-bg opacity-30 pointer-events-none" />
+          <div className="w-full max-w-[780px] mx-auto flex flex-col relative z-10">
             {messages.map((message) => (
               <ChatMessage key={message.id} message={message} onToggleThought={onToggleThought} />
             ))}
