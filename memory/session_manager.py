@@ -425,7 +425,7 @@ class SessionManager:
             result = []
             for m in messages:
                 msg_data = {
-                    "role": "user" if m.get("type") == "human" else "assistant",
+                    "role": "human" if m.get("type") == "human" else "FloodMind",
                     "content": m.get("content", "")
                 }
                 if m.get("reasoning"):

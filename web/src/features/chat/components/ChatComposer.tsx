@@ -1,6 +1,22 @@
 import { useState, useRef } from "react";
-import { Paperclip, Pause, Send, ChevronUp, Brain, Globe, Database } from "lucide-react";
-import type { ModelOption, SessionConfig } from "@/types/app";
+import { Paperclip, Pause, Send, ChevronUp, Brain, Globe, Database, ShieldAlert } from "lucide-react";
+import type { ModelOption, SessionConfig, PendingPermissionAsk } from "@/types/app";
+
+const PINNED_MODELS = ["glm_51", "qwen_36_plus", "deepseek_v4_flash", "minimax_m25"];
+
+function sortModels(models: ModelOption[]): ModelOption[] {
+  const pinned: ModelOption[] = [];
+  const rest: ModelOption[] = [];
+  for (const m of models) {
+    const idx = PINNED_MODELS.indexOf(m.key);
+    if (idx >= 0) {
+      pinned[idx] = m;
+    } else {
+      rest.push(m);
+    }
+  }
+  return [...pinned.filter(Boolean), ...rest];
+}
 
 const MODEL_ICON_MAP: Record<string, string> = {
   qwen_35_plus: "qwen",
@@ -45,6 +61,8 @@ interface ChatComposerProps {
   onPause: () => void;
   onUpload: (file: File) => void;
   onConfigChange: (config: SessionConfig) => void;
+  pendingPermissionAsk: PendingPermissionAsk | null;
+  onRespondPermissionAsk: (approved: boolean) => void;
 }
 
 export function ChatComposer({
@@ -58,11 +76,14 @@ export function ChatComposer({
   onPause,
   onUpload,
   onConfigChange,
+  pendingPermissionAsk,
+  onRespondPermissionAsk,
 }: ChatComposerProps) {
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const [modelMenuOpen, setModelMenuOpen] = useState(false);
 
   const currentModel = models.find((m) => m.key === config.model_key);
+  const sortedModels = sortModels(models);
 
   function selectModel(model: ModelOption) {
     setModelMenuOpen(false);
@@ -87,13 +108,40 @@ export function ChatComposer({
   const sendBtnClass = isRunning
     ? "bg-amber-500 text-white shadow-[0_2px_8px_-2px_rgba(245,158,11,0.25)] hover:bg-amber-600"
     : value.trim().length > 0 && !disabled
-    ? "bg-primary text-primary-foreground shadow-[0_2px_8px_-2px_rgba(38,92,178,0.25)] hover:bg-primary/90"
+    ? "bg-primary text-primary-foreground shadow-[0_2px_8px_-2px_rgba(14,165,233,0.25)] hover:bg-primary/90"
     : "bg-muted/50 text-muted-foreground/30";
 
   return (
     <div className="px-4 pt-2.5 pb-3 bg-gradient-to-t from-background via-background/95 to-background/70 backdrop-blur-lg border-t border-border/25">
       <div className="max-w-[780px] mx-auto">
-        <div className="relative flex items-end bg-card border border-border/60 rounded-xl focus-within:ring-2 focus-within:ring-primary/15 focus-within:border-primary/40 transition-all duration-300 shadow-[0_1px_12px_-3px_rgba(0,0,0,0.04)] focus-within:shadow-[0_2px_16px_-4px_rgba(38,92,178,0.08)]">
+        {pendingPermissionAsk && (
+          <div className="mb-2 flex items-center gap-2.5 px-3.5 py-2 rounded-xl border border-amber-200/60 bg-amber-50/70 shadow-[0_1px_4px_-1px_rgba(245,158,11,0.08)]">
+            <ShieldAlert size={15} className="text-amber-500 flex-shrink-0" strokeWidth={2} />
+            <div className="flex-1 min-w-0">
+              <div className="text-[12px] font-medium text-amber-800">权限确认</div>
+              {pendingPermissionAsk.askReason && (
+                <div className="text-[11px] text-amber-700/70 mt-0.5 truncate">{pendingPermissionAsk.askReason}</div>
+              )}
+            </div>
+            <div className="flex gap-1.5 flex-shrink-0">
+              <button
+                type="button"
+                className="px-3 py-1 text-[11px] font-medium rounded-md bg-emerald-500/15 text-emerald-600 hover:bg-emerald-500/25 transition-colors"
+                onClick={() => onRespondPermissionAsk(true)}
+              >
+                允许
+              </button>
+              <button
+                type="button"
+                className="px-3 py-1 text-[11px] font-medium rounded-md bg-red-500/15 text-red-500 hover:bg-red-500/25 transition-colors"
+                onClick={() => onRespondPermissionAsk(false)}
+              >
+                拒绝
+              </button>
+            </div>
+          </div>
+        )}
+        <div className="relative flex items-end bg-card border border-border/60 rounded-2xl focus-within:ring-2 focus-within:ring-primary/15 focus-within:border-primary/40 transition-all duration-300 shadow-[0_1px_12px_-3px_rgba(0,0,0,0.04)] focus-within:shadow-[0_2px_16px_-4px_rgba(14,165,233,0.08)]">
           <button
             type="button"
             onClick={() => fileInputRef.current?.click()}
@@ -158,8 +206,8 @@ export function ChatComposer({
             {modelMenuOpen && (
               <>
                 <div className="fixed inset-0 z-40" onClick={() => setModelMenuOpen(false)} />
-                <div className="absolute bottom-full left-0 mb-1.5 z-50 min-w-[240px] bg-popover border border-border/50 rounded-lg shadow-[0_8px_24px_-6px_rgba(0,0,0,0.12)] py-0.5 overflow-hidden backdrop-blur-lg">
-                  {models.map((model) => {
+                <div className="absolute bottom-full left-0 mb-1.5 z-50 min-w-[240px] bg-popover border border-border/50 rounded-lg shadow-[0_8px_24px_-6px_rgba(0,0,0,0.12)] py-0.5 backdrop-blur-lg max-h-[230px] overflow-y-auto">
+                  {sortedModels.map((model) => {
                     const isActive = model.key === config.model_key;
                     return (
                       <button

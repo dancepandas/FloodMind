@@ -1,449 +1,429 @@
 """
-AgentTool 统一工具运行时
+Agent 工具定义
 
-借鉴 Claude Code 的 buildTool 模式，为所有工具提供统一的行为特征接口：
-- is_readonly: 工具是否只读（不修改文件系统）
-- is_destructive: 工具是否具有破坏性
-- is_concurrency_safe: 工具是否可并发执行
-- check_permissions: 权限检查（路径白名单、危险命令检测）
-- validate_input: 输入校验
-- interrupt_behavior: 中断行为 ('cancel' | 'block')
-
-工具分类：
-- 只读工具: knowledge_search, search_artifacts, read_artifact, get_skill, search_memory, search_tool_error_memory
-- 写入工具: write_text_file, update_project_instructions, add_knowledge, add_memory
-- 执行工具: exec_bash, run_script, exec_python_file
-- 网络工具: web_search
+提供标准化的工具注册和调用机制，不依赖 LangChain。
+每个工具都是独立的、可序列化的、可快速迁移的组件。
 """
 
+import inspect
 import json
 import logging
 import os
 import re
-import threading
-from enum import Enum
+import traceback
 from pathlib import Path
-from typing import Optional, Dict, Any, List, Callable
+from typing import Any, Callable, Dict, List, Optional, Type, Union
 
-from langchain_core.tools import BaseTool
 from pydantic import BaseModel, Field
+
+from agent.runtime.contracts.permissions import (
+    InterruptBehavior,
+    PermissionBehavior,
+    PermissionDecision,
+    ToolPermissionPolicy,
+    ValidationResult,
+)
+from agent.runtime.contracts.paths import PathResolveResult
+from agent.runtime.services.path_service import get_path_service
+from agent.runtime.services.permission_service import (
+    PermissionService,
+    get_permission_service,
+    set_permission_service,
+)
 
 logger = logging.getLogger(__name__)
 
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
 
-class PermissionBehavior(str, Enum):
-    ALLOW = "allow"
-    DENY = "deny"
-    ASK = "ask"
+class ToolResult:
+    """工具执行结果"""
+
+    def __init__(self, output: Any, success: bool = True, error: Optional[str] = None):
+        self.output = output
+        self.success = success
+        self.error = error
+
+    def __str__(self) -> str:
+        if self.success:
+            return str(self.output)
+        return f"Error: {self.error}"
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "output": str(self.output),
+            "success": self.success,
+            "error": self.error,
+        }
 
 
-class PermissionResult(BaseModel):
-    behavior: PermissionBehavior = PermissionBehavior.ALLOW
-    reason: str = ""
+class AgentTool(BaseModel):
+    """Agent 工具基类
 
+    替代 langchain_core.tools.BaseTool，提供独立的工具定义。
+    每个工具都是可序列化的、可独立运行的组件。
+    """
 
-class ValidationResult(BaseModel):
-    valid: bool = True
-    reason: str = ""
+    name: str = Field(description="工具名称")
+    description: str = Field(description="工具描述")
+    func: Optional[Callable] = Field(default=None, description="工具执行函数", exclude=True)
+    args_schema: Optional[Type[BaseModel]] = Field(default=None, description="参数 schema")
 
+    # 行为标记
+    is_readonly: bool = Field(default=True, description="是否只读")
+    is_destructive: bool = Field(default=False, description="是否破坏性操作")
+    requires_confirmation: bool = Field(default=False, description="是否需要用户确认")
+    is_concurrency_safe: bool = Field(default=True, description="是否并发安全")
+    category: str = Field(default="general", description="工具分类")
+    tags: List[str] = Field(default_factory=list, description="工具标签")
 
-class InterruptBehavior(str, Enum):
-    CANCEL = "cancel"
-    BLOCK = "block"
+    # 权限
+    check_permissions_fn: Optional[Callable] = Field(default=None, description="权限检查函数", exclude=True)
+    permission_policy: Optional[ToolPermissionPolicy] = Field(default=None, description="权限策略")
 
+    model_config = {"arbitrary_types_allowed": True}
 
-_DANGEROUS_COMMAND_PATTERNS = [
-    re.compile(r'\brm\s+-rf\b', re.IGNORECASE),
-    re.compile(r'\bdel\s+/[sS]\b', re.IGNORECASE),
-    re.compile(r'\bformat\s+[A-Za-z]:', re.IGNORECASE),
-    re.compile(r'\brmdir\s+/[sS]\b', re.IGNORECASE),
-    re.compile(r'\bshred\b', re.IGNORECASE),
-    re.compile(r'\bdd\s+if=', re.IGNORECASE),
-    re.compile(r'\bmkfs\b', re.IGNORECASE),
-    re.compile(r'>\s*/dev/sd', re.IGNORECASE),
-    re.compile(r'\bchmod\s+-R\s+777\b', re.IGNORECASE),
-    re.compile(r'\bchown\s+-R\b', re.IGNORECASE),
-    re.compile(r'\bgit\s+push\s+--force\b', re.IGNORECASE),
-    re.compile(r'\bgit\s+reset\s+--hard\b', re.IGNORECASE),
-    re.compile(r'\bdocker\s+system\s+prune', re.IGNORECASE),
-    re.compile(r'\bdocker\s+rm\s+-f\b', re.IGNORECASE),
-]
+    def run(self, **kwargs) -> ToolResult:
+        """执行工具"""
+        if self.func is None:
+            return ToolResult(output=None, success=False, error=f"工具 {self.name} 没有执行函数")
 
-_FORBIDDEN_PATH_PATTERNS = [
-    re.compile(r'^/etc/', re.IGNORECASE),
-    re.compile(r'^C:\\Windows\\', re.IGNORECASE),
-    re.compile(r'^C:\\Program Files\\', re.IGNORECASE),
-    re.compile(r'^C:\\Program Files \\(x86\\)\\', re.IGNORECASE),
-    re.compile(r'^/usr/sbin/', re.IGNORECASE),
-    re.compile(r'^/sbin/', re.IGNORECASE),
-]
-
-_WRITE_ALLOWED_PREFIXES = [
-    _PROJECT_ROOT / "data",
-    _PROJECT_ROOT / "scripts",
-]
-
-_WRITE_ALLOWED_TOPLEVEL_FILES = {
-    "AGENTS.md",
-}
-
-
-def _is_write_allowed(resolved: Path) -> bool:
-    try:
-        resolved = resolved.resolve()
-    except Exception:
-        return False
-
-    def _is_relative_to(path: Path, base: Path) -> bool:
         try:
-            path.relative_to(base.resolve())
-            return True
-        except ValueError:
-            return False
+            if self.args_schema:
+                validated = self.args_schema(**kwargs)
+                result = self.func(**validated.model_dump())
+            else:
+                result = self.func(**kwargs)
 
-    for prefix in _WRITE_ALLOWED_PREFIXES:
-        if _is_relative_to(resolved, prefix):
-            return True
-    project_root = _PROJECT_ROOT.resolve()
-    if _is_relative_to(resolved, project_root):
-        rel = str(resolved.relative_to(project_root))
-        if not rel:
-            return False
-        if rel in _WRITE_ALLOWED_TOPLEVEL_FILES:
-            return True
-        top_dir = rel.split(os.sep)[0].split("/")[0]
-        if top_dir in ("data", "scripts"):
-            return True
-        return False
-    return False
+            if isinstance(result, ToolResult):
+                return result
+            return ToolResult(output=result)
 
+        except Exception as e:
+            error_msg = f"工具 {self.name} 执行失败: {e}\n{traceback.format_exc()}"
+            logger.error(error_msg)
+            return ToolResult(output=None, success=False, error=str(e))
 
-def _get_session_output_dir() -> Optional[str]:
-    try:
-        from tools.base_tools import get_current_session_output_dir
-        return get_current_session_output_dir()
-    except Exception:
-        return None
+    def get_schema(self) -> Dict[str, Any]:
+        """获取工具的 OpenAI function calling schema"""
+        schema: Dict[str, Any] = {
+            "type": "function",
+            "function": {
+                "name": self.name,
+                "description": self.description,
+            },
+        }
 
+        if self.args_schema:
+            args_schema = self.args_schema.model_json_schema()
+            properties = args_schema.get("properties", {})
+            required = args_schema.get("required", [])
 
-def _resolve_path(path_str: str) -> Path:
-    try:
-        from tools.base_tools import _strip_session_prefix
-        path_str = _strip_session_prefix(path_str)
-    except Exception:
-        pass
-    p = Path(path_str)
-    if p.is_absolute():
-        return p.resolve()
-    output_dir = _get_session_output_dir()
-    if output_dir:
-        return (Path(output_dir) / p).resolve()
-    return (_PROJECT_ROOT / p).resolve()
+            # 清理内部字段
+            for prop in properties.values():
+                prop.pop("title", None)
 
-
-def check_dangerous_command(command: str) -> PermissionResult:
-    for pattern in _DANGEROUS_COMMAND_PATTERNS:
-        if pattern.search(command):
-            return PermissionResult(
-                behavior=PermissionBehavior.DENY,
-                reason=f"检测到危险命令模式: {pattern.pattern}",
-            )
-    return PermissionResult(behavior=PermissionBehavior.ALLOW)
-
-
-def check_path_permission(path_str: str, *, require_write: bool = False) -> PermissionResult:
-    try:
-        resolved = _resolve_path(path_str)
-    except Exception:
-        return PermissionResult(behavior=PermissionBehavior.DENY, reason=f"无效路径: {path_str}")
-
-    for pattern in _FORBIDDEN_PATH_PATTERNS:
-        if pattern.match(str(resolved)):
-            return PermissionResult(
-                behavior=PermissionBehavior.DENY,
-                reason=f"禁止访问系统目录: {pattern.pattern}",
-            )
-
-    if require_write:
-        if not _is_write_allowed(resolved):
-            return PermissionResult(
-                behavior=PermissionBehavior.ASK,
-                reason=f"写入路径 {resolved} 不在允许目录内",
-            )
-
-    return PermissionResult(behavior=PermissionBehavior.ALLOW)
-
-
-class AgentTool(BaseTool):
-    is_readonly: bool = True
-    is_destructive: bool = False
-    is_concurrency_safe: bool = True
-    interrupt_behavior: str = InterruptBehavior.CANCEL
-    func: Optional[Callable] = None
-    check_permissions_fn: Optional[Callable] = None
-    validate_input_fn: Optional[Callable] = None
-
-    class Config:
-        arbitrary_types_allowed = True
-
-    def check_permissions(self, tool_input: Dict[str, Any]) -> PermissionResult:
-        if self.check_permissions_fn:
-            return self.check_permissions_fn(tool_input)
-        return PermissionResult(behavior=PermissionBehavior.ALLOW)
-
-    def validate_input(self, tool_input: Dict[str, Any]) -> ValidationResult:
-        if self.validate_input_fn:
-            return self.validate_input_fn(tool_input)
-        return ValidationResult(valid=True)
-
-    def _run(self, *args, **kwargs):
-        perm_result = self._check_execution_permissions(kwargs)
-        if perm_result is not None:
-            return perm_result
-
-        validation = self.validate_input(kwargs)
-        if not validation.valid:
-            return f"[输入校验失败] {validation.reason}"
-
-        if self.func is not None:
-            return self.func(**kwargs)
-        raise NotImplementedError(f"Tool {self.name} has no func implementation")
-
-    def _check_execution_permissions(self, tool_input: Dict[str, Any]) -> Optional[str]:
-        if _permission_manager is not None:
-            result = _permission_manager.check(self, tool_input)
+            schema["function"]["parameters"] = {
+                "type": "object",
+                "properties": properties,
+                "required": required,
+            }
         else:
-            result = self.check_permissions(tool_input)
-        if result.behavior == PermissionBehavior.DENY:
-            return f"[权限拒绝] {result.reason}"
-        if result.behavior == PermissionBehavior.ASK:
-            logger.warning(f"工具 {self.name} 需要 ASK 确认: {result.reason}，默认拒绝")
-            return f"[权限拒绝] 需要用户确认: {result.reason}"
-        return None
+            schema["function"]["parameters"] = {
+                "type": "object",
+                "properties": {},
+            }
 
+        return schema
 
-TOOL_DEFAULTS = {
-    "is_readonly": True,
-    "is_destructive": False,
-    "is_concurrency_safe": True,
-    "interrupt_behavior": InterruptBehavior.CANCEL,
-}
+    def to_tool_info(self) -> Dict[str, Any]:
+        """返回工具信息字典"""
+        return {
+            "name": self.name,
+            "description": self.description,
+            "schema": self.get_schema(),
+            "is_readonly": self.is_readonly,
+            "is_destructive": self.is_destructive,
+            "category": self.category,
+        }
 
 
 def build_agent_tool(
-    name: str,
-    description: str,
-    args_schema: type[BaseModel],
     func: Callable,
-    *,
-    is_readonly: bool = TOOL_DEFAULTS["is_readonly"],
-    is_destructive: bool = TOOL_DEFAULTS["is_destructive"],
-    is_concurrency_safe: bool = TOOL_DEFAULTS["is_concurrency_safe"],
-    interrupt_behavior: str = TOOL_DEFAULTS["interrupt_behavior"],
+    name: Optional[str] = None,
+    description: Optional[str] = None,
+    args_schema: Optional[Type[BaseModel]] = None,
+    is_readonly: bool = True,
+    is_destructive: bool = False,
+    requires_confirmation: bool = False,
+    is_concurrency_safe: bool = True,
+    category: str = "general",
+    tags: Optional[List[str]] = None,
     check_permissions_fn: Optional[Callable] = None,
-    validate_input_fn: Optional[Callable] = None,
+    permission_policy: Optional[ToolPermissionPolicy] = None,
 ) -> AgentTool:
+    """从函数构建 AgentTool"""
+    tool_name = name or func.__name__
+    tool_description = description or func.__doc__ or f"执行 {tool_name}"
+
     return AgentTool(
-        name=name,
-        description=description,
-        args_schema=args_schema,
+        name=tool_name,
+        description=tool_description,
         func=func,
+        args_schema=args_schema,
         is_readonly=is_readonly,
         is_destructive=is_destructive,
+        requires_confirmation=requires_confirmation,
         is_concurrency_safe=is_concurrency_safe,
-        interrupt_behavior=interrupt_behavior,
+        category=category,
+        tags=tags or [],
         check_permissions_fn=check_permissions_fn,
-        validate_input_fn=validate_input_fn,
+        permission_policy=permission_policy,
     )
 
 
+# ---------------------------------------------------------------------------
+# 权限检查工厂函数
+# ---------------------------------------------------------------------------
+
+def make_readonly_permission_fn() -> Callable[[dict], PermissionDecision]:
+    """只读工具权限检查 — 默认允许"""
+    def _fn(tool_input: dict) -> PermissionDecision:
+        return PermissionDecision(behavior=PermissionBehavior.ALLOW)
+    return _fn
+
+
+def make_write_permission_fn(path_field: str = "file_path") -> Callable[[dict], PermissionDecision]:
+    """写入工具权限检查 — 检查路径是否在允许范围内"""
+    def _fn(tool_input: dict) -> PermissionDecision:
+        raw_path = tool_input.get(path_field, "")
+        if not raw_path:
+            return PermissionDecision(behavior=PermissionBehavior.ALLOW)
+        result = resolve_tool_path(raw_path, access="write")
+        if not result.allowed:
+            return PermissionDecision(behavior=PermissionBehavior.DENY, reason=result.reason)
+        return PermissionDecision(behavior=PermissionBehavior.ALLOW)
+    return _fn
+
+
+def make_exec_permission_fn(
+    command_field: str = "command",
+    path_fields: Optional[List[str]] = None,
+) -> Callable[[dict], PermissionDecision]:
+    """执行工具权限检查 — 检查命令和路径"""
+    def _fn(tool_input: dict) -> PermissionDecision:
+        for pf in (path_fields or []):
+            raw_path = tool_input.get(pf, "")
+            if raw_path:
+                result = resolve_tool_path(raw_path, access="exec")
+                if not result.allowed:
+                    return PermissionDecision(behavior=PermissionBehavior.DENY, reason=result.reason)
+        return PermissionDecision(behavior=PermissionBehavior.ALLOW)
+    return _fn
+
+
+def make_skill_script_permission_fn() -> Callable[[dict], PermissionDecision]:
+    """技能脚本权限检查 — 默认允许（脚本路径由 skill 注册表约束）"""
+    def _fn(tool_input: dict) -> PermissionDecision:
+        return PermissionDecision(behavior=PermissionBehavior.ALLOW)
+    return _fn
+
+
+def make_ask_permission_fn(reason: str = "") -> Callable[[dict], PermissionDecision]:
+    """需要用户确认的权限检查 — 默认询问"""
+    def _fn(tool_input: dict) -> PermissionDecision:
+        return PermissionDecision(behavior=PermissionBehavior.ASK, reason=reason)
+    return _fn
+
+
+def make_read_path_permission_fn(path_field: str = "file_path") -> Callable[[dict], PermissionDecision]:
+    """读取路径权限检查 — 检查路径是否可读"""
+    def _fn(tool_input: dict) -> PermissionDecision:
+        raw_path = tool_input.get(path_field, "")
+        if not raw_path:
+            return PermissionDecision(behavior=PermissionBehavior.ALLOW)
+        result = resolve_tool_path(raw_path, access="read")
+        if not result.allowed:
+            return PermissionDecision(behavior=PermissionBehavior.DENY, reason=result.reason)
+        return PermissionDecision(behavior=PermissionBehavior.ALLOW)
+    return _fn
+
+
+# ---------------------------------------------------------------------------
+# 路径解析
+# ---------------------------------------------------------------------------
+
+def _strip_session_prefix(path_str: str) -> str:
+    """剥离 data/sessions/<id>/outputs/ 前缀"""
+    return get_path_service().strip_session_prefix(path_str)
+
+
+def resolve_tool_path(
+    path_str: str,
+    access: str = "read",
+) -> PathResolveResult:
+    """统一路径解析入口"""
+    return get_path_service().resolve_simple(path_str, access=access)
+
+
+# ---------------------------------------------------------------------------
+# AGENTS.md 路径
+# ---------------------------------------------------------------------------
+
+def get_agents_md_path(scope: str = "project") -> Path:
+    """获取 AGENTS.md 文件路径"""
+    if scope == "global":
+        home = Path.home()
+        agents_dir = home / ".floodmind"
+        agents_dir.mkdir(parents=True, exist_ok=True)
+        return agents_dir / "AGENTS.md"
+    return _PROJECT_ROOT / "AGENTS.md"
+
+
+# ---------------------------------------------------------------------------
+# 兼容别名
+# ---------------------------------------------------------------------------
+
+PermissionResult = PermissionDecision
+
+set_permission_manager = set_permission_service
+
+
+# ---------------------------------------------------------------------------
+# 工具默认配置
+# ---------------------------------------------------------------------------
+
+TOOL_DEFAULTS = {
+    "max_output_length": 8000,
+    "timeout_seconds": 120,
+    "retry_count": 0,
+}
+
+
+# ---------------------------------------------------------------------------
+# 安全检查函数
+# ---------------------------------------------------------------------------
+
+_DANGEROUS_COMMANDS = [
+    "rm -rf /", "rm -rf /*", "mkfs", "dd if=", ":(){ :|:& };:",
+    "wget.*|.*sh", "curl.*|.*sh", "> /dev/sda",
+]
+
+
+def check_dangerous_command(command: str) -> ValidationResult:
+    """检查命令是否危险"""
+    cmd_lower = command.lower().strip()
+    for pattern in _DANGEROUS_COMMANDS:
+        if pattern in cmd_lower:
+            return ValidationResult(
+                valid=False,
+                reason=f"命令包含危险模式: {pattern}",
+            )
+    return ValidationResult(valid=True)
+
+
+def check_path_permission(path_str: str, access: str = "read") -> ValidationResult:
+    """检查路径权限"""
+    result = resolve_tool_path(path_str, access=access)
+    return ValidationResult(
+        valid=result.allowed,
+        reason=getattr(result, "reason", ""),
+    )
+
+class UpdateProjectInstructionsInput(BaseModel):
+    """修改项目指令的输入参数"""
+    action: str = Field(default="append", description="操作类型: append, replace_section, remove_section")
+    content: str = Field(default="", description="要添加或替换的内容")
+    section_title: str = Field(default="", description="章节标题（replace_section/remove_section 必填）")
+    scope: str = Field(default="project", description="范围: project 或 global")
+
+
+# ---------------------------------------------------------------------------
+# 工具注册中心
+# ---------------------------------------------------------------------------
+
 class ToolRegistry:
-    _tools: Dict[str, AgentTool] = {}
-    _lock = threading.Lock()
+    """工具注册中心
 
-    @classmethod
-    def register(cls, tool: AgentTool) -> None:
-        with cls._lock:
-            cls._tools[tool.name] = tool
+    集中管理所有工具，支持分类查询和批量注册。
+    """
 
-    @classmethod
-    def get(cls, name: str) -> Optional[AgentTool]:
-        with cls._lock:
-            return cls._tools.get(name)
+    def __init__(self):
+        self._tools: Dict[str, AgentTool] = {}
 
-    @classmethod
-    def all(cls) -> List[AgentTool]:
-        with cls._lock:
-            return list(cls._tools.values())
+    def register(self, tool: AgentTool) -> None:
+        """注册工具"""
+        self._tools[tool.name] = tool
+        logger.debug(f"工具注册: {tool.name}")
 
-    @classmethod
-    def readonly_tools(cls) -> List[AgentTool]:
-        with cls._lock:
-            return [t for t in cls._tools.values() if t.is_readonly]
+    def unregister(self, name: str) -> None:
+        """注销工具"""
+        if name in self._tools:
+            del self._tools[name]
 
-    @classmethod
-    def destructive_tools(cls) -> List[AgentTool]:
-        with cls._lock:
-            return [t for t in cls._tools.values() if t.is_destructive]
+    def get(self, name: str) -> Optional[AgentTool]:
+        """获取工具"""
+        return self._tools.get(name)
+
+    def get_all(self) -> Dict[str, AgentTool]:
+        """获取所有工具"""
+        return dict(self._tools)
+
+    def get_by_category(self, category: str) -> List[AgentTool]:
+        """按分类获取工具"""
+        return [t for t in self._tools.values() if t.category == category]
+
+    def get_schemas(self) -> List[Dict[str, Any]]:
+        """获取所有工具的 OpenAI function calling schemas"""
+        return [tool.get_schema() for tool in self._tools.values()]
+
+    def get_readonly_tools(self) -> List[AgentTool]:
+        """获取只读工具"""
+        return [t for t in self._tools.values() if t.is_readonly]
+
+    def get_destructive_tools(self) -> List[AgentTool]:
+        """获取破坏性工具"""
+        return [t for t in self._tools.values() if t.is_destructive]
+
+    def run_tool(self, name: str, **kwargs) -> ToolResult:
+        """执行工具"""
+        tool = self.get(name)
+        if tool is None:
+            return ToolResult(output=None, success=False, error=f"工具 {name} 不存在")
+        return tool.run(**kwargs)
+
+    def __len__(self) -> int:
+        return len(self._tools)
+
+    def __contains__(self, name: str) -> bool:
+        return name in self._tools
 
     @classmethod
     def clear(cls) -> None:
-        with cls._lock:
-            cls._tools = {}
+        """清空全局注册表"""
+        global_tool_registry._tools.clear()
 
     @classmethod
-    def metadata_table(cls) -> List[Dict[str, Any]]:
-        with cls._lock:
-            return [
-                {
-                    "name": t.name,
-                    "readonly": t.is_readonly,
-                    "destructive": t.is_destructive,
-                    "concurrency_safe": t.is_concurrency_safe,
-                    "interrupt": t.interrupt_behavior,
-                    "category": _tool_category(t),
-                }
-                for t in cls._tools.values()
-            ]
-
-
-def _tool_category(tool: AgentTool) -> str:
-    if tool.is_destructive:
-        return "execution"
-    if tool.is_readonly:
-        if "search" in tool.name or "read" in tool.name or "get" in tool.name:
-            return "retrieval"
-        return "read"
-    return "write"
-
-
-_GLOBAL_AGENTS_DIR = Path.home() / ".floodagent"
-_GLOBAL_AGENTS_MD = _GLOBAL_AGENTS_DIR / "AGENTS.md"
-_PROJECT_AGENTS_MD = _PROJECT_ROOT / "AGENTS.md"
-
-
-def get_agents_md_path(scope: str) -> Path:
-    if scope == "global":
-        return _GLOBAL_AGENTS_MD
-    return _PROJECT_AGENTS_MD
-
-
-class PermissionRule(BaseModel):
-    name: str = ""
-    tool_name: Optional[str] = None
-    pattern: Optional[str] = None
-    behavior: PermissionBehavior = PermissionBehavior.DENY
-    reason: str = ""
-
-    def matches(self, tool_name: str, tool_input: Dict[str, Any]) -> bool:
-        if self.tool_name and self.tool_name != tool_name:
-            return False
-        if self.pattern:
-            import re as _re
-            try:
-                text = json.dumps(tool_input, ensure_ascii=False) if isinstance(tool_input, dict) else str(tool_input)
-            except (TypeError, ValueError):
-                text = str(tool_input)
-            if not _re.search(self.pattern, text):
-                return False
-        return True
-
-
-class PermissionManager:
-    def __init__(self):
-        self._deny_rules: List[PermissionRule] = []
-        self._allow_rules: List[PermissionRule] = []
-        self._on_ask_callback: Optional[Callable] = None
-
-    def add_deny_rule(self, rule: PermissionRule) -> None:
-        self._deny_rules.append(rule)
-
-    def add_allow_rule(self, rule: PermissionRule) -> None:
-        self._allow_rules.append(rule)
-
-    def set_on_ask_callback(self, callback: Callable) -> None:
-        self._on_ask_callback = callback
-
-    def check(self, tool: AgentTool, tool_input: Dict[str, Any]) -> PermissionResult:
-        result = tool.check_permissions(tool_input)
-        if result.behavior == PermissionBehavior.DENY:
-            return result
-
-        for rule in self._deny_rules:
-            if rule.matches(tool.name, tool_input):
-                return PermissionResult(
-                    behavior=rule.behavior,
-                    reason=rule.reason or f"全局拒绝规则 '{rule.name}' 命中",
-                )
-
-        for rule in self._allow_rules:
-            if rule.matches(tool.name, tool_input):
-                return PermissionResult(
-                    behavior=PermissionBehavior.ALLOW,
-                    reason=rule.reason or f"全局允许规则 '{rule.name}' 命中",
-                )
-
-        if result.behavior == PermissionBehavior.ASK:
-            if self._on_ask_callback:
-                try:
-                    user_decision = self._on_ask_callback(tool.name, tool_input, result.reason)
-                    if user_decision:
-                        return PermissionResult(behavior=PermissionBehavior.ALLOW, reason="用户确认允许")
-                    return PermissionResult(behavior=PermissionBehavior.DENY, reason="用户拒绝")
-                except Exception as e:
-                    logger.warning(f"权限确认回调异常: {e}")
-            return result
-
-        return result
+    def register(cls, tool: AgentTool) -> None:
+        """注册工具到全局注册表"""
+        global_tool_registry._tools[tool.name] = tool
+        logger.debug(f"工具注册: {tool.name}")
 
     @classmethod
-    def create_default(cls) -> "PermissionManager":
-        mgr = cls()
-        mgr.add_deny_rule(PermissionRule(
-            name="deny_system_path_write",
-            pattern=r"(/etc/|C:\\\\Windows\\\\|C:\\\\Program Files)",
-            behavior=PermissionBehavior.DENY,
-            reason="禁止写入系统目录",
-        ))
-        mgr.add_deny_rule(PermissionRule(
-            name="deny_destructive_command",
-            tool_name="exec_bash",
-            pattern=r"(rm\s+-rf|rm -rf|del\s+/[sS]|del /s|format\s+[A-Za-z]:|rmdir\s+/[sS]|rmdir /s)",
-            behavior=PermissionBehavior.DENY,
-            reason="检测到破坏性命令",
-        ))
-        return mgr
+    def get(cls, name: str) -> Optional[AgentTool]:
+        """从全局注册表获取工具"""
+        return global_tool_registry._tools.get(name)
+
+    @classmethod
+    def get_all(cls) -> Dict[str, AgentTool]:
+        """获取全局注册表所有工具"""
+        return dict(global_tool_registry._tools)
+
+    @classmethod
+    def get_schemas(cls) -> List[Dict[str, Any]]:
+        """获取全局注册表所有工具的 schemas"""
+        return [tool.get_schema() for tool in global_tool_registry._tools.values()]
 
 
-class UpdateProjectInstructionsInput(BaseModel):
-    action: str = Field(
-        default="append",
-        description="操作类型: append=追加内容, replace_section=替换章节, remove_section=删除章节",
-    )
-    content: str = Field(
-        default="",
-        description="要追加或替换的内容（纯文本，不需要加 ## 标题，工具会自动处理）",
-    )
-    section_title: str = Field(
-        default="",
-        description="章节标题（replace_section/remove_section 时必填，如 '用户偏好'）",
-    )
-    scope: str = Field(
-        default="project",
-        description="作用域: project=本项目AGENTS.md, global=全局~/.floodagent/AGENTS.md",
-    )
-
-
-_permission_manager: Optional["PermissionManager"] = None
-
-
-def set_permission_manager(mgr: "PermissionManager") -> None:
-    global _permission_manager
-    _permission_manager = mgr
-    logger.info("PermissionManager 已接入执行路径")
-
-
-def get_permission_manager() -> Optional["PermissionManager"]:
-    return _permission_manager
+# 全局工具注册中心
+global_tool_registry = ToolRegistry()

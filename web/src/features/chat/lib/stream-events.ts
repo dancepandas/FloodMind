@@ -5,12 +5,18 @@ import {
   attachArtifact,
   finalizeThoughtBlocks,
   setAssistantFinalContent,
+  updateActionBlockStatus,
 } from "@/features/chat/lib/message-blocks";
 import { createLogger } from "@/lib/logger";
-import { uuid } from "@/lib/utils";
 import type { ChatMessage, GeneratedArtifact, ReferenceLink, ToolActivity, WorkflowPlan } from "@/types/app";
 
 const log = createLogger("Stream");
+
+function normalizeWorkflowStatus(raw: string): "pending" | "running" | "completed" | "error" {
+  if (raw === "completed" || raw === "running" || raw === "pending" || raw === "error") return raw;
+  if (raw === "done") return "completed";
+  return "pending";
+}
 
 function parseKnowledgeReferences(content: string): ReferenceLink[] {
   const refs: ReferenceLink[] = [];
@@ -69,7 +75,7 @@ export function applyStreamEvent(data: Record<string, any>, handlers: StreamHand
     return;
   }
 
-  if (data.type === "reasoning") {
+  if (data.type === "thought_delta" || data.type === "reasoning") {
     log.debug(`[${eventType}] len=${(data.content || "").length}`);
     updateAssistant((message) => appendThoughtBlock(message, data.content || "", true));
     return;
@@ -78,6 +84,12 @@ export function applyStreamEvent(data: Record<string, any>, handlers: StreamHand
   if (data.type === "thought_summary") {
     log.debug(`[${eventType}] len=${(data.content || "").length}`);
     updateAssistant((message) => appendThoughtBlock(message, data.content || "", false));
+    return;
+  }
+
+  if (data.type === "answer_delta" || data.type === "token") {
+    log.debug(`[${eventType}] len=${(data.content || "").length}`);
+    updateAssistant((message) => appendAnswerBlock(message, data.content || "", true));
     return;
   }
 
@@ -90,7 +102,7 @@ export function applyStreamEvent(data: Record<string, any>, handlers: StreamHand
         key: step.key || step.step_key || `${index}`,
         label: step.label || step.title || step.detail || `步骤 ${index + 1}`,
         title: step.title || step.label || step.detail || "",
-        status: step.status || "pending",
+        status: normalizeWorkflowStatus(step.status || "pending"),
         detail: step.detail || "",
         outcome: step.outcome || "",
         expected_deliverables: step.expected_deliverables || [],
@@ -101,43 +113,75 @@ export function applyStreamEvent(data: Record<string, any>, handlers: StreamHand
   }
 
   if (data.type === "workflow_step") {
-    log.info(`[${eventType}] step_key="${data.step_key}" status="${data.status}" label="${data.label || data.title || ""}"`);
+    const stepKey = data.step_key || "";
+    const rawStatus = data.status || "pending";
+    const normalizedStatus = normalizeWorkflowStatus(rawStatus);
+    log.info(`[${eventType}] step_key="${stepKey}" status="${rawStatus}" -> "${normalizedStatus}"`);
     setWorkflow((prev) => {
       const steps = [...(prev?.steps || [])];
-      const idx = steps.findIndex((step) => step.key === data.step_key);
-      const next = {
-        key: data.step_key || uuid(),
-        label: data.label || data.title || data.detail || "步骤",
-        title: data.title || data.detail || data.label || "",
-        status: data.status || "pending",
-        detail: data.detail || "",
-        outcome: data.outcome || "",
-      };
-      if (idx >= 0) steps[idx] = { ...steps[idx], ...next };
-      else steps.push(next);
+      const idx = steps.findIndex((step) => step.key === stepKey);
+      if (idx < 0) {
+        log.warn(`[${eventType}] unknown step_key="${stepKey}", ignoring`);
+        return prev || { title: "调度计划", steps: [] };
+      }
+      steps[idx] = { ...steps[idx], status: normalizedStatus };
       return { title: prev?.title || "调度计划", steps };
     });
     return;
   }
 
-  if (data.type === "tool_status") {
+if (data.type === "action_start" || data.type === "tool_status") {
     const status = data.status === "error" ? "error" : "running";
     const toolName = data.tool_name || "tool";
-    log.info(`[${eventType}] tool="${toolName}" status="${status}"`);
+    const callId = data.call_id || "";
+    log.info(`[${eventType}] tool="${toolName}" call_id="${callId}" status="${status}"`);
     pushToolActivity(toolName, data.content || "", status);
     const delegation = data.delegation || undefined;
-    updateAssistant((message) => appendActionBlock(message, toolName, status, data.content || "", delegation));
+    updateAssistant((message) => appendActionBlock(message, toolName, status, data.content || "", delegation, callId));
     return;
   }
 
-  if (data.type === "tool_result") {
+  if (data.type === "permission_ask") {
+    const askId = data.ask_id || "";
+    const toolName = data.tool_name || "tool";
+    const askReason = data.reason || "";
+    const askSessionId = data.session_id || "";
+    const callId = data.call_id || (askId ? `ask-${askId}` : "");
+    log.info(`[${eventType}] permission_ask ask_id="${askId}" tool="${toolName}" call_id="${callId}" reason="${askReason}"`);
+    pushToolActivity(toolName, askReason, "pending_confirmation");
+    if (callId) {
+      updateAssistant((message) =>
+        updateActionBlockStatus(message, callId, "pending_confirmation", askReason, { askId, askReason, sessionId: askSessionId })
+      );
+    } else {
+      updateAssistant((message) =>
+        appendActionBlock(message, toolName, "pending_confirmation", askReason, undefined, "", askId, askReason, askSessionId)
+      );
+    }
+    return;
+  }
+
+  if (data.type === "permission_resolved") {
+    const callId = data.call_id || "";
+    const approved = !!data.approved;
+    log.info(`[${eventType}] call_id="${callId}" approved=${approved}`);
+    if (callId) {
+      updateAssistant((message) =>
+        updateActionBlockStatus(message, callId, approved ? "running" : "error", approved ? "" : "权限被拒绝")
+      );
+    }
+    return;
+  }
+
+  if (data.type === "action_end" || data.type === "tool_result") {
     const contentPreview = (data.content || "").slice(0, 120);
     const toolName = data.tool_name || "tool";
+    const callId = data.call_id || "";
     const rawContent = data.content || "";
-    log.info(`[${eventType}] tool="${toolName}" content=${contentPreview.length > 0 ? `"${contentPreview}…"` : "(empty)"}`);
+    log.info(`[${eventType}] tool="${toolName}" call_id="${callId}" content=${contentPreview.length > 0 ? `"${contentPreview}…"` : "(empty)"}`);
     pushToolActivity(toolName, rawContent, "done");
     const delegation = data.delegation || undefined;
-    updateAssistant((message) => appendActionBlock(message, toolName, "done", rawContent, delegation));
+    updateAssistant((message) => appendActionBlock(message, toolName, "done", rawContent, delegation, callId));
 
     let refs: ReferenceLink[] | null = null;
     if (toolName === "knowledge_search") {
@@ -161,11 +205,16 @@ export function applyStreamEvent(data: Record<string, any>, handlers: StreamHand
     return;
   }
 
-  if (data.type === "file_generated" || data.type === "image_generated") {
-    log.info(`[${eventType}] filename="${data.filename}" filepath="${data.filepath}" image_url="${data.image_url || ''}" download_url="${data.download_url || ''}" size=${data.size}`);
+  if (data.type === "final") {
+    const contentLen = (data.content || "").length;
+    const artifactCount = (data.artifacts || []).length;
+    log.info(`[${eventType}] content_len=${contentLen} artifacts=${artifactCount}`);
+    const artifacts = (data.artifacts || []) as GeneratedArtifact[];
     updateAssistant((message) => {
-      const updated = attachArtifact(message, data as GeneratedArtifact);
-      log.info(`[${eventType}] attachArtifact result: artifacts count=${updated.artifacts?.length}, last artifact type=${updated.artifacts?.[updated.artifacts.length - 1]?.type}, image_url=${updated.artifacts?.[updated.artifacts.length - 1]?.image_url}`);
+      let updated = setAssistantFinalContent(finalizeThoughtBlocks(message), data.content || "");
+      for (const artifact of artifacts) {
+        updated = attachArtifact(updated, artifact);
+      }
       return updated;
     });
     return;
@@ -174,6 +223,16 @@ export function applyStreamEvent(data: Record<string, any>, handlers: StreamHand
   if (data.type === "final_override") {
     log.info(`[${eventType}] len=${(data.content || "").length}`);
     updateAssistant((message) => setAssistantFinalContent(finalizeThoughtBlocks(message), data.content || ""));
+    return;
+  }
+
+  if (data.type === "file_generated" || data.type === "image_generated") {
+    log.info(`[${eventType}] filename="${data.filename}" filepath="${data.filepath}" image_url="${data.image_url || ''}" download_url="${data.download_url || ''}" size=${data.size}`);
+    updateAssistant((message) => {
+      const updated = attachArtifact(message, data as GeneratedArtifact);
+      log.info(`[${eventType}] attachArtifact result: artifacts count=${updated.artifacts?.length}, last artifact type=${updated.artifacts?.[updated.artifacts.length - 1]?.type}, image_url=${updated.artifacts?.[updated.artifacts.length - 1]?.image_url}`);
+      return updated;
+    });
     return;
   }
 
@@ -186,7 +245,7 @@ export function applyStreamEvent(data: Record<string, any>, handlers: StreamHand
   if (data.content) {
     const preview = (data.content || "").slice(0, 80);
     log.debug(`[content] type="${data.type || "(none)"}" len=${(data.content || "").length} preview="${preview}…"`);
-    updateAssistant((message) => appendAnswerBlock(message, data.content || "", data.type === "token"));
+    updateAssistant((message) => appendAnswerBlock(message, data.content || "", false));
     return;
   }
 

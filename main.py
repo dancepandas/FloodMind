@@ -1,7 +1,7 @@
 """
 洪水预报智能体主程序
 
-使用LangChain框架搭建的洪水预报智能体系统。
+使用Native Runtime搭建的洪水预报智能体系统。
 """
 
 import os
@@ -14,7 +14,7 @@ load_dotenv()
 from config.settings import settings
 from models import get_qwen_llm_service
 from memory import SimpleMemory
-from agent import FloodAgent
+from agent import create_flood_agent
 
 
 # 配置日志
@@ -57,12 +57,12 @@ root_logger.addHandler(console_handler)
 logger = logging.getLogger(__name__)
 
 
-def init_agent() -> FloodAgent:
+def init_agent():
     """
     初始化智能体
     
     Returns:
-        FloodAgent实例
+        NativeFloodAgent实例
     """
     logger.info("=" * 60)
     logger.info("洪水预报智能体初始化")
@@ -93,7 +93,7 @@ def init_agent() -> FloodAgent:
     logger.info(f"✓ 记忆系统初始化完成 - 最大历史: {settings.agent.max_history}轮")
     
     # 4. 创建智能体
-    agent = FloodAgent(
+    agent = create_flood_agent(
         llm_service=llm_service,
         memory=memory,
         enable_chronos_warmup=settings.agent.enable_chronos_warmup

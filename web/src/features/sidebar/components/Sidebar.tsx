@@ -20,8 +20,8 @@ export function Sidebar({
     <div className="w-[260px] h-full bg-sidebar border-r border-sidebar-border/50 flex flex-col flex-shrink-0">
       <div className="px-4 pt-4 pb-3 flex flex-col gap-3">
         <div className="flex items-center gap-2.5 px-1">
-          <div className="w-8 h-8 rounded-lg bg-gradient-to-br from-primary/12 to-primary/3 flex items-center justify-center border border-primary/8">
-            <img src="/floodmind-icon.svg" alt="FloodMind" className="w-4.5 h-4.5" />
+          <div className="w-8 h-8 rounded-lg bg-sky-500 flex items-center justify-center shadow-[0_2px_8px_-2px_rgba(14,165,233,0.3)]">
+            <img src="/floodmind-icon.svg" alt="FloodMind" className="w-4.5 h-4.5" style={{ filter: "brightness(0) invert(1)" }} />
           </div>
           <div className="flex flex-col">
             <span className="font-bold text-[14px] text-foreground tracking-tight leading-none">
@@ -33,9 +33,9 @@ export function Sidebar({
 
         <button
           onClick={onNewSession}
-          className="flex items-center justify-center gap-2 w-full px-3 py-2 bg-primary/[0.05] border border-border/50 rounded-lg hover:bg-primary hover:text-primary-foreground hover:border-primary hover:shadow-[0_4px_16px_-4px_rgba(38,92,178,0.15)] transition-all duration-250 text-[13px] font-medium active:scale-[0.98] group"
+          className="flex items-center justify-center gap-2 w-full px-3 py-2 bg-sky-50/60 border border-sky-200/40 rounded-lg hover:bg-sky-500 hover:text-white hover:border-sky-500 hover:shadow-[0_4px_16px_-4px_rgba(14,165,233,0.2)] transition-all duration-250 text-[13px] font-medium active:scale-[0.98] group text-sky-600"
         >
-          <Plus size={14} className="text-muted-foreground group-hover:text-primary-foreground transition-colors duration-200" />
+            <Plus size={14} className="text-sky-500 group-hover:text-white transition-colors duration-200" />
           <span>新建预报任务</span>
         </button>
       </div>
@@ -55,7 +55,7 @@ export function Sidebar({
                 onClick={() => onSelectSession(session.session_id)}
                 className={`flex-1 flex items-center gap-2.5 px-3 py-2 rounded-lg text-[12px] transition-colors text-left truncate ${active ? "text-foreground font-medium pl-4" : "text-muted-foreground hover:text-foreground"}`}
               >
-                <MessageSquare size={13} className={`flex-shrink-0 ${active ? "text-primary" : "text-muted-foreground/40"}`} strokeWidth={1.8} />
+                <MessageSquare size={13} className={`flex-shrink-0 ${active ? "text-sky-500" : "text-muted-foreground/40"}`} strokeWidth={1.8} />
                 <span className="truncate">{session.title || "未命名任务"}</span>
               </button>
               <button

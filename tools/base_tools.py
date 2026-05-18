@@ -29,26 +29,37 @@ from typing import Optional, Dict, Any, List, Union
 from pydantic import BaseModel, Field
 
 from tools.agent_tool import (
-    AgentTool,
     ToolRegistry,
-    PermissionBehavior,
-    PermissionResult,
-    check_dangerous_command,
-    check_path_permission,
     build_agent_tool,
     UpdateProjectInstructionsInput,
     get_agents_md_path,
+    make_readonly_permission_fn,
+    make_write_permission_fn,
+    make_exec_permission_fn,
+    make_skill_script_permission_fn,
+    make_ask_permission_fn,
+    make_read_path_permission_fn,
+    resolve_tool_path,
 )
+from agent.runtime.contracts.permissions import ToolPermissionPolicy
 
 logger = logging.getLogger(__name__)
 
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent
 _RETRY_GUARD_LOCK = threading.Lock()
-_RETRY_GUARD_STATE = {
-    "signature": None,
-    "consecutive_failures": 0,
-    "last_error_output": None,
-}
+_RETRY_GUARD_STATES: Dict[str, dict] = {}
+
+
+def _get_retry_guard_state() -> dict:
+    session_id = _SESSION_CONTEXT.get("session_id", "") or "default"
+    with _RETRY_GUARD_LOCK:
+        if session_id not in _RETRY_GUARD_STATES:
+            _RETRY_GUARD_STATES[session_id] = {
+                "signature": None,
+                "consecutive_failures": 0,
+                "last_error_output": None,
+            }
+        return _RETRY_GUARD_STATES[session_id]
 _RETRY_GUARD_PROMPT = (
     "\n\n[重试保护提示]\n"
     "你已经连续三次对同一个工具或 skill 使用相同或等价参数且都失败了。"
@@ -134,9 +145,10 @@ def _normalize_args(args: Union[str, List, None]) -> List[str]:
 
 def reset_retry_guard() -> None:
     """在每次新的 Agent 请求开始前重置重复失败检测状态。"""
+    state = _get_retry_guard_state()
     with _RETRY_GUARD_LOCK:
-        _RETRY_GUARD_STATE["signature"] = None
-        _RETRY_GUARD_STATE["consecutive_failures"] = 0
+        state["signature"] = None
+        state["consecutive_failures"] = 0
 
 
 def _normalize_signature_value(value: Any) -> str:
@@ -189,13 +201,14 @@ def _looks_like_error_output(output: str) -> bool:
 def _check_retry_guard_before_exec(tool_name: str, **signature_parts: Any) -> Optional[str]:
     """在工具执行前检查是否已被重试保护拦截。返回拦截消息或 None。"""
     signature = _build_call_signature(tool_name, **signature_parts)
+    state = _get_retry_guard_state()
     with _RETRY_GUARD_LOCK:
-        if _RETRY_GUARD_STATE["signature"] == signature and _RETRY_GUARD_STATE["consecutive_failures"] >= 3:
-            last_err = _RETRY_GUARD_STATE.get("last_error_output") or "无详细错误信息"
+        if state["signature"] == signature and state["consecutive_failures"] >= 3:
+            last_err = state.get("last_error_output") or "无详细错误信息"
             sig_display = signature[:300]
-            _RETRY_GUARD_STATE["signature"] = None
-            _RETRY_GUARD_STATE["consecutive_failures"] = 0
-            _RETRY_GUARD_STATE["last_error_output"] = None
+            state["signature"] = None
+            state["consecutive_failures"] = 0
+            state["last_error_output"] = None
             return (
                 f"[重试保护] 使用 [{sig_display}] 执行工具已经连续错误三次，请重新阅读 SKILL.md 文档，调整参数后再调用工具。\n\n"
                 f"完整报错信息：\n{last_err}"
@@ -204,21 +217,22 @@ def _check_retry_guard_before_exec(tool_name: str, **signature_parts: Any) -> Op
 
 
 def _apply_retry_guard(tool_name: str, signature: str, output: str) -> str:
+    state = _get_retry_guard_state()
     if not _looks_like_error_output(output):
         with _RETRY_GUARD_LOCK:
-            _RETRY_GUARD_STATE["signature"] = None
-            _RETRY_GUARD_STATE["consecutive_failures"] = 0
+            state["signature"] = None
+            state["consecutive_failures"] = 0
         return output
 
     with _RETRY_GUARD_LOCK:
-        if _RETRY_GUARD_STATE["signature"] == signature:
-            _RETRY_GUARD_STATE["consecutive_failures"] += 1
+        if state["signature"] == signature:
+            state["consecutive_failures"] += 1
         else:
-            _RETRY_GUARD_STATE["signature"] = signature
-            _RETRY_GUARD_STATE["consecutive_failures"] = 1
+            state["signature"] = signature
+            state["consecutive_failures"] = 1
 
-        _RETRY_GUARD_STATE["last_error_output"] = output.strip()[:2000]
-        consecutive_failures = _RETRY_GUARD_STATE["consecutive_failures"]
+        state["last_error_output"] = output.strip()[:2000]
+        consecutive_failures = state["consecutive_failures"]
 
     if consecutive_failures >= 3 and _RETRY_GUARD_PROMPT not in output:
         logger.warning("检测到连续 %s 次相同失败调用: %s", consecutive_failures, signature)
@@ -285,34 +299,12 @@ class ExecPythonFileInput(BaseModel):
 
 
 def _strip_session_prefix(path_str: str) -> str:
-    """剥离 LLM 误加的 data/sessions/<id>/outputs/ 或 data/sessions/<id>/ 前缀。
-    
-    LLM 经常传入 data/sessions/xxx/result.py 这样的路径，如果直接拼到 output_dir 
-    会变成 <output_dir>/data/sessions/xxx/result.py（路径嵌套）。
-    """
-    s = path_str.replace("\\", "/")
-    m = re.match(r"^data/sessions/[^/]+/outputs/(.+)$", s)
-    if m:
-        return m.group(1)
-    m = re.match(r"^data/sessions/[^/]+/(.+)$", s)
-    if m:
-        return m.group(1)
-    m = re.match(r"^data/sessions/(.+)$", s)
-    if m:
-        return m.group(1)
-    return path_str
+    from tools.agent_tool import _strip_session_prefix as _agent_strip
+    return _agent_strip(path_str)
 
 
-def _resolve_path(path_str: str) -> Path:
-    """解析路径：绝对路径直接用，相对路径优先从 session output 目录解析，再 fallback 到项目根。"""
-    path_str = _strip_session_prefix(path_str)
-    p = Path(path_str)
-    if p.is_absolute():
-        return p.resolve()
-    output_dir = _SESSION_CONTEXT.get("output_dir")
-    if output_dir:
-        return (Path(output_dir) / p).resolve()
-    return (_PROJECT_ROOT / p).resolve()
+def _resolve_path(path_str: str, *, access: str = "read") -> Path:
+    return resolve_tool_path(path_str, access=access).resolved
 
 
 class WriteTextFileInput(BaseModel):
@@ -653,6 +645,8 @@ get_skill = build_agent_tool(
     is_readonly=True,
     is_destructive=False,
     is_concurrency_safe=True,
+    check_permissions_fn=make_readonly_permission_fn(),
+    permission_policy=ToolPermissionPolicy(policy_type="readonly"),
 )
 
 
@@ -758,6 +752,8 @@ search_tool_error_memory = build_agent_tool(
     is_readonly=True,
     is_destructive=False,
     is_concurrency_safe=True,
+    check_permissions_fn=make_readonly_permission_fn(),
+    permission_policy=ToolPermissionPolicy(policy_type="readonly"),
 )
 
 
@@ -923,6 +919,8 @@ run_script = build_agent_tool(
     is_readonly=False,
     is_destructive=True,
     is_concurrency_safe=False,
+    check_permissions_fn=make_skill_script_permission_fn(),
+    permission_policy=ToolPermissionPolicy(policy_type="skill_script"),
 )
 
 
@@ -940,15 +938,6 @@ def _impl_exec_bash(command: str = "", timeout: int = 120) -> str:
     
     if not command:
         return _finalize_tool_output("exec_bash", "错误：命令不能为空", command=command, timeout=timeout)
-
-    danger_check = check_dangerous_command(command)
-    if danger_check.behavior == PermissionBehavior.DENY:
-        return _finalize_tool_output(
-            "exec_bash",
-            f"权限拒绝：{danger_check.reason}",
-            command=command,
-            timeout=timeout,
-        )
 
     normalized_command = command.lower()
     if normalized_command.startswith("powershell ") or normalized_command.startswith("powershell.exe ") or normalized_command.startswith("pwsh ") or normalized_command.startswith("pwsh.exe ") or normalized_command.startswith("bash ") or normalized_command.startswith("sh "):
@@ -1019,6 +1008,8 @@ exec_bash = build_agent_tool(
     is_readonly=False,
     is_destructive=True,
     is_concurrency_safe=False,
+    check_permissions_fn=make_exec_permission_fn("command"),
+    permission_policy=ToolPermissionPolicy(policy_type="exec", command_field="command"),
 )
 
 
@@ -1051,7 +1042,7 @@ def _impl_exec_python_file(
             workdir=workdir,
         )
 
-    script_file = _resolve_path(script_path)
+    script_file = resolve_tool_path(script_path, access="exec").resolved
 
     if not script_file.exists() or not script_file.is_file():
         return _finalize_tool_output(
@@ -1078,7 +1069,11 @@ def _impl_exec_python_file(
     except json.JSONDecodeError:
         env_dict = {}
 
-    exec_cwd_path = Path(workdir).resolve() if workdir else None
+    exec_cwd_path = None
+    if workdir:
+        from agent.runtime.services.path_service import get_path_service
+        cwd_result = get_path_service().resolve_simple(workdir, access="cwd")
+        exec_cwd_path = cwd_result.resolved
     if exec_cwd_path is None:
         session_output_dir = _SESSION_CONTEXT.get("output_dir")
         if session_output_dir:
@@ -1178,13 +1173,15 @@ exec_python_file = build_agent_tool(
         "执行一个本地 Python 文件。"
         "适用于先通过 `write_text_file` 写出临时 `.py` 脚本，再稳定执行该脚本。"
         "相比 `python -c \"...\"` 更适合多行逻辑、文件转换和 JSON 生成场景。"
-        "脚本的工作目录已自动设为当前会话的输出目录，因此输出文件参数只写文件名（如 result.json），不要加任何目录前缀。"
+        "脚本的工作目录已自动设为当前对话的输出目录，因此输出文件参数只写文件名（如 result.json），不要加任何目录前缀。"
     ),
     args_schema=ExecPythonFileInput,
     func=_impl_exec_python_file,
     is_readonly=False,
     is_destructive=True,
     is_concurrency_safe=False,
+    check_permissions_fn=make_exec_permission_fn("command", ["script_path", "workdir"]),
+    permission_policy=ToolPermissionPolicy(policy_type="exec", command_field="command", path_fields=["script_path", "workdir"]),
 )
 
 
@@ -1206,23 +1203,15 @@ def _impl_write_text_file(file_path: str = "", content: str = "", encoding: str 
             encoding=encoding,
         )
 
-    perm = check_path_permission(file_path, require_write=True)
-    if perm.behavior == PermissionBehavior.DENY:
+    path_result = resolve_tool_path(file_path, access="write")
+    if path_result.source == "no_context_rejected":
         return _finalize_tool_output(
             "write_text_file",
-            f"权限拒绝：{perm.reason}",
+            "错误：无会话上下文时相对路径写入被拒绝。正确做法：只写文件名（如 result.py），系统会自动写入当前对话输出目录。不要传 data/sessions/... 等目录前缀。",
             file_path=file_path,
             encoding=encoding,
         )
-    if perm.behavior == PermissionBehavior.ASK:
-        return _finalize_tool_output(
-            "write_text_file",
-            f"权限拒绝：需要用户确认: {perm.reason}",
-            file_path=file_path,
-            encoding=encoding,
-        )
-
-    target_file = _resolve_path(file_path)
+    target_file = path_result.resolved
 
     try:
         target_file.parent.mkdir(parents=True, exist_ok=True)
@@ -1249,14 +1238,17 @@ write_text_file = build_agent_tool(
         "直接写入文本文件。"
         "适用于生成临时 Python 脚本、JSON 文件、CSV 文件或其他文本文件，"
         "可避免通过 PowerShell here-string 或复杂转义来写文件。"
-        "文件会自动写入当前会话的输出目录。file_path 只写文件名（如 generate_data.py），"
+        "file_path 只写文件名（如 generate_data.py），系统会自动写入当前对话的输出目录。"
         "不要加任何目录前缀（不要写 data/sessions/xxx.py，否则路径嵌套出错）。"
+        "不要传目录路径，只传文件名。"
     ),
     args_schema=WriteTextFileInput,
     func=_impl_write_text_file,
     is_readonly=False,
     is_destructive=True,
     is_concurrency_safe=False,
+    check_permissions_fn=make_write_permission_fn("file_path"),
+    permission_policy=ToolPermissionPolicy(policy_type="write", path_field="file_path"),
 )
 
 
@@ -1329,6 +1321,8 @@ search_artifacts = build_agent_tool(
     is_readonly=True,
     is_destructive=False,
     is_concurrency_safe=True,
+    check_permissions_fn=make_readonly_permission_fn(),
+    permission_policy=ToolPermissionPolicy(policy_type="readonly"),
 )
 
 
@@ -1394,6 +1388,8 @@ check_artifact_exists = build_agent_tool(
     is_readonly=True,
     is_destructive=False,
     is_concurrency_safe=True,
+    check_permissions_fn=make_readonly_permission_fn(),
+    permission_policy=ToolPermissionPolicy(policy_type="readonly"),
 )
 
 
@@ -1412,7 +1408,7 @@ def _impl_read_artifact(artifact_path: str = "", max_chars: int = 12000) -> str:
             max_chars=max_chars,
         )
 
-    path = _resolve_path(artifact_path)
+    path = resolve_tool_path(artifact_path, access="read").resolved
 
     if not path.exists() or not path.is_file():
         return _finalize_tool_output(
@@ -1469,6 +1465,8 @@ read_artifact = build_agent_tool(
     is_readonly=True,
     is_destructive=False,
     is_concurrency_safe=True,
+    check_permissions_fn=make_read_path_permission_fn("artifact_path"),
+    permission_policy=ToolPermissionPolicy(policy_type="read_path", path_field="artifact_path"),
 )
 
 
@@ -1603,16 +1601,12 @@ def _get_retriever():
         if getattr(_RAG_CONFIG, "_retriever_key", None) == retriever_key and _RAG_CONFIG.retriever is not None:
             return _RAG_CONFIG.retriever
         try:
-            from rag.retriever import KnowledgeRetriever
+            from rag.vector_store import VectorStoreManager
             from rag.embeddings import EmbeddingManager
             persist_dir, embedding_model, top_k = retriever_key
 
-            if getattr(_RAG_CONFIG, "_retriever_key", None) != retriever_key:
-                KnowledgeRetriever.reset()
-                EmbeddingManager.reset()
-            
             logger.info(f"初始化检索器: persist_dir={persist_dir}, embedding_model={embedding_model}, top_k={top_k}")
-            
+
             import os
             permanent_dir = os.path.join(persist_dir, "permanent")
             if os.path.exists(permanent_dir):
@@ -1621,17 +1615,18 @@ def _get_retriever():
                 logger.info(f"永久知识库目录内容: {files}")
             else:
                 logger.warning(f"永久知识库目录不存在: {permanent_dir}")
-            
-            retriever = KnowledgeRetriever(
+
+            EmbeddingManager.reset()
+            embedding_mgr = EmbeddingManager(model_name=embedding_model)
+            store = VectorStoreManager(
                 persist_dir=persist_dir,
-                embedding_model=embedding_model,
-                top_k=top_k,
+                embedding_manager=embedding_mgr,
             )
-            
-            doc_count = retriever.permanent_store.get_document_count()
+
+            doc_count = store.get_document_count()
             logger.info(f"永久知识库文档数: {doc_count}")
-            
-            _RAG_CONFIG.retriever = retriever
+
+            _RAG_CONFIG.retriever = store
             _RAG_CONFIG._retriever_key = retriever_key
             
         except Exception as e:
@@ -1708,28 +1703,30 @@ def _impl_knowledge_search(
     
     try:
         session_id = _rag_cfg_var.get({}).get("session_id") or get_current_session_id()
-        result = retriever.search(
+        documents = retriever.search(
             query=query,
-            session_id=session_id,
-            top_k=top_k,
-            metadata_filter=metadata_filter,
+            k=top_k,
+            filter=metadata_filter if metadata_filter else None,
         )
-        
-        if not result.documents or len(result.documents) == 0:
+
+        if not documents:
             return _finalize_tool_output(
                 "knowledge_search",
                 f"知识库中暂未找到与 '{query}' 相关的内容。您可以：\n1. 提供相关资料让我学习\n2. 或者我直接基于已有知识回答您的问题",
                 query=query,
                 top_k=top_k,
             )
-        
-        context_text = result.to_context_text()
-        
-        filter_text = ""
-        if result.metadata_filter:
-            filter_text = f"\n生效过滤条件: {json.dumps(result.metadata_filter, ensure_ascii=False)}\n"
 
-        response = f"找到 {len(result.documents)} 条相关知识（来源: {result.source}）：{filter_text}\n{context_text}"
+        context_text = "\n\n".join(
+            f"[{i+1}] {doc.page_content}"
+            for i, doc in enumerate(documents)
+        )
+
+        filter_text = ""
+        if metadata_filter:
+            filter_text = f"\n生效过滤条件: {json.dumps(metadata_filter, ensure_ascii=False)}\n"
+
+        response = f"找到 {len(documents)} 条相关知识：{filter_text}\n{context_text}"
 
         return _finalize_tool_output(
             "knowledge_search",
@@ -1765,6 +1762,8 @@ knowledge_search = build_agent_tool(
     is_readonly=True,
     is_destructive=False,
     is_concurrency_safe=True,
+    check_permissions_fn=make_readonly_permission_fn(),
+    permission_policy=ToolPermissionPolicy(policy_type="readonly"),
 )
 
 
@@ -1800,36 +1799,24 @@ def _impl_add_knowledge(
             metadata["doc_name"] = doc_name
         
         if file_path:
-            result = retriever.add_file(
-                file_path=file_path,
+            resolved_file_path = resolve_tool_path(file_path, access="read").resolved
+            ids = retriever.add_file(
+                file_path=str(resolved_file_path),
                 metadata=metadata,
-                session_id=session_id,
             )
         else:
-            if force_method:
-                result = retriever.add_document(
-                    content=content,
-                    metadata=metadata,
-                    session_id=session_id,
-                    force_method=force_method,
-                )
-            else:
-                result = retriever.add_document(
-                    content=content,
-                    metadata=metadata,
-                    session_id=session_id,
-                )
-        
-        if result.success:
-            method_desc = "临时上下文" if result.method == "context" else "向量库"
+            ids = retriever.add_text(
+                text=content,
+                metadata=metadata,
+            )
+
+        if ids:
             return _finalize_tool_output(
                 "add_knowledge",
                 (
                 f"文档添加成功！\n"
-                f"- 处理方式: {method_desc}\n"
-                f"- 文档ID: {result.doc_id}\n"
-                f"- 分块数量: {result.chunk_count}\n"
-                f"- 说明: {result.message}"
+                f"- 处理方式: 向量库\n"
+                f"- 分块数量: {len(ids)}\n"
                 ),
                 content=content,
                 file_path=file_path,
@@ -1838,7 +1825,7 @@ def _impl_add_knowledge(
         else:
             return _finalize_tool_output(
                 "add_knowledge",
-                f"文档添加失败: {result.message}",
+                "文档添加失败：未生成任何分块",
                 content=content,
                 file_path=file_path,
                 doc_name=doc_name,
@@ -1867,6 +1854,8 @@ add_knowledge = build_agent_tool(
     is_readonly=False,
     is_destructive=False,
     is_concurrency_safe=False,
+    check_permissions_fn=make_read_path_permission_fn("file_path"),
+    permission_policy=ToolPermissionPolicy(policy_type="state_write"),
 )
 
 
@@ -2071,6 +2060,8 @@ web_search = build_agent_tool(
     is_readonly=True,
     is_destructive=False,
     is_concurrency_safe=True,
+    check_permissions_fn=make_readonly_permission_fn(),
+    permission_policy=ToolPermissionPolicy(policy_type="network"),
 )
 
 
@@ -2142,6 +2133,8 @@ add_memory = build_agent_tool(
     is_readonly=False,
     is_destructive=False,
     is_concurrency_safe=False,
+    check_permissions_fn=make_readonly_permission_fn(),
+    permission_policy=ToolPermissionPolicy(policy_type="state_write"),
 )
 
 
@@ -2203,6 +2196,7 @@ search_memory = build_agent_tool(
     is_readonly=True,
     is_destructive=False,
     is_concurrency_safe=True,
+    check_permissions_fn=make_readonly_permission_fn(),
 )
 
 
@@ -2404,6 +2398,7 @@ update_project_instructions = build_agent_tool(
     is_readonly=False,
     is_destructive=True,
     is_concurrency_safe=False,
+    check_permissions_fn=make_ask_permission_fn("修改 AGENTS.md 指令文件会影响所有后续对话，需要用户确认"),
 )
 
 
@@ -2464,6 +2459,7 @@ create_scheduled_task = build_agent_tool(
     is_readonly=False,
     is_destructive=False,
     is_concurrency_safe=False,
+    check_permissions_fn=make_readonly_permission_fn(),
 )
 
 
@@ -2500,6 +2496,7 @@ list_scheduled_tasks = build_agent_tool(
     is_readonly=True,
     is_destructive=False,
     is_concurrency_safe=True,
+    check_permissions_fn=make_readonly_permission_fn(),
 )
 
 
@@ -2532,6 +2529,7 @@ cancel_scheduled_task = build_agent_tool(
     is_readonly=False,
     is_destructive=False,
     is_concurrency_safe=False,
+    check_permissions_fn=make_readonly_permission_fn(),
 )
 
 

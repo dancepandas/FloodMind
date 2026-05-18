@@ -2,7 +2,7 @@ import { useEffect, useRef } from "react";
 import { ChatComposer } from "@/features/chat/components/ChatComposer";
 import { ChatMessage } from "@/features/chat/components/ChatMessage";
 import { WelcomePage } from "@/components/WelcomePage";
-import type { ChatMessage as ChatMessageModel, ModelOption, SessionConfig } from "@/types/app";
+import type { ChatMessage as ChatMessageModel, ModelOption, SessionConfig, ActionDetail, PendingPermissionAsk } from "@/types/app";
 
 interface ChatAreaProps {
   messages: ChatMessageModel[];
@@ -16,7 +16,10 @@ interface ChatAreaProps {
   onPause: () => void;
   onUpload: (file: File) => void;
   onToggleThought: (messageId: string, blockId: string) => void;
+  onUpdateAction?: (callId: string, status: ActionDetail["status"], content: string) => void;
   onConfigChange: (config: SessionConfig) => void;
+  pendingPermissionAsk: PendingPermissionAsk | null;
+  onRespondPermissionAsk: (approved: boolean) => void;
 }
 
 export function ChatArea({
@@ -31,7 +34,10 @@ export function ChatArea({
   onPause,
   onUpload,
   onToggleThought,
+  onUpdateAction,
   onConfigChange,
+  pendingPermissionAsk,
+  onRespondPermissionAsk,
 }: ChatAreaProps) {
   const scrollContainerRef = useRef<HTMLDivElement>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
@@ -57,7 +63,7 @@ export function ChatArea({
           <div className="absolute inset-0 hydro-grid-bg opacity-30 pointer-events-none" />
           <div className="w-full max-w-[780px] mx-auto flex flex-col relative z-10">
             {messages.map((message) => (
-              <ChatMessage key={message.id} message={message} onToggleThought={onToggleThought} />
+              <ChatMessage key={message.id} message={message} onToggleThought={onToggleThought} onUpdateAction={onUpdateAction} />
             ))}
           </div>
           <div ref={bottomRef} />
@@ -75,6 +81,8 @@ export function ChatArea({
         onPause={onPause}
         onUpload={onUpload}
         onConfigChange={onConfigChange}
+        pendingPermissionAsk={pendingPermissionAsk}
+        onRespondPermissionAsk={onRespondPermissionAsk}
       />
     </div>
   );

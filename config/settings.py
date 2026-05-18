@@ -7,6 +7,9 @@
 import os
 import socket
 import ssl
+import logging
+
+_logger = logging.getLogger(__name__)
 
 if os.getenv("PYTHON_IPV6", "0") != "1":
     _orig_getaddrinfo = socket.getaddrinfo
@@ -74,6 +77,10 @@ class AgentConfig:
     """智能体配置"""
     
     def __init__(self):
+        self.runtime = os.getenv("AGENT_RUNTIME", "native").lower()
+        if self.runtime != "native":
+            _logger.warning(f"AGENT_RUNTIME='{self.runtime}' is no longer supported, forcing 'native'")
+            self.runtime = "native"
         self.enable_chronos_warmup = os.getenv("AGENT_ENABLE_CHRONOS_WARMUP", "false").lower() == "true"
         self.max_history = int(os.getenv("AGENT_MAX_HISTORY", "20"))
         self.context_window = int(os.getenv("AGENT_CONTEXT_WINDOW", "32768"))

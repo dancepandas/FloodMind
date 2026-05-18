@@ -1,15 +1,7 @@
 """
-Context Runtime - 上下文运行时
+上下文运行时
 
-借鉴 Claude Code 的 context.ts 设计，统一管理所有上下文来源：
-- 固定上下文：系统 prompt、项目规则（AGENTS.md）
-- 会话上下文：长期记忆、最近工具结果
-- 任务上下文：当前时间、系统环境
-
-核心改进：
-- 缓存：固定上下文带 TTL 缓存，避免每轮重复读盘
-- 优先级：超 token budget 时按优先级裁剪
-- 并行预取：会话初始化时并行加载所有上下文
+管理系统提示、项目规则、会话上下文等，不依赖 LangChain。
 """
 
 import logging
@@ -23,7 +15,7 @@ from enum import IntEnum
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from langchain_core.messages import SystemMessage
+from agent.runtime.contracts.messages import system_message
 
 logger = logging.getLogger(__name__)
 
@@ -220,7 +212,8 @@ class ContextRuntime:
                 except Exception as e:
                     logger.warning(f"[ContextRuntime] 预取 {label} 失败: {e}")
 
-    def build_context_messages(self) -> List[SystemMessage]:
+    def build_context_messages(self) -> List[Dict[str, str]]:
+        """构建上下文消息列表，返回 OpenAI 格式的 dict 列表"""
         sorted_blocks = sorted(self._blocks.values(), key=lambda b: b.priority)
         messages = []
         used_tokens = 0
@@ -232,13 +225,13 @@ class ContextRuntime:
                 if remaining_tokens <= 0:
                     break
                 if block_tokens <= remaining_tokens:
-                    messages.append(SystemMessage(content=content))
+                    messages.append({"role": "system", "content": content})
                     used_tokens += block_tokens
                     continue
                 if not messages:
                     truncated = self._truncate_to_budget(content, remaining_tokens)
                     if truncated.strip():
-                        messages.append(SystemMessage(content=truncated))
+                        messages.append({"role": "system", "content": truncated})
                     break
         return messages
 

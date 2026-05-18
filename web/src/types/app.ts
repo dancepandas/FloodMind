@@ -1,9 +1,13 @@
 export type MessageBlockType = "thought" | "action" | "answer";
 
 export interface ActionDetail {
+  callId: string;
   toolName: string;
-  status: "running" | "done" | "error";
+  status: "running" | "done" | "error" | "pending_confirmation";
   content: string;
+  askId?: string;
+  askReason?: string;
+  sessionId?: string;
   delegation?: {
     task: string;
     skill_name?: string;
@@ -20,17 +24,6 @@ export interface MessageBlock {
   isStreaming?: boolean;
   isArchived?: boolean;
   actions?: ActionDetail[];
-}
-
-export interface ChatMessage {
-  id: string;
-  role: "user" | "assistant" | "system";
-  content: string;
-  reasoning?: string;
-  rawReasoning?: string;
-  blocks: MessageBlock[];
-  timestamp: string;
-  artifacts?: GeneratedArtifact[];
 }
 
 export interface SessionSummary {
@@ -84,10 +77,11 @@ export interface ReferenceLink {
 
 export interface ChatMessage {
   id: string;
-  role: "user" | "assistant" | "system";
+  role: "human" | "FloodMind" | "system";
   content: string;
   reasoning?: string;
   rawReasoning?: string;
+  isComplete?: boolean;
   blocks: MessageBlock[];
   timestamp: string;
   artifacts?: GeneratedArtifact[];
@@ -97,9 +91,11 @@ export interface ChatMessage {
 export interface ToolActivity {
   id: string;
   toolName: string;
-  status: "running" | "done" | "error";
+  status: "running" | "done" | "error" | "pending_confirmation";
   content: string;
   timestamp: string;
+  askId?: string;
+  askReason?: string;
 }
 
 export interface WorkflowStepItem {
@@ -131,6 +127,12 @@ export interface ModelOption {
   description: string;
   supports_reasoning: boolean;
   supports_search: boolean;
+  supports_vision: boolean;
+  supports_tool_calling: boolean;
+  supports_tool_calling_with_vision?: boolean;
+  supports_reasoning_with_vision?: boolean;
+  max_image_count?: number;
+  max_image_size_mb?: number;
   is_default: boolean;
 }
 
@@ -138,6 +140,14 @@ export interface ModelsResponse {
   status: string;
   default_model_key: string;
   models: ModelOption[];
+}
+
+export interface PendingPermissionAsk {
+  askId: string;
+  callId: string;
+  toolName: string;
+  askReason: string;
+  sessionId: string;
 }
 
 export interface SessionRuntimeState {

@@ -12,6 +12,7 @@ import {
   fetchModels,
   initAgent,
   pauseSession,
+  respondPermissionAsk as respondPermissionAskApi,
   resumeStreamRequest,
   resumeSession,
   saveSession,
@@ -28,6 +29,7 @@ import {
   finalizeThoughtBlocks,
   fromServerMessage,
   setAssistantFinalContent,
+  updateActionBlockStatus,
 } from "@/features/chat/lib/message-blocks";
 import { createLogger } from "@/lib/logger";
 import { uuid } from "@/lib/utils";
@@ -37,12 +39,14 @@ import type {
   FilePreview,
   GeneratedArtifact,
   ModelOption,
+  PendingPermissionAsk,
   SessionConfig,
   SessionRuntimeState,
   SessionSummary,
   ToolActivity,
   UploadedFileItem,
   WorkflowPlan,
+  ActionDetail,
 } from "@/types/app";
 
 const log = createLogger("App");
@@ -167,7 +171,7 @@ export function useAgentApp() {
             .filter((artifact): artifact is GeneratedArtifact => artifact !== null);
           if (restoredArtifacts.length > 0) {
             log.info("loadSession →", restoredArtifacts.length, "artifacts to attach");
-            const lastAssistantIndex = [...restoredMessages].map((message, index) => ({ message, index })).reverse().find(({ message }) => message.role === "assistant")?.index;
+            const lastAssistantIndex = [...restoredMessages].map((message, index) => ({ message, index })).reverse().find(({ message }) => message.role === "FloodMind")?.index;
             if (lastAssistantIndex !== undefined) {
               let targetMessage = restoredMessages[lastAssistantIndex];
               restoredArtifacts.forEach((artifact) => {
@@ -244,7 +248,7 @@ export function useAgentApp() {
             }
           } else {
             const alreadyExists = loadedMessages.some(
-              (m) => m.id === inProgressId || (m.role === "assistant" && m.content === (status.in_progress?.content || "")),
+              (m) => m.id === inProgressId || (m.role === "FloodMind" && m.content === (status.in_progress?.content || "")),
             );
             if (alreadyExists) {
               log.info("App init → in_progress already in restored messages, skipping", inProgressId);
@@ -382,6 +386,7 @@ export function useAgentApp() {
     setMessages((prev) => [...prev, userMessage, assistantMessage]);
     setInputValue("");
     setIsStreaming(true);
+    let eventCount = 0;
 
     try {
       const response = await createChatRequest(sessionId, content, uploadedFiles.map((file) => file.id), assistantMessage.id);
@@ -393,7 +398,6 @@ export function useAgentApp() {
       readerRef.current = reader;
       const decoder = new TextDecoder();
       let buffer = "";
-      let eventCount = 0;
 
       const updateAssistant = (updater: (message: ChatMessage) => ChatMessage) => {
         setMessages((prev) => prev.map((message) => (message.id === assistantMessage.id ? updater(message) : message)));
@@ -434,8 +438,42 @@ export function useAgentApp() {
       }
       log.info(`SSE stream ended, total events=${eventCount}`);
     } catch (error) {
-      log.error("handleSubmit: stream error", error);
-      setMessages((prev) => prev.map((message) => message.id === assistantMessage.id ? setAssistantFinalContent(message, "抱歉，连接失败，请检查后端服务。") : message));
+      log.error("handleSubmit: stream error, attempting resume", error);
+      try {
+        const resumeResponse = await resumeStreamRequest(sessionId, eventCount);
+        if (resumeResponse.ok && resumeResponse.body) {
+          const resumeReader = resumeResponse.body.getReader();
+          readerRef.current = resumeReader;
+          const decoder = new TextDecoder();
+          let resumeBuffer = "";
+          const resumeUpdateAssistant = (updater: (message: ChatMessage) => ChatMessage) => {
+            setMessages((prev) => prev.map((message) => (message.id === assistantMessage.id ? updater(message) : message)));
+          };
+          while (true) {
+            const { done, value } = await resumeReader.read();
+            if (done) break;
+            resumeBuffer += decoder.decode(value, { stream: true });
+            const lines = resumeBuffer.split("\n");
+            resumeBuffer = lines.pop() || "";
+            for (const line of lines) {
+              const trimmed = line.trim();
+              if (!trimmed) continue;
+              try {
+                const data = JSON.parse(trimmed) as Record<string, any>;
+                applyStreamEvent(data, { updateAssistant: resumeUpdateAssistant, pushToolActivity, setWorkflow });
+              } catch (parseErr) {
+                log.warn("Resume JSON parse error", trimmed.slice(0, 200), parseErr);
+              }
+            }
+          }
+          log.info("handleSubmit: resume completed after disconnect");
+        } else {
+          throw new Error("Resume request failed");
+        }
+      } catch (resumeError) {
+        log.warn("handleSubmit: resume failed, showing error", resumeError);
+        setMessages((prev) => prev.map((message) => message.id === assistantMessage.id ? setAssistantFinalContent(message, "抱歉，连接失败，请检查后端服务。") : message));
+      }
     } finally {
       setIsStreaming(false);
       readerRef.current = null;
@@ -488,6 +526,51 @@ export function useAgentApp() {
     }));
   }, []);
 
+  const updateAction = useCallback((callId: string, status: ActionDetail["status"], content: string) => {
+    setMessages((prev) => prev.map((message) =>
+      updateActionBlockStatus(message, callId, status, content)
+    ));
+  }, []);
+
+  const pendingPermissionAsk = useMemo<PendingPermissionAsk | null>(() => {
+    for (let mi = messages.length - 1; mi >= 0; mi--) {
+      const msg = messages[mi];
+      if (msg.role !== "FloodMind") continue;
+      for (let bi = msg.blocks.length - 1; bi >= 0; bi--) {
+        const block = msg.blocks[bi];
+        if (block.type !== "action" || !block.actions) continue;
+        for (let ai = block.actions.length - 1; ai >= 0; ai--) {
+          const action = block.actions[ai];
+          if (action.status === "pending_confirmation" && action.askId) {
+            return {
+              askId: action.askId,
+              callId: action.callId,
+              toolName: action.toolName,
+              askReason: action.askReason || "",
+              sessionId: action.sessionId || "",
+            };
+          }
+        }
+      }
+    }
+    return null;
+  }, [messages]);
+
+  const handleRespondPermissionAsk = useCallback(async (approved: boolean) => {
+    if (!pendingPermissionAsk) return;
+    const { askId, callId, sessionId } = pendingPermissionAsk;
+    try {
+      const data = await respondPermissionAskApi(askId, approved, sessionId);
+      if (data.status === "success") {
+        updateAction(callId, approved ? "running" : "error", approved ? "" : "用户拒绝");
+      } else {
+        updateAction(callId, "error", data.message || "确认失败");
+      }
+    } catch (err: any) {
+      updateAction(callId, "error", `请求失败: ${err.message}`);
+    }
+  }, [pendingPermissionAsk, updateAction]);
+
   const sessionItems = useMemo(() => sessions, [sessions]);
 
   const handlePauseResume = useCallback(async () => {
@@ -528,6 +611,9 @@ export function useAgentApp() {
     handleDeleteSession,
     loadSession,
     toggleThought,
+    updateAction,
+    pendingPermissionAsk,
+    handleRespondPermissionAsk,
     closePreview: () => setSelectedPreview(null),
     config,
     setConfig: async (nextConfig: SessionConfig) => {

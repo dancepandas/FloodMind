@@ -48,6 +48,7 @@ declare global {
   const Home: typeof import('lucide-react').Home
   const Icon: typeof import('lucide-react').Icon
   const InfoIcon: typeof import('lucide-react').InfoIcon
+  const Layers: typeof import('lucide-react').Layers
   const ListTree: typeof import('lucide-react').ListTree
   const Loader2: typeof import('lucide-react').Loader2
   const Loader2Icon: typeof import('lucide-react').Loader2Icon
@@ -67,7 +68,9 @@ declare global {
   const SearchIcon: typeof import('lucide-react').SearchIcon
   const Send: typeof import('lucide-react').Send
   const Sheet: typeof import('lucide-react').Sheet
+  const ShieldAlert: typeof import('lucide-react').ShieldAlert
   const Sidebar: typeof import('lucide-react').Sidebar
+  const SparkleIcon: typeof import('lucide-react').SparkleIcon
   const Sparkles: typeof import('lucide-react').Sparkles
   const Suspense: typeof import('react').Suspense
   const Table: typeof import('lucide-react').Table

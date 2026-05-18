@@ -2,11 +2,22 @@
 模型预设注册表
 
 所有前端可选模型统一在此注册，后端根据 model_key 查找真实模型名、API 配置和能力标签。
+能力字段遵循 docs/native-agent-multimodal-migration.md §10 规范。
 """
 
 import os
 from typing import Any, Dict, List, Optional
 
+_VISION_DEFAULTS = {
+    "supports_vision": False,
+    "supports_tool_calling": True,
+    "supports_tool_calling_with_vision": False,
+    "supports_reasoning_with_vision": False,
+    "vision_input_types": [],
+    "max_image_count": 0,
+    "max_image_size_mb": 0,
+    "extra_body": {},
+}
 
 MODEL_PRESETS: Dict[str, Dict[str, Any]] = {
     "qwen_35_plus": {
@@ -191,6 +202,10 @@ MODEL_PRESETS: Dict[str, Dict[str, Any]] = {
     },
 }
 
+for _key, _preset in MODEL_PRESETS.items():
+    for _vk, _vv in _VISION_DEFAULTS.items():
+        _preset.setdefault(_vk, _vv)
+
 DEFAULT_MODEL_KEY = "glm_51"
 
 
@@ -229,6 +244,12 @@ def get_models_list() -> List[Dict[str, Any]]:
             "description": preset.get("description", ""),
             "supports_reasoning": preset.get("supports_reasoning", False),
             "supports_search": preset.get("supports_search", False),
+            "supports_vision": preset.get("supports_vision", False),
+            "supports_tool_calling": preset.get("supports_tool_calling", True),
+            "supports_tool_calling_with_vision": preset.get("supports_tool_calling_with_vision", False),
+            "supports_reasoning_with_vision": preset.get("supports_reasoning_with_vision", False),
+            "max_image_count": preset.get("max_image_count", 0),
+            "max_image_size_mb": preset.get("max_image_size_mb", 0),
             "is_default": key == default_key,
         })
     return result

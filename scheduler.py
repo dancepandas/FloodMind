@@ -18,7 +18,7 @@ os.environ.setdefault('HF_HUB_OFFLINE', '1')
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from agent import FloodAgent
+from agent.native import create_flood_agent
 from agent.scheduled_task_runtime import ScheduledTaskRuntime
 from config.settings import settings
 from memory import DualMemory, SessionManager
@@ -71,7 +71,7 @@ def build_session_manager() -> SessionManager:
     })
 
 
-def create_agent_for_session(session_manager: SessionManager, session_id: str) -> FloodAgent:
+def create_agent_for_session(session_manager: SessionManager, session_id: str):
     set_session_context(session_id=session_id, output_dir=str(session_manager.get_output_dir(session_id)))
     set_rag_config(
         enabled=settings.rag.enabled,
@@ -87,15 +87,15 @@ def create_agent_for_session(session_manager: SessionManager, session_id: str) -
         enable_reasoning=settings.qwen.enable_reasoning,
     )
     memory = DualMemory(
-        max_history=settings.agent.max_history,
-        context_window=settings.agent.context_window,
-        memory_dir=session_manager.get_memory_dir(session_id),
         session_id=session_id,
+        max_short_term=settings.agent.max_history,
+        context_window=settings.agent.context_window,
+        persist_dir=session_manager.get_memory_dir(session_id),
     )
-    return FloodAgent(llm_service=llm_service, memory=memory, memory_type="dual")
+    return create_flood_agent(llm_service=llm_service, memory=memory, session_id=session_id, enable_search=False)
 
 
-def get_or_create_agent(session_manager: SessionManager, session_id: str) -> FloodAgent:
+def get_or_create_agent(session_manager: SessionManager, session_id: str):
     session_manager.touch_session(session_id)
     agent = session_manager.get_agent(session_id)
     if agent:

@@ -5,6 +5,14 @@ import { isPreviewable } from "@/features/chat/components/DocumentPreviewDialog"
 import { DocumentPreviewDialog } from "@/features/chat/components/DocumentPreviewDialog";
 import { ScheduledTasksPanel } from "@/features/scheduler/components/ScheduledTasksPanel";
 
+function SparkleIcon({ size = 12, className = "" }: { size?: number; className?: string }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" className={className}>
+      <path d="M12 0L13.5 8.5L22 6L15 12L22 18L13.5 15.5L12 24L10.5 15.5L2 18L9 12L2 6L10.5 8.5L12 0Z" fill="currentColor" />
+    </svg>
+  );
+}
+
 interface ContextPanelProps {
   sessionId: string;
   files: UploadedFileItem[];
@@ -36,7 +44,7 @@ export function ContextPanel({ sessionId, files, workflow, selectedPreview, onPr
   return (
     <div className="w-[320px] h-full bg-panel border-l border-border/30 flex flex-col flex-shrink-0 backdrop-blur-sm">
       <div className="shrink-0 px-4 pt-4 pb-2 flex items-center gap-2 border-b border-border/20">
-        <div className="w-1.5 h-1.5 rounded-full bg-primary/60" />
+        <div className="w-1.5 h-1.5 rounded-full bg-sky-400" />
         <span className="text-[11px] font-bold text-muted-foreground/60 tracking-[0.12em] uppercase">
           Runtime
         </span>
@@ -118,46 +126,39 @@ export function ContextPanel({ sessionId, files, workflow, selectedPreview, onPr
               等待任务规划
             </div>
           ) : (
-            <div className="relative ml-2 flex flex-col gap-0">
-              {workflow.steps.map((step, index) => {
-                const isLast = index === workflow.steps.length - 1;
-                return (
-                  <div key={step.key || `${index}`} className="relative pl-6 pb-3">
-                    {!isLast && (
-                      <div className={`absolute left-[5px] top-[14px] bottom-0 w-px ${step.status === "completed" ? "bg-primary/20" : "bg-border/30"}`} />
+            <div className="flex flex-col gap-0.5">
+              {workflow.steps.map((step, index) => (
+                <div key={step.key || `${index}`} className="flex items-center gap-2 py-1">
+                  <div className={`w-3 h-3 rounded-full flex items-center justify-center flex-shrink-0 ${
+                    step.status === "completed"
+                      ? "bg-primary/20 text-primary"
+                      : step.status === "running"
+                        ? "bg-sky-500/15 text-sky-500"
+                        : step.status === "error"
+                          ? "bg-red-500/15 text-red-400"
+                          : "bg-muted/40 text-muted-foreground/25"
+                  }`}>
+                    {step.status === "running" ? (
+                      <SparkleIcon size={8} className="animate-star-spin-breathe" />
+                    ) : step.status === "completed" ? (
+                      <svg width="7" height="7" viewBox="0 0 24 24" fill="currentColor"><circle cx="12" cy="12" r="10" /></svg>
+                    ) : step.status === "error" ? (
+                      <svg width="7" height="7" viewBox="0 0 24 24" fill="currentColor"><circle cx="12" cy="12" r="10" /></svg>
+                    ) : (
+                      <svg width="7" height="7" viewBox="0 0 24 24" fill="currentColor" opacity="0.4"><circle cx="12" cy="12" r="10" /></svg>
                     )}
-                    <div className={`absolute left-0 top-[5px] w-[11px] h-[11px] rounded-full border-2 border-background ${
-                      step.status === "completed"
-                        ? "bg-primary border-primary/30"
-                        : step.status === "running"
-                          ? "bg-background border-primary"
-                          : "bg-muted border-border/50"
-                    }`}>
-                      {step.status === "running" && (
-                        <div className="w-[5px] h-[5px] bg-primary rounded-full animate-pulse-subtle mx-auto mt-[0.5px]" />
-                      )}
-                    </div>
-                    <div className="flex flex-col">
-                      <div className="flex items-center gap-1.5">
-                        <span className={`text-[10px] font-mono ${step.status === "pending" ? "text-muted-foreground/35" : "text-muted-foreground/60"}`}>
-                          {String(index + 1).padStart(2, "0")}
-                        </span>
-                        <span className={`text-[12px] font-medium ${step.status === "pending" ? "text-muted-foreground/45" : "text-foreground"}`}>
-                          {step.title || step.label}
-                        </span>
-                      </div>
-                      {step.detail ? <span className="text-[10px] mt-0.5 text-muted-foreground/50 whitespace-pre-wrap break-words">{step.detail}</span> : null}
-                      {step.outcome ? <span className="text-[10px] mt-0.5 text-primary/70 whitespace-pre-wrap break-words">{step.outcome}</span> : null}
-                      {step.expected_deliverables?.length ? (
-                        <span className="text-[9px] mt-0.5 text-muted-foreground/30">交付: {step.expected_deliverables.map((d) => d.type).join(", ")}</span>
-                      ) : null}
-                      {step.output_artifacts?.length ? (
-                        <span className="text-[9px] mt-0.5 text-primary/40">产物: {step.output_artifacts.map((a) => a.split("/").pop() || a).join(", ")}</span>
-                      ) : null}
-                    </div>
                   </div>
-                );
-              })}
+<span className={`text-[11px] truncate ${
+                    step.status === "completed"
+                      ? "text-blue-600"
+                      : step.status === "error"
+                        ? "text-red-500"
+                        : "text-foreground"
+                  }`}>
+                    {step.title || step.label}
+                  </span>
+                </div>
+              ))}
             </div>
           )}
         </div>

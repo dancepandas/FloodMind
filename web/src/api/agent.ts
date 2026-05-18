@@ -213,9 +213,19 @@ export function createChatRequest(sessionId: string, message: string, uploadedFi
   return response;
 }
 
-export function resumeStreamRequest(sessionId: string): Promise<Response> {
-  log.info("resumeStreamRequest", { sessionId });
-  return fetch(buildApiUrl(`/api/stream/resume?session_id=${encodeURIComponent(sessionId)}`));
+export function resumeStreamRequest(sessionId: string, afterIndex = 0): Promise<Response> {
+  log.info("resumeStreamRequest", { sessionId, afterIndex });
+  return fetch(buildApiUrl(`/api/stream/resume?session_id=${encodeURIComponent(sessionId)}&after_index=${afterIndex}`));
+}
+
+export async function respondPermissionAsk(askId: string, approved: boolean, sessionId: string): Promise<{ status: string; ask_id?: string; approved?: boolean; message?: string }> {
+  log.info("respondPermissionAsk", { askId, approved, sessionId });
+  const result = await apiFetch<{ status: string; ask_id?: string; approved?: boolean; message?: string }>("/api/permission/respond", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ ask_id: askId, approved, session_id: sessionId }),
+  });
+  return result;
 }
 
 export function downloadLogsZip(): void {

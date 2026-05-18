@@ -1,316 +1,375 @@
 """
-Qwen模型服务模块
+Qwen LLM 服务
 
-基于LangChain集成Qwen API，提供统一的大模型调用接口。
-支持阿里云百炼平台所有 OpenAI 兼容模型（Qwen/GLM/DeepSeek/Kimi/MiniMax 等）。
+使用 openai SDK 直接调用，支持流式输出和推理内容提取。
+不依赖 LangChain。
 """
 
+import json
 import logging
 import os
-from typing import Any, Dict, Mapping, Optional
+import re
+import time
+from typing import Any, AsyncIterator, Dict, Iterator, List, Optional
 
-import openai
-from langchain_openai import ChatOpenAI
-from langchain_core.messages import AIMessage, AIMessageChunk
-from langchain_core.outputs import ChatGeneration, ChatGenerationChunk, ChatResult
-from langchain_core.messages.base import BaseMessageChunk
-from langchain_openai.chat_models.base import (
-    _convert_delta_to_message_chunk,
-    _convert_dict_to_message,
-    _create_usage_metadata,
-)
+from openai import OpenAI
+from pydantic import BaseModel
+
+from agent.runtime.contracts.messages import Message, ai_message
+from config.settings import settings
 
 logger = logging.getLogger(__name__)
 
 
-class QwenReasoningChatOpenAI(ChatOpenAI):
-    """保留 DashScope reasoning_content 的 ChatOpenAI 兼容层。"""
-
-    @staticmethod
-    def _extract_reasoning(payload: Mapping[str, Any]) -> str:
-        for key in ("reasoning_content", "reasoning", "thinking"):
-            value = payload.get(key)
-            if isinstance(value, str) and value.strip():
-                return value
-        return ""
-
-    def _convert_chunk_to_generation_chunk(
-        self,
-        chunk: dict,
-        default_chunk_class: type,
-        base_generation_info: dict | None,
-    ) -> ChatGenerationChunk | None:
-        generation_chunk = super()._convert_chunk_to_generation_chunk(
-            chunk, default_chunk_class, base_generation_info
-        )
-        if generation_chunk is None:
-            return None
-
-        choices = chunk.get("choices", []) or chunk.get("chunk", {}).get("choices", [])
-        if not choices:
-            return generation_chunk
-
-        delta = choices[0].get("delta") or {}
-        reasoning = self._extract_reasoning(delta)
-        if reasoning and isinstance(generation_chunk.message, AIMessageChunk):
-            generation_chunk.message.additional_kwargs["reasoning_content"] = reasoning
-        return generation_chunk
-
-    def _create_chat_result(
-        self,
-        response: dict | openai.BaseModel,
-        generation_info: dict | None = None,
-    ) -> ChatResult:
-        chat_result = super()._create_chat_result(response, generation_info)
-
-        response_dict = response if isinstance(response, dict) else response.model_dump()
-        choices = response_dict.get("choices", []) or []
-        if not choices or not chat_result.generations:
-            return chat_result
-
-        message_payload = choices[0].get("message") or {}
-        reasoning = self._extract_reasoning(message_payload)
-        if reasoning and isinstance(chat_result.generations[0].message, AIMessage):
-            chat_result.generations[0].message.additional_kwargs["reasoning_content"] = reasoning
-        return chat_result
-
-
 class QwenLLMService:
-    """Qwen大模型服务类"""
+    """Qwen LLM 服务"""
 
-    def __init__(self, api_key: str, model_name: str = "qwen-flash",
-                 temperature: float = 0.3, max_tokens: int = 2048,
-                 enable_reasoning: bool = False,
-                 reasoning_model: str = "qwen-plus"):
-        """
-        初始化Qwen大模型服务
+    _instance: Optional['QwenLLMService'] = None
 
-        Args:
-            api_key: 阿里云API密钥
-            model_name: 模型名称（推荐 qwen2.5-flash 速度更快）
-            temperature: 温度参数（0-1），控制输出随机性
-            max_tokens: 最大生成token数
-            enable_reasoning: 是否启用推理模式
-            reasoning_model: 推理模式使用的模型名称
-        """
-        self.api_key = api_key
-        self.model_name = model_name
+    def __new__(cls, *args, **kwargs):
+        if cls._instance is None:
+            cls._instance = super().__new__(cls)
+        return cls._instance
+
+    def __init__(
+        self,
+        model_name: Optional[str] = None,
+        api_key: Optional[str] = None,
+        base_url: Optional[str] = None,
+        temperature: float = 0.7,
+        max_tokens: int = 8192,
+        enable_thinking: bool = False,
+    ):
+        if hasattr(self, '_initialized') and self._initialized:
+            return
+
+        self.model_name = model_name or settings.qwen.model_name
+        self.api_key = api_key or settings.qwen.api_key
+        self.base_url = base_url or os.getenv("DASHSCOPE_API_BASE", "https://dashscope.aliyuncs.com/compatible-mode/v1")
         self.temperature = temperature
         self.max_tokens = max_tokens
-        self.enable_search = False
-        self.enable_reasoning = enable_reasoning
-        self.reasoning_model = reasoning_model
-        self.base_url = os.getenv("QWEN_BASE_URL", "https://dashscope.aliyuncs.com/compatible-mode/v1")
+        self.enable_thinking = enable_thinking
 
-        # 如果启用推理模式，使用推理模型和优化的参数
-        if enable_reasoning:
-            actual_model = reasoning_model
-            actual_temperature = min(temperature, 0.2)  # 推理模式使用更低温度
-            reasoning_max_tokens = min(4096, max(1024, max_tokens))  # 推理需要更多token空间
-            extra_body = {}
-            if enable_reasoning:
-                extra_body["enable_thinking"] = True
-            logger.info(f"推理模式已启用 - 使用模型: {actual_model}, 温度: {actual_temperature}")
-        else:
-            actual_model = model_name
-            actual_temperature = temperature
-            reasoning_max_tokens = max_tokens
-            extra_body = {}
+        self._client: Optional[OpenAI] = None
+        self._initialized = True
 
-        self.llm = QwenReasoningChatOpenAI(
-            model=actual_model,
-            api_key=api_key,
-            base_url=self.base_url,
-            temperature=actual_temperature,
-            max_tokens=reasoning_max_tokens,
-            timeout=90,
-            streaming=True,
-            extra_body=extra_body,
-            frequency_penalty=0.0,
-            presence_penalty=0.0,
+    @property
+    def enable_reasoning(self) -> bool:
+        """兼容别名：外部代码使用 enable_reasoning 访问推理模式"""
+        return self.enable_thinking
+
+    @enable_reasoning.setter
+    def enable_reasoning(self, value: bool) -> None:
+        self.enable_thinking = value
+
+        logger.info(
+            f"QwenLLMService 初始化: model={self.model_name}, "
+            f"base_url={self.base_url}, thinking={enable_thinking}"
         )
 
-        mode_str = "推理模式" if enable_reasoning else "标准模式"
-        logger.info(f"Qwen大模型服务初始化成功 - {mode_str} - 模型: {actual_model}, base_url: {self.base_url}")
-    
-    def get_llm(self) -> ChatOpenAI:
-        """
-        获取LangChain兼容的LLM对象
-        
-        Returns:
-            ChatOpenAI实例
-        """
-        return self.llm
-    
-    def invoke(self, prompt: str, include_reasoning: bool = True) -> str:
-        """
-        直接调用模型生成文本
+    @property
+    def client(self) -> OpenAI:
+        """获取 OpenAI 客户端（懒加载）"""
+        if self._client is None:
+            self._client = OpenAI(
+                api_key=self.api_key,
+                base_url=self.base_url,
+            )
+        return self._client
 
-        Args:
-            prompt: 输入提示
-            include_reasoning: 是否包含推理过程（默认为True）
+    def get_llm(self) -> 'QwenLLMService':
+        """获取 LLM 实例（兼容旧接口，返回 self）"""
+        return self
 
-        Returns:
-            生成的文本（可能包含推理过程和最终内容）
-        """
+    def invoke(
+        self,
+        prompt: str,
+        system_prompt: Optional[str] = None,
+        temperature: Optional[float] = None,
+        max_tokens: Optional[int] = None,
+        **kwargs: Any,
+    ) -> Message:
+        """调用 LLM"""
+        messages = []
+        if system_prompt:
+            messages.append({"role": "system", "content": system_prompt})
+        messages.append({"role": "user", "content": prompt})
+
+        start_time = time.time()
         try:
-            response = self.llm.invoke(prompt)
+            response = self.client.chat.completions.create(
+                model=self.model_name,
+                messages=messages,
+                temperature=temperature or self.temperature,
+                max_tokens=max_tokens or self.max_tokens,
+                **kwargs,
+            )
 
-            # 如果启用推理模式且有推理内容
-            if include_reasoning and hasattr(response, 'reasoning_content') and response.reasoning_content:
-                return f"[推理过程]: {response.reasoning_content}\n\n[最终回答]: {response.content}"
-            else:
-                return response.content
+            content = response.choices[0].message.content or ""
+            reasoning_content = None
+
+            if hasattr(response.choices[0].message, 'reasoning_content'):
+                reasoning_content = response.choices[0].message.reasoning_content
+
+            additional_kwargs = {}
+            if reasoning_content:
+                additional_kwargs["reasoning_content"] = reasoning_content
+
+            usage = response.usage
+            if usage:
+                additional_kwargs["usage"] = {
+                    "prompt_tokens": usage.prompt_tokens,
+                    "completion_tokens": usage.completion_tokens,
+                    "total_tokens": usage.total_tokens,
+                }
+
+            elapsed = time.time() - start_time
+            logger.info(
+                f"LLM 调用完成: model={self.model_name}, "
+                f"tokens={usage.total_tokens if usage else 'N/A'}, "
+                f"耗时={elapsed:.2f}s"
+            )
+
+            return ai_message(content=content, **additional_kwargs)
+
         except Exception as e:
-            logger.error(f"模型调用失败: {str(e)}")
+            elapsed = time.time() - start_time
+            logger.error(f"LLM 调用失败: {e}, 耗时={elapsed:.2f}s")
             raise
-    
-    def stream(self, prompt: str, include_reasoning: bool = True):
-        """
-        流式调用模型生成文本
 
-        Args:
-            prompt: 输入提示
-            include_reasoning: 是否包含推理过程（默认为True）
+    def stream(
+        self,
+        prompt: str,
+        system_prompt: Optional[str] = None,
+        temperature: Optional[float] = None,
+        max_tokens: Optional[int] = None,
+        **kwargs: Any,
+    ) -> Iterator[Dict[str, Any]]:
+        """流式调用 LLM"""
+        messages = []
+        if system_prompt:
+            messages.append({"role": "system", "content": system_prompt})
+        messages.append({"role": "user", "content": prompt})
 
-        Yields:
-            生成的文本片段（包含推理过程和最终内容）
-        """
+        start_time = time.time()
         try:
-            for chunk in self.llm.stream(prompt):
-                # 检查是否有推理内容
-                if hasattr(chunk, 'reasoning_content') and chunk.reasoning_content and include_reasoning:
-                    yield f"[推理过程]: {chunk.reasoning_content}\n"
+            stream = self.client.chat.completions.create(
+                model=self.model_name,
+                messages=messages,
+                temperature=temperature or self.temperature,
+                max_tokens=max_tokens or self.max_tokens,
+                stream=True,
+                **kwargs,
+            )
 
-                # 检查是否有普通内容
-                if hasattr(chunk, 'content'):
-                    yield chunk.content
+            for chunk in stream:
+                if not chunk.choices:
+                    continue
+
+                delta = chunk.choices[0].delta
+                finish_reason = chunk.choices[0].finish_reason
+
+                result: Dict[str, Any] = {
+                    "type": "content",
+                    "content": "",
+                    "finish_reason": finish_reason,
+                }
+
+                if hasattr(delta, 'reasoning_content') and delta.reasoning_content:
+                    result["type"] = "reasoning"
+                    result["content"] = delta.reasoning_content
+                elif delta.content:
+                    result["content"] = delta.content
+
+                yield result
+
+                if finish_reason == "stop":
+                    break
+
+            elapsed = time.time() - start_time
+            logger.info(f"LLM 流式调用完成: model={self.model_name}, 耗时={elapsed:.2f}s")
+
         except Exception as e:
-            logger.error(f"模型流式调用失败: {str(e)}")
-            raise
+            elapsed = time.time() - start_time
+            logger.error(f"LLM 流式调用失败: {e}, 耗时={elapsed:.2f}s")
+            yield {"type": "error", "content": str(e), "finish_reason": "error"}
 
+    def stream_with_reasoning(
+        self,
+        prompt: str,
+        system_prompt: Optional[str] = None,
+        temperature: Optional[float] = None,
+        max_tokens: Optional[int] = None,
+        **kwargs: Any,
+    ) -> Iterator[Dict[str, Any]]:
+        """流式调用 LLM（带推理内容）"""
+        extra_kwargs = dict(kwargs)
+        if self.enable_thinking:
+            extra_kwargs["extra_body"] = {"enable_thinking": True}
 
-_llm_service: Optional[QwenLLMService] = None
-
-
-def get_qwen_llm_service(api_key: str, model_name: str = "qwen-flash",
-                        temperature: float = 0.3, max_tokens: int = 2048,
-                        enable_reasoning: bool = False,
-                        reasoning_model: str = "qwen-plus") -> QwenLLMService:
-    """
-    获取全局Qwen大模型服务实例（向后兼容接口）
-
-    Args:
-        api_key: API密钥
-        model_name: 模型名称
-        temperature: 温度参数
-        max_tokens: 最大token数
-        enable_reasoning: 是否启用推理模式
-        reasoning_model: 推理模式使用的模型名称
-
-    Returns:
-        QwenLLMService实例
-    """
-    global _llm_service
-    current_signature = {
-        "api_key": api_key,
-        "model_name": model_name,
-        "temperature": temperature,
-        "max_tokens": max_tokens,
-        "enable_reasoning": enable_reasoning,
-        "reasoning_model": reasoning_model,
-        "base_url": os.getenv("QWEN_BASE_URL", "https://dashscope.aliyuncs.com/compatible-mode/v1"),
-    }
-
-    previous_signature = getattr(_llm_service, "_config_signature", None) if _llm_service else None
-    need_recreate = _llm_service is None or previous_signature != current_signature
-
-    if need_recreate and previous_signature is not None:
-        logger.info("Qwen 配置变更，重新创建实例")
-    
-    if need_recreate:
-        try:
-            from langchain_core.globals import set_llm_cache
-            from langchain_community.cache import SQLiteCache
-            set_llm_cache(SQLiteCache(database_path=".langchain_cache.db"))
-            logger.info("LLM 缓存已启用 (SQLiteCache -> .langchain_cache.db)")
-        except Exception as _cache_err:
-            logger.warning(f"LLM 缓存启用失败，将不使用缓存: {_cache_err}")
-        _llm_service = QwenLLMService(
-            api_key=api_key,
-            model_name=model_name,
+        yield from self.stream(
+            prompt=prompt,
+            system_prompt=system_prompt,
             temperature=temperature,
             max_tokens=max_tokens,
-            enable_reasoning=enable_reasoning,
-            reasoning_model=reasoning_model
+            **extra_kwargs,
         )
-        _llm_service._config_signature = current_signature
-    return _llm_service
+
+    def chat(
+        self,
+        messages: List[Dict[str, str]],
+        temperature: Optional[float] = None,
+        max_tokens: Optional[int] = None,
+        **kwargs: Any,
+    ) -> Message:
+        """多轮对话调用"""
+        start_time = time.time()
+        try:
+            response = self.client.chat.completions.create(
+                model=self.model_name,
+                messages=messages,
+                temperature=temperature or self.temperature,
+                max_tokens=max_tokens or self.max_tokens,
+                **kwargs,
+            )
+
+            content = response.choices[0].message.content or ""
+            reasoning_content = None
+
+            if hasattr(response.choices[0].message, 'reasoning_content'):
+                reasoning_content = response.choices[0].message.reasoning_content
+
+            additional_kwargs = {}
+            if reasoning_content:
+                additional_kwargs["reasoning_content"] = reasoning_content
+
+            usage = response.usage
+            if usage:
+                additional_kwargs["usage"] = {
+                    "prompt_tokens": usage.prompt_tokens,
+                    "completion_tokens": usage.completion_tokens,
+                    "total_tokens": usage.total_tokens,
+                }
+
+            elapsed = time.time() - start_time
+            logger.info(
+                f"LLM 多轮对话完成: model={self.model_name}, "
+                f"tokens={usage.total_tokens if usage else 'N/A'}, "
+                f"耗时={elapsed:.2f}s"
+            )
+
+            return ai_message(content=content, **additional_kwargs)
+
+        except Exception as e:
+            elapsed = time.time() - start_time
+            logger.error(f"LLM 多轮对话失败: {e}, 耗时={elapsed:.2f}s")
+            raise
+
+    def chat_stream(
+        self,
+        messages: List[Dict[str, str]],
+        temperature: Optional[float] = None,
+        max_tokens: Optional[int] = None,
+        **kwargs: Any,
+    ) -> Iterator[Dict[str, Any]]:
+        """多轮对话流式调用"""
+        start_time = time.time()
+        try:
+            stream = self.client.chat.completions.create(
+                model=self.model_name,
+                messages=messages,
+                temperature=temperature or self.temperature,
+                max_tokens=max_tokens or self.max_tokens,
+                stream=True,
+                **kwargs,
+            )
+
+            for chunk in stream:
+                if not chunk.choices:
+                    continue
+
+                delta = chunk.choices[0].delta
+                finish_reason = chunk.choices[0].finish_reason
+
+                result: Dict[str, Any] = {
+                    "type": "content",
+                    "content": "",
+                    "finish_reason": finish_reason,
+                }
+
+                if hasattr(delta, 'reasoning_content') and delta.reasoning_content:
+                    result["type"] = "reasoning"
+                    result["content"] = delta.reasoning_content
+                elif delta.content:
+                    result["content"] = delta.content
+
+                yield result
+
+                if finish_reason == "stop":
+                    break
+
+            elapsed = time.time() - start_time
+            logger.info(f"LLM 多轮流式调用完成: model={self.model_name}, 耗时={elapsed:.2f}s")
+
+        except Exception as e:
+            elapsed = time.time() - start_time
+            logger.error(f"LLM 多轮流式调用失败: {e}, 耗时={elapsed:.2f}s")
+            yield {"type": "error", "content": str(e), "finish_reason": "error"}
+
+    @classmethod
+    def reset(cls):
+        """重置单例"""
+        cls._instance = None
+
+
+def get_qwen_llm_service(
+    api_key: Optional[str] = None,
+    model_name: Optional[str] = None,
+    base_url: Optional[str] = None,
+    temperature: Optional[float] = None,
+    max_tokens: Optional[int] = None,
+    enable_reasoning: bool = False,
+) -> QwenLLMService:
+    """获取单例 QwenLLMService 实例"""
+    QwenLLMService.reset()
+    return QwenLLMService(
+        model_name=model_name,
+        api_key=api_key,
+        base_url=base_url,
+        temperature=temperature if temperature is not None else 0.7,
+        max_tokens=max_tokens or 8192,
+        enable_thinking=enable_reasoning,
+    )
 
 
 def create_llm_service_from_preset(
     model_key: str,
-    *,
     enable_reasoning: bool = False,
 ) -> QwenLLMService:
-    """
-    根据模型预设 key 创建 LLM 服务实例（不使用全局单例）。
-
-    Args:
-        model_key: 模型预设 key，如 "qwen_36_plus"、"glm_51" 等
-        enable_reasoning: 是否启用推理模式
-
-    Returns:
-        QwenLLMService 实例
-    """
+    """根据预设创建 LLM 服务"""
     from config.model_presets import get_preset, resolve_api_key, resolve_base_url
 
     preset = get_preset(model_key)
-    if preset is None:
-        raise ValueError(f"未知的模型预设: {model_key}")
+    if not preset:
+        raise ValueError(f"未找到模型预设: {model_key}")
 
     api_key = resolve_api_key(preset)
     base_url = resolve_base_url(preset)
+    model_name = preset["model_name"]
 
-    if enable_reasoning and preset.get("supports_reasoning"):
-        actual_model = preset["model_name"]
-        actual_temperature = preset.get("thinking_temperature", 0.2)
-        actual_max_tokens = preset.get("thinking_max_tokens", 4096)
-    else:
-        actual_model = preset["model_name"]
-        actual_temperature = preset.get("default_temperature", 0.3)
-        actual_max_tokens = preset.get("default_max_tokens", 4096)
-        enable_reasoning = False
-
-    extra_body: Dict[str, Any] = {}
     if enable_reasoning:
-        extra_body["enable_thinking"] = True
+        temperature = preset.get("thinking_temperature", 0.2)
+        max_tokens = preset.get("thinking_max_tokens", 4096)
+    else:
+        temperature = preset.get("default_temperature", 0.3)
+        max_tokens = preset.get("default_max_tokens", 4096)
 
-    llm = QwenReasoningChatOpenAI(
-        model=actual_model,
+    QwenLLMService.reset()
+    return QwenLLMService(
+        model_name=model_name,
         api_key=api_key,
         base_url=base_url,
-        temperature=actual_temperature,
-        max_tokens=actual_max_tokens,
-        timeout=90,
-        streaming=True,
-        extra_body=extra_body,
-        frequency_penalty=0.0,
-        presence_penalty=0.0,
+        temperature=temperature,
+        max_tokens=max_tokens,
+        enable_thinking=enable_reasoning,
     )
-
-    service = QwenLLMService.__new__(QwenLLMService)
-    service.api_key = api_key
-    service.model_name = actual_model
-    service.temperature = actual_temperature
-    service.max_tokens = actual_max_tokens
-    service.enable_search = False
-    service.enable_reasoning = enable_reasoning
-    service.reasoning_model = actual_model
-    service.base_url = base_url
-    service.llm = llm
-
-    mode_str = "推理模式" if enable_reasoning else "标准模式"
-    logger.info("LLM 服务创建成功 - %s - 模型: %s, base_url: %s", mode_str, actual_model, base_url)
-
-    return service

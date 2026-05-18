@@ -1,0 +1,10 @@
+[
+  {
+    "role": "human",
+    "content": "\n\n[会话环境信息]\n输出目录: D:\\chengs\\9.project\\Hydro_Model_Agent\\data\\sessions\\session-1779076456608-bzgjez7w\\outputs\n上传目录: D:\\chengs\\9.project\\Hydro_Model_Agent\\data\\sessions\\session-1779076456608-bzgjez7w\\uploads\n生成文件时，请使用输出目录路径。\n\n\nhello"
+  },
+  {
+    "role": "ai",
+    "content": "你好！我是 FloodMind，洪水预报智能体。有什么可以帮你的吗？"
+  }
+]

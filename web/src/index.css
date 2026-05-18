@@ -64,85 +64,85 @@
 :root {
   --fontSans: "Poppins-Regular_6", "Noto Sans SC", "Microsoft YaHei", system-ui, -apple-system, sans-serif;
   --radius: 0.5rem;
-  --background: rgba(248, 249, 252, 1);
-  --foreground: rgba(18, 20, 30, 1);
+  --background: rgba(248, 250, 253, 1);
+  --foreground: rgba(15, 23, 42, 1);
   --card: rgba(255, 255, 255, 1);
-  --card-foreground: rgba(18, 20, 30, 1);
+  --card-foreground: rgba(15, 23, 42, 1);
   --popover: rgba(255, 255, 255, 1);
-  --popover-foreground: rgba(18, 20, 30, 1);
-  --primary: rgba(38, 92, 178, 1);
+  --popover-foreground: rgba(15, 23, 42, 1);
+  --primary: rgba(14, 165, 233, 1);
   --primary-foreground: rgba(255, 255, 255, 1);
-  --secondary: rgba(237, 239, 244, 1);
-  --secondary-foreground: rgba(18, 20, 30, 1);
-  --muted: rgba(240, 242, 246, 1);
-  --muted-foreground: rgba(100, 104, 120, 1);
-  --accent: rgba(224, 236, 248, 1);
-  --accent-foreground: rgba(38, 92, 178, 1);
+  --secondary: rgba(237, 244, 250, 1);
+  --secondary-foreground: rgba(15, 23, 42, 1);
+  --muted: rgba(240, 246, 252, 1);
+  --muted-foreground: rgba(100, 116, 139, 1);
+  --accent: rgba(224, 242, 254, 1);
+  --accent-foreground: rgba(14, 165, 233, 1);
   --destructive: rgba(200, 50, 35, 1);
   --destructive-foreground: rgba(255, 255, 255, 1);
-  --border: rgba(218, 222, 232, 1);
-  --input: rgba(230, 233, 240, 1);
-  --ring: rgba(38, 92, 178, 0.3);
-  --chart-1: rgba(38, 92, 178, 1);
+  --border: rgba(203, 218, 234, 1);
+  --input: rgba(224, 236, 248, 1);
+  --ring: rgba(14, 165, 233, 0.3);
+  --chart-1: rgba(14, 165, 233, 1);
   --chart-2: rgba(20, 160, 130, 1);
   --chart-3: rgba(210, 140, 30, 1);
-  --chart-4: rgba(100, 125, 190, 1);
+  --chart-4: rgba(99, 160, 220, 1);
   --chart-5: rgba(160, 85, 140, 1);
-  --sidebar: rgba(243, 244, 248, 1);
-  --sidebar-foreground: rgba(18, 20, 30, 1);
-  --sidebar-primary: rgba(38, 92, 178, 1);
+  --sidebar: rgba(243, 248, 253, 1);
+  --sidebar-foreground: rgba(15, 23, 42, 1);
+  --sidebar-primary: rgba(14, 165, 233, 1);
   --sidebar-primary-foreground: rgba(255, 255, 255, 1);
-  --sidebar-accent: rgba(230, 234, 242, 1);
-  --sidebar-accent-foreground: rgba(38, 92, 178, 1);
-  --sidebar-border: rgba(218, 222, 232, 1);
-  --sidebar-ring: rgba(38, 92, 178, 0.3);
+  --sidebar-accent: rgba(224, 242, 254, 1);
+  --sidebar-accent-foreground: rgba(14, 165, 233, 1);
+  --sidebar-border: rgba(203, 218, 234, 1);
+  --sidebar-ring: rgba(14, 165, 233, 0.3);
   --warning: rgba(220, 140, 20, 1);
   --panel: rgba(255, 255, 255, 0.65);
-  --grid-line: rgba(38, 92, 178, 0.04);
-  --river: rgba(38, 92, 178, 0.08);
+  --grid-line: rgba(14, 165, 233, 0.04);
+  --river: rgba(14, 165, 233, 0.08);
   --shadow-spread: 0px;
   --shadow-blur: 32px;
-  --shadow-color: rgba(18, 20, 30, 0.05);
+  --shadow-color: rgba(15, 23, 42, 0.05);
   --shadow-x: 0px;
   --shadow-y: 12px;
 }
 
 .dark {
-  --background: rgb(12, 13, 18);
-  --foreground: rgb(232, 234, 240);
-  --card: rgb(22, 24, 30);
-  --card-foreground: rgb(232, 234, 240);
-  --popover: rgb(22, 24, 30);
-  --popover-foreground: rgb(232, 234, 240);
-  --primary: rgb(80, 140, 220);
-  --primary-foreground: rgb(12, 13, 18);
-  --secondary: rgb(34, 36, 44);
-  --secondary-foreground: rgb(232, 234, 240);
-  --muted: rgb(34, 36, 44);
-  --muted-foreground: rgb(150, 155, 170);
-  --accent: rgb(30, 45, 70);
-  --accent-foreground: rgb(80, 140, 220);
+  --background: rgb(10, 14, 22);
+  --foreground: rgb(232, 240, 250);
+  --card: rgb(18, 24, 34);
+  --card-foreground: rgb(232, 240, 250);
+  --popover: rgb(18, 24, 34);
+  --popover-foreground: rgb(232, 240, 250);
+  --primary: rgb(56, 189, 248);
+  --primary-foreground: rgb(10, 14, 22);
+  --secondary: rgb(28, 36, 50);
+  --secondary-foreground: rgb(232, 240, 250);
+  --muted: rgb(28, 36, 50);
+  --muted-foreground: rgb(148, 163, 184);
+  --accent: rgb(20, 40, 65);
+  --accent-foreground: rgb(56, 189, 248);
   --destructive: rgb(240, 80, 80);
-  --border: rgba(255, 255, 255, 0.08);
-  --input: rgba(255, 255, 255, 0.1);
-  --ring: rgba(80, 140, 220, 0.4);
-  --chart-1: rgb(60, 120, 220);
+  --border: rgba(56, 189, 248, 0.08);
+  --input: rgba(56, 189, 248, 0.1);
+  --ring: rgba(56, 189, 248, 0.4);
+  --chart-1: rgb(56, 189, 248);
   --chart-2: rgb(0, 180, 130);
   --chart-3: rgb(240, 160, 20);
   --chart-4: rgb(160, 100, 240);
   --chart-5: rgb(240, 60, 90);
-  --sidebar: rgb(16, 17, 22);
-  --sidebar-foreground: rgb(232, 234, 240);
-  --sidebar-primary: rgb(80, 140, 220);
-  --sidebar-primary-foreground: rgb(12, 13, 18);
-  --sidebar-accent: rgb(28, 32, 42);
-  --sidebar-accent-foreground: rgb(80, 140, 220);
-  --sidebar-border: rgba(255, 255, 255, 0.06);
-  --sidebar-ring: rgba(80, 140, 220, 0.4);
+  --sidebar: rgb(14, 18, 28);
+  --sidebar-foreground: rgb(232, 240, 250);
+  --sidebar-primary: rgb(56, 189, 248);
+  --sidebar-primary-foreground: rgb(10, 14, 22);
+  --sidebar-accent: rgb(22, 30, 46);
+  --sidebar-accent-foreground: rgb(56, 189, 248);
+  --sidebar-border: rgba(56, 189, 248, 0.06);
+  --sidebar-ring: rgba(56, 189, 248, 0.4);
   --warning: rgb(230, 160, 40);
-  --panel: rgba(22, 24, 30, 0.7);
-  --grid-line: rgba(80, 140, 220, 0.04);
-  --river: rgba(80, 140, 220, 0.06);
+  --panel: rgba(18, 24, 34, 0.7);
+  --grid-line: rgba(56, 189, 248, 0.04);
+  --river: rgba(56, 189, 248, 0.06);
   --shadow-spread: 0px;
   --shadow-y: 1px;
   --shadow-blur: 4px;
@@ -205,6 +205,52 @@
 
 .animate-pulse-subtle {
   animation: pulse-subtle 2s ease-in-out infinite;
+}
+
+@keyframes star-spin {
+  0% { transform: rotate(0deg); }
+  100% { transform: rotate(360deg); }
+}
+
+@keyframes star-breathe {
+  0%, 100% { transform: scale(1); opacity: 0.85; }
+  50% { transform: scale(1.18); opacity: 1; }
+}
+
+.animate-star-spin {
+  animation: star-spin 3s linear infinite;
+}
+
+.animate-star-breathe {
+  animation: star-breathe 1.8s ease-in-out infinite;
+}
+
+.animate-star-spin-breathe {
+  animation: star-spin 3s linear infinite, star-breathe 1.8s ease-in-out infinite;
+}
+
+@keyframes message-in {
+  from {
+    opacity: 0;
+    transform: translateY(8px) scale(0.98);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
+.animate-message-in {
+  animation: message-in 0.35s cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+
+@keyframes shimmer-line {
+  0% { transform: translateX(-100%); }
+  100% { transform: translateX(200%); }
+}
+
+.animate-shimmer-line {
+  animation: shimmer-line 2s ease-in-out infinite;
 }
 
 .hydro-grid-bg {

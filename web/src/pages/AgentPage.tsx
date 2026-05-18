@@ -27,6 +27,9 @@ const AgentPage = () => {
     handleDeleteSession,
     loadSession,
     toggleThought,
+    updateAction,
+    pendingPermissionAsk,
+    handleRespondPermissionAsk,
     closePreview,
   } = useAgentApp();
 
@@ -52,7 +55,10 @@ const AgentPage = () => {
           onPause={handlePauseResume}
           onUpload={handleUpload}
           onToggleThought={toggleThought}
+          onUpdateAction={updateAction}
           onConfigChange={setConfig}
+          pendingPermissionAsk={pendingPermissionAsk}
+          onRespondPermissionAsk={handleRespondPermissionAsk}
         />
         <ContextPanel
           sessionId={sessionId}

@@ -33,7 +33,7 @@ from models import QwenLLMService, get_qwen_llm_service, create_llm_service_from
 from config.model_presets import get_preset, get_default_model_key, get_models_list, resolve_api_key, resolve_base_url
 from memory import SimpleMemory, DualMemory, SessionManager
 from memory.session_manager import validate_session_id
-from agent import FloodAgent
+from agent.native import create_flood_agent
 from agent.scheduled_task_runtime import get_scheduled_task_runtime
 from tools import set_rag_config, set_memory_instance, set_session_context
 
@@ -119,6 +119,9 @@ session_states_lock = threading.RLock()
 
 session_abort_flags: Dict[str, bool] = {}
 session_abort_flags_lock = threading.RLock()
+
+session_streaming_flags: Dict[str, bool] = {}
+session_streaming_lock = threading.RLock()
 
 IMAGE_EXTENSIONS = {'.png', '.jpg', '.jpeg'}
 DOWNLOADABLE_EXTENSIONS = {
@@ -269,14 +272,12 @@ def _dedup_filename(directory: str, filename: str) -> str:
 
 
 def build_session_output_url(filepath: str, fallback_session_id: str) -> str:
-    """根据输出文件路径构造会话输出 URL。"""
-    normalized_path = os.path.normpath(filepath)
-    path_parts = normalized_path.split(os.sep)
-
-    if 'sessions' in path_parts:
-        session_idx = path_parts.index('sessions')
-        if session_idx + 1 < len(path_parts):
-            return f"/api/sessions/{path_parts[session_idx + 1]}/outputs/{os.path.basename(filepath)}"
+    """根据输出文件路径构造会话输出 URL，保留子目录相对路径。"""
+    real_path = os.path.realpath(filepath)
+    output_dir = os.path.realpath(get_session_output_dir(fallback_session_id))
+    if _is_within_dir(real_path, output_dir):
+        rel = os.path.relpath(real_path, output_dir).replace(os.sep, "/")
+        return f"/api/sessions/{fallback_session_id}/outputs/{rel}"
 
     return f"/api/sessions/{fallback_session_id}/outputs/{os.path.basename(filepath)}"
 
@@ -355,10 +356,9 @@ def _generate_session_title(message: str) -> str:
         model_name=settings.qwen.model_name,
         temperature=0.2,
         max_tokens=60,
-        enable_reasoning=False,
-        reasoning_model=settings.qwen.reasoning_model,
+        enable_thinking=False,
     )
-    raw = (llm.invoke(prompt, include_reasoning=False) or '').strip()
+    raw = (llm.invoke(prompt).content or '').strip()
     title = raw.splitlines()[0].strip().strip('"“”')
     title = re.sub(r"^[#\-*\d.\s]+", "", title).strip()
     return title[:24] if title else ''
@@ -409,6 +409,11 @@ def build_artifact_event(filepath: str, fallback_session_id: str, emitted_paths:
 
     if not os.path.exists(real_path):
         logger.warning(f"生成文件不存在: {real_path}")
+        return None
+
+    output_dir = os.path.realpath(get_session_output_dir(fallback_session_id))
+    if not _is_within_dir(real_path, output_dir):
+        logger.warning(f"生成文件不在会话输出目录内: {real_path}")
         return None
 
     if real_path in emitted_paths:
@@ -473,17 +478,33 @@ def build_artifact_summary_text(artifact_events: list[dict[str, Any]], original_
 
     cleaned_original = (original_text or "").strip()
     if not cleaned_original:
-        cleaned_original = "任务已完成，已生成最终结果文件。"
+        cleaned_original = "任务已完成。"
+
+    internal_artifact_names = {'input.json', 'result.json', 'result.xlsx', 'result.csv', 'result.txt'}
+    is_explicit_delivery = any(
+        kw in cleaned_original for kw in ('最终交付', '已生成', '导出文件', '生成报告', '生成文件', '保存文件', '下载文件')
+    )
 
     if image_events:
-        lines.append("最终交付图片：")
+        label = "最终交付图片" if is_explicit_delivery else "附带图片"
+        lines.append(f"{label}：")
         for event in image_events:
             lines.append(f"- `{event.get('filename', '')}`")
 
     if file_events:
-        lines.append("最终交付文件：")
-        for event in file_events:
-            lines.append(f"- `{event.get('filename', '')}`")
+        internal_files = [e for e in file_events if e.get('filename', '') in internal_artifact_names]
+        deliverable_files = [e for e in file_events if e not in internal_files]
+
+        if deliverable_files:
+            label = "最终交付文件" if is_explicit_delivery else "附带结果文件"
+            lines.append(f"{label}：")
+            for event in deliverable_files:
+                lines.append(f"- `{event.get('filename', '')}`")
+
+        if internal_files and not deliverable_files:
+            lines.append("附带结果文件：")
+            for event in internal_files:
+                lines.append(f"- `{event.get('filename', '')}`")
 
     if not lines:
         return None
@@ -499,20 +520,22 @@ def stream_json_line(payload: dict[str, Any]) -> str:
     return json.dumps(payload, ensure_ascii=False) + "\n"
 
 
-def _buffered_yield(buf: list, payload: dict, resume_event: Optional[threading.Event] = None) -> str:
+def _buffered_yield(buf: list, payload: dict, resume_event: Optional[threading.Event] = None, buffer_lock: Optional[threading.Lock] = None) -> str:
     line = stream_json_line(payload)
-    buf.append(line)
+    if buffer_lock:
+        with buffer_lock:
+            buf.append(line)
+    else:
+        buf.append(line)
     if resume_event:
         resume_event.set()
     return line
-    """将流事件编码为 NDJSON 行。"""
-    return json.dumps(payload, ensure_ascii=False) + "\n"
 
 
 def _serialize_snapshot(snapshot: Optional[dict]) -> Optional[dict]:
     if not snapshot:
         return None
-    return {k: v for k, v in snapshot.items() if k not in ('event_buffer', 'resume_event')}
+    return {k: v for k, v in snapshot.items() if k not in ('event_buffer', 'resume_event', 'buffer_lock')}
 
 
 def ensure_session_state(session_id: str) -> dict[str, Any]:
@@ -542,6 +565,7 @@ def init_stream_snapshot(session_id: str, message_id: str) -> dict[str, Any]:
         'updated_at': datetime.now().isoformat(),
         'event_buffer': [],
         'resume_event': threading.Event(),
+        'buffer_lock': threading.Lock(),
     }
     state['is_streaming'] = True
     state['stream_snapshot'] = snapshot
@@ -627,7 +651,7 @@ def save_session_artifact_events(session_id: str, artifact_events: list[dict[str
     )
 
 
-def extract_validated_artifact_paths(content: str) -> list[str]:
+def extract_validated_artifact_paths(content: str, session_id: str = "") -> list[str]:
     """只提取已经被调度器/校验逻辑认定为最终可交付的成果文件。"""
     text = (content or '').strip()
     if not text:
@@ -641,19 +665,21 @@ def extract_validated_artifact_paths(content: str) -> list[str]:
     if not isinstance(payload, dict):
         return []
 
+    is_native_delegate = payload.get('is_native_delegate', False)
     validation = payload.get('validation') or {}
     overall_status = str(validation.get('overall_status', '')).strip().lower()
     is_final_goal_met = validation.get('is_final_goal_met')
     current_result_type = str(validation.get('current_result_type', '')).strip().lower()
-    if overall_status != 'pass' and is_final_goal_met is not True:
+    if not is_native_delegate and overall_status != 'pass' and is_final_goal_met is not True:
         return []
-    if current_result_type and current_result_type != 'final_deliverable':
+    if not is_native_delegate and current_result_type and current_result_type != 'final_deliverable':
         return []
 
     artifacts = payload.get('artifacts') or []
     if not isinstance(artifacts, list):
         return []
 
+    output_dir = get_session_output_dir(session_id) if session_id else ""
     deliverable_exts = {'.xlsx', '.xls', '.docx', '.doc', '.pdf', '.png', '.jpg', '.jpeg', '.gif'}
     result = []
     for path in artifacts:
@@ -661,8 +687,11 @@ def extract_validated_artifact_paths(content: str) -> list[str]:
         if not normalized:
             continue
         ext = os.path.splitext(normalized)[1].lower()
-        if ext in deliverable_exts:
-            result.append(normalized)
+        if ext not in deliverable_exts:
+            continue
+        if output_dir and not _is_within_dir(os.path.realpath(normalized), os.path.realpath(output_dir)):
+            continue
+        result.append(normalized)
     return result
 
 
@@ -732,10 +761,10 @@ def filter_system_info(content: str) -> str:
     return filtered
 
 
-def create_agent_for_session(session_id: str, enable_search: bool = False, enable_rag: Optional[bool] = None, enable_reasoning: bool = True, model_key: Optional[str] = None) -> FloodAgent:
-    """为会话创建 Agent 实例"""
+def create_agent_for_session(session_id: str, enable_search: bool = False, enable_rag: Optional[bool] = None, enable_reasoning: bool = True, model_key: Optional[str] = None):
+    """为会话创建 Agent 实例（Native Runtime）"""
     session_id = _require_session_id(session_id)
-    logger.info(f"创建新的智能体实例: {session_id}")
+    logger.info(f"创建新的智能体实例: {session_id}, runtime={settings.agent.runtime}")
     
     if enable_rag is None:
         enable_rag = settings.rag.enabled
@@ -752,21 +781,20 @@ def create_agent_for_session(session_id: str, enable_search: bool = False, enabl
             temperature=settings.qwen.temperature,
             max_tokens=settings.qwen.max_tokens,
             enable_reasoning=enable_reasoning,
-            reasoning_model=settings.qwen.reasoning_model,
         )
     
     memory_dir = session_manager.get_memory_dir(session_id)
     memory = DualMemory(
-        max_history=20,
-        context_window=32768,
-        memory_dir=memory_dir,
         session_id=session_id,
+        max_short_term=20,
+        context_window=32768,
+        persist_dir=memory_dir,
     )
     
-    agent = FloodAgent(
+    agent = create_flood_agent(
         llm_service=llm_service,
         memory=memory,
-        memory_type="dual",
+        session_id=session_id,
         enable_search=enable_search,
     )
     
@@ -788,7 +816,7 @@ def create_agent_for_session(session_id: str, enable_search: bool = False, enabl
     return agent
 
 
-def get_or_create_agent(session_id: str) -> FloodAgent:
+def get_or_create_agent(session_id: str):
     """获取或创建会话智能体"""
     session_id = _require_session_id(session_id)
     session_manager.touch_session(session_id)
@@ -1336,17 +1364,27 @@ def init_agent():
 def chat():
     """流式聊天接口"""
     try:
-        data = request.get_json()
+        session_id = None
+        data = request.get_json() or {}
         session_id = _require_session_id(data.get('session_id', 'default'))
         message = data.get('message', '')
         uploaded_files = data.get('uploaded_files', [])
-        enable_reasoning = data.get('enable_reasoning', True)
+        enable_reasoning = data.get('enable_reasoning', None)
         assistant_message_id = data.get('assistant_message_id', '') or f"stream-{int(time.time() * 1000)}"
+        
+        state = ensure_session_state(session_id)
+        if enable_reasoning is None:
+            enable_reasoning = state.get('enable_reasoning', True)
         
         logger.info(f"[Backend Debug] 接收到请求, enable_reasoning: {enable_reasoning}")
         
         if not message:
             return jsonify({'error': '消息不能为空'}), 400
+
+        with session_streaming_lock:
+            if session_streaming_flags.get(session_id):
+                return jsonify({'error': '当前会话正在处理中，请稍后再试'}), 429
+            session_streaming_flags[session_id] = True
 
         session_manager.get_or_create_session(session_id, agent_factory=None)
         session_manager.increment_message_count(session_id)
@@ -1357,7 +1395,6 @@ def chat():
         with session_abort_flags_lock:
             session_abort_flags[session_id] = False
 
-        state = ensure_session_state(session_id)
         state['is_paused'] = False
 
         if enable_reasoning != state.get('enable_reasoning', True):
@@ -1394,26 +1431,36 @@ def chat():
         
         request_started_at = time.time()
 
-        def generate():
-            """生成流式响应"""
+        def _run_agent_pump(snapshot, event_buffer, resume_event, approved_artifact_paths, streamed_text_parts):
+            """Background thread: consume agent.stream() and write to event_buffer via emit()."""
+            is_workflow_stream = False
+            final_answer_text = ""
+            _pump_stop_heartbeat = threading.Event()
+            buffer_lock = snapshot.get('buffer_lock')
+
+            def _heartbeat():
+                while not _pump_stop_heartbeat.wait(8):
+                    if buffer_lock:
+                        with buffer_lock:
+                            event_buffer.append(stream_json_line({'type': 'heartbeat'}))
+                    else:
+                        event_buffer.append(stream_json_line({'type': 'heartbeat'}))
+                    resume_event.set()
+
+            ht = threading.Thread(target=_heartbeat, daemon=True, name=f"heartbeat-{session_id[:8]}")
+            ht.start()
+
+            def emit(payload: dict):
+                return _buffered_yield(event_buffer, payload, resume_event, buffer_lock)
+
             try:
-                snapshot = init_stream_snapshot(session_id, assistant_message_id)
-                approved_artifact_paths: list[str] = []
-                streamed_text_parts: list[str] = []
-                is_workflow_stream = False
-                event_buffer = snapshot['event_buffer']
-                resume_event = snapshot['resume_event']
-
-                def emit(payload: dict):
-                    return _buffered_yield(event_buffer, payload, resume_event)
-
                 for chunk in agent.stream(enhanced_message, enable_reasoning=enable_reasoning, user_message=message, abort_check=lambda: session_abort_flags.get(session_id, False)):
                     with session_abort_flags_lock:
                         is_aborted = session_abort_flags.get(session_id, False)
                     if is_aborted:
                         finish_stream_snapshot(session_id)
-                        yield emit({'type': 'error', 'content': '会话已被用户暂停'})
-                        yield emit({'type': 'stream_end'})
+                        emit({'type': 'error', 'content': '会话已被用户暂停'})
+                        emit({'type': 'stream_end'})
                         return
                     
                     if not isinstance(chunk, dict):
@@ -1434,9 +1481,11 @@ def chat():
                             for step in workflow_snapshot.get('steps', []):
                                 if step.get('key') == step_key:
                                     merged = dict(step)
+                                    raw_status = chunk.get('status', step.get('status', 'pending'))
+                                    normalized_status = raw_status if raw_status in ('completed', 'running', 'pending', 'error') else ('completed' if raw_status == 'done' else raw_status)
                                     merged.update({
                                         'label': chunk.get('label', step.get('label', '')),
-                                        'status': chunk.get('status', step.get('status', 'pending')),
+                                        'status': normalized_status,
                                         'title': chunk.get('title', step.get('title', '待分析')),
                                         'detail': chunk.get('detail', step.get('detail', '')),
                                         'outcome': chunk.get('outcome', step.get('outcome', '')),
@@ -1446,45 +1495,64 @@ def chat():
                                 else:
                                     updated_steps.append(step)
                             if not seen and step_key:
-                                updated_steps.append({
-                                    'key': step_key,
-                                    'label': chunk.get('label', step_key),
-                                    'status': chunk.get('status', 'pending'),
-                                    'title': chunk.get('title', '待分析'),
-                                    'detail': chunk.get('detail', ''),
-                                    'outcome': chunk.get('outcome', ''),
-                                })
+                                logger.warning(f"[workflow] unknown step_key='{step_key}' not in plan steps, ignoring")
                             workflow_snapshot['steps'] = updated_steps
                         snapshot['workflow'] = workflow_snapshot
                         touch_stream_snapshot(session_id)
-                        yield emit(chunk)
+                        emit(chunk)
                         continue
 
-                    if chunk.get("type") == "reasoning":
+                    if chunk.get("type") in {"reasoning", "thought_delta"}:
                         if enable_reasoning or is_workflow_stream:
                             snapshot['raw_reasoning'] += chunk.get('content', '')
+                            snapshot['reasoning'] = snapshot['raw_reasoning']
                             touch_stream_snapshot(session_id)
-                            yield emit({'type': 'reasoning', 'content': chunk.get('content', '')})
+                            emit({'type': 'thought_delta', 'content': chunk.get('content', '')})
                         continue
 
                     if chunk.get("type") == "llm_token_error":
                         finish_stream_snapshot(session_id)
-                        yield emit({'type': 'error', 'content': 'LLM模型服务账号Token余额不足，无法提供服务'})
-                        yield emit({'type': 'stream_end'})
+                        emit({'type': 'error', 'content': 'LLM模型服务账号Token余额不足，无法提供服务'})
+                        emit({'type': 'stream_end'})
                         return
+
+                    if chunk.get("type") == "error":
+                        emit({'type': 'error', 'content': chunk.get('content', '处理请求时出错')})
+                        continue
+
+                    if chunk.get("type") == "permission_ask":
+                        touch_stream_snapshot(session_id)
+                        emit(chunk)
+                        continue
+
+                    if chunk.get("type") == "artifact_warning":
+                        emit({'type': 'artifact_warning', 'content': chunk.get('content', '')})
+                        continue
 
                     if chunk.get("type") == "memory_status":
                         touch_stream_snapshot(session_id)
-                        yield emit(chunk)
+                        emit(chunk)
                         continue
 
-                    if chunk.get("type") == "tool_status":
+                    if chunk.get("type") == "final_text":
+                        final_answer_text = sanitize_output(chunk.get('content', '') or '')
+                        if final_answer_text:
+                            snapshot['content'] = final_answer_text
+                            touch_stream_snapshot(session_id)
+                        continue
+
+                    if chunk.get("type") in {"tool_status", "action_start"}:
+                        call_id = chunk.get('call_id', '')
                         safe_chunk = {
-                            'type': 'tool_status',
+                            'type': 'action_start',
                             'tool_name': chunk.get('tool_name', ''),
                             'status': chunk.get('status', 'running'),
                         }
+                        if call_id:
+                            safe_chunk['call_id'] = call_id
                         tool_input = chunk.get('tool_input', '')
+                        if tool_input:
+                            safe_chunk['tool_input'] = tool_input
                         if tool_input and chunk.get('tool_name', '') == 'delegate_execution_specialist':
                             try:
                                 parsed = json.loads(tool_input) if isinstance(tool_input, str) else tool_input
@@ -1502,24 +1570,30 @@ def chat():
                         if chunk.get('status') == 'error':
                             safe_chunk['content'] = '工具执行失败，智能体正在继续处理。'
                         touch_stream_snapshot(session_id)
-                        yield emit(safe_chunk)
+                        emit(safe_chunk)
                         continue
 
-                    if chunk.get("type") == "tool_result":
+                    if chunk.get("type") in {"tool_result", "action_end"}:
                         original_content = chunk.get("content", "")
                         tool_name = chunk.get('tool_name', '')
+                        call_id = chunk.get('call_id', '')
                         filtered_content = passthrough_workflow_content(original_content) if is_workflow_stream else sanitize_tool_output(tool_name, original_content)
                         if not filtered_content:
                             continue
                         
-                        logger.info(f"tool_result 内容: {filtered_content[:200] if len(filtered_content) > 200 else filtered_content}")
+                        logger.info(f"action_end 内容: {filtered_content[:200] if len(filtered_content) > 200 else filtered_content}")
 
-                        validated_paths = extract_validated_artifact_paths(original_content)
+                        validated_paths = extract_validated_artifact_paths(original_content, session_id=session_id)
                         logger.info(f"[ARTIFACT] extract_validated_artifact_paths result: paths={validated_paths}, tool={tool_name}")
                         if validated_paths:
-                            approved_artifact_paths = validated_paths
+                            for vp in validated_paths:
+                                rp = os.path.realpath(vp)
+                                if rp not in {os.path.realpath(p) for p in approved_artifact_paths}:
+                                    approved_artifact_paths.append(vp)
 
-                        result_event = {'type': 'tool_result', 'tool_name': tool_name, 'content': filtered_content}
+                        result_event = {'type': 'action_end', 'tool_name': tool_name, 'content': filtered_content}
+                        if call_id:
+                            result_event['call_id'] = call_id
 
                         if tool_name == 'delegate_execution_specialist':
                             try:
@@ -1543,20 +1617,20 @@ def chat():
 
                         snapshot['tool_results'].append({'tool_name': tool_name, 'content': filtered_content})
                         touch_stream_snapshot(session_id)
-                        yield emit(result_event)
+                        emit(result_event)
                         continue
 
-                    if chunk.get("type") == "token" and chunk.get("content"):
+                    if chunk.get("type") in {"token", "answer_delta"} and chunk.get("content"):
                         raw_content = chunk["content"]
                         chunk["content"] = raw_content if is_workflow_stream else sanitize_output(raw_content)
                         streamed_text_parts.append(chunk["content"])
                         snapshot['content'] += chunk['content']
                         touch_stream_snapshot(session_id)
+                        emit({'type': 'answer_delta', 'content': chunk["content"]})
+                        continue
 
-                    yield emit(chunk)
-
-                final_text = ''.join(streamed_text_parts)
-                approved_artifact_paths = resolve_artifact_references(session_id, approved_artifact_paths, final_text)
+                final_text = final_answer_text.strip() or ''.join(streamed_text_parts)
+                approved_artifact_paths[:] = resolve_artifact_references(session_id, approved_artifact_paths, final_text)
                 logger.info(f"[ARTIFACT] approved_artifact_paths after resolve: {approved_artifact_paths}")
 
                 approved_artifact_events: list[dict[str, Any]] = []
@@ -1574,26 +1648,28 @@ def chat():
                 save_session_artifact_events(session_id, approved_artifact_events)
                 logger.info(f"[ARTIFACT] total approved events: {len(approved_artifact_events)}, saved to approved_artifacts.json")
 
-                final_override_content = build_artifact_summary_text(approved_artifact_events, final_text)
-                if final_override_content:
-                    if hasattr(agent, 'memory') and hasattr(agent.memory, 'upsert_last_ai_message'):
-                        try:
-                            agent.memory.upsert_last_ai_message(final_override_content)
-                            if hasattr(agent.memory, 'save_chat_history'):
-                                agent.memory.save_chat_history()
-                        except Exception as e:
-                            logger.warning(f"更新会话最终展示文案失败: {e}")
-                    snapshot['content'] = final_override_content
-                    touch_stream_snapshot(session_id)
-                    yield emit({'type': 'final_override', 'content': final_override_content})
+                final_event = {
+                    'type': 'final',
+                    'content': final_text,
+                    'artifacts': [_sanitize_artifact_event(e) for e in approved_artifact_events],
+                }
+                snapshot['content'] = final_text
+                touch_stream_snapshot(session_id)
 
-                for artifact_event in approved_artifact_events:
-                    logger.info(f"[ARTIFACT] sending SSE event: type={artifact_event.get('type')}, filename={artifact_event.get('filename')}, image_url={artifact_event.get('image_url', '')}, download_url={artifact_event.get('download_url', '')}")
-                    yield emit(artifact_event)
+                if hasattr(agent, 'memory') and hasattr(agent.memory, 'upsert_last_ai_message'):
+                    try:
+                        agent.memory.upsert_last_ai_message(final_text)
+                        if hasattr(agent.memory, 'save_chat_history'):
+                            agent.memory.save_chat_history()
+                    except Exception as e:
+                        logger.warning(f"更新会话最终展示文案失败: {e}")
 
+                emit(final_event)
+
+                _pump_stop_heartbeat.set()
                 finish_stream_snapshot(session_id)
                 logger.info(f"[ARTIFACT] stream finished, sending stream_end. SSE stream connection will close now.")
-                yield emit({'type': 'stream_end'})
+                emit({'type': 'stream_end'})
 
                 session_info = session_manager.get_session_info(session_id)
                 if session_info and not session_info.title:
@@ -1601,17 +1677,59 @@ def chat():
 
             except Exception as e:
                 logger.error(f"流式输出错误: {e}")
+                _pump_stop_heartbeat.set()
                 finish_stream_snapshot(session_id)
                 error_msg = {
                     'type': 'error',
                     'content': f'处理请求时出错: {str(e)}'
                 }
-                yield emit(error_msg)
-                yield emit({'type': 'stream_end'})
+                emit(error_msg)
+                emit({'type': 'stream_end'})
             finally:
+                _pump_stop_heartbeat.set()
                 if snapshot.get('is_streaming'):
                     finish_stream_snapshot(session_id)
-                    logger.info("generate() interrupted, force-finished stream snapshot")
+                    logger.info("_run_agent_pump interrupted, force-finished stream snapshot")
+
+        def generate():
+            """Buffer-following reader: yield from event_buffer."""
+            snapshot = init_stream_snapshot(session_id, assistant_message_id)
+            approved_artifact_paths: list[str] = []
+            streamed_text_parts: list[str] = []
+            event_buffer = snapshot['event_buffer']
+            resume_event = snapshot['resume_event']
+            buffer_lock = snapshot.get('buffer_lock', threading.Lock())
+
+            pump_thread = threading.Thread(
+                target=_run_agent_pump,
+                args=(snapshot, event_buffer, resume_event, approved_artifact_paths, streamed_text_parts),
+                daemon=True,
+                name=f"agent-pump-{session_id[:8]}",
+            )
+            pump_thread.start()
+
+            replayed = 0
+            try:
+                while True:
+                    with buffer_lock:
+                        buf_len = len(event_buffer)
+                    while replayed < buf_len:
+                        yield event_buffer[replayed]
+                        replayed += 1
+
+                    if not snapshot.get('is_streaming'):
+                        break
+
+                    resume_event.wait(timeout=5.0)
+                    resume_event.clear()
+
+                with buffer_lock:
+                    while replayed < len(event_buffer):
+                        yield event_buffer[replayed]
+                        replayed += 1
+            finally:
+                with session_streaming_lock:
+                    session_streaming_flags.pop(session_id, None)
         
         return Response(
             generate(),
@@ -1624,6 +1742,9 @@ def chat():
         
     except Exception as e:
         logger.error(f"聊天接口错误: {e}")
+        if session_id:
+            with session_streaming_lock:
+                session_streaming_flags.pop(session_id, None)
         return jsonify({'error': str(e)}), 500
 
 
@@ -1631,20 +1752,23 @@ def chat():
 def stream_resume():
     """恢复断开的流式连接，回放已缓冲的事件并继续流式输出"""
     session_id = _require_session_id(request.args.get('session_id', 'default'))
+    after_index = int(request.args.get('after_index', '0'))
     state = ensure_session_state(session_id)
     snapshot = state.get('stream_snapshot')
 
-    if not snapshot or not snapshot.get('is_streaming'):
+    if not snapshot:
         return jsonify({'status': 'idle', 'message': '没有正在进行的流'}), 200
 
     def replay_and_continue():
         event_buffer = snapshot.get('event_buffer', [])
-        replayed = 0
+        buffer_lock = snapshot.get('buffer_lock', threading.Lock())
+        replayed = after_index
         stale_rounds = 0
         max_stale_rounds = 6
 
         while True:
-            buf_len = len(event_buffer)
+            with buffer_lock:
+                buf_len = len(event_buffer)
             while replayed < buf_len:
                 yield event_buffer[replayed]
                 replayed += 1
@@ -1660,13 +1784,20 @@ def stream_resume():
             else:
                 time.sleep(0.5)
 
-            if len(event_buffer) == buf_len:
+            with buffer_lock:
+                new_buf_len = len(event_buffer)
+            if new_buf_len == buf_len:
                 stale_rounds += 1
                 if stale_rounds >= max_stale_rounds:
                     logger.info("stream_resume: no new events for 30s, closing")
                     break
             else:
                 stale_rounds = 0
+
+        with buffer_lock:
+            while replayed < len(event_buffer):
+                yield event_buffer[replayed]
+                replayed += 1
 
     return Response(
         replay_and_continue(),
@@ -1848,9 +1979,22 @@ def delete_session_route(session_id: str):
     """删除会话"""
     try:
         session_id = _require_session_id(session_id)
+        
+        from agent.runtime.adapters.flask_permission_api import handle_permission_cancel_session
+        cancelled = handle_permission_cancel_session(session_id)
+        if cancelled:
+            logger.info(f"删除会话 {session_id}: 已取消 {cancelled} 个 pending ASK")
+        
         session_manager.delete_session(session_id)
         
         _remove_session_files(session_id)
+        
+        with session_states_lock:
+            session_states.pop(session_id, None)
+        with session_abort_flags_lock:
+            session_abort_flags.pop(session_id, None)
+        with session_streaming_lock:
+            session_streaming_flags.pop(session_id, None)
         
         logger.info(f"已删除会话: {session_id}")
         
@@ -2133,6 +2277,31 @@ def add_long_term_memory():
         }), 500
 
 
+@app.route('/api/permission/respond', methods=['POST'])
+def permission_respond():
+    """用户对权限 ASK 请求的响应"""
+    try:
+        from agent.runtime.adapters.flask_permission_api import handle_permission_respond
+        data = request.get_json() or {}
+        result, status_code = handle_permission_respond(data)
+        return jsonify(result), status_code
+    except Exception as e:
+        logger.error(f"权限确认响应失败: {e}")
+        return jsonify({'status': 'error', 'message': str(e)}), 500
+
+
+@app.route('/api/permission/pending', methods=['GET'])
+def permission_pending():
+    """查询当前所有 pending ASK 请求"""
+    try:
+        from agent.runtime.adapters.flask_permission_api import handle_permission_pending
+        session_id = _require_session_id(request.args.get('session_id', 'default'))
+        result, status_code = handle_permission_pending(session_id)
+        return jsonify(result), status_code
+    except Exception as e:
+        return jsonify({'status': 'error', 'message': str(e)}), 500
+
+
 @app.route('/api/session/pause', methods=['POST'])
 def pause_session():
     """暂停会话"""
@@ -2143,6 +2312,14 @@ def pause_session():
         with session_abort_flags_lock:
             session_abort_flags[session_id] = True
         ensure_session_state(session_id)['is_paused'] = True
+
+        try:
+            from agent.runtime.adapters.flask_permission_api import handle_permission_cancel_session
+            cancelled = handle_permission_cancel_session(session_id)
+            if cancelled:
+                logger.info(f"暂停会话 {session_id}: 已取消 {cancelled} 个 pending ASK")
+        except Exception:
+            pass
         
         logger.info(f"会话已暂停: {session_id}")
         
@@ -2370,10 +2547,10 @@ if __name__ == '__main__':
 
                 options = {
                     'bind': f'{args.host}:{args.port}',
-                    'workers': 4,
+                    'workers': 1,
                     'timeout': 300,
                     'worker_class': 'gthread',
-                    'threads': 2,
+                    'threads': 4,
                 }
                 logger.info(f"使用 gunicorn 生产服务器 (Linux)")
                 StandaloneApplication(app, options).run()

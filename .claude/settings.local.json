@@ -1,0 +1,27 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(dir *)",
+      "Bash(python -c \"from agent.runtime.contracts.messages import Message, Document, MessageStore, human_message, ai_message, system_message; print\\('messages.py OK'\\)\")",
+      "Bash(python -c \"from rag.text_splitters import RecursiveCharacterTextSplitter, MarkdownHeaderTextSplitter; print\\('text_splitters.py OK'\\)\")",
+      "Bash(python -c \"from tools.agent_tool import AgentTool, ToolRegistry, build_agent_tool; print\\('agent_tool.py OK'\\)\")",
+      "Bash(python -c \"from agent.context_runtime import ContextRuntime; print\\('context_runtime.py OK'\\)\")",
+      "Bash(python -c \"from memory.simple_memory import SimpleMemory; print\\('simple_memory.py OK'\\)\")",
+      "Bash(python -c \"from memory.dual_memory import DualMemory; print\\('dual_memory.py OK'\\)\")",
+      "Bash(python -c \"from memory.global_search import GlobalSearch; print\\('global_search.py OK'\\)\")",
+      "Bash(python -c \"from models.qwen_llm_service import QwenLLMService; print\\('qwen_llm_service.py OK'\\)\")",
+      "Bash(python -c \"from rag.embeddings import EmbeddingManager; print\\('embeddings.py OK'\\)\")",
+      "Bash(python -c \"from rag.vector_store import VectorStoreManager; print\\('vector_store.py OK'\\)\")",
+      "Bash(python -c \"from rag.retriever import KnowledgeRetriever; print\\('retriever.py OK'\\)\")",
+      "Bash(python -c \"from agent.native import create_flood_agent, register_agent_tools; print\\('agent.native OK'\\)\")",
+      "Bash(python -c ' *)",
+      "Bash(python -c \"from models import QwenLLMService, get_qwen_llm_service, create_llm_service_from_preset; print\\('Import OK'\\)\")",
+      "Bash(python -c \"from tools.agent_tool import UpdateProjectInstructionsInput, get_agents_md_path, make_readonly_permission_fn, make_write_permission_fn, make_exec_permission_fn, make_skill_script_permission_fn, make_ask_permission_fn, make_read_path_permission_fn, resolve_tool_path, _strip_session_prefix; print\\('agent_tool imports OK'\\)\")",
+      "Bash(python -c \"from tools.base_tools import *; print\\('base_tools imports OK'\\)\")",
+      "Bash(python -c \"from tools import set_rag_config, set_session_context; print\\('tools __init__ OK'\\)\")",
+      "Bash(python -c \"from models import QwenLLMService, get_qwen_llm_service, create_llm_service_from_preset; from tools import set_rag_config, set_session_context, set_memory_instance; print\\('All imports OK'\\)\")",
+      "Bash(python -c \"from tools import set_rag_config, set_session_context, set_memory_instance; print\\('tools __init__ OK'\\)\")",
+      "Bash(timeout 10 python -c ' *)"
+    ]
+  }
+}

@@ -29,7 +29,7 @@ export function getToolDisplayName(toolName: string): string {
 export function createUserMessage(content: string): ChatMessage {
   return {
     id: uuid(),
-    role: "user",
+    role: "human",
     content,
     timestamp: new Date().toISOString(),
     blocks: [
@@ -45,8 +45,9 @@ export function createUserMessage(content: string): ChatMessage {
 export function createAssistantMessage(id?: string): ChatMessage {
   return {
     id: id || uuid(),
-    role: "assistant",
+    role: "FloodMind",
     content: "",
+    isComplete: false,
     timestamp: new Date().toISOString(),
     blocks: [],
     artifacts: [],
@@ -73,7 +74,7 @@ export function appendThoughtBlock(message: ChatMessage, content: string, append
   const normalized = String(content || "").trim();
   if (!normalized) return message;
 
-  const blocks = [...message.blocks];
+  const blocks = message.blocks.map((b) => ({ ...b }));
   const last = blocks[blocks.length - 1];
   if (append && last?.type === "thought") {
     last.content += content;
@@ -103,21 +104,28 @@ export function appendThoughtBlock(message: ChatMessage, content: string, append
 
 export function appendAnswerBlock(message: ChatMessage, content: string, append = true): ChatMessage {
   const normalized = String(content || "");
-  const blocks = [...message.blocks];
-  const last = blocks[blocks.length - 1];
+  const blocks = message.blocks.map((b) => ({ ...b }));
 
-  if (last?.type === "thought") {
-    last.isCollapsed = true;
-    last.isStreaming = false;
-    last.isArchived = true;
-  }
+  blocks.forEach((block) => {
+    if (block.type === "thought") {
+      block.isCollapsed = true;
+      block.isStreaming = false;
+      block.isArchived = true;
+    }
+  });
 
-  if (append && blocks[blocks.length - 1]?.type === "answer") {
+  const lastAnswerIdx = blocks.map((b, i) => b.type === "answer" ? i : -1).filter(i => i >= 0).pop();
+  const hasNewPhaseAfterAnswer = lastAnswerIdx !== undefined
+    ? blocks.slice(lastAnswerIdx + 1).some((b) => b.type === "thought" || b.type === "action")
+    : false;
+
+  if (append && blocks[blocks.length - 1]?.type === "answer" && !hasNewPhaseAfterAnswer) {
     blocks[blocks.length - 1].content += normalized;
   } else {
     blocks.forEach((block) => {
       if (block.type === "answer") {
         block.isArchived = true;
+        block.isCollapsed = true;
       }
     });
     blocks.push({
@@ -158,8 +166,22 @@ function actionLabel(action: ActionDetail): string {
   return action.delegation?.label || getToolDisplayName(action.toolName);
 }
 
-export function appendActionBlock(message: ChatMessage, toolName: string, status: ActionDetail["status"], content: string, delegation?: ActionDetail["delegation"]): ChatMessage {
-  const blocks = [...message.blocks];
+function findActionByCallId(actions: ActionDetail[], callId: string): number {
+  return actions.findIndex((a) => a.callId === callId);
+}
+
+function findActionByToolNameRunning(actions: ActionDetail[], toolName: string): number {
+  return actions.findIndex((a) => a.toolName === toolName && a.status === "running");
+}
+
+export function appendActionBlock(message: ChatMessage, toolName: string, status: ActionDetail["status"], content: string, delegation?: ActionDetail["delegation"], callId?: string, askId?: string, askReason?: string, askSessionId?: string): ChatMessage {
+  const blocks = message.blocks.map((b) => {
+    const copy: MessageBlock = { ...b };
+    if (b.actions) {
+      copy.actions = b.actions.map((a) => ({ ...a, delegation: a.delegation ? { ...a.delegation } : undefined }));
+    }
+    return copy;
+  });
 
   const last = blocks[blocks.length - 1];
   if (last?.type === "thought") {
@@ -167,13 +189,24 @@ export function appendActionBlock(message: ChatMessage, toolName: string, status
     last.isStreaming = false;
   }
 
-  const existingActionIdx = blocks.findIndex(
-    (b) => b.type === "action" && b.actions?.some((a) => a.toolName === toolName && a.status === "running")
-  );
+  const effectiveCallId = callId || `${toolName}-${Date.now()}`;
 
-  if (status === "running") {
-    const action: ActionDetail = { toolName, status: "running", content: "", delegation };
-    if (existingActionIdx >= 0) {
+  if (status === "running" || status === "pending_confirmation") {
+    const action: ActionDetail = {
+      callId: effectiveCallId,
+      toolName,
+      status,
+      content: "",
+      delegation,
+      askId,
+      askReason,
+      sessionId: askSessionId,
+    };
+
+    const existingActionBlockIdx = blocks.findIndex(
+      (b) => b.type === "action" && b.actions?.some((a) => a.callId === effectiveCallId)
+    );
+    if (existingActionBlockIdx >= 0) {
       return { ...message, blocks };
     }
 
@@ -181,7 +214,7 @@ export function appendActionBlock(message: ChatMessage, toolName: string, status
     if (lastAction && !lastAction.isArchived) {
       lastAction.actions = [...(lastAction.actions || []), action];
       lastAction.content = lastAction.actions.map((a) => `▸ ${actionLabel(a)}`).join("\n");
-      lastAction.isStreaming = lastAction.actions.some((a) => a.status === "running");
+      lastAction.isStreaming = lastAction.actions.some((a) => a.status === "running" || a.status === "pending_confirmation");
       trimVisibleBlocks(blocks);
       return { ...message, blocks };
     }
@@ -201,88 +234,118 @@ export function appendActionBlock(message: ChatMessage, toolName: string, status
 
   if (status === "done" || status === "error") {
     const actionBlockIdx = blocks.findIndex(
-      (b) => b.type === "action" && b.actions?.some((a) => a.toolName === toolName && a.status === "running")
+      (b) => b.type === "action" && b.actions?.some((a) => a.callId === effectiveCallId)
     );
 
-    if (actionBlockIdx >= 0) {
-      const actionBlock = blocks[actionBlockIdx];
-      const updatedActions = (actionBlock.actions || []).map((a) => {
-        if (a.toolName === toolName && a.status === "running") {
-          const updatedDelegation = delegation
-            ? { ...a.delegation, ...delegation, summary: delegation.summary || a.delegation?.summary }
-            : a.delegation;
-          return {
-            ...a,
-            status,
-            content: status === "error" ? content : content.slice(0, 200),
-            delegation: updatedDelegation,
-          };
-        }
-        return a;
-      });
-
-      const allDone = updatedActions.every((a) => a.status !== "running");
-      actionBlock.actions = updatedActions;
-      actionBlock.isStreaming = !allDone;
-      actionBlock.isArchived = allDone;
-
-      const doneCount = updatedActions.filter((a) => a.status === "done").length;
-      const errCount = updatedActions.filter((a) => a.status === "error").length;
-      actionBlock.content = updatedActions
-        .map((a) => {
-          const icon = a.status === "running" ? "▸" : a.status === "done" ? "✓" : "✗";
-          return `${icon} ${actionLabel(a)}`;
-        })
-        .join("\n");
-
-      if (allDone) {
-        const labelParts: string[] = [];
-        if (doneCount > 0) labelParts.push(`${doneCount}项完成`);
-        if (errCount > 0) labelParts.push(`${errCount}项失败`);
-        actionBlock.content = `[${labelParts.join(", ")}] ` + actionBlock.content;
+    if (actionBlockIdx < 0 && callId) {
+      const fallbackIdx = blocks.findIndex(
+        (b) => b.type === "action" && b.actions?.some((a) => a.toolName === toolName && a.status === "running")
+      );
+      if (fallbackIdx >= 0) {
+        return _updateActionBlock(message, blocks, fallbackIdx, toolName, status, content, delegation, effectiveCallId);
       }
     }
 
-    trimVisibleBlocks(blocks);
+    if (actionBlockIdx >= 0) {
+      return _updateActionBlock(message, blocks, actionBlockIdx, toolName, status, content, delegation, effectiveCallId);
+    }
+
     return { ...message, blocks };
   }
 
   return { ...message, blocks };
 }
 
+function _recomputeActionBlockState(block: MessageBlock): void {
+  const actions = block.actions || [];
+  const allDone = actions.every((a) => a.status !== "running" && a.status !== "pending_confirmation");
+  block.isStreaming = !allDone;
+  block.isArchived = allDone;
+  const doneCount = actions.filter((a) => a.status === "done").length;
+  const errCount = actions.filter((a) => a.status === "error").length;
+  block.content = actions
+    .map((a) => {
+      const icon = a.status === "running" ? "▸" : a.status === "pending_confirmation" ? "⏳" : a.status === "done" ? "✓" : "✗";
+      return `${icon} ${actionLabel(a)}`;
+    })
+    .join("\n");
+  if (allDone) {
+    const labelParts: string[] = [];
+    if (doneCount > 0) labelParts.push(`${doneCount}项完成`);
+    if (errCount > 0) labelParts.push(`${errCount}项失败`);
+    block.content = `[${labelParts.join(", ")}] ` + block.content;
+  }
+}
+
+function _updateActionBlock(message: ChatMessage, blocks: MessageBlock[], blockIdx: number, toolName: string, status: ActionDetail["status"], content: string, delegation: ActionDetail["delegation"] | undefined, callId: string): ChatMessage {
+  const actionBlock = blocks[blockIdx];
+  const updatedActions = (actionBlock.actions || []).map((a) => {
+    if (a.callId === callId || (a.toolName === toolName && a.status === "running")) {
+      const updatedDelegation = delegation
+        ? { ...a.delegation, ...delegation, summary: delegation.summary || a.delegation?.summary }
+        : a.delegation;
+      return {
+        ...a,
+        callId: a.callId || callId,
+        status,
+        content: status === "error" ? content : content.slice(0, 200),
+        delegation: updatedDelegation,
+      };
+    }
+    return a;
+  });
+
+  actionBlock.actions = updatedActions;
+  _recomputeActionBlockState(actionBlock);
+
+  trimVisibleBlocks(blocks);
+  return { ...message, blocks };
+}
+
 export function finalizeThoughtBlocks(message: ChatMessage): ChatMessage {
   const lastAnswer = [...message.blocks].reverse().find((block) => block.type === "answer" && block.content.trim());
-  if (lastAnswer) {
-    return {
-      ...message,
-      content: lastAnswer.content,
-      blocks: [{ ...lastAnswer, isArchived: false }],
-    };
-  }
+  const lastAnswerId = lastAnswer?.id;
+  const blocks = message.blocks.map((block) => {
+    if (block.type === "thought") {
+      return { ...block, isCollapsed: true, isStreaming: false, isArchived: true };
+    }
+    if (block.type === "action") {
+      return { ...block, isStreaming: false, isCollapsed: true, isArchived: true };
+    }
+    if (block.type === "answer" && block.id !== lastAnswerId) {
+      return { ...block, isArchived: true, isCollapsed: true };
+    }
+    if (block.type === "answer" && block.id === lastAnswerId) {
+      return { ...block, isArchived: false };
+    }
+    return block;
+  });
 
   return {
     ...message,
-    blocks: message.blocks.map((block) =>
-      block.type === "thought"
-        ? { ...block, isCollapsed: true, isStreaming: false }
-        : block.type === "action"
-          ? { ...block, isStreaming: false, isCollapsed: true }
-          : block,
-    ),
+    isComplete: true,
+    content: lastAnswer ? lastAnswer.content : getMessageAnswerText(blocks),
+    blocks,
   };
 }
 
 export function setAssistantFinalContent(message: ChatMessage, content: string): ChatMessage {
-  const answerBlock: MessageBlock = {
-    id: uuid(),
-    type: "answer",
-    content,
-    isArchived: false,
-  };
+  const blocks = message.blocks.map((b) =>
+    b.type === "answer" ? { ...b, isArchived: true, isCollapsed: true } : { ...b }
+  );
+  if (content.trim()) {
+    blocks.push({
+      id: uuid(),
+      type: "answer",
+      content,
+      isArchived: false,
+    });
+  }
   return {
     ...message,
-    content,
-    blocks: content.trim() ? [answerBlock] : message.blocks,
+    isComplete: true,
+    content: content.trim() ? content : getMessageAnswerText(blocks),
+    blocks,
   };
 }
 
@@ -303,18 +366,38 @@ export function attachArtifact(message: ChatMessage, artifact: GeneratedArtifact
 }
 
 export function fromServerMessage(raw: Record<string, unknown>): ChatMessage {
-  const role = String(raw.role || "assistant") as ChatMessage["role"];
+  const rawRole = String(raw.role || "FloodMind");
+  const role = (rawRole === "user" ? "human" : rawRole === "assistant" ? "FloodMind" : rawRole) as ChatMessage["role"];
   const content = String(raw.content || "");
   const reasoning = String(raw.reasoning || "");
   const blocks: MessageBlock[] = [];
 
-  if (role === "assistant") {
+  if (role === "FloodMind") {
     if (reasoning.trim()) {
       blocks.push({
         id: uuid(),
         type: "thought",
         content: reasoning,
         isCollapsed: true,
+        isArchived: true,
+      });
+    }
+    const toolCalls = raw.tool_calls as Array<Record<string, unknown>> | undefined;
+    if (toolCalls && Array.isArray(toolCalls)) {
+      const actions: ActionDetail[] = toolCalls.map((tc) => ({
+        callId: String(tc.call_id || tc.tool_call_id || uuid()),
+        toolName: String(tc.tool_name || ""),
+        status: "done" as const,
+        content: String(tc.tool_output || "").slice(0, 200),
+      }));
+      const contentLines = actions.map((a) => `✓ ${getToolDisplayName(a.toolName)}`).join("\n");
+      blocks.push({
+        id: uuid(),
+        type: "action",
+        content: `[${actions.length}项完成] ${contentLines}`,
+        actions,
+        isCollapsed: true,
+        isStreaming: false,
         isArchived: true,
       });
     }
@@ -330,6 +413,7 @@ export function fromServerMessage(raw: Record<string, unknown>): ChatMessage {
     role,
     content,
     reasoning,
+    isComplete: true,
     timestamp: new Date().toISOString(),
     blocks,
     artifacts: [],
@@ -337,5 +421,44 @@ export function fromServerMessage(raw: Record<string, unknown>): ChatMessage {
 }
 
 function getMessageAnswerText(blocks: MessageBlock[]): string {
-  return blocks.filter((block) => block.type === "answer").map((block) => block.content).join("\n\n");
+  return blocks.filter((block) => block.type === "answer" && !block.isArchived).map((block) => block.content).join("\n\n");
+}
+
+export function updateActionBlockStatus(
+  message: ChatMessage,
+  callId: string,
+  status: ActionDetail["status"],
+  content: string,
+  extra?: { askId?: string; askReason?: string; sessionId?: string },
+): ChatMessage {
+  const blocks = message.blocks.map((b) => {
+    const copy: MessageBlock = { ...b };
+    if (b.actions) {
+      copy.actions = b.actions.map((a) => ({ ...a, delegation: a.delegation ? { ...a.delegation } : undefined }));
+    }
+    return copy;
+  });
+
+  let found = false;
+  for (const block of blocks) {
+    if (block.type !== "action" || !block.actions) continue;
+    const idx = block.actions.findIndex((a) => a.callId === callId);
+    if (idx < 0) continue;
+    found = true;
+    const action = block.actions[idx];
+    const clearAsk = status !== "pending_confirmation";
+    block.actions[idx] = {
+      ...action,
+      status,
+      content: content || action.content,
+      askId: clearAsk ? undefined : (extra?.askId ?? action.askId),
+      askReason: clearAsk ? undefined : (extra?.askReason ?? action.askReason),
+      sessionId: clearAsk ? undefined : (extra?.sessionId ?? action.sessionId),
+    };
+    _recomputeActionBlockState(block);
+    break;
+  }
+
+  if (!found) return { ...message };
+  return { ...message, blocks };
 }

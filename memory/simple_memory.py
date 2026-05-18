@@ -1,3 +1,9 @@
+"""
+简单记忆模块
+
+基于列表的对话历史管理，不依赖 LangChain。
+"""
+
 import logging
 import os
 import re
@@ -5,13 +11,16 @@ import threading
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
-from langchain_community.chat_message_histories import ChatMessageHistory
-from langchain_core.language_models import BaseLanguageModel
-from langchain_core.messages import AIMessage, BaseMessage, HumanMessage
+from agent.runtime.contracts.messages import (
+    LLMProtocol,
+    Message,
+    MessageStore,
+    ai_message,
+    human_message,
+)
 
 logger = logging.getLogger(__name__)
 
-# 长期记忆文件路径（与本模块同目录）
 _MEMORY_DIR = os.path.dirname(os.path.abspath(__file__))
 LONG_TERM_MEMORY_FILE = os.path.join(_MEMORY_DIR, "memory.md")
 
@@ -21,11 +30,11 @@ class SimpleMemory:
     CONTEXT_THRESHOLD = 0.7
     MAX_LONG_TERM_RECALL = 4
 
-    def __init__(self, max_history: int = 20, llm: Optional[BaseLanguageModel] = None, context_window: int = 32768):
+    def __init__(self, max_history: int = 20, llm: Optional[Any] = None, context_window: int = 32768):
         self.max_history = max_history
         self.llm = llm
         self.context_window = context_window
-        self.chat_history = ChatMessageHistory()
+        self._store = MessageStore()
         self.compressed_summary: str = ""
         self.long_term_memory: str = ""
         self._lock = threading.Lock()
@@ -34,19 +43,19 @@ class SimpleMemory:
 
     def add_user_message(self, message: str):
         with self._lock:
-            self.chat_history.add_user_message(message)
+            self._store.add_user_message(message)
             self._extract_rule_based_long_term_memory(message)
         logger.debug(f"[记忆] 添加用户消息，当前轮数: {self._current_rounds()}")
 
     def add_ai_message(self, message: str):
         with self._lock:
-            self.chat_history.add_ai_message(message)
+            self._store.add_ai_message(message)
             self._check_and_compress()
         logger.debug(f"[记忆] 添加AI消息，当前轮数: {self._current_rounds()}")
 
-    def get_messages(self) -> List[BaseMessage]:
+    def get_messages(self) -> List[Message]:
         with self._lock:
-            return list(self.chat_history.messages)
+            return self._store.messages
 
     def get_history_text(self, user_input: Optional[str] = None) -> str:
         parts: List[str] = []
@@ -56,23 +65,23 @@ class SimpleMemory:
                 parts.append(f"[长期记忆]\n{long_term_recall}")
             if self.compressed_summary.strip():
                 parts.append(f"[历史摘要]\n{self.compressed_summary.strip()}")
-            if self.chat_history.messages:
-                recent = self._messages_to_text(self.chat_history.messages)
+            if self._store.messages:
+                recent = self._messages_to_text(self._store.messages)
                 parts.append(f"[近期对话]\n{recent}")
         return "\n\n".join(parts) if parts else "无历史对话"
 
     def clear(self):
         with self._lock:
-            self.chat_history.clear()
+            self._store.clear()
             self.compressed_summary = ""
         logger.info("短期记忆已清空（长期记忆保留）")
 
-    def get_chat_history(self) -> ChatMessageHistory:
-        return self.chat_history
+    def get_chat_history(self) -> MessageStore:
+        return self._store
 
     def to_dict(self) -> Dict[str, Any]:
         with self._lock:
-            messages = self.chat_history.messages
+            messages = self._store.messages
             long_term_entries = self._split_long_term_entries()
             return {
                 "max_history": self.max_history,
@@ -84,7 +93,7 @@ class SimpleMemory:
                 "estimated_tokens": self._estimate_total_tokens(),
                 "messages": [
                     {
-                        "type": "human" if isinstance(msg, HumanMessage) else "ai",
+                        "type": "human" if msg.role == "human" else "ai",
                         "content": msg.content,
                     }
                     for msg in messages
@@ -92,14 +101,14 @@ class SimpleMemory:
             }
 
     def _current_rounds(self) -> int:
-        return len(self.chat_history.messages) // 2
+        return len(self._store.messages) // 2
 
     def _estimate_tokens(self, text: str) -> int:
         return max(1, int(len(text) / 1.5))
 
     def _estimate_total_tokens(self) -> int:
         total = self.compressed_summary
-        for msg in self.chat_history.messages:
+        for msg in self._store.messages:
             total += str(msg.content)
         return self._estimate_tokens(total)
 
@@ -115,7 +124,7 @@ class SimpleMemory:
             self._compress()
 
     def _compress(self):
-        msgs = list(self.chat_history.messages)
+        msgs = list(self._store.messages)
         keep_recent_rounds = max(4, self.max_history // 2)
         compress_count = min(self.COMPRESS_BATCH * 2, max(0, len(msgs) - keep_recent_rounds * 2))
         if compress_count < 2:
@@ -140,15 +149,12 @@ class SimpleMemory:
                 if self.compressed_summary
                 else fallback
             )
-        self.chat_history.clear()
+        self._store.clear()
         for msg in remaining:
-            if isinstance(msg, HumanMessage):
-                self.chat_history.add_user_message(str(msg.content))
-            elif isinstance(msg, AIMessage):
-                self.chat_history.add_ai_message(str(msg.content))
+            self._store.add_message(msg)
         logger.info(f"[记忆] 压缩完成 - 压缩{compress_count // 2}轮，保留{len(remaining) // 2}轮")
 
-    def _llm_summarize_and_extract(self, conv_text: str) -> tuple[str, str]:
+    def _llm_summarize_and_extract(self, conv_text: str) -> tuple:
         llm = self.llm
         if llm is None:
             return f"[摘要生成失败，原始对话{conv_text.count('用户:')}轮]", ""
@@ -202,9 +208,7 @@ class SimpleMemory:
             if os.path.exists(LONG_TERM_MEMORY_FILE):
                 with open(LONG_TERM_MEMORY_FILE, "r", encoding="utf-8") as f:
                     self.long_term_memory = f.read()
-                logger.info(
-                    f"[记忆] 长期记忆加载成功 - {len(self.long_term_memory)} 字符"
-                )
+                logger.info(f"[记忆] 长期记忆加载成功 - {len(self.long_term_memory)} 字符")
             else:
                 self.long_term_memory = ""
                 with open(LONG_TERM_MEMORY_FILE, "w", encoding="utf-8") as f:
@@ -214,12 +218,12 @@ class SimpleMemory:
             logger.error(f"[记忆] 加载长期记忆失败: {e}")
             self.long_term_memory = ""
 
-    def _messages_to_text(self, messages: List[BaseMessage]) -> str:
+    def _messages_to_text(self, messages: List[Message]) -> str:
         lines = []
         for msg in messages:
-            if isinstance(msg, HumanMessage):
+            if msg.role == "human":
                 lines.append(f"用户: {msg.content}")
-            elif isinstance(msg, AIMessage):
+            elif msg.role == "ai":
                 lines.append(f"助手: {msg.content}")
         return "\n".join(lines)
 
@@ -250,10 +254,10 @@ class SimpleMemory:
         if not user_input:
             selected = entries[-self.MAX_LONG_TERM_RECALL:]
             return "\n".join(f"- {item}" for item in selected)
-        query_terms = set(re.findall(r"[\u4e00-\u9fa5A-Za-z0-9]{2,}", user_input.lower()))
-        scored: List[tuple[int, int, str]] = []
+        query_terms = set(re.findall(r"[一-龥A-Za-z0-9]{2,}", user_input.lower()))
+        scored: List[tuple] = []
         for idx, entry in enumerate(entries):
-            terms = set(re.findall(r"[\u4e00-\u9fa5A-Za-z0-9]{2,}", entry.lower()))
+            terms = set(re.findall(r"[一-龥A-Za-z0-9]{2,}", entry.lower()))
             score = len(query_terms & terms)
             scored.append((score, idx, entry))
         scored.sort(key=lambda x: (x[0], x[1]), reverse=True)
