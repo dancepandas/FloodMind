@@ -114,6 +114,7 @@ class NativeFloodAgent:
 - `read_artifact`：读取文本类产物
 - `knowledge_search`：检索知识库（知识查询时，优先使用）
 - `web_search`：检索网络资料（knowledge_search搜索结果不够支撑回答时，搜索网络资料补充）
+- `fetch_webpage`：进入指定网址读取网页正文，当搜索摘要不够详细时使用
 - `search_memory`：检索历史对话和技能文档
 - `update_project_instructions`：将用户偏好或规则写入 AGENTS.md，使其在后续所有对话中生效
 - `create_scheduled_task`：创建后台定时任务，用户要求未来、每天、定时、自动执行任务时使用
@@ -236,6 +237,7 @@ class NativeFloodAgent:
 - 模型或工具运行过程中必须产生的中间文件（如 input.json、result.json、result.xlsx 等），属于内部过程产物，可在回答中附带提及供用户下载，但不得表述为用户要求的最终交付物
 - 不要主动为用户未要求的文件类型生成报告或导出文件
 - 如果用户只要求文字结果，即使工具天然输出文件，也以文字汇总为主，文件仅作为可下载附件
+- 对任何产物，你都应该重新查看一遍，对比用户意图、输入文件内容等，确保产物质量
 
 ## 输出规范
 - 最终输出路径使用相对路径即可
@@ -279,6 +281,7 @@ class NativeFloodAgent:
 6. `exec_python_file`
 7. `search_tool_error_memory`
 8. `web_search`（当需要从网络检索资料补充信息时使用）
+9. `fetch_webpage`（当已拿到目标网址，需要进一步抓取页面正文时使用）
 
 ## 可使用skills
 {skill_catalog}
@@ -363,7 +366,7 @@ class NativeFloodAgent:
         from tools import (
             get_skill, run_script, exec_bash, exec_python_file, write_text_file,
             search_tool_error_memory, search_artifacts, check_artifact_exists, read_artifact, knowledge_search,
-            web_search, add_memory, search_memory, update_project_instructions,
+            web_search, fetch_webpage, add_memory, search_memory, update_project_instructions,
             create_scheduled_task, list_scheduled_tasks, cancel_scheduled_task,
             set_rag_config, set_memory_instance, reset_retry_guard,
         )
@@ -419,12 +422,14 @@ class NativeFloodAgent:
                 base_tools.append(_t)
         if self._enable_search:
             base_tools.append(web_search)
+            base_tools.append(fetch_webpage)
         execution_tools = [
             get_skill, run_script, exec_python_file, write_text_file,
             search_tool_error_memory, search_artifacts, read_artifact,
         ]
         if self._enable_search:
             execution_tools.append(web_search)
+            execution_tools.append(fetch_webpage)
 
         self._skill_catalog = "\n".join(
             f"- {s.name}: {s.description}"

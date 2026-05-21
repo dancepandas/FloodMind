@@ -42,6 +42,7 @@ reportlab>=4.0.0
 fpdf2>=2.7.0
 lxml>=4.9.0
 defusedxml>=0.7.0
+beautifulsoup4>=4.12.0
 
 # Visualization
 matplotlib>=3.7.0

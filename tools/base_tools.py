@@ -1895,6 +1895,13 @@ class WebSearchInput(BaseModel):
     site: str = Field(default="", description="指定站点搜索，如 baidu.com")
 
 
+class FetchWebpageInput(BaseModel):
+    """抓取网页正文的输入参数"""
+    url: str = Field(default="", description="要抓取的网页 URL")
+    max_chars: int = Field(default=12000, description="返回正文的最大字符数")
+    include_links: bool = Field(default=False, description="是否附带页面中的部分链接")
+
+
 def _impl_web_search(
     query: str = "",
     count: int = 10,
@@ -2084,6 +2091,143 @@ web_search = build_agent_tool(
     ),
     args_schema=WebSearchInput,
     func=_impl_web_search,
+    is_readonly=True,
+    is_destructive=False,
+    is_concurrency_safe=True,
+    check_permissions_fn=make_readonly_permission_fn(),
+    permission_policy=ToolPermissionPolicy(policy_type="network"),
+)
+
+
+def _impl_fetch_webpage(
+    url: str = "",
+    max_chars: int = 12000,
+    include_links: bool = False,
+) -> str:
+    parsed = _parse_json_if_needed(url)
+    if parsed and 'url' in parsed:
+        url = parsed.get('url', url)
+        max_chars = parsed.get('max_chars', max_chars)
+        include_links = parsed.get('include_links', include_links)
+
+    url = str(url).strip().strip('"').strip("'")
+    if not url:
+        return _finalize_tool_output("fetch_webpage", "错误：url 参数不能为空", url=url, max_chars=max_chars, include_links=include_links)
+
+    if not re.match(r'^https?://', url, re.IGNORECASE):
+        url = f"https://{url}"
+
+    try:
+        max_chars = max(1000, min(int(max_chars), 50000))
+    except Exception:
+        max_chars = 12000
+
+    try:
+        import requests
+        from bs4 import BeautifulSoup
+    except ImportError as e:
+        return _finalize_tool_output(
+            "fetch_webpage",
+            f"错误：缺少必要依赖 ({e})",
+            url=url,
+            max_chars=max_chars,
+            include_links=include_links,
+        )
+
+    headers = {
+        "User-Agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/124.0 Safari/537.36"
+        )
+    }
+
+    try:
+        response = requests.get(url, headers=headers, timeout=30)
+        response.raise_for_status()
+        response.encoding = response.encoding or response.apparent_encoding or 'utf-8'
+        html = response.text
+
+        soup = BeautifulSoup(html, 'html.parser')
+        for tag in soup(['script', 'style', 'noscript', 'iframe', 'svg']):
+            tag.decompose()
+
+        title = ''
+        if soup.title and soup.title.string:
+            title = soup.title.string.strip()
+
+        main_node = None
+        for selector in ['main', 'article', '[role="main"]', '.article', '.content', '.post', '.entry-content']:
+            main_node = soup.select_one(selector)
+            if main_node:
+                break
+        if main_node is None:
+            main_node = soup.body or soup
+
+        lines: List[str] = []
+        for el in main_node.find_all(['h1', 'h2', 'h3', 'p', 'li']):
+            text = el.get_text(' ', strip=True)
+            if not text:
+                continue
+            text = re.sub(r'\s+', ' ', text).strip()
+            if len(text) < 2:
+                continue
+            lines.append(text)
+
+        content = '\n'.join(lines)
+        if not content:
+            content = re.sub(r'\s+', ' ', main_node.get_text(' ', strip=True)).strip()
+
+        truncated = False
+        if len(content) > max_chars:
+            content = content[:max_chars] + "\n...[内容已截断]"
+            truncated = True
+
+        result: Dict[str, Any] = {
+            "url": url,
+            "title": title,
+            "status_code": response.status_code,
+            "content": content,
+            "truncated": truncated,
+        }
+
+        if include_links:
+            links: List[Dict[str, str]] = []
+            for a in main_node.find_all('a', href=True):
+                text = re.sub(r'\s+', ' ', a.get_text(' ', strip=True)).strip()
+                href = a.get('href', '').strip()
+                if not href:
+                    continue
+                if len(links) >= 20:
+                    break
+                links.append({"text": text[:120], "href": href[:500]})
+            result["links"] = links
+
+        return _finalize_tool_output(
+            "fetch_webpage",
+            json.dumps(result, ensure_ascii=False, indent=2),
+            url=url,
+            max_chars=max_chars,
+            include_links=include_links,
+        )
+    except requests.exceptions.Timeout:
+        return _finalize_tool_output("fetch_webpage", "抓取网页超时，请稍后重试", url=url, max_chars=max_chars, include_links=include_links)
+    except requests.exceptions.RequestException as e:
+        return _finalize_tool_output("fetch_webpage", f"抓取网页失败: {str(e)}", url=url, max_chars=max_chars, include_links=include_links)
+    except Exception as e:
+        logger.error("抓取网页失败: %s", e, exc_info=True)
+        return _finalize_tool_output("fetch_webpage", f"抓取网页失败: {str(e)}", url=url, max_chars=max_chars, include_links=include_links)
+
+
+fetch_webpage = build_agent_tool(
+    name="fetch_webpage",
+    description=(
+        "抓取指定网页 URL 的正文内容。"
+        "适用于先通过 web_search 找到候选链接，再进入具体网页抽取标题、正文和部分链接。"
+        "当搜索摘要不够详细时，优先使用此工具读取目标页面。"
+    ),
+    args_schema=FetchWebpageInput,
+    func=_impl_fetch_webpage,
     is_readonly=True,
     is_destructive=False,
     is_concurrency_safe=True,
@@ -2574,6 +2718,7 @@ def _register_all_tools():
     ToolRegistry.register(knowledge_search)
     ToolRegistry.register(add_knowledge)
     ToolRegistry.register(web_search)
+    ToolRegistry.register(fetch_webpage)
     ToolRegistry.register(add_memory)
     ToolRegistry.register(search_memory)
     ToolRegistry.register(update_project_instructions)
@@ -2716,6 +2861,7 @@ __all__ = [
     'knowledge_search',
     'add_knowledge',
     'web_search',
+    'fetch_webpage',
     'add_memory',
     'search_memory',
     'search_tool_error_memory',

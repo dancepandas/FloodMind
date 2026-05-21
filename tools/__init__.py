@@ -8,7 +8,7 @@
 - 只读工具: get_skill, search_artifacts, read_artifact, knowledge_search, search_memory, search_tool_error_memory, search_task_experience, browse_experience_tree, drill_down_experience
 - 写入工具: write_text_file, update_project_instructions, add_knowledge, add_memory, add_task_experience
 - 执行工具: exec_bash, run_script, exec_python_file
-- 网络工具: web_search
+- 网络工具: web_search, fetch_webpage
 """
 
 from tools.base_tools import (
@@ -24,6 +24,7 @@ from tools.base_tools import (
     knowledge_search,
     add_knowledge,
     web_search,
+    fetch_webpage,
     add_memory,
     search_memory,
     update_project_instructions,
@@ -67,6 +68,7 @@ __all__ = [
     'knowledge_search',
     'add_knowledge',
     'web_search',
+    'fetch_webpage',
     'add_memory',
     'search_memory',
     'update_project_instructions',
