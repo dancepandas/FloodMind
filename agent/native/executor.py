@@ -51,6 +51,8 @@ class NativeAgentExecutor:
     def set_tools_schema(self, schema: List[dict]) -> None:
         self._tools_schema = schema
 
+    MAX_CONSECUTIVE_TOOL_FAILURES = 5
+
     def run(
         self,
         context: RunContext,
@@ -65,6 +67,7 @@ class NativeAgentExecutor:
         all_tool_results: List[ToolResult] = []
         all_artifacts: List[str] = []
         plan_created = False
+        _consecutive_failures: Dict[str, int] = {}
 
         effective_abort = abort_check or context.abort_check
 
@@ -171,6 +174,30 @@ class NativeAgentExecutor:
                 result = self.tool_executor.execute(call, context, registry=self._tool_registry)
                 logger.info("[EXEC] tool done: name=%s, status=%s, result_len=%d", call.name, result.status, len(result.content) if result.content else 0)
                 all_tool_results.append(result)
+
+                # 连续失败检测
+                if result.status == "error" or (result.content and "错误" in result.content[:50]):
+                    _consecutive_failures[call.name] = _consecutive_failures.get(call.name, 0) + 1
+                else:
+                    _consecutive_failures[call.name] = 0
+
+                if _consecutive_failures.get(call.name, 0) >= self.MAX_CONSECUTIVE_TOOL_FAILURES:
+                    failure_msg = (
+                        f"工具 {call.name} 已连续失败 {self.MAX_CONSECUTIVE_TOOL_FAILURES} 次，"
+                        f"强制终止执行循环。请检查参数是否正确。"
+                    )
+                    logger.warning("[EXEC] %s", failure_msg)
+                    self.event_bus.emit_tool_result(
+                        tool_name=call.name,
+                        status="error",
+                        content=failure_msg,
+                        tool_input=tool_input_str,
+                        call_id=call.id,
+                    )
+                    messages.append(self.message_builder.build_tool_result_message(call.id, failure_msg))
+                    if not final_answer:
+                        final_answer = failure_msg
+                    break
 
                 self.event_bus.emit_tool_result(
                     tool_name=call.name,

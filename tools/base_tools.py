@@ -1204,6 +1204,14 @@ def _impl_write_text_file(file_path: str = "", content: str = "", encoding: str 
     encoding = str(encoding).strip() or 'utf-8'
 
     if not file_path:
+        _retry_block = _check_retry_guard_before_exec("write_text_file", file_path=file_path)
+        if _retry_block:
+            return _finalize_tool_output(
+                "write_text_file",
+                _retry_block,
+                file_path=file_path,
+                encoding=encoding,
+            )
         return _finalize_tool_output(
             "write_text_file",
             "错误：file_path 参数不能为空",

@@ -13,6 +13,7 @@ import queue
 import re
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
@@ -24,7 +25,7 @@ from agent.native.types import (
 )
 from agent.runtime.contracts.tools import ToolSpec
 from agent.native.artifact_watcher import ArtifactWatcher
-from agent.native.event_bus import EventBus
+from agent.native.event_bus import EventBus, StepEventBus
 from agent.native.executor import NativeAgentExecutor
 from agent.native.message_builder import MessageBuilder
 from agent.native.model_client import ModelClient
@@ -106,6 +107,8 @@ class NativeFloodAgent:
 
 ## 可用工具
 - `create_plan`：【delegated / requires_plan 时必须调用】创建结构化执行计划，明确用户意图、预期交付物和执行步骤。lightweight 任务无需调用此工具
+- `delegate_execution_specialist`：串行委派单个任务给执行单元
+- `delegate_parallel`：并行委派多个互不依赖的任务给执行单元，可显著缩短总执行时间
 - `get_skill`：查看 skill 的详细说明、脚本、参数和规则
 - `search_artifacts`：搜索当前会话或历史可复用产物
 - `read_artifact`：读取文本类产物
@@ -143,6 +146,15 @@ class NativeFloodAgent:
 
 ## 可用执行单元
 - `delegate_execution_specialist`：执行单步落地任务，包括数据提取、转换、结构化文件生成、Excel 导出、模型相关脚本执行；如已明确 skill，委派时一并传 `skill_name`
+- `delegate_parallel`：并行委派多个互不依赖的任务。当计划中有多个步骤可同时执行时使用
+
+## 并行委派规则
+当计划中有多个步骤之间无依赖关系时，使用 `delegate_parallel` 一次性并行委派：
+- 各任务必须互不依赖（不读写同一文件、不依赖彼此的输出产物）
+- 每个任务仍遵循"内容先落地"规则（文档类任务先写中间文件再委派）
+- 有依赖关系的步骤仍用 `delegate_execution_specialist` 串行委派
+- 不要对需要用户确认权限的任务使用并行委派
+- 典型场景：先生成内容文件和图表（并行），再合并为最终文档（串行，依赖前两步产物）
 
 ## 敖江流域子任务编码
 - 子任务：`霍口水库断面预报`、`霍口水库~山仔水库区间断面预报`、`山仔水库~水动力模型区间断面预报`、`水动力模型区间断面预报`、`桂湖溪流域出口断面预报`、`牛溪流域出口断面预报`
@@ -305,6 +317,7 @@ class NativeFloodAgent:
         self._specialist_executor: Optional[NativeAgentExecutor] = None
         self._tool_executor: Optional[Any] = None
         self._artifact_watcher: Optional[ArtifactWatcher] = None
+        self._artifact_lock = threading.Lock()
 
         self._skill_catalog = ""
         self._active_user_message = ""
@@ -471,6 +484,36 @@ class NativeFloodAgent:
             is_destructive=True,
             is_concurrency_safe=False,
             permission_policy=ToolPermissionPolicy(policy_type="internal", reason="编排层内部委派，实际权限由 specialist 内部工具逐次检查"),
+        ))
+
+        self._orchestrator_registry.register(ToolSpec(
+            name="delegate_parallel",
+            description="并行委派多个互不依赖的任务给执行单元。当计划中有多个步骤之间无依赖关系时使用，可显著缩短总执行时间。各任务必须互不依赖（不读写同一文件、不依赖彼此的输出）。有依赖关系的步骤仍用 delegate_execution_specialist 串行委派。",
+            parameters={
+                "type": "object",
+                "properties": {
+                    "tasks": {
+                        "type": "array",
+                        "description": "可并行执行的任务列表，每个元素含 task(任务说明)、skill_name(可选)、step_key(可选，对应 create_plan 中的步骤ID)",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "task": {"type": "string", "description": "交给执行单元的明确任务说明"},
+                                "skill_name": {"type": "string", "description": "若任务明确要求复用某个 skill，传入 skill 名称"},
+                                "step_key": {"type": "string", "description": "对应执行计划中的步骤ID，如 step-1"},
+                            },
+                            "required": ["task"],
+                        },
+                    },
+                    "max_concurrent": {"type": "integer", "description": "最大并发数，默认3，最大5", "default": 3},
+                },
+                "required": ["tasks"],
+            },
+            func=self._handle_delegate_parallel,
+            is_readonly=False,
+            is_destructive=True,
+            is_concurrency_safe=True,
+            permission_policy=ToolPermissionPolicy(policy_type="internal", reason="编排层内部并行委派，各 specialist 独立运行"),
         ))
 
         self._tool_executor = ToolExecutionService(
@@ -675,8 +718,9 @@ class NativeFloodAgent:
         )
 
         self._step_start_time = time.time()
-        if self._artifact_watcher:
-            self._artifact_watcher.take_snapshot()
+        with self._artifact_lock:
+            if self._artifact_watcher:
+                self._artifact_watcher.take_snapshot()
 
         result = self._specialist_executor.run(
             context=context,
@@ -689,9 +733,10 @@ class NativeFloodAgent:
         output = result.final_output or ""
 
         artifacts = []
-        if self._artifact_watcher:
-            new_artifacts = self._artifact_watcher.detect_new_artifacts()
-            artifacts = [a.file_path for a in new_artifacts]
+        with self._artifact_lock:
+            if self._artifact_watcher:
+                new_artifacts = self._artifact_watcher.detect_new_artifacts()
+                artifacts = [a.file_path for a in new_artifacts]
 
         has_tool_success = any(tr.status == "completed" for tr in result.tool_results) if result.tool_results else False
         has_artifacts = bool(artifacts)
@@ -717,6 +762,136 @@ class NativeFloodAgent:
             "skill_name": skill_name,
             "summary": output,
             "artifacts": artifacts,
+        }
+        return json.dumps(payload, ensure_ascii=False, indent=2)
+
+    def _handle_delegate_parallel(self, tasks: Any = "", max_concurrent: int = 3) -> str:
+        """并行委派多个独立任务给执行单元"""
+        if isinstance(tasks, str):
+            try:
+                tasks = json.loads(tasks)
+            except json.JSONDecodeError:
+                return "错误：tasks 参数必须是 JSON 数组"
+
+        if not isinstance(tasks, list) or not tasks:
+            return "错误：tasks 必须是非空数组"
+
+        max_concurrent = max(1, min(max_concurrent or 3, 5))
+
+        context = self._current_run_context
+        if context is None:
+            context = RunContext(
+                session_id=self.session_id,
+                user_text="[并行委派]",
+                attachments=[],
+                output_dir=self._get_output_dir(),
+                upload_dir=self._get_upload_dir(),
+            )
+
+        specialist_prompt = self._specialist_executor.system_prompt if self._specialist_executor else ""
+
+        results: Dict[str, Dict[str, Any]] = {}
+
+        def _run_single(idx: int, task_def: Dict[str, Any]) -> tuple:
+            task_text = (task_def.get("task") or "").strip()
+            skill_name = (task_def.get("skill_name") or "").strip()
+            step_key = task_def.get("step_key") or f"parallel-{idx}"
+
+            if not task_text:
+                return (step_key, {"status": "error", "summary": "task 为空", "artifacts": []})
+
+            self._event_bus.emit_workflow_step(
+                step_key=step_key,
+                status="running",
+                title=task_text[:60],
+                detail=skill_name or "",
+            )
+
+            step_event_bus = StepEventBus(self._event_bus, step_key)
+
+            specialist_executor = NativeAgentExecutor(
+                model_client=self._model_client,
+                tool_executor=self._tool_executor,
+                event_bus=step_event_bus,
+                message_builder=MessageBuilder(),
+                max_iterations=50,
+                system_prompt=specialist_prompt,
+                tools_schema=self._specialist_registry.tools_schema(),
+                tool_registry=self._specialist_registry,
+            )
+
+            specialist_input = self._build_specialist_user_input(task_text, skill_name)
+
+            with self._artifact_lock:
+                if self._artifact_watcher:
+                    self._artifact_watcher.take_snapshot()
+
+            try:
+                result = specialist_executor.run(
+                    context=context,
+                    user_text=specialist_input,
+                    attachments=context.attachments,
+                    memory_messages=[],
+                    abort_check=context.abort_check,
+                )
+            except Exception as e:
+                logger.error("[并行委派] 任务 %s 执行异常: %s", step_key, e)
+                self._event_bus.emit_workflow_step(step_key=step_key, status="error", title=task_text[:60], outcome=str(e)[:200])
+                return (step_key, {"status": "error", "summary": str(e)[:200], "artifacts": []})
+
+            output = result.final_output or ""
+
+            artifacts = []
+            with self._artifact_lock:
+                if self._artifact_watcher:
+                    new_artifacts = self._artifact_watcher.detect_new_artifacts()
+                    artifacts = [a.file_path for a in new_artifacts]
+
+            has_tool_success = any(tr.status == "completed" for tr in result.tool_results) if result.tool_results else False
+            step_status = "completed" if (output or has_tool_success or artifacts) else "error"
+
+            if self._last_loop_state is not None and self._last_loop_state.plan is not None:
+                plan_step = self._last_loop_state.plan.find_step(step_key)
+                if plan_step:
+                    plan_step["status"] = step_status
+
+            self._event_bus.emit_workflow_step(
+                step_key=step_key,
+                status=step_status,
+                title=task_text[:60],
+                outcome=output[:200] if output else "",
+            )
+
+            return (step_key, {
+                "status": step_status,
+                "summary": output[:500] if output else "",
+                "artifacts": artifacts,
+            })
+
+        with ThreadPoolExecutor(max_workers=max_concurrent) as pool:
+            futures = {}
+            for i, task_def in enumerate(tasks):
+                future = pool.submit(_run_single, i, task_def)
+                futures[future] = i
+
+            for future in as_completed(futures):
+                try:
+                    step_key, result_data = future.result()
+                    results[step_key] = result_data
+                except Exception as e:
+                    idx = futures[future]
+                    step_key = f"parallel-{idx}"
+                    results[step_key] = {"status": "error", "summary": str(e)[:200], "artifacts": []}
+                    logger.error("[并行委派] future 异常: %s", e)
+
+        payload = {
+            "stage": "parallel_delegation",
+            "stage_label": "Parallel Execution",
+            "result_type": "intermediate",
+            "status": "completed" if all(r.get("status") != "error" for r in results.values()) else "partial",
+            "user_goal": _active_input_var.get(),
+            "tasks_count": len(tasks),
+            "results": results,
         }
         return json.dumps(payload, ensure_ascii=False, indent=2)
 

@@ -152,3 +152,115 @@ class EventBus:
     def emit_context_compress_done(self, summary: str) -> None:
         """发送上下文压缩完成事件，附带结构化摘要"""
         self.emit({"type": "context_compress_done", "content": summary})
+
+
+class StepEventBus:
+    """EventBus 子通道：给所有事件附加 step_key，用于并行委派时区分不同步骤的事件"""
+
+    def __init__(self, parent: EventBus, step_key: str):
+        self._parent = parent
+        self._step_key = step_key
+
+    def emit(self, event: dict) -> None:
+        if "step_key" not in event:
+            event["step_key"] = self._step_key
+        self._parent.emit(event)
+
+    def emit_reasoning(self, content: str) -> None:
+        self.emit({"type": "thought_delta", "content": content})
+
+    def emit_token(self, content: str) -> None:
+        self.emit({"type": "answer_delta", "content": content})
+
+    def emit_tool_status(self, tool_name: str, status: str, tool_input: str = "", call_id: str = "") -> None:
+        event: Dict[str, Any] = {"type": "action_start", "tool_name": tool_name, "status": status}
+        if call_id:
+            event["call_id"] = call_id
+        if tool_input:
+            event["tool_input"] = tool_input
+        self.emit(event)
+
+    def emit_tool_result(self, tool_name: str, status: str, content: str, tool_input: str = "", call_id: str = "") -> None:
+        event: Dict[str, Any] = {
+            "type": "action_end",
+            "tool_name": tool_name,
+            "status": status,
+            "content": content,
+        }
+        if call_id:
+            event["call_id"] = call_id
+        if tool_input:
+            event["tool_input"] = tool_input
+        self.emit(event)
+
+    def emit_workflow_plan(self, title: str, steps: List[dict]) -> None:
+        self.emit({
+            "type": "workflow_plan",
+            "title": title,
+            "steps": steps,
+        })
+
+    def emit_workflow_step(self, step_key: str, status: str, title: str = "", detail: str = "", label: str = "", outcome: str = "") -> None:
+        event: Dict[str, Any] = {
+            "type": "workflow_step",
+            "step_key": step_key,
+            "status": status,
+        }
+        if title:
+            event["title"] = title
+        if detail:
+            event["detail"] = detail
+        if label:
+            event["label"] = label
+        if outcome:
+            event["outcome"] = outcome
+        self.emit(event)
+
+    def emit_file_generated(self, file_name: str, download_url: str, size: int = 0) -> None:
+        self.emit({
+            "type": "file_generated",
+            "filename": file_name,
+            "file_name": file_name,
+            "download_url": download_url,
+            "size": size,
+        })
+
+    def emit_image_generated(self, file_name: str, download_url: str, size: int = 0) -> None:
+        self.emit({
+            "type": "image_generated",
+            "filename": file_name,
+            "file_name": file_name,
+            "download_url": download_url,
+            "image_url": download_url,
+            "size": size,
+        })
+
+    def emit_heartbeat(self) -> None:
+        self.emit({"type": "heartbeat"})
+
+    def emit_error(self, message: str, code: str = "") -> None:
+        event: Dict[str, Any] = {"type": "error", "content": message}
+        if code:
+            event["code"] = code
+        self.emit(event)
+
+    def emit_attachment_context(self, images: List[dict]) -> None:
+        self.emit({"type": "attachment_context", "images": images})
+
+    def emit_permission_ask(self, ask_id: str, tool_name: str, reason: str, tool_input: Dict[str, Any], session_id: str = "", call_id: str = "") -> None:
+        event: Dict[str, Any] = {
+            "type": "permission_ask",
+            "ask_id": ask_id,
+            "session_id": session_id,
+            "call_id": call_id,
+            "tool_name": tool_name,
+            "reason": reason,
+            "tool_input": tool_input,
+        }
+        self.emit(event)
+
+    def emit_context_compress_start(self) -> None:
+        self.emit({"type": "context_compress_start", "content": "正在压缩历史对话..."})
+
+    def emit_context_compress_done(self, summary: str) -> None:
+        self.emit({"type": "context_compress_done", "content": summary})
