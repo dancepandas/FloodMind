@@ -145,16 +145,31 @@ class SessionManager:
         except FileNotFoundError:
             existing_dirs = set()
 
+        # 移除索引中存在但磁盘上不存在的会话
         stale_session_ids = [session_id for session_id in self._sessions.keys() if session_id not in existing_dirs]
-        if not stale_session_ids:
-            return
-
         for session_id in stale_session_ids:
             self._sessions.pop(session_id, None)
             self._agents.pop(session_id, None)
 
-        self._save_session_index()
-        logger.info(f"已从会话索引中移除 {len(stale_session_ids)} 个不存在的会话目录")
+        # 添加磁盘上存在但索引中缺失的会话
+        new_count = 0
+        for session_id in existing_dirs - self._sessions.keys():
+            session_file = self.sessions_dir / session_id / "session.json"
+            if session_file.exists():
+                try:
+                    data = json.loads(session_file.read_text(encoding="utf-8"))
+                    info = SessionInfo.from_dict(data)
+                    self._sessions[session_id] = info
+                    new_count += 1
+                except Exception as e:
+                    logger.warning(f"加载磁盘会话 {session_id} 失败: {e}")
+
+        if stale_session_ids or new_count:
+            self._save_session_index()
+            if stale_session_ids:
+                logger.info(f"已从会话索引中移除 {len(stale_session_ids)} 个不存在的会话目录")
+            if new_count:
+                logger.info(f"已从磁盘恢复 {new_count} 个缺失的会话")
     
     def set_callbacks(
         self,
@@ -389,12 +404,19 @@ class SessionManager:
         if history_file.exists():
             try:
                 data = json.loads(history_file.read_text(encoding="utf-8"))
+                # 新格式：turns
+                if "turns" in data:
+                    for turn in data["turns"]:
+                        content = turn.get("user_input", "")
+                        if content:
+                            return self._extract_title_from_user_input(content)
+                # 旧格式：messages
                 messages = data.get("messages", [])
                 for msg in messages:
                     if msg.get("type") == "human":
                         content = msg.get("content", "")
-                        title = content[:50] + ("..." if len(content) > 50 else "")
-                        return title
+                        if content:
+                            return self._extract_title_from_user_input(content)
             except Exception:
                 pass
 
@@ -402,6 +424,45 @@ class SessionManager:
             return f"会话 {session_id[:8]}"
 
         return "新会话"
+
+    @staticmethod
+    def _extract_title_from_user_input(content: str) -> str:
+        """从用户输入中提取标题，去除环境信息前缀"""
+        text = content.strip()
+        # 去除 [会话环境信息]... 前缀块，找到环境信息结束后的实际用户消息
+        if "[会话环境信息]" in text:
+            # 找到最后一个环境信息标记之后的内容
+            markers = ["[会话环境信息]", "[已上传的文件]"]
+            last_end = 0
+            for marker in markers:
+                idx = text.find(marker)
+                if idx >= 0:
+                    # 找到该标记所在段落的结束位置（下一个空行或下一个标记）
+                    end = text.find("\n\n", idx)
+                    if end < 0:
+                        end = len(text)
+                    else:
+                        end += 2
+                    last_end = max(last_end, end)
+            # 也跳过环境信息中的键值行
+            remaining = text[last_end:].strip()
+            # 过滤掉残留的环境信息行
+            lines = []
+            for line in remaining.split("\n"):
+                s = line.strip()
+                if not s:
+                    continue
+                if s.startswith("输出目录:") or s.startswith("上传目录:") or s.startswith("生成文件时"):
+                    continue
+                if s.startswith("- 文件名:") or s.startswith("用户提到"):
+                    continue
+                if s.startswith("路径:"):
+                    continue
+                lines.append(s)
+            if lines:
+                text = " ".join(lines)
+        title = text[:50] + ("..." if len(text) > 50 else "")
+        return title
     
     def get_session_messages(self, session_id: str) -> List[Dict[str, str]]:
         """获取会话的对话历史（用于前端恢复）"""
@@ -415,28 +476,81 @@ class SessionManager:
             except Exception as e:
                 logger.warning(f"读取活动会话内存失败，回退到磁盘历史: {e}")
 
+        # 新路径：会话目录下 memory/chat_history.json
         history_file = self.get_memory_dir(session_id) / "chat_history.json"
         if not history_file.exists():
-            return []
-        
+            # 兼容旧路径：memory/chat_history/chat_{session_id}_*.json
+            old_dir = Path(__file__).parent / "chat_history"
+            old_files = sorted(old_dir.glob(f"chat_{session_id}_*.json")) if old_dir.exists() else []
+            if old_files:
+                history_file = old_files[-1]
+            else:
+                return []
+
         try:
             data = json.loads(history_file.read_text(encoding="utf-8"))
+            # 新格式：{"turns": [...], "short_term": [...], ...}
+            if "turns" in data:
+                return self._turns_to_frontend(data["turns"])
+            # 旧格式：{"messages": [...]} 或 [...]
             messages = data.get("full_messages", data.get("messages", []))
-            result = []
-            for m in messages:
-                msg_data = {
-                    "role": "human" if m.get("type") == "human" else "FloodMind",
-                    "content": m.get("content", "")
-                }
-                if m.get("reasoning"):
-                    msg_data["reasoning"] = m.get("reasoning", "")
-                if m.get("tool_calls"):
-                    msg_data["tool_calls"] = m.get("tool_calls", [])
-                result.append(msg_data)
-            return result
+            if isinstance(data, list):
+                messages = data
+            return self._legacy_messages_to_frontend(messages)
         except Exception as e:
             logger.error(f"获取会话消息失败: {e}")
             return []
+
+    @staticmethod
+    def _turns_to_frontend(turns: List[Dict[str, Any]]) -> List[Dict[str, str]]:
+        """将新格式轮次转为前端消息列表
+
+        每轮合并为一条 FloodMind 消息，包含 reasoning、tool_calls、final_answer，
+        前端 fromServerMessage 会据此构建 thought/action/answer blocks 并自动折叠。
+        """
+        result = []
+        for turn in turns:
+            # 用户消息
+            if turn.get("user_input"):
+                result.append({
+                    "role": "human",
+                    "content": turn["user_input"],
+                })
+            # 合并本轮所有 AI 内容为一条消息
+            ai_parts: Dict[str, Any] = {"role": "FloodMind", "content": ""}
+            if turn.get("reasoning"):
+                ai_parts["reasoning"] = turn["reasoning"]
+            tool_calls = turn.get("tool_calls", [])
+            if tool_calls:
+                ai_parts["tool_calls"] = [
+                    {
+                        "tool_name": tc.get("tool_name", tc.get("name", "unknown")),
+                        "tool_output": tc.get("tool_output", tc.get("result", "")),
+                    }
+                    for tc in tool_calls
+                ]
+            if turn.get("final_answer"):
+                ai_parts["content"] = turn["final_answer"]
+            # 只有有内容才添加
+            if ai_parts.get("reasoning") or ai_parts.get("tool_calls") or ai_parts.get("content"):
+                result.append(ai_parts)
+        return result
+
+    @staticmethod
+    def _legacy_messages_to_frontend(messages: list) -> List[Dict[str, str]]:
+        """将旧格式消息转为前端格式"""
+        result = []
+        for m in messages:
+            msg_data = {
+                "role": "human" if m.get("type") == "human" else "FloodMind",
+                "content": m.get("content", "")
+            }
+            if m.get("reasoning"):
+                msg_data["reasoning"] = m.get("reasoning", "")
+            if m.get("tool_calls"):
+                msg_data["tool_calls"] = m.get("tool_calls", [])
+            result.append(msg_data)
+        return result
     
     def delete_session(self, session_id: str):
         """删除会话（包括所有数据）"""

@@ -459,15 +459,24 @@ def create_docx_from_json(content: str, output_path: str) -> dict:
 
 def main():
     parser = argparse.ArgumentParser(description="创建Word文档报告")
-    parser.add_argument("--content", required=True, help="文档内容（Markdown或JSON格式）")
-    parser.add_argument("--output_path", required=True, help="输出文件路径")
+    parser.add_argument("--content", required=True, help="文档内容文件路径（.md 或 .json）")
+    parser.add_argument("--output_path", required=True, help="输出文件名称")
     parser.add_argument("--format", default="auto", choices=["auto", "markdown", "json"], help="内容格式")
 
     args = parser.parse_args()
 
-    content = args.content.strip()
+    content_path = Path(args.content.strip())
+    if not content_path.exists():
+        print(f"错误: 内容文件不存在: {content_path}")
+        sys.exit(1)
 
-    if args.format == "json" or (args.format == "auto" and content.startswith('{')):
+    try:
+        content = content_path.read_text(encoding="utf-8")
+    except Exception as e:
+        print(f"错误: 读取内容文件失败: {e}")
+        sys.exit(1)
+
+    if args.format == "json" or (args.format == "auto" and content_path.suffix.lower() == '.json') or (args.format == "auto" and content.lstrip().startswith('{')):
         result = create_docx_from_json(content, args.output_path)
     else:
         result = create_docx_from_markdown(content, args.output_path)

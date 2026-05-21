@@ -1,5 +1,5 @@
-import { useState, useRef } from "react";
-import { Paperclip, Pause, Send, ChevronUp, Brain, Globe, Database, ShieldAlert } from "lucide-react";
+import { useRef, useState, useEffect } from "react";
+import { Send, Pause, Paperclip, ChevronDown, ShieldAlert, Check, X, Brain, Globe, Database } from "lucide-react";
 import type { ModelOption, SessionConfig, PendingPermissionAsk } from "@/types/app";
 
 const PINNED_MODELS = ["glm_51", "qwen_36_plus", "deepseek_v4_flash", "minimax_m25"];
@@ -80,10 +80,18 @@ export function ChatComposer({
   onRespondPermissionAsk,
 }: ChatComposerProps) {
   const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const textareaRef = useRef<HTMLTextAreaElement>(null);
   const [modelMenuOpen, setModelMenuOpen] = useState(false);
 
   const currentModel = models.find((m) => m.key === config.model_key);
   const sortedModels = sortModels(models);
+
+  useEffect(() => {
+    if (textareaRef.current) {
+      textareaRef.current.style.height = "auto";
+      textareaRef.current.style.height = Math.min(textareaRef.current.scrollHeight, 220) + "px";
+    }
+  }, [value]);
 
   function selectModel(model: ModelOption) {
     setModelMenuOpen(false);
@@ -105,35 +113,44 @@ export function ChatComposer({
     onConfigChange({ ...config, enable_rag: !config.enable_rag });
   }
 
-  const sendBtnClass = isRunning
-    ? "bg-amber-500 text-white shadow-[0_2px_8px_-2px_rgba(245,158,11,0.25)] hover:bg-amber-600"
+  const sendBtnStyle = isRunning
+    ? { background: 'var(--amber-500)', color: 'white', boxShadow: '0 2px 8px rgba(245,158,11,0.3)' }
     : value.trim().length > 0 && !disabled
-    ? "bg-primary text-primary-foreground shadow-[0_2px_8px_-2px_rgba(14,165,233,0.25)] hover:bg-primary/90"
-    : "bg-muted/50 text-muted-foreground/30";
+    ? { background: 'linear-gradient(135deg, var(--ocean-500), var(--teal-500))', color: 'white', boxShadow: '0 2px 8px rgba(37,99,168,0.25)' }
+    : { background: 'hsl(var(--muted))', color: 'hsl(var(--muted-foreground))', opacity: 0.3 };
 
   return (
-    <div className="px-4 pt-2.5 pb-3 bg-gradient-to-t from-background via-background/95 to-background/70 backdrop-blur-lg border-t border-border/25">
+    <div className="px-4 pt-2.5 pb-3" style={{ background: 'linear-gradient(to top, hsl(var(--background)), hsl(var(--background)))' }}>
       <div className="max-w-[780px] mx-auto">
         {pendingPermissionAsk && (
-          <div className="mb-2 flex items-center gap-2.5 px-3.5 py-2 rounded-xl border border-amber-200/60 bg-amber-50/70 shadow-[0_1px_4px_-1px_rgba(245,158,11,0.08)]">
-            <ShieldAlert size={15} className="text-amber-500 flex-shrink-0" strokeWidth={2} />
+          <div
+            className="mb-2 flex items-center gap-2.5 px-3.5 py-2 rounded-xl"
+            style={{
+              background: 'var(--amber-50)',
+              border: '1px solid var(--amber-200)',
+              boxShadow: '0 1px 4px rgba(245,158,11,0.08)',
+            }}
+          >
+            <ShieldAlert size={15} style={{ color: 'var(--amber-500)' }} strokeWidth={2} />
             <div className="flex-1 min-w-0">
-              <div className="text-[12px] font-medium text-amber-800">权限确认</div>
+              <div className="text-[12px] font-medium" style={{ color: 'var(--amber-800)' }}>权限确认</div>
               {pendingPermissionAsk.askReason && (
-                <div className="text-[11px] text-amber-700/70 mt-0.5 truncate">{pendingPermissionAsk.askReason}</div>
+                <div className="text-[11px] truncate" style={{ color: 'var(--amber-700)', opacity: 0.7 }}>{pendingPermissionAsk.askReason}</div>
               )}
             </div>
             <div className="flex gap-1.5 flex-shrink-0">
               <button
                 type="button"
-                className="px-3 py-1 text-[11px] font-medium rounded-md bg-emerald-500/15 text-emerald-600 hover:bg-emerald-500/25 transition-colors"
+                className="px-3 py-1 text-[11px] font-medium rounded-md transition-colors"
+                style={{ background: 'var(--teal-500)', color: 'white' }}
                 onClick={() => onRespondPermissionAsk(true)}
               >
                 允许
               </button>
               <button
                 type="button"
-                className="px-3 py-1 text-[11px] font-medium rounded-md bg-red-500/15 text-red-500 hover:bg-red-500/25 transition-colors"
+                className="px-3 py-1 text-[11px] font-medium rounded-md transition-colors"
+                style={{ background: 'hsl(var(--destructive))', color: 'white' }}
                 onClick={() => onRespondPermissionAsk(false)}
               >
                 拒绝
@@ -141,12 +158,23 @@ export function ChatComposer({
             </div>
           </div>
         )}
-        <div className="relative flex items-end bg-card border border-border/60 rounded-2xl focus-within:ring-2 focus-within:ring-primary/15 focus-within:border-primary/40 transition-all duration-300 shadow-[0_1px_12px_-3px_rgba(0,0,0,0.04)] focus-within:shadow-[0_2px_16px_-4px_rgba(14,165,233,0.08)]">
+
+        <div
+          className="relative flex items-end rounded-2xl transition-all duration-300"
+          style={{
+            background: 'hsl(var(--card))',
+            border: '1px solid hsl(var(--border))',
+            boxShadow: 'var(--shadow-md)',
+          }}
+        >
           <button
             type="button"
             onClick={() => fileInputRef.current?.click()}
             disabled={isRunning}
-            className="p-3 text-muted-foreground/40 hover:text-foreground transition-colors duration-200 h-[52px] flex items-center justify-center flex-shrink-0 rounded-l-xl disabled:opacity-30 hover:bg-muted/15"
+            className="p-3 h-[52px] flex items-center justify-center flex-shrink-0 rounded-l-xl transition-colors duration-200 disabled:opacity-30"
+            style={{ color: 'hsl(var(--muted-foreground))', opacity: 0.4 }}
+            onMouseEnter={(e) => { if (!isRunning) { e.currentTarget.style.color = 'var(--ocean-500)'; e.currentTarget.style.background = 'var(--sidebar-hover)'; }}}
+            onMouseLeave={(e) => { e.currentTarget.style.color = 'hsl(var(--muted-foreground))'; e.currentTarget.style.background = 'transparent'; }}
           >
             <Paperclip size={16} strokeWidth={1.8} />
           </button>
@@ -163,6 +191,7 @@ export function ChatComposer({
           />
 
           <textarea
+            ref={textareaRef}
             value={value}
             onChange={(e) => onChange(e.target.value)}
             onKeyDown={(e) => {
@@ -173,7 +202,8 @@ export function ChatComposer({
               }
             }}
             placeholder="输入预报任务指令..."
-            className="flex-1 max-h-[220px] min-h-[52px] py-3.5 px-2 bg-transparent resize-none outline-none text-[14px] leading-relaxed text-foreground placeholder:text-muted-foreground/30"
+            className="flex-1 max-h-[220px] min-h-[52px] py-3.5 px-2 bg-transparent resize-none outline-none text-[14px] leading-relaxed placeholder:opacity-30"
+            style={{ color: 'hsl(var(--foreground))', fontFamily: 'var(--font-body)' }}
             rows={1}
             disabled={disabled || isRunning}
           />
@@ -183,7 +213,8 @@ export function ChatComposer({
               type="button"
               onClick={isRunning ? onPause : onSubmit}
               disabled={!isRunning && (disabled || !value.trim())}
-              className={`p-2.5 rounded-lg flex items-center justify-center transition-all duration-250 active:scale-[0.94] ${sendBtnClass}`}
+              className={`p-2.5 rounded-lg flex items-center justify-center transition-all duration-250 active:scale-[0.94]`}
+              style={sendBtnStyle}
             >
               {isRunning ? <Pause size={14} /> : <Send size={14} className={value.trim().length > 0 ? "ml-0.5" : ""} />}
             </button>
@@ -194,36 +225,55 @@ export function ChatComposer({
           <div className="relative">
             <button
               onClick={() => setModelMenuOpen(!modelMenuOpen)}
-              className="flex items-center gap-1.5 px-2 py-0.5 rounded-md bg-muted/25 hover:bg-muted/50 border border-border/25 transition-all duration-200 text-[11px]"
+              className="flex items-center gap-1.5 px-2 py-0.5 rounded-md transition-all duration-200 text-[11px]"
+              style={{
+                background: modelMenuOpen ? 'hsl(var(--muted))' : 'hsl(var(--muted))',
+                border: '1px solid hsl(var(--border))',
+                opacity: modelMenuOpen ? 1 : 0.6,
+              }}
             >
               <ModelIcon modelKey={config.model_key} size={13} />
-              <span className="font-medium text-foreground/80 truncate max-w-[120px]">
+              <span className="font-medium truncate max-w-[120px]" style={{ color: 'hsl(var(--foreground))', opacity: 0.8 }}>
                 {currentModel?.label || config.model_key}
               </span>
-              <ChevronUp size={10} className={`text-muted-foreground/50 transition-transform duration-250 ${modelMenuOpen ? "rotate-180" : ""}`} />
+              <ChevronUp size={10} className={`transition-transform duration-250 ${modelMenuOpen ? "rotate-180" : ""}`} style={{ color: 'hsl(var(--muted-foreground))', opacity: 0.5 }} />
             </button>
 
             {modelMenuOpen && (
               <>
                 <div className="fixed inset-0 z-40" onClick={() => setModelMenuOpen(false)} />
-                <div className="absolute bottom-full left-0 mb-1.5 z-50 min-w-[240px] bg-popover border border-border/50 rounded-lg shadow-[0_8px_24px_-6px_rgba(0,0,0,0.12)] py-0.5 backdrop-blur-lg max-h-[230px] overflow-y-auto">
+                <div
+                  className="absolute bottom-full left-0 mb-1.5 z-50 min-w-[240px] py-0.5 max-h-[230px] overflow-y-auto rounded-lg"
+                  style={{
+                    background: 'hsl(var(--popover))',
+                    border: '1px solid hsl(var(--border))',
+                    boxShadow: 'var(--shadow-xl)',
+                  }}
+                >
                   {sortedModels.map((model) => {
                     const isActive = model.key === config.model_key;
                     return (
                       <button
                         key={model.key}
                         onClick={() => selectModel(model)}
-                        className={`w-full text-left px-3 py-2 hover:bg-muted/30 transition-colors duration-150 flex items-center gap-2 ${isActive ? "bg-primary/[0.05]" : ""}`}
+                        className="w-full text-left px-3 py-2 transition-colors duration-150 flex items-center gap-2"
+                        style={{
+                          background: isActive ? 'var(--sidebar-hover)' : 'transparent',
+                        }}
+                        onMouseEnter={(e) => { if (!isActive) e.currentTarget.style.background = 'hsl(var(--muted))'; }}
+                        onMouseLeave={(e) => { if (!isActive) e.currentTarget.style.background = 'transparent'; }}
                       >
                         <ModelIcon modelKey={model.key} size={15} />
                         <div className="min-w-0">
-                          <div className={`font-medium text-[11px] ${isActive ? "text-primary" : "text-foreground"}`}>{model.label}</div>
+                          <div className="font-medium text-[11px]" style={{ color: isActive ? 'var(--ocean-500)' : 'hsl(var(--foreground))' }}>
+                            {model.label}
+                          </div>
                           {model.description && (
-                            <div className="text-[9px] text-muted-foreground/40 mt-0.5">{model.description}</div>
+                            <div className="text-[9px]" style={{ color: 'hsl(var(--muted-foreground))', opacity: 0.4 }}>{model.description}</div>
                           )}
                         </div>
                         {isActive && (
-                          <div className="ml-auto w-1.5 h-1.5 rounded-full bg-primary flex-shrink-0" />
+                          <div className="ml-auto w-1.5 h-1.5 rounded-full flex-shrink-0" style={{ background: 'var(--ocean-500)' }} />
                         )}
                       </button>
                     );
@@ -237,10 +287,14 @@ export function ChatComposer({
             onClick={toggleReasoning}
             disabled={!currentModel?.supports_reasoning}
             className={`flex items-center gap-1 px-1.5 py-0.5 rounded-md border transition-all duration-200 text-[11px] active:scale-[0.96] ${
-              config.enable_reasoning
-                ? "bg-primary/8 border-primary/15 text-primary"
-                : "bg-transparent border-border/15 text-muted-foreground/35 hover:text-muted-foreground/55 hover:border-border/25"
-            } ${!currentModel?.supports_reasoning ? "opacity-20 cursor-not-allowed" : "cursor-pointer"}`}
+              !currentModel?.supports_reasoning ? "opacity-20 cursor-not-allowed" : "cursor-pointer"
+            }`}
+            style={{
+              background: config.enable_reasoning ? 'var(--ocean-50)' : 'transparent',
+              borderColor: config.enable_reasoning ? 'var(--ocean-200)' : 'hsl(var(--border))',
+              color: config.enable_reasoning ? 'var(--ocean-500)' : 'hsl(var(--muted-foreground))',
+              opacity: config.enable_reasoning ? 1 : (!currentModel?.supports_reasoning ? 0.2 : 0.35),
+            }}
             title="深度思考"
           >
             <Brain size={10} strokeWidth={1.8} />
@@ -249,11 +303,13 @@ export function ChatComposer({
 
           <button
             onClick={toggleSearch}
-            className={`flex items-center gap-1 px-1.5 py-0.5 rounded-md border transition-all duration-200 text-[11px] cursor-pointer active:scale-[0.96] ${
-              config.enable_search
-                ? "bg-primary/8 border-primary/15 text-primary"
-                : "bg-transparent border-border/15 text-muted-foreground/35 hover:text-muted-foreground/55 hover:border-border/25"
-            }`}
+            className="flex items-center gap-1 px-1.5 py-0.5 rounded-md border transition-all duration-200 text-[11px] cursor-pointer active:scale-[0.96]"
+            style={{
+              background: config.enable_search ? 'var(--ocean-50)' : 'transparent',
+              borderColor: config.enable_search ? 'var(--ocean-200)' : 'hsl(var(--border))',
+              color: config.enable_search ? 'var(--ocean-500)' : 'hsl(var(--muted-foreground))',
+              opacity: config.enable_search ? 1 : 0.35,
+            }}
             title="联网搜索"
           >
             <Globe size={10} strokeWidth={1.8} />
@@ -262,20 +318,32 @@ export function ChatComposer({
 
           <button
             onClick={toggleRag}
-            className={`flex items-center gap-1 px-1.5 py-0.5 rounded-md border transition-all duration-200 text-[11px] cursor-pointer active:scale-[0.96] ${
-              config.enable_rag
-                ? "bg-primary/8 border-primary/15 text-primary"
-                : "bg-transparent border-border/15 text-muted-foreground/35 hover:text-muted-foreground/55 hover:border-border/25"
-            }`}
+            className="flex items-center gap-1 px-1.5 py-0.5 rounded-md border transition-all duration-200 text-[11px] cursor-pointer active:scale-[0.96]"
+            style={{
+              background: config.enable_rag ? 'var(--teal-50)' : 'transparent',
+              borderColor: config.enable_rag ? 'var(--teal-200)' : 'hsl(var(--border))',
+              color: config.enable_rag ? 'var(--teal-500)' : 'hsl(var(--muted-foreground))',
+              opacity: config.enable_rag ? 1 : 0.35,
+            }}
             title="知识库检索"
           >
             <Database size={10} strokeWidth={1.8} />
             <span>RAG</span>
           </button>
 
-          <span className="ml-auto text-[9px] text-muted-foreground/25 select-none tracking-wide">Enter 发送 · Shift+Enter 换行</span>
+          <span className="ml-auto text-[9px] select-none tracking-wide" style={{ color: 'hsl(var(--muted-foreground))', opacity: 0.25 }}>
+            Enter 发送 · Shift+Enter 换行
+          </span>
         </div>
       </div>
     </div>
+  );
+}
+
+function ChevronUp({ size, className, style }: { size: number; className?: string; style?: React.CSSProperties }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round" className={className} style={style}>
+      <path d="m18 15-6-6-6 6" />
+    </svg>
   );
 }

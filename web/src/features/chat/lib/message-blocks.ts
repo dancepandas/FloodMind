@@ -20,6 +20,7 @@ const TOOL_DISPLAY_NAMES: Record<string, string> = {
   cancel_scheduled_task: "取消定时任务",
   delegate_execution_specialist: "委派执行",
   get_skill: "获取技能",
+  context_compress: "压缩历史对话",
 };
 
 export function getToolDisplayName(toolName: string): string {

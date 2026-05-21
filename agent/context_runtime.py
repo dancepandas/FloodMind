@@ -26,6 +26,7 @@ class ContextPriority(IntEnum):
     SYSTEM_PROMPT = 0
     PROJECT_RULES = 10
     SKILL_CATALOG = 20
+    TASK_EXPERIENCE = 25
     LONG_TERM_MEMORY = 30
     SYSTEM_ENV = 40
     CURRENT_TIME = 50

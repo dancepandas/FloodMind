@@ -10,6 +10,7 @@ import logging
 import time
 from typing import Any, Callable, Dict, Iterator, List, Optional
 
+import httpx
 import openai
 
 from agent.native.types import ModelEvent, ToolCall
@@ -196,6 +197,9 @@ class ModelClient:
         except openai.APIError as e:
             logger.error("ModelClient stream error: %s", e)
             yield ModelEvent(type="error", content=str(e))
+        except httpx.ReadTimeout as e:
+            logger.error("ModelClient stream timeout: %s", e)
+            yield ModelEvent(type="timeout", content="模型请求超时，请稍后重试")
         except Exception as e:
             logger.error("ModelClient unexpected stream error: %s", e, exc_info=True)
             yield ModelEvent(type="error", content=f"流式输出异常: {str(e)}")

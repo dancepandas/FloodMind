@@ -2,6 +2,8 @@
 双记忆模块
 
 短期记忆 + 长期记忆的对话管理，不依赖 LangChain。
+对话历史统一存储到 persist_dir/chat_history.json，每轮包含：
+turn_index, user_input, reasoning, tool_calls, final_answer, timestamp
 """
 
 import json
@@ -148,11 +150,15 @@ class ContextCompressor:
 
 
 class DualMemory:
-    """双记忆系统：短期记忆 + 长期记忆"""
+    """双记忆系统：短期记忆 + 长期记忆 + 对话历史"""
 
     COMPRESS_BATCH = 4
     CONTEXT_THRESHOLD = 0.7
     MAX_LONG_TERM_RECALL = 4
+
+    # 对话历史压缩参数
+    HISTORY_COMPRESS_RATIO = 0.85    # 上下文使用率超过此值触发压缩
+    HISTORY_KEEP_RECENT_TURNS = 2    # 压缩时保留最近N轮完整原文
 
     def __init__(
         self,
@@ -178,6 +184,15 @@ class DualMemory:
         self._lock = threading.Lock()
         self._reasoning_trace: List[Dict[str, Any]] = []
 
+        # 对话历史（按轮次组织）
+        self._turns: List[Dict[str, Any]] = []
+        self._turn_index: int = 0
+        self._history_compressed: bool = False  # 早期轮次是否已压缩
+
+        # 增量 history 缓存
+        self._last_sent_turn_index: int = 0
+        self._cached_history_text: str = ""
+
         if persist_dir:
             self._load_from_disk()
 
@@ -187,17 +202,58 @@ class DualMemory:
             f"LLM压缩: {'启用' if llm else '禁用'}"
         )
 
+    def set_llm(self, llm: Any) -> None:
+        """注入 LLM 服务（支持延迟注入）"""
+        self._llm = llm
+        self._compressor.llm = llm
+
+    # ── 消息添加 ──────────────────────────────────────────────
+
     def add_user_message(self, content: str) -> None:
         with self._lock:
             self._short_term.add_user_message(content)
             self._extract_long_term_from_message(content)
-        logger.debug(f"[记忆] 添加用户消息，短期轮数: {self._current_short_rounds()}")
+            # 开始新轮次
+            self._turns.append({
+                "turn_index": self._turn_index,
+            "history_compressed": self._history_compressed,
+                "user_input": content,
+                "reasoning": "",
+                "tool_calls": [],
+                "final_answer": "",
+                "timestamp": datetime.now().isoformat(),
+            })
+            self._turn_index += 1
+        logger.debug(f"[记忆] 添加用户消息，轮次: {self._turn_index - 1}")
 
     def add_ai_message(self, content: str) -> None:
         with self._lock:
             self._short_term.add_ai_message(content)
             self._check_consolidation()
+            # 补充当前轮次的 final_answer
+            if self._turns and not self._turns[-1].get("final_answer"):
+                self._turns[-1]["final_answer"] = content
         logger.debug(f"[记忆] 添加AI消息，短期轮数: {self._current_short_rounds()}")
+
+    def add_ai_message_with_trace(
+        self,
+        content: str,
+        reasoning: str = "",
+        tool_calls: Optional[List[Dict[str, Any]]] = None,
+    ) -> None:
+        """记录完整的 AI 回复（含推理过程和工具调用详情）"""
+        with self._lock:
+            self._short_term.add_ai_message(content)
+            # 更新当前轮次
+            if self._turns:
+                turn = self._turns[-1]
+                turn["final_answer"] = content
+                if reasoning:
+                    turn["reasoning"] = reasoning
+                if tool_calls:
+                    turn["tool_calls"] = tool_calls
+            self._check_consolidation()
+        logger.debug(f"[记忆] 添加AI消息(含trace)，轮次: {self._turn_index - 1}")
 
     def add_message(self, message: Message) -> None:
         with self._lock:
@@ -214,6 +270,8 @@ class DualMemory:
 
     def get_reasoning_trace(self) -> List[Dict[str, Any]]:
         return list(self._reasoning_trace)
+
+    # ── 消息读取 ──────────────────────────────────────────────
 
     def get_short_term_messages(self) -> List[Message]:
         with self._lock:
@@ -255,6 +313,171 @@ class DualMemory:
 
     def get_chat_history(self) -> MessageStore:
         return self._short_term
+
+    def get_turns(self) -> List[Dict[str, Any]]:
+        """获取所有对话轮次"""
+        with self._lock:
+            return list(self._turns)
+
+    def get_chat_history_for_system_prompt(self, total_context_chars: int = 0, context_window: int = 0, event_bus=None) -> str:
+        """构建对话历史文本，支持增量拼接，超阈值时全量重建并压缩早期轮次
+
+        Args:
+            total_context_chars: 当前系统提示词+memory_messages的总字符数（不含对话历史）
+            context_window: 模型上下文窗口大小（tokens），用于判断是否需要压缩
+            event_bus: EventBus 实例，用于向前端发送压缩状态事件
+        """
+        with self._lock:
+            if not self._turns:
+                return ""
+
+            # 判断是否需要压缩
+            need_compress = False
+            if context_window > 0 and len(self._turns) > self.HISTORY_KEEP_RECENT_TURNS:
+                estimated_tokens = (total_context_chars + len(self._cached_history_text)) / 1.5
+                if estimated_tokens / context_window > self.HISTORY_COMPRESS_RATIO:
+                    need_compress = True
+
+            if need_compress:
+                # 压缩触发：全量重建
+                recent = self._turns[-self.HISTORY_KEEP_RECENT_TURNS:]
+                older = self._turns[:-self.HISTORY_KEEP_RECENT_TURNS]
+                if not older:
+                    result = self._build_turns_text(self._turns)
+                else:
+                    older_summary = self._get_cached_or_compress_older(older, event_bus)
+                    lines = ["[对话历史]"]
+                    if older_summary:
+                        lines.append(f"\n[早期对话摘要]\n{older_summary}\n")
+                    lines.append(self._build_turns_text(recent))
+                    result = "\n".join(lines)
+                self._cached_history_text = result
+                self._last_sent_turn_index = len(self._turns)
+                return result
+
+            # 非压缩：增量拼接
+            new_turns = self._turns[self._last_sent_turn_index:]
+            if not new_turns:
+                return self._cached_history_text
+
+            incremental_text = self._build_turns_text(new_turns)
+            if self._cached_history_text:
+                # 去掉增量文本开头的 "[对话历史]" 标记，避免重复
+                incremental_body = incremental_text
+                if incremental_body.startswith("[对话历史]"):
+                    incremental_body = incremental_body[len("[对话历史]"):]
+                result = self._cached_history_text + incremental_body
+            else:
+                result = incremental_text
+
+            self._cached_history_text = result
+            self._last_sent_turn_index = len(self._turns)
+            return result
+
+    def _build_turns_text(self, turns: List[Dict[str, Any]]) -> str:
+        """将轮次列表格式化为文本"""
+        lines = ["[对话历史]"]
+        for turn in turns:
+            idx = turn.get("turn_index", 0)
+            lines.append(f"\n第{idx}轮:")
+            lines.append(f"用户: {turn.get('user_input', '')}")
+            if turn.get("reasoning"):
+                lines.append(f"思考: {turn['reasoning']}")
+            if turn.get("tool_calls"):
+                for tc in turn["tool_calls"]:
+                    tool_name = tc.get("tool_name", tc.get("name", "unknown"))
+                    tool_input = tc.get("tool_input", "")
+                    tool_output = tc.get("tool_output", tc.get("result", ""))
+                    input_summary = str(tool_input)[:200] if tool_input else ""
+                    output_summary = str(tool_output)[:300] if tool_output else ""
+                    lines.append(f"  调用 {tool_name}: {input_summary}")
+                    lines.append(f"  结果: {output_summary}")
+            if turn.get("final_answer"):
+                lines.append(f"回答: {turn['final_answer']}")
+        return "\n".join(lines)
+
+    def _get_cached_or_compress_older(self, older_turns: List[Dict[str, Any]], event_bus=None) -> str:
+        """获取早期轮次的压缩摘要，优先用缓存"""
+        if self._history_compressed and all(t.get("compressed") for t in older_turns):
+            parts = [t["compressed"] for t in older_turns if t.get("compressed")]
+            return "\n".join(parts)
+
+        # 发送压缩开始事件
+        if event_bus:
+            event_bus.emit_context_compress_start()
+
+        if self._llm:
+            summary = self._llm_compress_turns(older_turns)
+        else:
+            summary = self._rule_compress_turns(older_turns)
+
+        self._distribute_compressed(older_turns, summary)
+        self._history_compressed = True
+        self.save_chat_history()
+
+        # 发送压缩完成事件
+        if event_bus:
+            event_bus.emit_context_compress_done(summary)
+
+        return summary
+
+    def _distribute_compressed(self, older_turns: List[Dict[str, Any]], summary: str):
+        """将压缩摘要分配到各轮的 compressed 字段"""
+        if not older_turns:
+            return
+        if self._llm:
+            # LLM 摘要是整体文本，存到第一轮
+            older_turns[0]["compressed"] = summary
+            for t in older_turns[1:]:
+                t["compressed"] = ""
+        else:
+            # 规则压缩逐轮，按行分配
+            lines = summary.strip().split("\n")
+            for i, turn in enumerate(older_turns):
+                turn["compressed"] = lines[i] if i < len(lines) else self._compress_turn_rule(turn)
+
+    def _rule_compress_turns(self, turns: List[Dict[str, Any]]) -> str:
+        """规则压缩多轮对话为结构化摘要"""
+        return "\n".join(self._compress_turn_rule(t) for t in turns)
+
+    def _compress_turn_rule(self, turn: Dict[str, Any]) -> str:
+        """规则压缩单轮对话"""
+        idx = turn.get("turn_index", 0)
+        user = turn.get("user_input", "")[:50]
+        parts = [f"第{idx}轮: {user}"]
+
+        tool_calls = turn.get("tool_calls", [])
+        if tool_calls:
+            tool_parts = []
+            for tc in tool_calls:
+                name = tc.get("tool_name", tc.get("name", "unknown"))
+                output = str(tc.get("tool_output", tc.get("result", "")))[:80]
+                tool_parts.append(f"{name}->{output}")
+            parts.append(" | ".join(tool_parts))
+
+        answer = turn.get("final_answer", "")
+        if answer:
+            parts.append(f"-> {answer[:100]}")
+
+        return " | ".join(parts)
+
+    def _llm_compress_turns(self, turns: List[Dict[str, Any]]) -> str:
+        """用 LLM 批量压缩多轮对话为摘要"""
+        turns_text = self._build_turns_text(turns)
+        prompt = (
+            "将以下对话历史压缩为简洁的结构化摘要，每轮一行，格式：第N轮: 用户意图 | 关键操作和结果 | 最终结论。"
+            "省略推理过程，只保留用户意图、工具调用名称和关键结果、最终回答要点。"
+            "每轮不超过80字。\n\n"
+            f"{turns_text}"
+        )
+        try:
+            result = self._llm.invoke(prompt)
+            return result if result else self._rule_compress_turns(turns)
+        except Exception as e:
+            logger.warning("LLM压缩对话历史失败，fallback到规则压缩: %s", e)
+            return self._rule_compress_turns(turns)
+
+    # ── 内部管理 ──────────────────────────────────────────────
 
     def _current_short_rounds(self) -> int:
         return len(self._short_term) // 2
@@ -313,7 +536,7 @@ class DualMemory:
                 self._long_term_store.add_message(msg)
 
         if self.persist_dir:
-            self._save_to_disk()
+            self.save_chat_history()
 
         logger.info(
             f"[记忆] 整合完成 - 压缩{compress_count // 2}轮，"
@@ -396,6 +619,8 @@ class DualMemory:
                 lines.append(f"助手: {msg.content}")
         return "\n".join(lines)
 
+    # ── 清理 ──────────────────────────────────────────────────
+
     def clear_short_term(self) -> None:
         with self._lock:
             self._short_term.clear()
@@ -407,8 +632,13 @@ class DualMemory:
             self._long_term_store.clear()
             self.compressed_summary = ""
             self._reasoning_trace.clear()
+            self._turns.clear()
+            self._turn_index = 0
+            self._history_compressed = False
+            self._last_sent_turn_index = 0
+            self._cached_history_text = ""
         if self.persist_dir:
-            self._save_to_disk()
+            self.save_chat_history()
 
     @property
     def short_term_count(self) -> int:
@@ -418,36 +648,79 @@ class DualMemory:
     def long_term_count(self) -> int:
         return len(self._long_term_store)
 
-    def _save_to_disk(self) -> None:
+    # ── 持久化（统一存储） ────────────────────────────────────
+
+    def save_chat_history(self) -> str:
+        """统一保存对话历史到 persist_dir/chat_history.json"""
         if not self.persist_dir:
-            return
+            return ""
         try:
             os.makedirs(self.persist_dir, exist_ok=True)
             data = {
                 "session_id": self.session_id,
+                "turns": self._turns,
                 "compressed_summary": self.compressed_summary,
                 "short_term": [
-                    {"role": m.role, "content": m.content, "additional_kwargs": m.additional_kwargs}
+                    {"role": m.role, "content": m.content}
                     for m in self._short_term.messages
                 ],
                 "long_term": [
-                    {"role": m.role, "content": m.content, "additional_kwargs": m.additional_kwargs}
+                    {"role": m.role, "content": m.content}
                     for m in self._long_term_store.messages
                 ],
-                "reasoning_trace": self._reasoning_trace,
             }
-            filepath = os.path.join(self.persist_dir, f"memory_{self.session_id}.json")
+            filepath = os.path.join(self.persist_dir, "chat_history.json")
             with open(filepath, "w", encoding="utf-8") as f:
-                json.dump(data, f, ensure_ascii=False, indent=2)
+                json.dump(data, f, ensure_ascii=False, indent=2, default=str)
+            logger.info(f"[记忆] 对话历史已保存: {filepath}")
+            return filepath
         except Exception as e:
-            logger.error(f"[记忆] 保存到磁盘失败: {e}")
+            logger.error(f"[记忆] 保存对话历史失败: {e}")
+            return ""
 
     def _load_from_disk(self) -> None:
         if not self.persist_dir:
             return
-        filepath = os.path.join(self.persist_dir, f"memory_{self.session_id}.json")
+        filepath = os.path.join(self.persist_dir, "chat_history.json")
         if not os.path.exists(filepath):
+            # 兼容旧格式 memory_{session_id}.json
+            legacy = os.path.join(self.persist_dir, f"memory_{self.session_id}.json")
+            if os.path.exists(legacy):
+                self._load_legacy(legacy)
             return
+        try:
+            with open(filepath, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            self.compressed_summary = data.get("compressed_summary", "")
+            # 加载对话轮次
+            self._turns = data.get("turns", [])
+            if self._turns:
+                self._turn_index = max(t.get("turn_index", 0) for t in self._turns) + 1
+            # 从磁盘加载后，增量缓存失效，下次请求全量构建
+            self._last_sent_turn_index = 0
+            self._cached_history_text = ""
+            # 加载短期/长期记忆
+            for msg_data in data.get("short_term", []):
+                self._short_term.add_message(Message(
+                    role=msg_data["role"],
+                    content=msg_data["content"],
+                    additional_kwargs=msg_data.get("additional_kwargs", {}),
+                ))
+            for msg_data in data.get("long_term", []):
+                self._long_term_store.add_message(Message(
+                    role=msg_data["role"],
+                    content=msg_data["content"],
+                    additional_kwargs=msg_data.get("additional_kwargs", {}),
+                ))
+            logger.info(
+                f"[记忆] 从磁盘加载: 轮次={len(self._turns)}, "
+                f"短期={len(self._short_term)}, 长期={len(self._long_term_store)}"
+            )
+        except Exception as e:
+            logger.error(f"[记忆] 从磁盘加载失败: {e}")
+
+    def _load_legacy(self, filepath: str) -> None:
+        """兼容旧格式 memory_{session_id}.json"""
         try:
             with open(filepath, "r", encoding="utf-8") as f:
                 data = json.load(f)
@@ -465,31 +738,37 @@ class DualMemory:
                     additional_kwargs=msg_data.get("additional_kwargs", {}),
                 ))
             self._reasoning_trace = data.get("reasoning_trace", [])
-            logger.info(
-                f"[记忆] 从磁盘加载: 短期={len(self._short_term)}, "
-                f"长期={len(self._long_term_store)}"
-            )
+            # 从旧格式的消息重建轮次
+            self._rebuild_turns_from_messages()
+            logger.info(f"[记忆] 从旧格式加载: 轮次={len(self._turns)}")
         except Exception as e:
-            logger.error(f"[记忆] 从磁盘加载失败: {e}")
+            logger.error(f"[记忆] 加载旧格式失败: {e}")
 
-    def save_chat_history(self, messages: Optional[List[Dict[str, Any]]] = None) -> str:
-        """保存聊天历史到文件"""
-        os.makedirs(CHAT_HISTORY_DIR, exist_ok=True)
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        filename = f"chat_{self.session_id}_{timestamp}.json"
-        filepath = os.path.join(CHAT_HISTORY_DIR, filename)
+    def _rebuild_turns_from_messages(self) -> None:
+        """从短期+长期消息重建轮次（兼容旧数据）"""
+        all_msgs = self._long_term_store.messages + self._short_term.messages
+        turn_idx = 0
+        current_turn = None
+        for msg in all_msgs:
+            if msg.role == "human":
+                if current_turn:
+                    self._turns.append(current_turn)
+                current_turn = {
+                    "turn_index": turn_idx,
+                    "user_input": msg.content,
+                    "reasoning": "",
+                    "tool_calls": [],
+                    "final_answer": "",
+                    "timestamp": "",
+                }
+                turn_idx += 1
+            elif msg.role == "ai" and current_turn:
+                current_turn["final_answer"] = msg.content
+        if current_turn:
+            self._turns.append(current_turn)
+        self._turn_index = turn_idx
 
-        if messages is None:
-            messages = [
-                {"role": msg.role, "content": msg.content}
-                for msg in self.get_all_messages()
-            ]
-
-        with open(filepath, "w", encoding="utf-8") as f:
-            json.dump(messages, f, ensure_ascii=False, indent=2)
-
-        logger.info(f"[记忆] 聊天历史已保存: {filepath}")
-        return filepath
+    # ── 序列化 ────────────────────────────────────────────────
 
     def to_dict(self) -> Dict[str, Any]:
         with self._lock:
@@ -500,6 +779,7 @@ class DualMemory:
                 "short_term_count": len(self._short_term),
                 "long_term_count": len(self._long_term_store),
                 "has_compressed_summary": bool(self.compressed_summary),
+                "turn_count": len(self._turns),
                 "short_term": [
                     {"role": m.role, "content": m.content}
                     for m in self._short_term.messages

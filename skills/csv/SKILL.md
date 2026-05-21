@@ -1,6 +1,6 @@
 ---
 name: csv
-description: "处理CSV/TSV文件时触发，包括：读取/编辑CSV文件、预览数据、创建/转换CSV、数据清洗、统计分析。**数据预览时必须使用preview_data.py仅读取前几行，禁止直接读取整个文件！**"
+description: "处理CSV文件时触发，包括：读取/编辑CSV文件、预览CSV数据、创建/转换CSV、CSV格式数据清洗、统计分析CSV中的数据。**数据预览时必须使用preview_data.py仅读取前几行，禁止直接读取整个文件！**"
 ---
 
 # Requirements for Outputs

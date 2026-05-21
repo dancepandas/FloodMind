@@ -5,8 +5,8 @@
 具备完整的行为元数据（readonly/destructive/concurrency_safe/interrupt_behavior）。
 
 工具分类：
-- 只读工具: get_skill, search_artifacts, read_artifact, knowledge_search, search_memory, search_tool_error_memory
-- 写入工具: write_text_file, update_project_instructions, add_knowledge, add_memory
+- 只读工具: get_skill, search_artifacts, read_artifact, knowledge_search, search_memory, search_tool_error_memory, search_task_experience, browse_experience_tree, drill_down_experience
+- 写入工具: write_text_file, update_project_instructions, add_knowledge, add_memory, add_task_experience
 - 执行工具: exec_bash, run_script, exec_python_file
 - 网络工具: web_search
 """

@@ -789,6 +789,7 @@ def create_agent_for_session(session_id: str, enable_search: bool = False, enabl
         max_short_term=20,
         context_window=32768,
         persist_dir=memory_dir,
+        llm=llm_service,
     )
     
     agent = create_flood_agent(
@@ -1656,13 +1657,7 @@ def chat():
                 snapshot['content'] = final_text
                 touch_stream_snapshot(session_id)
 
-                if hasattr(agent, 'memory') and hasattr(agent.memory, 'upsert_last_ai_message'):
-                    try:
-                        agent.memory.upsert_last_ai_message(final_text)
-                        if hasattr(agent.memory, 'save_chat_history'):
-                            agent.memory.save_chat_history()
-                    except Exception as e:
-                        logger.warning(f"更新会话最终展示文案失败: {e}")
+                # agent 内部已自动保存对话历史，无需额外调用
 
                 emit(final_event)
 
@@ -1673,7 +1668,9 @@ def chat():
 
                 session_info = session_manager.get_session_info(session_id)
                 if session_info and not session_info.title:
-                    session_manager.update_session_title(session_id, message[:50])
+                    from memory.session_manager import SessionManager as _SM
+                    title = _SM._extract_title_from_user_input(message)
+                    session_manager.update_session_title(session_id, title)
 
             except Exception as e:
                 logger.error(f"流式输出错误: {e}")
@@ -1842,6 +1839,7 @@ def list_sessions():
         for s in sessions:
             session_data = s.to_dict()
             session_data['title'] = session_manager.get_session_title(s.session_id)
+            session_data['updated_at'] = session_data.get('last_active', '')
             result.append(session_data)
         
         return jsonify({
@@ -1956,6 +1954,10 @@ def get_session(session_id: str):
                 ]
             filtered_messages.append(filtered_msg)
         
+        # 只在流式输出进行中返回 in_progress，已完成的不返回（避免与 messages 重复）
+        snapshot = ensure_session_state(session_id).get('stream_snapshot')
+        in_progress = _serialize_snapshot(snapshot) if (snapshot and snapshot.get('is_streaming')) else None
+        
         return jsonify({
             'status': 'success',
             'session': {
@@ -1964,7 +1966,7 @@ def get_session(session_id: str):
             },
             'messages': filtered_messages,
             'artifacts': list_session_artifact_events(session_id),
-            'in_progress': _serialize_snapshot(ensure_session_state(session_id).get('stream_snapshot')),
+            'in_progress': in_progress,
         })
     except Exception as e:
         logger.error(f"获取会话详情失败: {e}")
@@ -2368,11 +2370,13 @@ def get_session_status():
         state = ensure_session_state(session_id)
         
         safe_state = {k: v for k, v in state.items() if k != 'stream_snapshot'}
-        safe_state['stream_snapshot'] = _serialize_snapshot(state.get('stream_snapshot'))
+        snapshot = state.get('stream_snapshot')
+        in_progress = _serialize_snapshot(snapshot) if (snapshot and snapshot.get('is_streaming')) else None
+        safe_state['stream_snapshot'] = in_progress
         return jsonify({
             'status': 'success',
             'session_state': safe_state,
-            'in_progress': _serialize_snapshot(state.get('stream_snapshot'))
+            'in_progress': in_progress
         })
     except Exception as e:
         logger.error(f"获取会话状态失败: {e}")

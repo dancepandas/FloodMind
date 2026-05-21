@@ -91,6 +91,7 @@ def create_agent_for_session(session_manager: SessionManager, session_id: str):
         max_short_term=settings.agent.max_history,
         context_window=settings.agent.context_window,
         persist_dir=session_manager.get_memory_dir(session_id),
+        llm=llm_service,
     )
     return create_flood_agent(llm_service=llm_service, memory=memory, session_id=session_id, enable_search=False)
 
@@ -156,6 +157,24 @@ def run_once(runtime: ScheduledTaskRuntime, session_manager: SessionManager, loo
     for task in tasks:
         execute_task(runtime, session_manager, task)
     session_manager.save_all()
+
+    # ── 经验树巡检 ──────────────────────────────────────────
+    if settings.task_experience.enabled:
+        try:
+            from memory.task_experience import get_task_experience_store
+            store = get_task_experience_store()
+            if store.should_run_maintenance():
+                logger.info("经验树巡检: 开始执行...")
+                try:
+                    model_key = get_default_model_key()
+                    llm_service = create_llm_service_from_preset(model_key, enable_reasoning=False)
+                    stats = store.run_maintenance(llm_service)
+                    logger.info(f"经验树巡检: 完成, 统计={stats}")
+                except Exception as e:
+                    logger.error(f"经验树巡检: 执行失败: {e}")
+        except Exception as e:
+            logger.debug(f"经验树巡检: 跳过 ({e})")
+
     return len(tasks)
 
 

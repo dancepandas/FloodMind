@@ -144,3 +144,11 @@ class EventBus:
             "tool_input": tool_input,
         }
         self.emit(event)
+
+    def emit_context_compress_start(self) -> None:
+        """发送上下文压缩开始事件"""
+        self.emit({"type": "context_compress_start", "content": "正在压缩历史对话..."})
+
+    def emit_context_compress_done(self, summary: str) -> None:
+        """发送上下文压缩完成事件，附带结构化摘要"""
+        self.emit({"type": "context_compress_done", "content": summary})

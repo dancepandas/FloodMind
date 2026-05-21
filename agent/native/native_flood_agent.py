@@ -63,7 +63,7 @@ class _InstanceToolRegistry:
 
 
 class NativeFloodAgent:
-    SYSTEM_PROMPT = """你是FloodMind，是大水云开发的洪水预报智能体。
+    SYSTEM_PROMPT = """你是大水云科技开发的FloodMind。
 
 ## 当前系统时间
 {current_time_context}
@@ -116,6 +116,8 @@ class NativeFloodAgent:
 - `create_scheduled_task`：创建后台定时任务，用户要求未来、每天、定时、自动执行任务时使用
 - `list_scheduled_tasks`：查询当前会话的定时任务
 - `cancel_scheduled_task`：取消或停用定时任务
+- `search_task_experience`：检索历史任务执行经验（遇到类似任务时，先搜索经验避免重复踩坑）
+- `add_task_experience`：手动添加任务执行经验到经验树
 
 ## 定时任务处理
 当用户表达"每天、明天、某个时间、定时、自动、后台执行、提前安排任务"等需求时：
@@ -189,6 +191,13 @@ class NativeFloodAgent:
 4. 不要把用户原始长文本整包塞给执行单元
 5. 如果你已经确定要使用某个 skill，直接明确要求执行
 
+### 4.5 文档生成的内容传递规则（强制）
+当任务涉及生成 Word/PDF/报告等文档时，执行单元无法访问你的对话历史和搜索结果，因此：
+1. **你必须先将文档的完整内容写入一个中间文件**（如 `report_content.md`），包含所有章节的完整正文、数据、分析结论
+2. 然后委派执行单元时，task 中明确指定该内容文件路径，例如："根据 report_content.md 的内容，使用 docx skill 生成 Word 文档 report.docx"
+3. **严禁只传大纲或标题**，中间文件必须包含每个章节的完整正文内容
+4. 这条规则优先级高于"不要把超长文本塞给执行单元"——文档内容必须完整落地到文件
+
 ### 5. 结合校验继续推进
 只有当本轮任务明确承诺了文件产物时，才在流程结束后执行代码级最终文件存在性检查。
 如果最终文件检查明确指出缺失文件，优先按缺失文件结果继续分发，不要自己重新写成模糊任务。
@@ -202,7 +211,7 @@ class NativeFloodAgent:
 ## 调度原则
 1. 默认负责规划、分发、汇总；同时允许直接完成轻量无副作用任务
 2. 如果有相关 skill，先查 skill，再决定是否委派
-3. 对执行单元只传当前这一步的执行指令，不传用户原始长输入和多余会话背景
+3. 对执行单元只传当前这一步的执行指令，不传用户原始长输入和多余会话背景；但文档生成类任务必须先将完整内容写入中间文件再委派（见"4.5 文档生成的内容传递规则"）
 4. 严禁把超长 JSON 直接塞进任务描述
 5. 必须严格遵循 SKILL.md 及相关文档
 6. 不要过度解读任务，调度执行单元要谨慎！
@@ -217,7 +226,7 @@ class NativeFloodAgent:
 - 如果用户只要求文字结果，即使工具天然输出文件，也以文字汇总为主，文件仅作为可下载附件
 
 ## 输出规范
-- 最终输出不要包含完整路径
+- 最终输出路径使用相对路径即可
 - 最终输出不要包含会话环境内部信息
 - 标准 Markdown 格式输出
 """
@@ -257,6 +266,7 @@ class NativeFloodAgent:
 5. `write_text_file`
 6. `exec_python_file`
 7. `search_tool_error_memory`
+8. `web_search`（当需要从网络检索资料补充信息时使用）
 
 ## 可使用skills
 {skill_catalog}
@@ -303,6 +313,9 @@ class NativeFloodAgent:
         self._current_run_context: Optional[RunContext] = None
         self._orchestrator_extra_body: dict = {}
 
+        self._cached_experience_context: str = ""
+        self._cached_experience_version: int = -1
+
         self._init_tools()
         self._init_model_client()
         self._init_executors()
@@ -341,6 +354,8 @@ class NativeFloodAgent:
             create_scheduled_task, list_scheduled_tasks, cancel_scheduled_task,
             set_rag_config, set_memory_instance, reset_retry_guard,
         )
+        from tools.agent_tool import ToolRegistry as _GlobalToolRegistry
+        from memory.task_experience import get_task_experience_capture
         from agent.runtime.contracts.permissions import PermissionBehavior, PermissionRule, ToolPermissionPolicy
         from agent.runtime.services.permission_service import PermissionService, set_permission_service
         from agent.runtime.services.ask_service import get_ask_service, set_ask_service
@@ -351,17 +366,8 @@ class NativeFloodAgent:
 
         if self.memory is not None:
             set_memory_instance(self.memory)
-            if hasattr(self.memory, 'set_llm') and self.memory.llm is None:
-                try:
-                    self.memory.set_llm(self.llm_service.get_llm())
-                except Exception as e:
-                    logger.warning("NativeFloodAgent memory.set_llm() 失败: %s", e)
-            if hasattr(self.memory, 'load_chat_history'):
-                try:
-                    self.memory.load_chat_history()
-                    logger.info("NativeFloodAgent 对话历史已从磁盘加载")
-                except Exception as e:
-                    logger.warning("NativeFloodAgent load_chat_history() 失败: %s", e)
+            if self.memory._llm is None:
+                self.memory.set_llm(self.llm_service)
 
         set_rag_config(
             enabled=_settings.rag.enabled,
@@ -393,12 +399,19 @@ class NativeFloodAgent:
             search_memory, update_project_instructions,
             create_scheduled_task, list_scheduled_tasks, cancel_scheduled_task,
         ]
+        # 从全局 ToolRegistry 获取任务经验工具
+        for _tname in ("search_task_experience", "add_task_experience"):
+            _t = _GlobalToolRegistry.get(_tname)
+            if _t:
+                base_tools.append(_t)
         if self._enable_search:
             base_tools.append(web_search)
         execution_tools = [
             get_skill, run_script, exec_python_file, write_text_file,
             search_tool_error_memory, search_artifacts, read_artifact,
         ]
+        if self._enable_search:
+            execution_tools.append(web_search)
 
         self._skill_catalog = "\n".join(
             f"- {s.name}: {s.description}"
@@ -471,8 +484,7 @@ class NativeFloodAgent:
         if self.llm_service is not None:
             api_key = self.llm_service.api_key
             base_url = self.llm_service.base_url
-            llm = self.llm_service.get_llm()
-            model_name = getattr(llm, "model_name", None) or getattr(llm, "model", None) or self.llm_service.model_name
+            model_name = self.llm_service.model_name
             temperature = self.llm_service.temperature
             max_tokens = self.llm_service.max_tokens
             self._model_client = ModelClient(
@@ -718,7 +730,7 @@ class NativeFloodAgent:
 
         mentioned_files = set()
         for ext in sorted(self._ARTIFACT_EXTENSIONS, key=len, reverse=True):
-            pattern = re.compile(r'(?<![/\\])[\w\u4e00-\u9fff][\w\u4e00-\u9fff\-.]*' + re.escape(ext) + r'(?![\w\u4e00-\u9fff\-.])', re.IGNORECASE)
+            pattern = re.compile(r'(?<=[/\\])[\w\u4e00-\u9fff][\w\u4e00-\u9fff\-.]*' + re.escape(ext) + r'(?![\w\u4e00-\u9fff\-.])' + r'|(?<![/\w\u4e00-\u9fff\\-])[\w\u4e00-\u9fff][\w\u4e00-\u9fff\-.]*' + re.escape(ext) + r'(?![\w\u4e00-\u9fff\-.])', re.IGNORECASE)
             for match in pattern.findall(agent_result.final_output):
                 if len(match) < 5 or len(match) > 120:
                     continue
@@ -783,6 +795,28 @@ class NativeFloodAgent:
             tool_input=clean_input,
         ))
 
+    def _build_experience_context(self) -> str:
+        """注入经验摘要到上下文（渐进压缩，只给摘要而非全部叶子），带版本号缓存"""
+        if not settings.task_experience.enabled:
+            return ""
+        try:
+            from memory.task_experience import get_task_experience_store
+            store = get_task_experience_store()
+            if not store.has_experiences():
+                return ""
+            current_version = store.get_version()
+            if current_version == self._cached_experience_version and self._cached_experience_context:
+                return self._cached_experience_context
+            md = store.build_summary_context()
+            if not md:
+                return ""
+            self._cached_experience_context = f"[历史任务执行经验摘要]\n{md}\n\n需要查看具体经验详情时，请使用 browse_experience_tree 或 drill_down_experience 工具。"
+            self._cached_experience_version = current_version
+            return self._cached_experience_context
+        except Exception as e:
+            logger.warning("构建经验上下文失败: %s", e)
+            return ""
+
     def _get_output_dir(self) -> str:
         if self.session_id:
             data_dir = os.environ.get('DATA_DIR', os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..', 'data')))
@@ -831,6 +865,7 @@ class NativeFloodAgent:
 
             def _run_loop() -> None:
                 try:
+                    logger.info("[RUN_LOOP] === _run_loop started, session=%s ===", self.session_id)
                     output_dir = self._get_output_dir()
                     upload_dir = self._get_upload_dir()
                     self._set_session_context(self.session_id, output_dir)
@@ -876,6 +911,32 @@ class NativeFloodAgent:
                             self.memory.get_messages()
                         )
 
+                    # 注入对话历史到系统提示词（传入上下文信息用于压缩判断）
+                    if hasattr(self.memory, "get_chat_history_for_system_prompt"):
+                        # 估算当前上下文字符数：system_prompt + memory_messages
+                        context_chars = len(self._orchestrator_executor.system_prompt or "")
+                        for mm in memory_messages:
+                            context_chars += len(str(mm.get("content", "")))
+                        cw = settings.agent.context_window
+                        history_text = self.memory.get_chat_history_for_system_prompt(
+                            total_context_chars=context_chars,
+                            context_window=cw,
+                            event_bus=self._event_bus,
+                        )
+                        if history_text:
+                            memory_messages.append({
+                                "role": "system",
+                                "content": history_text,
+                            })
+
+                    # 注入相关任务经验到上下文
+                    experience_context = self._build_experience_context()
+                    if experience_context:
+                        memory_messages.append({
+                            "role": "system",
+                            "content": experience_context,
+                        })
+
                     agent_result = self._orchestrator_executor.run(
                         context=context,
                         user_text=user_input,
@@ -884,9 +945,12 @@ class NativeFloodAgent:
                         abort_check=abort_check,
                     )
 
-                    self._validate_artifacts(agent_result)
-
-                    result_holder["result"] = agent_result
+                    if agent_result.is_timeout:
+                        q.put({"type": "error", "content": agent_result.final_output})
+                        result_holder["result"] = None
+                    else:
+                        self._validate_artifacts(agent_result)
+                        result_holder["result"] = agent_result
 
                 except Exception as exc:
                     error_str = str(exc)
@@ -962,12 +1026,39 @@ class NativeFloodAgent:
                     self.memory.add_ai_message_with_trace(full_answer, full_reasoning, full_tool_calls)
                 elif hasattr(self.memory, "add_ai_message"):
                     self.memory.add_ai_message(full_answer)
-            if hasattr(self.memory, "save_conversation"):
-                self.memory.save_conversation(user_input, full_answer)
+                # 持久化对话历史
+                if hasattr(self.memory, "save_chat_history"):
+                    try:
+                        self.memory.save_chat_history()
+                    except Exception as e:
+                        logger.warning("保存对话历史失败: %s", e)
+
+            # 任务经验自动捕获（非阻塞，后台线程）
+            if settings.task_experience.enabled and settings.task_experience.auto_capture:
+                try:
+                    from memory.task_experience import get_task_experience_capture
+                    capture = get_task_experience_capture(self.llm_service)
+                    if capture:
+                        plan = self._last_loop_state.plan if self._last_loop_state else None
+                        tool_results_list = agent_result.tool_results if agent_result else []
+                        capture.on_task_complete(
+                            session_id=self.session_id,
+                            user_input=user_input,
+                            plan=plan,
+                            tool_results=tool_results_list,
+                            final_output=full_answer,
+                            execution_duration=time.time() - self._step_start_time if self._step_start_time else 0,
+                        )
+                except Exception as e:
+                    logger.warning("Task experience capture failed (non-critical): %s", e)
+
             if hasattr(self.memory, "set_status_callback"):
                 self.memory.set_status_callback(None)
 
-            logger.info("NativeFloodAgent 流式执行成功")
+            if agent_result and agent_result.is_timeout:
+                logger.warning("NativeFloodAgent 流式执行超时")
+            else:
+                logger.info("NativeFloodAgent 流式执行成功")
 
         except Exception as e:
             logger.error("NativeFloodAgent 流式执行失败: %s", e)

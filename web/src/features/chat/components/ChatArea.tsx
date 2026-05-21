@@ -1,7 +1,7 @@
 import { useEffect, useRef } from "react";
 import { ChatComposer } from "@/features/chat/components/ChatComposer";
 import { ChatMessage } from "@/features/chat/components/ChatMessage";
-import { WelcomePage } from "@/components/WelcomePage";
+import WelcomePage from "@/components/WelcomePage";
 import type { ChatMessage as ChatMessageModel, ModelOption, SessionConfig, ActionDetail, PendingPermissionAsk } from "@/types/app";
 
 interface ChatAreaProps {
@@ -55,35 +55,51 @@ export function ChatArea({
   }, [isStreaming]);
 
   return (
-    <div className="flex-1 flex flex-col h-full bg-background relative min-w-0">
+    <div className="flex-1 flex flex-col h-full relative min-w-0" style={{ background: 'hsl(var(--background))' }}>
       {messages.length === 0 ? (
-        <WelcomePage onQuickAction={(text) => { onInputChange(text); onSubmit(); }} />
+        <WelcomePage
+          value={inputValue}
+          disabled={isStreaming && !isPaused}
+          models={availableModels}
+          config={config}
+          onChange={onInputChange}
+          onSubmit={onSubmit}
+          onUpload={onUpload}
+          onConfigChange={onConfigChange}
+        />
       ) : (
-        <div ref={scrollContainerRef} className="flex-1 overflow-y-auto px-4 py-5 scroll-smooth relative">
-          <div className="absolute inset-0 hydro-grid-bg opacity-30 pointer-events-none" />
-          <div className="w-full max-w-[780px] mx-auto flex flex-col relative z-10">
-            {messages.map((message) => (
-              <ChatMessage key={message.id} message={message} onToggleThought={onToggleThought} onUpdateAction={onUpdateAction} />
-            ))}
+        <>
+          <div ref={scrollContainerRef} className="flex-1 overflow-y-auto px-6 py-6 scroll-smooth relative">
+            <div
+              className="absolute inset-0 pointer-events-none opacity-[0.03]"
+              style={{
+                backgroundImage: `linear-gradient(var(--ocean-400) 1px, transparent 1px), linear-gradient(90deg, var(--ocean-400) 1px, transparent 1px)`,
+                backgroundSize: '60px 60px',
+              }}
+            />
+            <div className="w-full max-w-[780px] mx-auto flex flex-col relative z-10 stagger-children">
+              {messages.map((message) => (
+                <ChatMessage key={message.id} message={message} onToggleThought={onToggleThought} onUpdateAction={onUpdateAction} />
+              ))}
+            </div>
+            <div ref={bottomRef} />
           </div>
-          <div ref={bottomRef} />
-        </div>
+          <ChatComposer
+            value={inputValue}
+            disabled={isStreaming && !isPaused}
+            isRunning={isStreaming}
+            models={availableModels}
+            config={config}
+            onChange={onInputChange}
+            onSubmit={onSubmit}
+            onPause={onPause}
+            onUpload={onUpload}
+            onConfigChange={onConfigChange}
+            pendingPermissionAsk={pendingPermissionAsk}
+            onRespondPermissionAsk={onRespondPermissionAsk}
+          />
+        </>
       )}
-
-      <ChatComposer
-        value={inputValue}
-        disabled={isStreaming && !isPaused}
-        isRunning={isStreaming}
-        models={availableModels}
-        config={config}
-        onChange={onInputChange}
-        onSubmit={onSubmit}
-        onPause={onPause}
-        onUpload={onUpload}
-        onConfigChange={onConfigChange}
-        pendingPermissionAsk={pendingPermissionAsk}
-        onRespondPermissionAsk={onRespondPermissionAsk}
-      />
     </div>
   );
 }

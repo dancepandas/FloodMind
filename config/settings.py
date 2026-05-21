@@ -9,6 +9,13 @@ import socket
 import ssl
 import logging
 
+# 自动加载 .env 文件，无需在每个入口点手动调用 load_dotenv()
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    pass
+
 _logger = logging.getLogger(__name__)
 
 if os.getenv("PYTHON_IPV6", "0") != "1":
@@ -97,14 +104,31 @@ class RAGConfig:
         self.small_doc_threshold = int(os.getenv("RAG_SMALL_DOC_THRESHOLD", "10000"))
 
 
+class TaskExperienceConfig:
+    """任务执行经验知识库配置"""
+
+    def __init__(self):
+        self.enabled = os.getenv("TASK_EXPERIENCE_ENABLED", "true").lower() == "true"
+        self.auto_capture = os.getenv("TASK_EXPERIENCE_AUTO_CAPTURE", "true").lower() == "true"
+        self.persist_dir = os.getenv("TASK_EXPERIENCE_PERSIST_DIR", "./data/task_experience")
+        self.top_k = int(os.getenv("TASK_EXPERIENCE_TOP_K", "5"))
+        self.min_tool_calls_for_capture = int(os.getenv("TASK_EXPERIENCE_MIN_TOOL_CALLS", "2"))
+        self.seal_threshold = int(os.getenv("TASK_EXPERIENCE_SEAL_THRESHOLD", "5"))
+        self.hotness_decay_days = int(os.getenv("TASK_EXPERIENCE_HOTNESS_DECAY_DAYS", "90"))
+        self.maintenance_interval_hours = int(os.getenv("TASK_EXPERIENCE_MAINTENANCE_INTERVAL_HOURS", "6"))
+        self.dedup_similarity_threshold = float(os.getenv("TASK_EXPERIENCE_DEDUP_THRESHOLD", "0.8"))
+        self.archive_after_days = int(os.getenv("TASK_EXPERIENCE_ARCHIVE_AFTER_DAYS", "90"))
+
+
 class Settings:
     """全局配置类"""
-    
+
     def __init__(self):
         self.api = APIConfig()
         self.qwen = QwenConfig()
         self.agent = AgentConfig()
         self.rag = RAGConfig()
+        self.task_experience = TaskExperienceConfig()
 
 
 settings = Settings()

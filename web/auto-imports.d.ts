@@ -8,6 +8,7 @@ export {}
 declare global {
   const Activity: typeof import('react').Activity
   const AlarmClock: typeof import('lucide-react').AlarmClock
+  const AlertTriangle: typeof import('lucide-react').AlertTriangle
   const ArrowLeft: typeof import('lucide-react').ArrowLeft
   const ArrowRight: typeof import('lucide-react').ArrowRight
   const Badge: typeof import('lucide-react').Badge
@@ -16,6 +17,7 @@ declare global {
   const Brain: typeof import('lucide-react').Brain
   const Calendar: typeof import('lucide-react').Calendar
   const CalendarClock: typeof import('lucide-react').CalendarClock
+  const Check: typeof import('lucide-react').Check
   const CheckCircle2: typeof import('lucide-react').CheckCircle2
   const CheckIcon: typeof import('lucide-react').CheckIcon
   const ChevronDown: typeof import('lucide-react').ChevronDown
@@ -25,6 +27,7 @@ declare global {
   const ChevronRightIcon: typeof import('lucide-react').ChevronRightIcon
   const ChevronUp: typeof import('lucide-react').ChevronUp
   const ChevronUpIcon: typeof import('lucide-react').ChevronUpIcon
+  const Circle: typeof import('lucide-react').Circle
   const CircleCheckIcon: typeof import('lucide-react').CircleCheckIcon
   const CircleIcon: typeof import('lucide-react').CircleIcon
   const Clock: typeof import('lucide-react').Clock
@@ -39,6 +42,7 @@ declare global {
   const FileSpreadsheet: typeof import('lucide-react').FileSpreadsheet
   const FileText: typeof import('lucide-react').FileText
   const FileType: typeof import('lucide-react').FileType
+  const Files: typeof import('lucide-react').Files
   const FolderOpen: typeof import('lucide-react').FolderOpen
   const Form: typeof import('lucide-react').Form
   const Fragment: typeof import('react').Fragment
@@ -49,6 +53,7 @@ declare global {
   const Icon: typeof import('lucide-react').Icon
   const InfoIcon: typeof import('lucide-react').InfoIcon
   const Layers: typeof import('lucide-react').Layers
+  const List: typeof import('lucide-react').List
   const ListTree: typeof import('lucide-react').ListTree
   const Loader2: typeof import('lucide-react').Loader2
   const Loader2Icon: typeof import('lucide-react').Loader2Icon
@@ -66,6 +71,7 @@ declare global {
   const Route: typeof import('lucide-react').Route
   const Search: typeof import('lucide-react').Search
   const SearchIcon: typeof import('lucide-react').SearchIcon
+  const Section: typeof import('lucide-react').Section
   const Send: typeof import('lucide-react').Send
   const Sheet: typeof import('lucide-react').Sheet
   const ShieldAlert: typeof import('lucide-react').ShieldAlert
@@ -80,6 +86,7 @@ declare global {
   const User: typeof import('lucide-react').User
   const Waves: typeof import('lucide-react').Waves
   const Wifi: typeof import('lucide-react').Wifi
+  const Workflow: typeof import('lucide-react').Workflow
   const Wrench: typeof import('lucide-react').Wrench
   const X: typeof import('lucide-react').X
   const XCircle: typeof import('lucide-react').XCircle

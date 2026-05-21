@@ -30,15 +30,25 @@ A .docx file is a ZIP archive containing XML files.
 | Create new document | Use `create_docx.py` - see Creating New Documents below |
 | Edit existing document | Unpack → edit XML → repack - see Editing Existing Documents below |
 
-## 当前项目中的首选做法，使用默认需求
-
-- 在本项目里，创建新的 Word 报告时，优先使用 `run_script(skill_name='docx', script_name='create_docx.py', ...)`
-- 在本项目里，创建新的 PDF 报告时，优先创建docx文档，再使用`run_script(skill_name='docx', script_name='convert_docx_to_pdf.py', ...)`进行转换
+### create_docx.py介绍
+- create_docx.py包含两个必填参数,
+```text
+必填参数`--content` 用于给出文档内容文件路径（.md 或 .json），脚本会读取该文件内容来生成Word文档
+例如：你已将报告内容写入了 report_content.md，那么参数填写就用`--content report_content.md`
+```
+```text
+必填参数`--output_path`用于指定输出文档名称（只需要填写file_name.docx)
+```
+```text
+必填参数`--output_path`用于指定输出文档名称（只需要填写file_name.docx)
+```
+- 使用create_docx.py时，创建新的 Word 报告时，优先使用 `run_script(skill_name='docx', script_name='create_docx.py', ...)`
+- 创建新的 PDF 报告时，先创建docx文档，再使用`run_script(skill_name='docx', script_name='convert_docx_to_pdf.py', ...)`进行转换
+- 使用create_docx.py时，如果报告中需要插入已生成图片，必须把图片路径写进 `--content`，不要只在正文里描述"图片已生成"
+- 使用create_docx.py时，推荐使用 Markdown 图片语法：`![](/absolute/path/to/image.png)`
+- 使用create_docx.py时，也支持将图片路径单独放在一行，例如：`/absolute/path/to/image.png`
+- 使用create_docx.py时，图片支持格式：`.png`、`.jpg`、`.jpeg`、`.bmp`、`.gif`
 - 不要临时改用其他未声明脚本或外部生成方案
-- 如果报告中需要插入已生成图片，必须把图片路径写进 `--content`，不要只在正文里描述"图片已生成"
-- 推荐使用 Markdown 图片语法：`![](/absolute/path/to/image.png)`
-- 也支持将图片路径单独放在一行，例如：`/absolute/path/to/image.png`
-- 支持格式：`.png`、`.jpg`、`.jpeg`、`.bmp`、`.gif`
 
 ### 文档样式规范
 
@@ -489,7 +499,7 @@ python create_docx.py --content "文档内容" --output_path "output.docx" [opti
 **参数：**
 | 参数 | 必填 | 默认值 | 说明 |
 |------|------|--------|------|
-| --content | ✅ | - | 文档内容（Markdown或JSON格式） |
+| --content | ✅ | - | 文档内容文件路径（.md 或 .json） |
 | --output_path | ✅ | - | 输出文件路径 |
 | --format | ❌ | auto | 内容格式：auto/markdown/json |
 
@@ -500,7 +510,7 @@ Markdown格式：
 run_script(
     skill_name='docx',
     script_name='create_docx.py',
-    args='["--content", "## 报告标题\n\n这是报告内容。\n\n| 列1 | 列2 |\n|------|------|\n| 数据1 | 数据2 |", "--output_path", "D:\\output\\report.docx"]'
+    args='["--content", "report_content.md", "--output_path", "report.docx"]'
 )
 ```
 
@@ -509,7 +519,7 @@ JSON格式：
 run_script(
     skill_name='docx',
     script_name='create_docx.py',
-    args='["--content", "{\"title\": \"报告\", \"sections\": [{\"type\": \"heading\", \"level\": 1, \"text\": \"标题\"}, {\"type\": \"paragraph\", \"text\": \"内容\"}]}", "--output_path", "D:\\output\\report.docx"]'
+    args='["--content", "report_data.json", "--output_path", "report.docx"]'
 )
 ```
 

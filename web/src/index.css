@@ -63,46 +63,48 @@
 
 :root {
   --fontSans: "Poppins-Regular_6", "Noto Sans SC", "Microsoft YaHei", system-ui, -apple-system, sans-serif;
-  --radius: 0.5rem;
-  --background: rgba(248, 250, 253, 1);
+  --radius: 0.625rem;
+
+  /* ═══ Ocean-Teal Palette ═══ */
+  --background: rgba(246, 249, 253, 1);
   --foreground: rgba(15, 23, 42, 1);
   --card: rgba(255, 255, 255, 1);
   --card-foreground: rgba(15, 23, 42, 1);
   --popover: rgba(255, 255, 255, 1);
   --popover-foreground: rgba(15, 23, 42, 1);
-  --primary: rgba(14, 165, 233, 1);
+  --primary: rgba(37, 99, 168, 1);
   --primary-foreground: rgba(255, 255, 255, 1);
   --secondary: rgba(237, 244, 250, 1);
   --secondary-foreground: rgba(15, 23, 42, 1);
   --muted: rgba(240, 246, 252, 1);
   --muted-foreground: rgba(100, 116, 139, 1);
-  --accent: rgba(224, 242, 254, 1);
-  --accent-foreground: rgba(14, 165, 233, 1);
+  --accent: rgba(245, 158, 11, 1);
+  --accent-foreground: rgba(15, 23, 42, 1);
   --destructive: rgba(200, 50, 35, 1);
   --destructive-foreground: rgba(255, 255, 255, 1);
   --border: rgba(203, 218, 234, 1);
   --input: rgba(224, 236, 248, 1);
-  --ring: rgba(14, 165, 233, 0.3);
-  --chart-1: rgba(14, 165, 233, 1);
-  --chart-2: rgba(20, 160, 130, 1);
-  --chart-3: rgba(210, 140, 30, 1);
+  --ring: rgba(37, 99, 168, 0.3);
+  --chart-1: rgba(37, 99, 168, 1);
+  --chart-2: rgba(16, 185, 129, 1);
+  --chart-3: rgba(245, 158, 11, 1);
   --chart-4: rgba(99, 160, 220, 1);
   --chart-5: rgba(160, 85, 140, 1);
-  --sidebar: rgba(243, 248, 253, 1);
+  --sidebar: rgba(240, 245, 250, 1);
   --sidebar-foreground: rgba(15, 23, 42, 1);
-  --sidebar-primary: rgba(14, 165, 233, 1);
+  --sidebar-primary: rgba(37, 99, 168, 1);
   --sidebar-primary-foreground: rgba(255, 255, 255, 1);
   --sidebar-accent: rgba(224, 242, 254, 1);
-  --sidebar-accent-foreground: rgba(14, 165, 233, 1);
+  --sidebar-accent-foreground: rgba(37, 99, 168, 1);
   --sidebar-border: rgba(203, 218, 234, 1);
-  --sidebar-ring: rgba(14, 165, 233, 0.3);
-  --warning: rgba(220, 140, 20, 1);
-  --panel: rgba(255, 255, 255, 0.65);
-  --grid-line: rgba(14, 165, 233, 0.04);
-  --river: rgba(14, 165, 233, 0.08);
+  --sidebar-ring: rgba(37, 99, 168, 0.3);
+  --warning: rgba(245, 158, 11, 1);
+  --panel: rgba(255, 255, 255, 0.72);
+  --grid-line: rgba(37, 99, 168, 0.04);
+  --river: rgba(37, 99, 168, 0.08);
   --shadow-spread: 0px;
   --shadow-blur: 32px;
-  --shadow-color: rgba(15, 23, 42, 0.05);
+  --shadow-color: rgba(15, 31, 56, 0.05);
   --shadow-x: 0px;
   --shadow-y: 12px;
 }
@@ -114,35 +116,36 @@
   --card-foreground: rgb(232, 240, 250);
   --popover: rgb(18, 24, 34);
   --popover-foreground: rgb(232, 240, 250);
-  --primary: rgb(56, 189, 248);
+  --primary: rgb(59, 130, 196);
   --primary-foreground: rgb(10, 14, 22);
   --secondary: rgb(28, 36, 50);
   --secondary-foreground: rgb(232, 240, 250);
   --muted: rgb(28, 36, 50);
   --muted-foreground: rgb(148, 163, 184);
-  --accent: rgb(20, 40, 65);
-  --accent-foreground: rgb(56, 189, 248);
+  --accent: rgb(245, 158, 11);
+  --accent-foreground: rgb(10, 14, 22);
   --destructive: rgb(240, 80, 80);
-  --border: rgba(56, 189, 248, 0.08);
-  --input: rgba(56, 189, 248, 0.1);
-  --ring: rgba(56, 189, 248, 0.4);
-  --chart-1: rgb(56, 189, 248);
-  --chart-2: rgb(0, 180, 130);
-  --chart-3: rgb(240, 160, 20);
+  --destructive-foreground: rgb(255, 255, 255);
+  --border: rgba(59, 130, 196, 0.08);
+  --input: rgba(59, 130, 196, 0.1);
+  --ring: rgba(59, 130, 196, 0.4);
+  --chart-1: rgb(59, 130, 196);
+  --chart-2: rgb(16, 185, 129);
+  --chart-3: rgb(245, 158, 11);
   --chart-4: rgb(160, 100, 240);
   --chart-5: rgb(240, 60, 90);
   --sidebar: rgb(14, 18, 28);
   --sidebar-foreground: rgb(232, 240, 250);
-  --sidebar-primary: rgb(56, 189, 248);
+  --sidebar-primary: rgb(59, 130, 196);
   --sidebar-primary-foreground: rgb(10, 14, 22);
   --sidebar-accent: rgb(22, 30, 46);
-  --sidebar-accent-foreground: rgb(56, 189, 248);
-  --sidebar-border: rgba(56, 189, 248, 0.06);
-  --sidebar-ring: rgba(56, 189, 248, 0.4);
-  --warning: rgb(230, 160, 40);
-  --panel: rgba(18, 24, 34, 0.7);
-  --grid-line: rgba(56, 189, 248, 0.04);
-  --river: rgba(56, 189, 248, 0.06);
+  --sidebar-accent-foreground: rgb(59, 130, 196);
+  --sidebar-border: rgba(59, 130, 196, 0.06);
+  --sidebar-ring: rgba(59, 130, 196, 0.4);
+  --warning: rgb(245, 158, 11);
+  --panel: rgba(18, 24, 34, 0.72);
+  --grid-line: rgba(59, 130, 196, 0.04);
+  --river: rgba(59, 130, 196, 0.06);
   --shadow-spread: 0px;
   --shadow-y: 1px;
   --shadow-blur: 4px;
@@ -164,6 +167,8 @@
     box-shadow: var(--shadow-x) var(--shadow-y) var(--shadow-blur) var(--shadow-spread) var(--shadow-color);
   }
 }
+
+/* ═══ Animations ═══ */
 
 @keyframes fade-in-up {
   from {
@@ -253,6 +258,8 @@
   animation: shimmer-line 2s ease-in-out infinite;
 }
 
+/* ═══ Background Patterns ═══ */
+
 .hydro-grid-bg {
   background-image:
     linear-gradient(var(--grid-line) 1px, transparent 1px),
@@ -263,6 +270,8 @@
 .hydro-radial-glow {
   background: radial-gradient(ellipse 60% 50% at 50% 0%, var(--river) 0%, transparent 70%);
 }
+
+/* ═══ Scrollbar ═══ */
 
 * {
   scrollbar-width: thin;
@@ -295,25 +304,130 @@
 }
 
 *:hover::-webkit-scrollbar-thumb {
-  background: rgba(0, 0, 0, 0.12);
+  background: rgba(37, 99, 168, 0.12);
 }
 
 *:hover::-webkit-scrollbar-thumb:hover {
-  background: rgba(0, 0, 0, 0.24);
+  background: rgba(37, 99, 168, 0.24);
 }
 
 .dark *:hover::-webkit-scrollbar-thumb {
-  background: rgba(255, 255, 255, 0.14);
+  background: rgba(59, 130, 196, 0.14);
 }
 
 .dark *:hover::-webkit-scrollbar-thumb:hover {
-  background: rgba(255, 255, 255, 0.28);
+  background: rgba(59, 130, 196, 0.28);
 }
 
 *:hover {
-  scrollbar-color: rgba(0, 0, 0, 0.12) transparent;
+  scrollbar-color: rgba(37, 99, 168, 0.12) transparent;
 }
 
 .dark *:hover {
-  scrollbar-color: rgba(255, 255, 255, 0.14) transparent;
+  scrollbar-color: rgba(59, 130, 196, 0.14) transparent;
+}
+
+/* ═══ Custom Design Tokens (CSS vars for inline styles) ═══ */
+
+:root {
+  --ocean-50: #e8f2fa;
+  --ocean-100: #c2dff2;
+  --ocean-200: #8fc4e8;
+  --ocean-300: #5ea3d8;
+  --ocean-400: #3b82c4;
+  --ocean-500: #2563a8;
+  --ocean-600: #1f4f8a;
+  --ocean-700: #1b3d6b;
+  --ocean-800: #152d4f;
+  --ocean-900: #0f1f38;
+
+  --teal-50: #ecfdf5;
+  --teal-100: #d1fae5;
+  --teal-200: #a7f3d0;
+  --teal-300: #6ee7b7;
+  --teal-400: #34d399;
+  --teal-500: #10b981;
+  --teal-600: #059669;
+  --teal-700: #047857;
+
+  --amber-50: #fffbeb;
+  --amber-100: #fef3c7;
+  --amber-200: #fde68a;
+  --amber-300: #fcd34d;
+  --amber-400: #fbbf24;
+  --amber-500: #f59e0b;
+  --amber-600: #d97706;
+  --amber-700: #b45309;
+  --amber-800: #92400e;
+
+  --slate-600: #475569;
+  --slate-700: #334155;
+
+  --sidebar-bg: #f0f5fa;
+  --sidebar-hover: rgba(37, 99, 168, 0.06);
+  --sidebar-active: rgba(37, 99, 168, 0.1);
+
+  --msg-user-bg: linear-gradient(135deg, #1f4f8a 0%, #2563a8 100%);
+  --msg-assistant-bg: #ffffff;
+  --msg-system-bg: #fef3c7;
+
+  --thought-bg: #f0f5fa;
+  --thought-border: #c2dff2;
+
+  --action-bg: #ecfdf5;
+  --action-border: #a7f3d0;
+
+  --glass-bg: rgba(255, 255, 255, 0.72);
+  --glass-border: rgba(255, 255, 255, 0.5);
+  --glass-shadow: 0 8px 32px rgba(15, 31, 56, 0.08);
+}
+
+.dark {
+  --ocean-50: #0f1f38;
+  --ocean-100: #152d4f;
+  --ocean-200: #1b3d6b;
+  --ocean-300: #1f4f8a;
+  --ocean-400: #2563a8;
+  --ocean-500: #3b82c4;
+  --ocean-600: #5ea3d8;
+  --ocean-700: #8fc4e8;
+
+  --teal-50: #042f2e;
+  --teal-100: #064e3b;
+  --teal-200: #047857;
+  --teal-300: #059669;
+  --teal-400: #10b981;
+  --teal-500: #34d399;
+  --teal-600: #6ee7b7;
+
+  --amber-50: #2a1f0a;
+  --amber-100: #422006;
+  --amber-200: #78350f;
+  --amber-300: #92400e;
+  --amber-400: #b45309;
+  --amber-500: #d97706;
+  --amber-600: #f59e0b;
+  --amber-700: #fbbf24;
+  --amber-800: #fcd34d;
+
+  --slate-600: #94a3b8;
+  --slate-700: #cbd5e1;
+
+  --sidebar-bg: #0c1a2e;
+  --sidebar-hover: rgba(59, 130, 196, 0.08);
+  --sidebar-active: rgba(59, 130, 196, 0.15);
+
+  --msg-user-bg: linear-gradient(135deg, #1b3d6b 0%, #1f4f8a 100%);
+  --msg-assistant-bg: #111d33;
+  --msg-system-bg: #2a1f0a;
+
+  --thought-bg: #0f1f38;
+  --thought-border: #1b3d6b;
+
+  --action-bg: #042f2e;
+  --action-border: #047857;
+
+  --glass-bg: rgba(15, 31, 56, 0.72);
+  --glass-border: rgba(255, 255, 255, 0.08);
+  --glass-shadow: 0 8px 32px rgba(0, 0, 0, 0.3);
 }

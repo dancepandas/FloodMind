@@ -75,6 +75,18 @@ export function applyStreamEvent(data: Record<string, any>, handlers: StreamHand
     return;
   }
 
+  if (data.type === "context_compress_start") {
+    log.info(`[context_compress_start]`);
+    updateAssistant((message) => appendThoughtBlock(message, data.content || "正在压缩历史对话...", false));
+    return;
+  }
+
+  if (data.type === "context_compress_done") {
+    log.info(`[context_compress_done] len=${(data.content || "").length}`);
+    updateAssistant((message) => appendActionBlock(message, "context_compress", "done", data.content || "", undefined, "context_compress"));
+    return;
+  }
+
   if (data.type === "thought_delta" || data.type === "reasoning") {
     log.debug(`[${eventType}] len=${(data.content || "").length}`);
     updateAssistant((message) => appendThoughtBlock(message, data.content || "", true));
@@ -121,10 +133,25 @@ export function applyStreamEvent(data: Record<string, any>, handlers: StreamHand
       const steps = [...(prev?.steps || [])];
       const idx = steps.findIndex((step) => step.key === stepKey);
       if (idx < 0) {
-        log.warn(`[${eventType}] unknown step_key="${stepKey}", ignoring`);
-        return prev || { title: "调度计划", steps: [] };
+        log.info(`[${eventType}] unknown step_key="${stepKey}", adding dynamically`);
+        steps.push({
+          key: stepKey,
+          label: data.title || stepKey,
+          title: data.title || "",
+          status: normalizedStatus,
+          detail: data.detail || "",
+          outcome: data.outcome || "",
+          expected_deliverables: [],
+          output_artifacts: [],
+        });
+      } else {
+        steps[idx] = {
+          ...steps[idx],
+          status: normalizedStatus,
+          ...(data.title ? { title: data.title, label: data.title } : {}),
+          ...(data.outcome ? { outcome: data.outcome } : {}),
+        };
       }
-      steps[idx] = { ...steps[idx], status: normalizedStatus };
       return { title: prev?.title || "调度计划", steps };
     });
     return;

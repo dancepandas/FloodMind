@@ -54,6 +54,10 @@ mpl.rcParams['font.family'] = 'sans-serif'
 mpl.rcParams['axes.unicode_minus'] = False
 ```
 
+## 会话文件存放位置
+- 用户上传文件存储在当前会话路径下 `uploads` 文件夹下
+- 生成的中间产物和结果产物文件存储在当前会话路径 `outputs` 文件夹下
+
 ## 常见陷阱
 - DashScope 的 reasoning_content 可能返回增量或累计文本，回调中需要兼容两种模式
 - Qwen 模型的 tool_call 参数有时会以 JSON 字符串形式传入，需要 `_parse_json_if_needed` 兼容

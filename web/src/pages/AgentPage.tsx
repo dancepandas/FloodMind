@@ -34,7 +34,7 @@ const AgentPage = () => {
   } = useAgentApp();
 
   return (
-    <div className="min-h-screen bg-background text-foreground font-sans">
+    <div className="min-h-screen" style={{ background: 'hsl(var(--background))', color: 'hsl(var(--foreground))' }}>
       <div className="w-full h-screen flex overflow-hidden relative">
         <Sidebar
           sessions={sessions}

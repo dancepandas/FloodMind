@@ -75,10 +75,23 @@ class NativeAgentExecutor:
                     final_answer = "任务已被用户中断。"
                 break
 
+            logger.info("[EXEC] === iteration %d === messages=%d, tool_results=%d", iteration, len(messages), len(all_tool_results))
+
             current_answer = ""
             tool_calls: List[ToolCall] = []
 
             tools_param = self._tools_schema if self._tools_schema else None
+
+            logger.info("[EXEC] calling LLM stream, iteration=%d, messages=%d, tools=%d", iteration, len(messages), len(tools_param) if tools_param else 0)
+
+            # 临时日志：记录完整prompt
+            logger.info("[PROMPT DEBUG] === 完整prompt (iteration=%d) ===", iteration)
+            logger.info("[PROMPT DEBUG] 消息数: %d, tools数: %d", len(messages), len(tools_param) if tools_param else 0)
+            for i, msg in enumerate(messages):
+                role = msg.get("role", "unknown")
+                content = str(msg.get("content", ""))
+                logger.info("[PROMPT DEBUG] msg[%d] role=%s, content_len=%d", i, role, len(content))
+                logger.info("[PROMPT DEBUG] msg[%d] content前500字: %s", i, content[:500])
 
             for event in self.model_client.stream_chat(
                 messages=messages,
@@ -102,8 +115,22 @@ class NativeAgentExecutor:
                         tool_results=all_tool_results,
                         artifacts=all_artifacts,
                     )
+                elif event.type == "timeout":
+                    self.event_bus.emit_error(event.content)
+                    return AgentResult(
+                        final_output=event.content,
+                        reasoning=reasoning,
+                        tool_results=all_tool_results,
+                        artifacts=all_artifacts,
+                        is_timeout=True,
+                    )
                 elif event.type == "done":
                     pass
+
+            logger.info("[EXEC] LLM stream done, iteration=%d, answer_len=%d, tool_calls=%d", iteration, len(current_answer), len(tool_calls))
+            if tool_calls:
+                for tc in tool_calls:
+                    logger.info("[EXEC] tool_call: name=%s, id=%s, args_len=%d", tc.name, tc.id, len(json.dumps(tc.arguments, ensure_ascii=False)) if tc.arguments else 0)
 
             if not tool_calls:
                 final_answer = current_answer
@@ -140,7 +167,9 @@ class NativeAgentExecutor:
 
                 tool_input_str = json.dumps(call.arguments, ensure_ascii=False) if call.arguments else ""
                 self.event_bus.emit_tool_status(call.name, "running", tool_input=tool_input_str, call_id=call.id)
+                logger.info("[EXEC] executing tool: name=%s, call_id=%s, input_len=%d", call.name, call.id, len(tool_input_str))
                 result = self.tool_executor.execute(call, context, registry=self._tool_registry)
+                logger.info("[EXEC] tool done: name=%s, status=%s, result_len=%d", call.name, result.status, len(result.content) if result.content else 0)
                 all_tool_results.append(result)
 
                 self.event_bus.emit_tool_result(

@@ -318,6 +318,7 @@ class SearchArtifactsInput(BaseModel):
     """搜索历史产物的输入参数"""
     query: str = Field(default="", description="搜索关键词，支持文件类型、任务类型、目标文件名等")
     scope: str = Field(default="current", description="搜索范围：current 或 reusable")
+    path_filter: str = Field(default="", description="路径过滤，仅返回路径包含该子串的产物（如会话ID、目录名）")
     limit: int = Field(default=10, description="返回结果上限，默认10")
 
 
@@ -362,7 +363,7 @@ class CancelScheduledTaskInput(BaseModel):
 _SKILL_REGISTRY: List[Any] = []
 _SESSION_ROOT = _PROJECT_ROOT / "data" / "sessions"
 _REUSABLE_SCRIPT_EXTENSIONS = {".py"}
-_READABLE_ARTIFACT_EXTENSIONS = {".py", ".md", ".txt", ".json"}
+_READABLE_ARTIFACT_EXTENSIONS = {".py", ".md", ".txt", ".json", ".csv"}
 _TOOL_ERROR_MEMORY_PATH = _PROJECT_ROOT / "data" / "tool_error_memory.md"
 _TOOL_ERROR_INDEX_PATH = _PROJECT_ROOT / "data" / ".tool_error_memory_index.json"
 _TOOL_ERROR_MEMORY_LOCK = threading.Lock()
@@ -417,12 +418,16 @@ def _iter_candidate_artifacts(scope: str) -> List[Path]:
         session_id = _get_active_session_id()
         if not session_id:
             return []
-        outputs_dir = _SESSION_ROOT / session_id / "outputs"
-        if outputs_dir.exists():
-            candidates.extend(sorted([p for p in outputs_dir.iterdir() if p.is_file()]))
+        session_dir = _SESSION_ROOT / session_id
+        # 搜索整个会话目录下的所有文件
+        for path in session_dir.rglob("*"):
+            if path.is_file():
+                candidates.append(path)
+        candidates.sort(key=lambda p: p.stat().st_mtime, reverse=True)
         return candidates
 
     if scope == "reusable":
+        # 跨会话搜索可复用脚本（outputs 目录下的 .py）
         for outputs_dir in _SESSION_ROOT.glob("session-*/outputs"):
             for path in outputs_dir.iterdir():
                 if path.is_file() and path.suffix.lower() in _REUSABLE_SCRIPT_EXTENSIONS:
@@ -466,17 +471,20 @@ def _build_artifact_record(path: Path) -> Dict[str, Any]:
 
 
 def _artifact_matches_query(record: Dict[str, Any], query: str) -> bool:
-    text = " ".join([
-        record.get("name", ""),
-        record.get("artifact_type", ""),
-        record.get("extension", ""),
-        record.get("session_id", ""),
-    ]).lower()
-    query = (query or "").strip().lower()
     if not query:
         return True
-    tokens = [token for token in query.split() if token]
-    return all(token in text for token in tokens)
+    searchable = " ".join([
+        str(record.get("name", "")).lower(),
+        str(record.get("path", "")).lower(),
+        str(record.get("artifact_type", "")).lower(),
+        str(record.get("extension", "")).lower(),
+        str(record.get("session_id", "")).lower(),
+    ])
+    # 支持逗号、空格分隔的多关键词，任一匹配即可
+    keywords = [w.strip().lower() for w in query.replace(",", " ").split() if len(w.strip()) > 1]
+    if not keywords:
+        return True
+    return any(kw in searchable for kw in keywords)
 
 
 def _resolve_artifact_candidates(artifact_path: str, scope: str = "current") -> List[Path]:
@@ -1252,14 +1260,16 @@ write_text_file = build_agent_tool(
 )
 
 
-def _impl_search_artifacts(query: str = "", scope: str = "current", limit: int = 10) -> str:
+def _impl_search_artifacts(query: str = "", scope: str = "current", path_filter: str = "", limit: int = 10) -> str:
     parsed = _parse_json_if_needed(query)
     if parsed and 'query' in parsed:
         query = parsed.get('query', query)
         scope = parsed.get('scope', scope)
+        path_filter = parsed.get('path_filter', path_filter)
         limit = parsed.get('limit', limit)
 
     scope = str(scope).strip().lower() or "current"
+    path_filter = str(path_filter).strip()
     try:
         limit = max(1, min(int(limit), 20))
     except Exception:
@@ -1271,10 +1281,15 @@ def _impl_search_artifacts(query: str = "", scope: str = "current", limit: int =
             "错误：scope 仅支持 `current` 或 `reusable`",
             query=query,
             scope=scope,
+            path_filter=path_filter,
             limit=limit,
         )
 
     candidates = _iter_candidate_artifacts(scope)
+    if path_filter:
+        pf_lower = path_filter.lower()
+        candidates = [p for p in candidates if pf_lower in str(p).lower()]
+
     records = [_build_artifact_record(path) for path in candidates]
     matched = [record for record in records if _artifact_matches_query(record, query)]
     matched = matched[:limit]
@@ -1282,9 +1297,10 @@ def _impl_search_artifacts(query: str = "", scope: str = "current", limit: int =
     if not matched:
         return _finalize_tool_output(
             "search_artifacts",
-            f"未找到匹配产物。scope={scope}, query={query!r}",
+            f"未找到匹配产物。scope={scope}, query={query!r}, path_filter={path_filter!r}",
             query=query,
             scope=scope,
+            path_filter=path_filter,
             limit=limit,
         )
 
@@ -1305,6 +1321,7 @@ def _impl_search_artifacts(query: str = "", scope: str = "current", limit: int =
         "\n".join(lines),
         query=query,
         scope=scope,
+        path_filter=path_filter,
         limit=limit,
     )
 
@@ -1313,8 +1330,10 @@ search_artifacts = build_agent_tool(
     name="search_artifacts",
     description=(
         "搜索当前会话或历史可复用产物。"
-        "默认优先搜索当前活跃会话的 outputs；如需跨会话复用脚本，使用 scope=`reusable`。"
-        "当前仅开放 `.py` 脚本的元信息检索，不直接返回文件内容。"
+        "scope=current 搜索当前会话所有文件（包括 outputs 和 uploads 目录下的脚本、数据文件、图片等）。"
+        "scope=reusable 跨会话搜索可复用脚本。"
+        "path_filter 可按路径子串过滤（如会话ID、目录名）。"
+        "query 支持按文件名、路径、类型关键词搜索。"
     ),
     args_schema=SearchArtifactsInput,
     func=_impl_search_artifacts,
@@ -1422,7 +1441,7 @@ def _impl_read_artifact(artifact_path: str = "", max_chars: int = 12000) -> str:
     if ext not in _READABLE_ARTIFACT_EXTENSIONS:
         return _finalize_tool_output(
             "read_artifact",
-            f"错误：当前仅支持读取 .py、.md、.txt、.json 文件，文件类型 {ext} 不支持直接读取",
+            f"错误：当前仅支持读取 .py、.md、.txt、.json、.csv 文件，文件类型 {ext} 不支持直接读取",
             artifact_path=str(path),
             max_chars=max_chars,
         )
@@ -1457,8 +1476,8 @@ read_artifact = build_agent_tool(
     name="read_artifact",
     description=(
         "读取文本类产物内容。"
-        "仅支持读取 `.py`、`.md`、`.txt`、`.json` 四类文本文件。"
-        "这是硬编码限制，用于避免误读超大 `.csv`、Excel、`.docx` 等文件，导致内存占用过大或上下文超限。"
+        "支持读取 `.py`、`.md`、`.txt`、`.json`、`.csv` 文本文件。"
+        "不支持 Excel、`.docx` 等二进制文件，避免内存占用过大或上下文超限。"
     ),
     args_schema=ReadArtifactInput,
     func=_impl_read_artifact,
@@ -2553,6 +2572,125 @@ def _register_all_tools():
     ToolRegistry.register(create_scheduled_task)
     ToolRegistry.register(list_scheduled_tasks)
     ToolRegistry.register(cancel_scheduled_task)
+
+    # ── 任务经验工具 ──────────────────────────────────────────
+    from config.settings import settings as _settings
+    if _settings.task_experience.enabled:
+        from memory.task_experience import get_task_experience_store
+        from memory.experience_tree import ExperienceLeaf
+
+        class _SearchTaskExperienceInput(BaseModel):
+            query: str = Field(default="", description="搜索查询，描述要查找的任务经验")
+            path: str = Field(default="", description="可选树路径过滤，如 '水文预报/敖江流域'")
+            top_k: int = Field(default=5, description="返回结果数量")
+
+        def _search_task_experience(query: str = "", path: str = "", top_k: int = 5) -> str:
+            try:
+                store = get_task_experience_store()
+                if not store.has_experiences():
+                    return "当前没有积累的任务执行经验。随着任务执行，经验会自动积累。"
+                leaves = store.search_keywords(query, path_filter=path, top_k=top_k)
+                store.bump_hotness(query, leaves)
+                return store.render_experience_markdown(leaves)
+            except Exception as e:
+                return f"检索任务经验时出错: {e}"
+
+        ToolRegistry.register(build_agent_tool(
+            name="search_task_experience",
+            description="检索历史任务执行经验，避免重复踩坑。可指定树路径缩小检索范围。搜索命中会自动提升经验热度。",
+            args_schema=_SearchTaskExperienceInput,
+            func=_search_task_experience,
+            is_readonly=True, is_destructive=False, is_concurrency_safe=True,
+            check_permissions_fn=make_readonly_permission_fn(),
+            permission_policy=ToolPermissionPolicy(policy_type="readonly"),
+        ))
+
+        class _BrowseExperienceTreeInput(BaseModel):
+            path: str = Field(default="", description="可选路径过滤，如 '水文预报'，留空浏览整棵树")
+
+        def _browse_experience_tree(path: str = "") -> str:
+            try:
+                store = get_task_experience_store()
+                return store.browse_tree(path)
+            except Exception as e:
+                return f"浏览经验树时出错: {e}"
+
+        ToolRegistry.register(build_agent_tool(
+            name="browse_experience_tree",
+            description="按路径浏览经验树结构，查看摘要概览。不返回叶子详情，需要详情时使用 drill_down_experience。",
+            args_schema=_BrowseExperienceTreeInput,
+            func=_browse_experience_tree,
+            is_readonly=True, is_destructive=False, is_concurrency_safe=True,
+            check_permissions_fn=make_readonly_permission_fn(),
+            permission_policy=ToolPermissionPolicy(policy_type="readonly"),
+        ))
+
+        class _DrillDownExperienceInput(BaseModel):
+            summary_node_id: str = Field(default="", description="摘要节点 ID 或路径 key（如 '水文预报/敖江流域预报'）")
+
+        def _drill_down_experience(summary_node_id: str = "") -> str:
+            try:
+                store = get_task_experience_store()
+                return store.drill_down(summary_node_id)
+            except Exception as e:
+                return f"下钻经验详情时出错: {e}"
+
+        ToolRegistry.register(build_agent_tool(
+            name="drill_down_experience",
+            description="从摘要节点展开到叶子详情，查看具体的坑点、解决方案和步骤。",
+            args_schema=_DrillDownExperienceInput,
+            func=_drill_down_experience,
+            is_readonly=True, is_destructive=False, is_concurrency_safe=True,
+            check_permissions_fn=make_readonly_permission_fn(),
+            permission_policy=ToolPermissionPolicy(policy_type="readonly"),
+        ))
+
+        class _AddTaskExperienceInput(BaseModel):
+            path: str = Field(default="", description="经验树路径，如 '水文预报/敖江流域预报/霍口水库预报'")
+            description: str = Field(default="", description="任务描述")
+            pitfalls: str = Field(default="", description="遇到的坑点，分号分隔")
+            solutions: str = Field(default="", description="解决方案，分号分隔")
+            steps_summary: str = Field(default="", description="关键步骤摘要")
+            code_snippets: str = Field(default="", description="可复用的代码片段，分号分隔")
+            outcome: str = Field(default="success", description="最终结果: success/partial/failed")
+
+        def _add_task_experience(
+            path: str = "", description: str = "", pitfalls: str = "",
+            solutions: str = "", steps_summary: str = "",
+            code_snippets: str = "", outcome: str = "success",
+        ) -> str:
+            try:
+                path_parts = [p.strip() for p in path.split("/") if p.strip()]
+                if not path_parts:
+                    return "路径不能为空"
+                pitfalls_list = [p.strip() for p in pitfalls.split(";") if p.strip()] if pitfalls else []
+                solutions_list = [s.strip() for s in solutions.split(";") if s.strip()] if solutions else []
+                code_list = [c.strip() for c in code_snippets.split(";") if c.strip()] if code_snippets else []
+                leaf = ExperienceLeaf(
+                    node_id="", experience_id="",
+                    path=path_parts + [description[:30]], label=description[:30],
+                    node_type="case", task_description=description,
+                    domain_keywords=[], skill_used="", steps_summary=steps_summary,
+                    pitfalls=pitfalls_list, solutions=solutions_list,
+                    code_snippets=code_list, final_outcome=outcome,
+                    session_id="manual", created_at=datetime.now().isoformat(),
+                    importance=0.7 if pitfalls_list else 0.4,
+                )
+                store = get_task_experience_store()
+                store.record_experience(leaf, path_parts)
+                return f"经验已添加到: {'/'.join(path_parts)}\n描述: {description}\n坑点: {len(pitfalls_list)}个\n解决方案: {len(solutions_list)}个\n代码片段: {len(code_list)}个"
+            except Exception as e:
+                return f"添加任务经验时出错: {e}"
+
+        ToolRegistry.register(build_agent_tool(
+            name="add_task_experience",
+            description="手动添加任务执行经验到经验树，供未来类似任务参考。包括坑点、解决方案、步骤摘要和可复用代码片段。",
+            args_schema=_AddTaskExperienceInput,
+            func=_add_task_experience,
+            is_readonly=False, is_destructive=False, is_concurrency_safe=False,
+            check_permissions_fn=make_write_permission_fn(),
+            permission_policy=ToolPermissionPolicy(policy_type="state_write"),
+        ))
 
 
 _register_all_tools()

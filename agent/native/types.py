@@ -47,6 +47,7 @@ class ModelEvent:
         "done",
         "usage",
         "error",
+        "timeout",
     ]
     content: str = ""
     tool_call: Optional[ToolCall] = None
@@ -59,6 +60,7 @@ class AgentResult:
     reasoning: str
     tool_results: List[ToolResult] = field(default_factory=list)
     artifacts: List[str] = field(default_factory=list)
+    is_timeout: bool = False
 
 
 @dataclass
