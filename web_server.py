@@ -798,6 +798,12 @@ def create_agent_for_session(session_id: str, enable_search: bool = False, enabl
         session_id=session_id,
         enable_search=enable_search,
     )
+
+    # 记录创建该 agent 时绑定的会话配置，供后续复用前比对。
+    agent._session_model_key = model_key or get_default_model_key()
+    agent._session_enable_search = enable_search
+    agent._session_enable_rag = enable_rag
+    agent._session_enable_reasoning = enable_reasoning
     
     logger.info(f"RAG 配置: enabled={enable_rag}, persist_dir={settings.rag.persist_dir}")
     
@@ -827,16 +833,42 @@ def get_or_create_agent(session_id: str):
         output_dir=str(session_manager.get_output_dir(session_id)),
     )
     
-    agent = session_manager.get_agent(session_id)
-    if agent:
-        return agent
-    
     with session_states_lock:
         state = dict(session_states.get(session_id, {}))
     enable_search = state.get('enable_search', False)
     enable_rag = state.get('enable_rag', settings.rag.enabled)
     enable_reasoning = state.get('enable_reasoning', True)
     model_key = state.get('model_key') or get_default_model_key()
+
+    agent = session_manager.get_agent(session_id)
+    if agent:
+        current_model_key = getattr(agent, '_session_model_key', get_default_model_key())
+        current_enable_search = getattr(agent, '_session_enable_search', False)
+        current_enable_rag = getattr(agent, '_session_enable_rag', settings.rag.enabled)
+        current_enable_reasoning = getattr(agent, '_session_enable_reasoning', True)
+
+        if (
+            current_model_key == model_key
+            and current_enable_search == enable_search
+            and current_enable_rag == enable_rag
+            and current_enable_reasoning == enable_reasoning
+        ):
+            return agent
+
+        logger.info(
+            "会话 %s 配置已变更，重建 Agent: model %s -> %s, search %s -> %s, rag %s -> %s, reasoning %s -> %s",
+            session_id,
+            current_model_key,
+            model_key,
+            current_enable_search,
+            enable_search,
+            current_enable_rag,
+            enable_rag,
+            current_enable_reasoning,
+            enable_reasoning,
+        )
+        if hasattr(session_manager, '_agents') and session_id in session_manager._agents:
+            del session_manager._agents[session_id]
 
     _, agent = session_manager.get_or_create_session(
         session_id,
@@ -1336,6 +1368,10 @@ def init_agent():
         state['enable_reasoning'] = enable_reasoning
         if model_key and get_preset(model_key):
             state['model_key'] = model_key
+
+        # init_agent 也可能在已有会话上被重复调用，先清理旧实例，确保使用最新配置重建。
+        if hasattr(session_manager, '_agents') and session_id in session_manager._agents:
+            del session_manager._agents[session_id]
         
         agent = get_or_create_agent(session_id)
 
