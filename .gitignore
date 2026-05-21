@@ -17,6 +17,7 @@
 /fig/
 /model_cache/
 /.idea/
+/.claude/
 __pycache__/
 /.opencode/
 /models/阿里云文档/
