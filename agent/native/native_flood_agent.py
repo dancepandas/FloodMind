@@ -114,6 +114,7 @@ class NativeFloodAgent:
 - `search_artifacts`：搜索当前会话或历史可复用产物
 - `read_artifact`：读取文本类产物
 - `knowledge_search`：检索知识库（知识查询时，优先使用）
+- `add_knowledge`：将用户提供的专业知识、整理后的文本内容或指定文件写入知识库，供后续通过 `knowledge_search` 检索
 - `web_search`：检索网络资料（knowledge_search搜索结果不够支撑回答时，搜索网络资料补充）
 - `fetch_webpage`：进入指定网址读取网页正文，当搜索摘要不够详细时使用
 - `search_memory`：检索历史对话和技能文档
@@ -131,6 +132,12 @@ class NativeFloodAgent:
 3. 每日重复任务使用 `repeat="daily"` 和 `run_time="HH:MM"`；一次性任务使用 `repeat="none"` 和 `scheduled_at`。
 4. 任务默认绑定当前会话，用户后续可从前端查看该任务生成的新增文件。
 5. 用户询问已有定时任务时调用 `list_scheduled_tasks`；用户取消定时任务时调用 `cancel_scheduled_task`。
+
+## 知识入库处理
+当用户提供了具体的业务文档或用户询问了许多专业知识并对你的回答没有异议时，你可以使用add_knowledge工具将业务文档的知识或者历史对话中的相关知识整理入库：
+1. 如果用户提供了文件路径或上传文件，调用 `add_knowledge(file_path=...)`
+2. 如果知识是本轮对话中整理出的文本内容，调用 `add_knowledge(content=..., doc_name=...)`
+3. 入库成功后，明确告知用户后续可通过 `knowledge_search` 检索
 
 ## 用户偏好处理
 当用户表达长期偏好、规则或习惯时（如"以后都用PNG格式"、"不要生成PDF"）：
@@ -366,7 +373,7 @@ class NativeFloodAgent:
         from tools import (
             get_skill, run_script, exec_bash, exec_python_file, write_text_file,
             search_tool_error_memory, search_artifacts, check_artifact_exists, read_artifact, knowledge_search,
-            web_search, fetch_webpage, add_memory, search_memory, update_project_instructions,
+            add_knowledge, web_search, fetch_webpage, add_memory, search_memory, update_project_instructions,
             create_scheduled_task, list_scheduled_tasks, cancel_scheduled_task,
             set_rag_config, set_memory_instance, reset_retry_guard,
         )
@@ -411,7 +418,7 @@ class NativeFloodAgent:
         set_permission_manager(perm_svc)
 
         base_tools = [
-            get_skill, search_artifacts, read_artifact, knowledge_search,
+            get_skill, search_artifacts, read_artifact, knowledge_search, add_knowledge,
             search_memory, update_project_instructions,
             create_scheduled_task, list_scheduled_tasks, cancel_scheduled_task,
         ]
