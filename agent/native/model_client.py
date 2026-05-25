@@ -145,19 +145,29 @@ class ModelClient:
                     for idx, acc in sorted(tool_call_accumulators.items()):
                         arguments_str = acc["arguments"]
                         parsed_args: dict = {}
+                        json_ok = False
                         if arguments_str:
                             try:
                                 parsed_args = json.loads(arguments_str)
+                                json_ok = True
                             except json.JSONDecodeError:
                                 try:
                                     repaired = arguments_str + "}"
                                     parsed_args = json.loads(repaired)
+                                    json_ok = True
+                                    logger.info(
+                                        "tool_call arguments JSON repaired for %s with +'}' (length=%d)",
+                                        acc["name"], len(arguments_str),
+                                    )
                                 except json.JSONDecodeError:
                                     parsed_args = {}
                                     logger.warning(
-                                        "tool_call arguments JSON parse failed for %s, raw: %s. Passing empty args.",
+                                        "tool_call arguments JSON parse failed for %s. "
+                                        "length=%d, ends_with_}=%s, preview=%s",
                                         acc["name"],
-                                        arguments_str[:200],
+                                        len(arguments_str),
+                                        arguments_str.endswith("}"),
+                                        arguments_str[:300],
                                     )
 
                         tool_call = ToolCall(
@@ -165,6 +175,8 @@ class ModelClient:
                             name=acc["name"],
                             arguments=parsed_args,
                         )
+                        if not json_ok and arguments_str:
+                            tool_call._raw_arguments = arguments_str
                         yield ModelEvent(type="tool_call_done", content="", tool_call=tool_call)
                     tool_call_accumulators.clear()
 
@@ -175,21 +187,28 @@ class ModelClient:
                 for idx, acc in tool_call_accumulators.items():
                     arguments_str = acc["arguments"]
                     parsed_args: dict = {}
+                    json_ok = False
                     if arguments_str:
                         try:
                             parsed_args = json.loads(arguments_str)
+                            json_ok = True
                         except json.JSONDecodeError:
                             parsed_args = {}
                             logger.warning(
-                                "tool_call arguments JSON parse failed for %s (stream end), raw: %s",
+                                "tool_call arguments JSON parse failed for %s (stream end). "
+                                "length=%d, ends_with_}=%s, preview=%s",
                                 acc["name"],
-                                arguments_str[:200],
+                                len(arguments_str),
+                                arguments_str.endswith("}"),
+                                arguments_str[:300],
                             )
                     tool_call = ToolCall(
                         id=acc["id"] or f"call_{idx}_{time.time_ns()}",
                         name=acc["name"],
                         arguments=parsed_args,
                     )
+                    if not json_ok and arguments_str:
+                        tool_call._raw_arguments = arguments_str
                     yield ModelEvent(type="tool_call_done", content="", tool_call=tool_call)
 
             yield ModelEvent(type="done", content="")

@@ -2,7 +2,7 @@ import { useRef, useState, useEffect } from "react";
 import { Send, Pause, Paperclip, ChevronDown, ShieldAlert, Brain, Globe, Database } from "lucide-react";
 import type { ModelOption, SessionConfig, PendingPermissionAsk } from "@/types/app";
 
-const PINNED_MODELS = ["glm_51", "qwen_36_plus", "deepseek_v4_flash", "minimax_m25"];
+const PINNED_MODELS = ["deepseek_v4_flash", "glm_51", "qwen_36_plus", "minimax_m25"];
 
 function sortModels(models: ModelOption[]): ModelOption[] {
   const pinned: ModelOption[] = [];
@@ -23,12 +23,10 @@ const MODEL_ICON_MAP: Record<string, string> = {
   qwen_36_plus: "qwen",
   glm_51: "zhipu",
   glm_5: "zhipu",
-  glm_47: "zhipu",
-  glm_46: "zhipu",
-  glm_45: "zhipu",
   deepseek_v4_pro: "deepseek",
   deepseek_v4_flash: "deepseek",
-  kimi_k2_thinking: "kimi",
+  kimi_k2_5: "kimi",
+  kimi_k2_6: "kimi",
   minimax_m25: "minimax",
   minimax_m21: "minimax",
 };

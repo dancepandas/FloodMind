@@ -1,19 +1,11 @@
 import { useState } from "react";
-import { ChevronDown, ChevronRight, User, FileText, AlertTriangle, Eye, Download, ZoomIn, ExternalLink, Layers, X, AlertCircle } from "lucide-react";
+import { ChevronDown, ChevronRight, User, FileText, AlertTriangle, Eye, Download, ZoomIn, ExternalLink, Layers, X, AlertCircle, Terminal, Brain, MessageSquare } from "lucide-react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import type { ChatMessage as ChatMessageModel, GeneratedArtifact, ReferenceLink, ActionDetail, MessageBlock } from "@/types/app";
 import { Dialog, DialogContent, DialogTitle, DialogDescription } from "@/components/ui/dialog";
 import { DocumentPreviewDialog, isPreviewable, getFileExt, getFileIcon } from "./DocumentPreviewDialog";
 import { getToolDisplayName } from "@/features/chat/lib/message-blocks";
-
-function SparkleIcon({ size = 12, className = "", style }: { size?: number; className?: string; style?: React.CSSProperties }) {
-  return (
-    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" className={className} style={style}>
-      <path d="M12 0L13.5 8.5L22 6L15 12L22 18L13.5 15.5L12 24L10.5 15.5L2 18L9 12L2 6L10.5 8.5L12 0Z" fill="currentColor" />
-    </svg>
-  );
-}
 
 interface ChatMessageProps {
   message: ChatMessageModel;
@@ -23,151 +15,367 @@ interface ChatMessageProps {
 
 const MAX_ARCHIVED_BLOCKS = 4;
 
-function ThoughtBlock({ message, block, onToggleThought }: { message: ChatMessageModel; block: ChatMessageModel["blocks"][number]; onToggleThought: (messageId: string, blockId: string) => void }) {
+/* ─── Codex-style Step Badge with tooltip ─── */
+function StepBadge({ index, type, label }: { index: number; type: "thought" | "action" | "answer"; label?: string }) {
+  const palette = {
+    thought: { bg: 'var(--ocean-500)', ring: 'var(--ocean-200)' },
+    action: { bg: 'var(--teal-500)', ring: 'var(--teal-200)' },
+    answer: { bg: 'var(--ocean-400)', ring: 'var(--ocean-100)' },
+  }[type];
+  const tooltipText = label || { thought: '思考推理', action: '工具调用', answer: '应答' }[type];
   return (
-    <div className={`w-full max-w-full transition-all duration-300 ${block.isArchived ? "opacity-50" : "opacity-100"}`}>
+    <span className="codex-step-tooltip">
+      <span
+        className="inline-flex items-center justify-center w-[18px] h-[18px] rounded-md text-[9px] font-bold flex-shrink-0"
+        style={{ background: palette.bg, color: '#fff', boxShadow: `0 0 0 2px ${palette.ring}` }}
+      >
+        {index}
+      </span>
+      <span className="tooltip-content">{tooltipText}</span>
+    </span>
+  );
+}
+
+/* ─── Step Complete Checkbox ─── */
+function StepComplete({ type }: { type: "thought" | "action" | "answer" }) {
+  const borderColor = { thought: 'var(--ocean-300)', action: 'var(--teal-300)', answer: 'var(--ocean-200)' }[type];
+  return (
+    <span className={`codex-step-check completed`} style={{ borderColor }}>
+      <span className="checkmark" />
+    </span>
+  );
+}
+
+/* ─── Streaming: Pulse Dots Loader ─── */
+function StreamingIndicator({ variant = "ocean" }: { variant?: "ocean" | "teal" }) {
+  return (
+    <span className={`codex-pulse-dots ${variant === "teal" ? "teal" : ""}`}>
+      <span className="dot" />
+      <span className="dot" />
+      <span className="dot" />
+    </span>
+  );
+}
+
+/* ─── Status Icon ─── */
+function StatusIcon({ status, size = 12 }: { status: ActionDetail["status"]; size?: number }) {
+  if (status === "running" || status === "pending_confirmation") {
+    return <StreamingIndicator variant="teal" />;
+  }
+  if (status === "done") {
+    return (
+      <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="var(--teal-500)" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+        <polyline points="20 6 9 17 4 12" />
+      </svg>
+    );
+  }
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="hsl(var(--destructive))" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+      <line x1="18" y1="6" x2="6" y2="18" /><line x1="6" y1="6" x2="18" y2="18" />
+    </svg>
+  );
+}
+
+/* ═══════════════════════════════════════
+   ThoughtBlock — Codex-style collapsible
+   ═══════════════════════════════════════ */
+function ThoughtBlock({ message, block, onToggleThought, stepIndex }: {
+  message: ChatMessageModel; block: ChatMessageModel["blocks"][number];
+  onToggleThought: (messageId: string, blockId: string) => void; stepIndex: number;
+}) {
+  const isCollapsed = block.isCollapsed;
+  const isStreaming = block.isStreaming;
+  const isArchived = block.isArchived;
+
+  return (
+    <div className={`w-full transition-all duration-300 ${isArchived ? "opacity-40" : "opacity-100"}`}>
+      {/* Header bar */}
       <button
         type="button"
         onClick={() => onToggleThought(message.id, block.id)}
-        className="flex items-center gap-2 text-[10px] font-semibold tracking-wider transition-all duration-200 px-1.5 py-1 rounded-lg"
-        style={{ color: 'var(--ocean-400)' }}
-        onMouseEnter={(e) => { e.currentTarget.style.background = 'var(--ocean-50)'; }}
-        onMouseLeave={(e) => { e.currentTarget.style.background = 'transparent'; }}
-      >
-        {block.isCollapsed ? <ChevronRight size={11} strokeWidth={2} /> : <ChevronDown size={11} strokeWidth={2} />}
-        {block.isStreaming ? (
-          <span className="relative flex items-center justify-center w-3.5 h-3.5">
-            <SparkleIcon size={14} className="animate-star-spin-breathe" style={{ color: 'var(--ocean-500)' }} />
-            <span className="absolute inset-0 rounded-full animate-ping" style={{ background: 'var(--ocean-400)', opacity: 0.12 }} />
-          </span>
-        ) : (
-          <SparkleIcon size={11} style={{ color: 'var(--ocean-400)', opacity: 0.35 }} />
-        )}
-        <span className="uppercase">{block.isStreaming ? "Thinking" : "Thought"}</span>
-      </button>
-      <div
-        className={`mt-1.5 ml-3 pl-4 pr-3 py-2.5 rounded-xl text-[11px] leading-relaxed transition-all duration-400 overflow-x-hidden overflow-y-auto ${block.isCollapsed ? "max-h-0 opacity-0 py-0 mt-0" : "max-h-36 opacity-100"}`}
+        className="w-full flex items-center gap-2 px-2.5 py-[7px] rounded-lg text-left transition-all duration-200 group"
         style={{
-          background: 'var(--thought-bg)',
-          border: '1px solid var(--thought-border)',
-          color: 'hsl(var(--muted-foreground))',
-          opacity: block.isCollapsed ? 0 : 0.75,
-          backdropFilter: 'blur(4px)',
+          background: isCollapsed ? 'transparent' : 'var(--thought-bg)',
+          border: `1px solid ${isCollapsed ? 'transparent' : 'var(--thought-border)'}`,
         }}
+        onMouseEnter={(e) => { if (isCollapsed) e.currentTarget.style.background = 'var(--thought-bg)'; }}
+        onMouseLeave={(e) => { if (isCollapsed) e.currentTarget.style.background = 'transparent'; }}
       >
-        <div className="whitespace-pre-wrap break-words max-w-[65ch]">{block.content}</div>
-        {block.isStreaming && (
-          <div className="mt-1.5 h-[2px] w-16 rounded-full overflow-hidden" style={{ background: 'var(--ocean-100)' }}>
-            <div className="h-full w-1/2 animate-shimmer-line" style={{ background: 'linear-gradient(to right, transparent, var(--ocean-400), transparent)' }} />
-          </div>
-        )}
+        {isStreaming ? <StepBadge index={stepIndex} type="thought" /> : <StepComplete type="thought" />}
+        <Brain size={12} style={{ color: 'var(--ocean-400)', opacity: isStreaming ? 1 : 0.5 }} className={isStreaming ? 'animate-pulse-subtle' : ''} />
+        <span className="text-[11px] font-semibold" style={{ color: 'var(--ocean-500)' }}>
+          {isStreaming ? "Thinking" : "Thought"}
+        </span>
+        {isStreaming && <StreamingIndicator />}
+        <span className="ml-auto flex-shrink-0 transition-transform duration-200" style={{ transform: isCollapsed ? 'rotate(0deg)' : 'rotate(0deg)' }}>
+          <ChevronRight size={12} style={{ color: 'hsl(var(--muted-foreground))', opacity: 0.35, transform: isCollapsed ? 'rotate(0deg)' : 'rotate(90deg)', transition: 'transform 0.2s' }} />
+        </span>
+      </button>
+
+      {/* Collapsible content */}
+      <div
+        className={`overflow-hidden transition-all duration-300 ${isCollapsed ? "max-h-0 opacity-0" : "max-h-80 opacity-100 overflow-y-auto"}`}
+      >
+        <div
+          className="ml-[26px] mr-1 mt-1 px-3 py-2 rounded-lg text-[11px] leading-relaxed"
+          style={{
+            background: 'var(--thought-bg)',
+            borderLeft: '2px solid var(--ocean-300)',
+            color: 'hsl(var(--muted-foreground))',
+          }}
+        >
+          <div className="whitespace-pre-wrap break-words max-w-[65ch]">{block.content}</div>
+          {isStreaming && (
+            <div className="mt-1.5 h-[2px] w-12 rounded-full overflow-hidden" style={{ background: 'var(--ocean-100)' }}>
+              <div className="h-full w-1/2 animate-shimmer-line" style={{ background: 'linear-gradient(to right, transparent, var(--ocean-400), transparent)' }} />
+            </div>
+          )}
+        </div>
       </div>
     </div>
   );
 }
 
-function ActionBlock({ block, onToggleThought, message, onUpdateAction }: { block: ChatMessageModel["blocks"][number]; onToggleThought: (messageId: string, blockId: string) => void; message: ChatMessageModel; onUpdateAction?: (callId: string, status: ActionDetail["status"], content: string) => void }) {
+/* ═══════════════════════════════════════
+   ActionBlock — Codex-style tool calls
+   ═══════════════════════════════════════ */
+function ActionBlock({ block, onToggleThought, message, onUpdateAction, stepIndex }: {
+  block: ChatMessageModel["blocks"][number]; onToggleThought: (messageId: string, blockId: string) => void;
+  message: ChatMessageModel; onUpdateAction?: (callId: string, status: ActionDetail["status"], content: string) => void;
+  stepIndex: number;
+}) {
   const actions = block.actions || [];
   const isStreaming = block.isStreaming;
   const isCollapsed = block.isCollapsed;
   const isArchived = block.isArchived;
+  const [expandedSubAgents, setExpandedSubAgents] = useState<Set<string>>(new Set());
+
+  const subAgentActions = actions.filter((a) => a.toolName === 'SubAgent' || a.toolName === 'ParallelSubAgent' || a.toolName === 'ParallelTask');
+  const toolActions = actions.filter((a) => a.toolName !== 'SubAgent' && a.toolName !== 'ParallelSubAgent' && a.toolName !== 'ParallelTask');
+
+  const toggleSubAgent = (callId: string) => {
+    setExpandedSubAgents((prev) => {
+      const next = new Set(prev);
+      if (next.has(callId)) next.delete(callId);
+      else next.add(callId);
+      return next;
+    });
+  };
 
   const runningCount = actions.filter((a) => a.status === "running" || a.status === "pending_confirmation").length;
   const doneCount = actions.filter((a) => a.status === "done").length;
 
-  const headerLabel = isStreaming
-    ? `执行中${runningCount > 0 ? ` · ${runningCount}项进行中` : ""}${doneCount > 0 ? ` · ${doneCount}项完成` : ""}`
-    : isArchived
-      ? `已执行 ${actions.length} 项操作`
-      : `${actions.length} 项操作`;
-
   return (
-    <div className={`w-full max-w-full transition-all duration-300 ${isArchived ? "opacity-55" : "opacity-100"}`}>
+    <div className={`w-full transition-all duration-300 ${isArchived ? "opacity-40" : "opacity-100"}`}>
+      {/* Header */}
       <button
         type="button"
         onClick={() => onToggleThought(message.id, block.id)}
-        className="flex items-center gap-2 text-[10px] font-semibold tracking-wider transition-all duration-200 px-1.5 py-1 rounded-lg"
-        style={{ color: 'hsl(var(--muted-foreground))', opacity: 0.7 }}
-        onMouseEnter={(e) => { e.currentTarget.style.background = 'hsl(var(--muted))'; }}
-        onMouseLeave={(e) => { e.currentTarget.style.background = 'transparent'; }}
-      >
-        {isCollapsed ? <ChevronRight size={11} strokeWidth={2} /> : <ChevronDown size={11} strokeWidth={2} />}
-        {isStreaming ? (
-          <span className="relative flex items-center justify-center w-3.5 h-3.5">
-            <SparkleIcon size={14} className="animate-star-spin-breathe" style={{ color: 'var(--teal-500)' }} />
-            <span className="absolute inset-0 rounded-full animate-ping" style={{ background: 'var(--teal-400)', opacity: 0.1 }} />
-          </span>
-        ) : (
-          <SparkleIcon size={10} style={{ color: 'hsl(var(--muted-foreground))', opacity: 0.35 }} />
-        )}
-        <span className="uppercase">{headerLabel}</span>
-      </button>
-      <div
-        className={`mt-1.5 ml-3 pl-4 pr-3 py-2.5 rounded-xl text-[11px] leading-relaxed transition-all duration-400 overflow-hidden ${isCollapsed ? "max-h-0 opacity-0 py-0 mt-0" : "max-h-52 opacity-100 overflow-y-auto"}`}
+        className="w-full flex items-center gap-2 px-2.5 py-[7px] rounded-lg text-left transition-all duration-200 group"
         style={{
-          background: 'var(--action-bg)',
-          border: '1px solid var(--action-border)',
-          backdropFilter: 'blur(4px)',
+          background: isCollapsed ? 'transparent' : 'var(--action-bg)',
+          border: `1px solid ${isCollapsed ? 'transparent' : 'var(--action-border)'}`,
         }}
+        onMouseEnter={(e) => { if (isCollapsed) e.currentTarget.style.background = 'var(--action-bg)'; }}
+        onMouseLeave={(e) => { if (isCollapsed) e.currentTarget.style.background = 'transparent'; }}
       >
-        <div className="flex flex-wrap gap-x-3 gap-y-1.5">
-          {actions.map((action) => {
-            const isSubAgent = action.toolName === 'SubAgent' || action.toolName === 'ParallelSubAgent';
-            const displayName = isSubAgent ? 'SubAgent' : getToolDisplayName(action.toolName);
-            return (
-              <div key={action.callId || action.toolName} className="flex items-center gap-1.5">
-                {action.status === "running" ? (
-                  <span className="relative flex items-center justify-center w-3 h-3">
-                    <SparkleIcon size={10} className="animate-star-spin-breathe" style={{ color: 'var(--teal-500)' }} />
-                  </span>
-                ) : action.status === "done" ? (
-                  <SparkleIcon size={8} style={{ color: 'var(--teal-500)', opacity: 0.5 }} />
-                ) : (
-                  <SparkleIcon size={8} style={{ color: 'hsl(var(--destructive))', opacity: 0.6 }} />
-                )}
-                <span className="text-[11px] font-medium tracking-tight"
-                  style={{
-                    color: action.status === "running" ? 'hsl(var(--foreground))'
-                      : isSubAgent ? 'var(--ocean-500)'
-                      : 'hsl(var(--muted-foreground))',
-                    opacity: action.status === "done" ? 0.65 : 1,
-                  }}
-                >
-                  {displayName}
-                </span>
-              </div>
-            );
-          })}
+        {isStreaming ? <StepBadge index={stepIndex} type="action" /> : <StepComplete type="action" />}
+        <Terminal size={12} style={{ color: 'var(--teal-500)', opacity: isStreaming ? 1 : 0.5 }} className={isStreaming ? 'animate-pulse-subtle' : ''} />
+        <span className="text-[11px] font-semibold" style={{ color: 'var(--teal-600)' }}>
+          {isStreaming
+            ? `Running${runningCount > 0 ? ` ${runningCount}项` : ''}`
+            : `${doneCount > 0 ? `${doneCount}项完成` : `${actions.length}项操作`}`}
+        </span>
+        {isStreaming && <StreamingIndicator variant="teal" />}
+        <span className="ml-auto">
+          <ChevronRight size={12} style={{ color: 'hsl(var(--muted-foreground))', opacity: 0.35, transform: isCollapsed ? 'rotate(0deg)' : 'rotate(90deg)', transition: 'transform 0.2s' }} />
+        </span>
+      </button>
+
+      {/* Collapsible content */}
+      <div className={`overflow-hidden transition-all duration-300 ${isCollapsed ? "max-h-0 opacity-0" : "max-h-72 opacity-100"}`}>
+        <div
+          className="ml-[26px] mr-1 mt-1 px-3 py-2 rounded-lg text-[11px] leading-relaxed overflow-y-auto"
+          style={{
+            background: 'var(--action-bg)',
+            borderLeft: '2px solid var(--teal-300)',
+          }}
+        >
+          {/* Tool calls */}
+          {toolActions.length > 0 && (
+            <div className="flex flex-col gap-[6px]">
+              {toolActions.map((action) => {
+                const displayName = getToolDisplayName(action.toolName);
+                return (
+                  <div key={action.callId || action.toolName} className="flex items-center gap-2">
+                    <StatusIcon status={action.status} size={10} />
+                    <span
+                      className="text-[11px] font-medium"
+                      style={{
+                        fontFamily: 'var(--font-mono)',
+                        color: action.status === "running" ? 'hsl(var(--foreground))' : 'hsl(var(--muted-foreground))',
+                        opacity: action.status === "done" ? 0.7 : 1,
+                      }}
+                    >
+                      {displayName}
+                    </span>
+                    {action.content && action.status === "done" && (
+                      <span className="text-[10px] truncate" style={{ color: 'hsl(var(--muted-foreground))', opacity: 0.4, maxWidth: '200px' }}>
+                        {action.content.slice(0, 60)}
+                      </span>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+          )}
+
+          {/* SubAgents */}
+          {subAgentActions.length > 0 && (
+            <div className={`flex flex-col gap-1.5 ${toolActions.length > 0 ? 'mt-2 pt-2' : ''}`} style={toolActions.length > 0 ? { borderTop: '1px dashed var(--action-border)' } : undefined}>
+              {subAgentActions.map((action) => (
+                <SubAgentCard
+                  key={action.callId}
+                  action={action}
+                  isExpanded={expandedSubAgents.has(action.callId)}
+                  onToggle={() => toggleSubAgent(action.callId)}
+                />
+              ))}
+            </div>
+          )}
+
+          {isStreaming && (
+            <div className="mt-2 h-[2px] w-12 rounded-full overflow-hidden" style={{ background: 'var(--teal-50)' }}>
+              <div className="h-full w-1/2 animate-shimmer-line" style={{ background: 'linear-gradient(to right, transparent, var(--teal-400), transparent)' }} />
+            </div>
+          )}
         </div>
-        {isStreaming && (
-          <div className="mt-2 h-[2px] w-16 rounded-full overflow-hidden" style={{ background: 'var(--teal-50)' }}>
-            <div className="h-full w-1/2 animate-shimmer-line" style={{ background: 'linear-gradient(to right, transparent, var(--teal-400), transparent)' }} />
-          </div>
-        )}
       </div>
     </div>
   );
 }
 
+/* ═══════════════════════════════════════
+   SubAgentCard — nested agent
+   ═══════════════════════════════════════ */
+function SubAgentCard({ action, isExpanded, onToggle }: { action: ActionDetail; isExpanded: boolean; onToggle: () => void }) {
+  const taskLabel = action.delegation?.label || "SubAgent";
+  const taskDesc = action.delegation?.task || action.delegation?.skill_name || "";
+  const isRunning = action.status === "running";
+
+  return (
+    <div
+      className="rounded-md overflow-hidden transition-all duration-200"
+      style={{
+        background: 'var(--thought-bg)',
+        border: `1px solid ${isRunning ? 'var(--ocean-200)' : 'var(--thought-border)'}`,
+      }}
+    >
+      <button
+        type="button"
+        onClick={onToggle}
+        className="w-full flex items-center gap-2 px-2.5 py-[6px] text-left transition-all duration-200"
+        onMouseEnter={(e) => { e.currentTarget.style.background = 'var(--ocean-50)'; }}
+        onMouseLeave={(e) => { e.currentTarget.style.background = 'transparent'; }}
+      >
+        {isRunning ? (
+          <span className="codex-subagent-loader">
+            <span className="dot" />
+            <span className="dot" />
+            <span className="dot" />
+          </span>
+        ) : action.status === "done" ? (
+          <StepComplete type="action" />
+        ) : (
+          <svg width={12} height={12} viewBox="0 0 24 24" fill="none" stroke="hsl(var(--destructive))" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+            <line x1="18" y1="6" x2="6" y2="18" /><line x1="6" y1="6" x2="18" y2="18" />
+          </svg>
+        )}
+        <span className="text-[11px] font-semibold" style={{ color: 'var(--ocean-500)', fontFamily: 'var(--font-mono)' }}>
+          {taskLabel}
+        </span>
+        {taskDesc && (
+          <span className="text-[10px] truncate" style={{ color: 'hsl(var(--muted-foreground))', opacity: 0.45 }}>
+            — {taskDesc}
+          </span>
+        )}
+        <span className="ml-auto">
+          <ChevronRight size={11} style={{ color: 'hsl(var(--muted-foreground))', opacity: 0.3, transform: isExpanded ? 'rotate(90deg)' : 'rotate(0deg)', transition: 'transform 0.2s' }} />
+        </span>
+      </button>
+      {isExpanded && (
+        <div className="px-2.5 pb-2 pt-0.5 animate-sub-agent-expand" style={{ borderTop: '1px solid var(--thought-border)' }}>
+          <div className="pl-3 text-[10px] leading-relaxed" style={{ color: 'hsl(var(--muted-foreground))', opacity: 0.55, borderLeft: '2px solid var(--ocean-200)' }}>
+            {taskDesc || "子Agent 执行中..."}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+/* ═══════════════════════════════════════
+   ErrorBlock
+   ═══════════════════════════════════════ */
 function ErrorBlock({ content }: { content: string }) {
   return (
     <div
-      className="w-full max-w-full px-4 py-3 rounded-2xl rounded-tl-sm text-[13px] leading-relaxed"
+      className="w-full px-3 py-2 rounded-lg text-[12px] leading-relaxed"
       style={{
         background: 'rgba(239, 68, 68, 0.06)',
-        border: '1px solid rgba(239, 68, 68, 0.18)',
+        borderLeft: '2px solid hsl(var(--destructive))',
         color: 'hsl(var(--destructive))',
-        backdropFilter: 'blur(6px)',
       }}
     >
       <div className="flex items-center gap-2">
-        <AlertCircle size={15} strokeWidth={1.8} style={{ opacity: 0.7 }} />
+        <AlertCircle size={13} strokeWidth={1.8} style={{ opacity: 0.7 }} />
         <span className="font-medium">{content}</span>
       </div>
     </div>
   );
 }
 
+/* ═══════════════════════════════════════
+   ProcessTimelineView — completed message
+   ═══════════════════════════════════════ */
+function ProcessTimelineView({ blocks, message, onToggleThought, onUpdateAction }: {
+  blocks: MessageBlock[]; message: ChatMessageModel;
+  onToggleThought: (messageId: string, blockId: string) => void;
+  onUpdateAction?: (callId: string, status: ActionDetail["status"], content: string) => void;
+}) {
+  let thoughtIdx = 0;
+  let actionIdx = 0;
+  let stepNum = 1;
+
+  return (
+    <div className="flex flex-col gap-1">
+      {blocks.map((block) => {
+        if (block.type === "thought") {
+          const idx = thoughtIdx++;
+          const sn = stepNum++;
+          return <ThoughtBlock key={block.id} message={message} block={{ ...block, isCollapsed: true }} onToggleThought={onToggleThought} stepIndex={sn} />;
+        }
+        if (block.type === "action") {
+          const idx = actionIdx++;
+          const sn = stepNum++;
+          return <ActionBlock key={block.id} block={{ ...block, isCollapsed: true }} onToggleThought={onToggleThought} message={message} onUpdateAction={onUpdateAction} stepIndex={sn} />;
+        }
+        if (block.type === "error") {
+          return <ErrorBlock key={block.id} content={block.content} />;
+        }
+        return (
+          <div key={block.id} className="px-3 py-2 rounded-lg text-[11px] leading-relaxed" style={{ background: 'hsl(var(--card))', border: '1px solid hsl(var(--border))', color: 'hsl(var(--muted-foreground))', opacity: 0.75 }}>
+            <ReactMarkdown remarkPlugins={[remarkGfm]}>{block.content.length > 200 ? block.content.slice(0, 200) + "…" : block.content}</ReactMarkdown>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+/* ═══════════════════════════════════════
+   ImagePreviewDialog
+   ═══════════════════════════════════════ */
 function ImagePreviewDialog({ artifact, open, onOpenChange }: { artifact: GeneratedArtifact; open: boolean; onOpenChange: (open: boolean) => void }) {
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
@@ -195,6 +403,92 @@ function ImagePreviewDialog({ artifact, open, onOpenChange }: { artifact: Genera
   );
 }
 
+/* ═══════════════════════════════════════
+   Artifact rendering helpers
+   ═══════════════════════════════════════ */
+function ArtifactList({ artifacts, onPreview }: { artifacts: GeneratedArtifact[]; onPreview: (a: GeneratedArtifact) => void }) {
+  return (
+    <div className="mt-2.5 flex flex-col gap-2.5 items-start">
+      {artifacts.map((artifact) =>
+        artifact.type === "image_generated" ? (
+          <div key={artifact.download_url || artifact.image_url || `${artifact.type}-${artifact.filename}`}
+            className="w-[35%] min-w-[200px] overflow-hidden rounded-xl group"
+            style={{ border: '1px solid hsl(var(--border))', background: 'hsl(var(--card))' }}
+          >
+            {artifact.image_url && (
+              <div className="relative h-24 w-full overflow-hidden cursor-pointer" style={{ borderBottom: '1px solid hsl(var(--border))' }}
+                onClick={() => onPreview(artifact)}
+              >
+                <img src={artifact.image_url} alt={artifact.filename} className="h-full w-full object-cover" />
+                <div className="absolute inset-0 bg-black/0 group-hover:bg-black/12 transition-colors duration-200 flex items-center justify-center">
+                  <ZoomIn size={20} className="text-white opacity-0 group-hover:opacity-70 transition-opacity duration-200" />
+                </div>
+              </div>
+            )}
+            <div className="px-2.5 py-2 flex items-center justify-between">
+              <div className="font-medium truncate flex-1 text-[12px]">{artifact.filename}</div>
+              {artifact.download_url && (
+                <a href={artifact.download_url} download={artifact.filename}
+                  className="ml-1.5 flex-shrink-0 rounded p-1 transition-colors duration-150"
+                  style={{ color: 'hsl(var(--muted-foreground))', opacity: 0.45 }}
+                  onClick={(e) => e.stopPropagation()}
+                >
+                  <Download size={13} />
+                </a>
+              )}
+            </div>
+          </div>
+        ) : (
+          <div key={artifact.download_url || `${artifact.type}-${artifact.filename}`}
+            className="w-[35%] min-w-[200px] rounded-xl overflow-hidden"
+            style={{ border: '1px solid hsl(var(--border))', background: 'hsl(var(--card))' }}
+          >
+            <div className="px-2.5 py-2 flex items-center gap-2">
+              {getFileIcon(artifact.filename)}
+              <div className="font-medium truncate flex-1 text-[12px]">{artifact.filename}</div>
+            </div>
+            <div className="px-2.5 pb-2 flex items-center gap-1">
+              {isPreviewable(artifact.filename) && (
+                <button type="button" onClick={() => onPreview(artifact)}
+                  className="inline-flex items-center gap-1 rounded-md px-1.5 py-0.5 text-[11px] transition-colors duration-150"
+                  style={{ color: 'var(--ocean-500)' }}
+                >
+                  <Eye size={12} /> 预览
+                </button>
+              )}
+              {artifact.download_url && (
+                <a href={artifact.download_url} download={artifact.filename}
+                  className="inline-flex items-center gap-1 rounded-md px-1.5 py-0.5 text-[11px] transition-colors duration-150"
+                  style={{ color: 'hsl(var(--muted-foreground))' }}
+                  onClick={(e) => e.stopPropagation()}
+                >
+                  <Download size={12} /> 下载
+                </a>
+              )}
+            </div>
+          </div>
+        ),
+      )}
+    </div>
+  );
+}
+
+function ReferenceList({ references }: { references: ReferenceLink[] }) {
+  return (
+    <div className="mt-2.5 pt-2.5" style={{ borderTop: '1px solid hsl(var(--border))', opacity: 0.35 }}>
+      <div className="text-[10px] font-semibold mb-1.5" style={{ color: 'hsl(var(--muted-foreground))' }}>参考来源</div>
+      <div className="flex flex-col gap-1">
+        {references.map((ref, i) => (
+          <ReferenceItem key={i} reference={ref} index={i + 1} />
+        ))}
+      </div>
+    </div>
+  );
+}
+
+/* ═══════════════════════════════════════
+   Main ChatMessage component
+   ═══════════════════════════════════════ */
 export function ChatMessage({ message, onToggleThought, onUpdateAction }: ChatMessageProps) {
   const isUser = message.role === "human";
   const isSystem = message.role === "system";
@@ -208,7 +502,7 @@ export function ChatMessage({ message, onToggleThought, onUpdateAction }: ChatMe
     : null;
 
   const processBlocks = isComplete
-    ? message.blocks.filter((b) => b !== lastAnswerBlock)
+    ? message.blocks.filter((b) => b !== lastAnswerBlock && b.type !== "error")
     : [];
 
   const processCount = processBlocks.length;
@@ -222,9 +516,12 @@ export function ChatMessage({ message, onToggleThought, onUpdateAction }: ChatMe
     ? message.blocks.filter((block) => !block.isArchived || archivedToShowIds.has(block.id))
     : [];
 
+  let stepNum = 1;
+
   return (
-    <div className={`flex w-full mb-5 animate-message-in ${isUser ? "justify-end" : "justify-start"}`}>
+    <div className={`flex w-full mb-4 animate-message-in ${isUser ? "justify-end" : "justify-start"}`}>
       <div className={`flex gap-2.5 max-w-[88%] ${isUser ? "flex-row-reverse" : "flex-row"}`}>
+        {/* Avatar */}
         <div className="flex-shrink-0 mt-0.5">
           <div
             className="w-7 h-7 rounded-lg flex items-center justify-center"
@@ -247,6 +544,7 @@ export function ChatMessage({ message, onToggleThought, onUpdateAction }: ChatMe
         </div>
 
         <div className={`flex flex-col gap-1.5 ${isUser ? "items-end" : "items-start"}`}>
+          {/* User message */}
           {isUser ? (
             <div
               className="px-3.5 py-2.5 rounded-2xl rounded-tr-sm text-[13px] whitespace-pre-wrap leading-relaxed"
@@ -271,69 +569,112 @@ export function ChatMessage({ message, onToggleThought, onUpdateAction }: ChatMe
               {message.content}
             </div>
           ) : (
-            <div className="flex flex-col gap-2.5 w-full">
+            <div className="flex flex-col gap-1.5 w-full">
+              {/* Archived count badge */}
               {!isComplete && hiddenArchivedCount > 0 && (
-                <div className="self-start rounded-full px-2.5 py-1 text-[10px]" style={{ border: '1px solid hsl(var(--border))', background: 'hsl(var(--muted))', color: 'hsl(var(--muted-foreground))', opacity: 0.4 }}>
-                  已折叠 {hiddenArchivedCount} 个较早中间步骤
+                <div className="self-start rounded-md px-2 py-0.5 text-[10px]" style={{ background: 'hsl(var(--muted))', color: 'hsl(var(--muted-foreground))', opacity: 0.5 }}>
+                  {hiddenArchivedCount} 步已折叠
                 </div>
               )}
 
+              {/* Completed: "查看中间过程" toggle */}
               {isComplete && hasProcess && (
                 <button
                   type="button"
                   onClick={() => setShowProcess(!showProcess)}
-                  className="flex items-center gap-1.5 self-start rounded-lg px-2.5 py-1 text-[10px] transition-all duration-200"
-                  style={{ border: '1px solid hsl(var(--border))', background: 'hsl(var(--muted))', color: 'hsl(var(--muted-foreground))', opacity: 0.45 }}
-                  onMouseEnter={(e) => { e.currentTarget.style.background = 'var(--ocean-50)'; e.currentTarget.style.borderColor = 'var(--ocean-200)'; e.currentTarget.style.color = 'var(--ocean-500)'; }}
-                  onMouseLeave={(e) => { e.currentTarget.style.background = 'hsl(var(--muted))'; e.currentTarget.style.borderColor = 'hsl(var(--border))'; e.currentTarget.style.color = 'hsl(var(--muted-foreground))'; e.currentTarget.style.opacity = '0.45'; }}
+                  className="flex items-center gap-1.5 self-start rounded-md px-2 py-1 text-[10px] font-medium transition-all duration-200"
+                  style={{
+                    background: showProcess ? 'var(--thought-bg)' : 'transparent',
+                    border: `1px solid ${showProcess ? 'var(--thought-border)' : 'hsl(var(--border))'}`,
+                    color: showProcess ? 'var(--ocean-500)' : 'hsl(var(--muted-foreground))',
+                    opacity: showProcess ? 1 : 0.5,
+                  }}
+                  onMouseEnter={(e) => { e.currentTarget.style.background = 'var(--thought-bg)'; e.currentTarget.style.borderColor = 'var(--thought-border)'; e.currentTarget.style.color = 'var(--ocean-500)'; e.currentTarget.style.opacity = '1'; }}
+                  onMouseLeave={(e) => { e.currentTarget.style.background = showProcess ? 'var(--thought-bg)' : 'transparent'; e.currentTarget.style.borderColor = showProcess ? 'var(--thought-border)' : 'hsl(var(--border))'; e.currentTarget.style.color = showProcess ? 'var(--ocean-500)' : 'hsl(var(--muted-foreground))'; e.currentTarget.style.opacity = showProcess ? '1' : '0.5'; }}
                 >
                   <Layers size={10} strokeWidth={1.8} />
-                  {showProcess ? "收起中间过程" : `查看中间过程（${processCount}项）`}
+                  {showProcess ? "收起过程" : `${processCount} 步过程`}
                   {showProcess ? <ChevronDown size={9} /> : <ChevronRight size={9} />}
                 </button>
               )}
 
+              {/* Completed: expanded process view */}
               {isComplete && showProcess && (
-                <div className="flex flex-col gap-1.5 opacity-70">
-                  {processBlocks.map((block) => {
-                    if (block.type === "thought") {
-                      return <ThoughtBlock key={block.id} message={message} block={{ ...block, isCollapsed: true }} onToggleThought={onToggleThought} />;
-                    }
-                    if (block.type === "action") {
-                      return <ActionBlock key={block.id} block={{ ...block, isCollapsed: true }} onToggleThought={onToggleThought} message={message} onUpdateAction={onUpdateAction} />;
-                    }
-                    if (block.type === "error") {
-                      return <ErrorBlock key={block.id} content={block.content} />;
-                    }
-                    return (
-                      <div key={block.id} className="px-3 py-2 rounded-xl text-[11px] leading-relaxed" style={{ background: 'hsl(var(--card))', border: '1px solid hsl(var(--border))', color: 'hsl(var(--muted-foreground))', opacity: 0.75 }}>
-                        <ReactMarkdown remarkPlugins={[remarkGfm]}>{block.content.length > 200 ? block.content.slice(0, 200) + "…" : block.content}</ReactMarkdown>
-                      </div>
-                    );
-                  })}
+                <div className="opacity-60">
+                  <ProcessTimelineView blocks={processBlocks} message={message} onToggleThought={onToggleThought} onUpdateAction={onUpdateAction} />
                 </div>
               )}
 
+              {/* Streaming blocks */}
               {!isComplete && displayBlocks.map((block) => {
                 const isArchived = !!block.isArchived;
+
                 if (block.type === "thought") {
-                  return <ThoughtBlock key={block.id} message={message} block={block} onToggleThought={onToggleThought} />;
+                  const sn = stepNum++;
+                  return <ThoughtBlock key={block.id} message={message} block={block} onToggleThought={onToggleThought} stepIndex={sn} />;
                 }
 
                 if (block.type === "action") {
-                  return <ActionBlock key={block.id} block={block} onToggleThought={onToggleThought} message={message} onUpdateAction={onUpdateAction} />;
+                  const sn = stepNum++;
+                  return <ActionBlock key={block.id} block={block} onToggleThought={onToggleThought} message={message} onUpdateAction={onUpdateAction} stepIndex={sn} />;
                 }
 
                 if (block.type === "error") {
                   return <ErrorBlock key={block.id} content={block.content} />;
                 }
 
+                /* Answer block during streaming */
                 const displayContent = isArchived && block.isCollapsed && block.content.length > 120
                   ? block.content.slice(0, 120) + "…"
                   : block.content;
 
                 return (
-                  <div key={block.id} className={`px-4 py-3 rounded-2xl rounded-tl-sm text-[13px] leading-relaxed transition-all duration-300 ${isArchived ? "opacity-40 scale-[0.995]" : "opacity-100"}`}
+                  <div key={block.id} className={`transition-all duration-300 ${isArchived ? "opacity-40 scale-[0.995]" : "opacity-100"}`}>
+                    {/* Answer step header */}
+                    <div className="flex items-center gap-2 px-2.5 py-[7px] rounded-lg" style={{ background: 'transparent' }}>
+                      <StepBadge index={stepNum} type="answer" />
+                      <MessageSquare size={12} style={{ color: 'var(--ocean-400)', opacity: 0.5 }} />
+                      <span className="text-[11px] font-semibold" style={{ color: 'var(--ocean-500)' }}>Answer</span>
+                    </div>
+                    <div
+                      className="ml-[26px] mr-1 px-3.5 py-3 rounded-lg text-[13px] leading-relaxed"
+                      style={{
+                        background: 'var(--gradient-card)',
+                        border: '1px solid hsl(var(--border))',
+                        color: 'hsl(var(--foreground))',
+                        boxShadow: '0 2px 12px rgba(15,31,56,0.04)',
+                        backdropFilter: 'blur(6px)',
+                      }}
+                    >
+                      <div className="prose prose-sm max-w-none" style={{ color: 'hsl(var(--foreground))' }}>
+                        <ReactMarkdown remarkPlugins={[remarkGfm]}>{displayContent}</ReactMarkdown>
+                      </div>
+                      {!!message.artifacts?.length && block.type === "answer" && !isArchived && (
+                        <ArtifactList artifacts={message.artifacts} onPreview={setPreviewArtifact} />
+                      )}
+                      {!!message.references?.length && message.isComplete && block.type === "answer" && !isArchived && (
+                        <ReferenceList references={message.references} />
+                      )}
+                    </div>
+                  </div>
+                );
+              })}
+
+              {/* Completed: always-visible error blocks */}
+              {isComplete && message.blocks.filter((b) => b.type === "error").map((block) => (
+                <ErrorBlock key={block.id} content={block.content} />
+              ))}
+
+              {/* Completed: final answer */}
+              {isComplete && lastAnswerBlock && (
+                <div>
+                  <div className="flex items-center gap-2 px-2.5 py-[7px] rounded-lg">
+                    <StepBadge index={stepNum} type="answer" />
+                    <MessageSquare size={12} style={{ color: 'var(--ocean-400)', opacity: 0.5 }} />
+                    <span className="text-[11px] font-semibold" style={{ color: 'var(--ocean-500)' }}>Answer</span>
+                  </div>
+                  <div
+                    className="ml-[26px] mr-1 px-3.5 py-3 rounded-lg text-[13px] leading-relaxed"
                     style={{
                       background: 'var(--gradient-card)',
                       border: '1px solid hsl(var(--border))',
@@ -343,173 +684,15 @@ export function ChatMessage({ message, onToggleThought, onUpdateAction }: ChatMe
                     }}
                   >
                     <div className="prose prose-sm max-w-none" style={{ color: 'hsl(var(--foreground))' }}>
-                      <ReactMarkdown remarkPlugins={[remarkGfm]}>{displayContent}</ReactMarkdown>
+                      <ReactMarkdown remarkPlugins={[remarkGfm]}>{lastAnswerBlock.content}</ReactMarkdown>
                     </div>
-                    {!!message.artifacts?.length && block.type === "answer" && !isArchived && (
-                      <div className="mt-2.5 flex flex-col gap-2.5 items-start">
-                        {message.artifacts.map((artifact) =>
-                          artifact.type === "image_generated" ? (
-                            <div key={artifact.download_url || artifact.image_url || `${artifact.type}-${artifact.filename}`}
-                              className="w-[35%] min-w-[200px] overflow-hidden rounded-xl group"
-                              style={{ border: '1px solid hsl(var(--border))', background: 'hsl(var(--card))' }}
-                            >
-                              {artifact.image_url && (
-                                <div className="relative h-24 w-full overflow-hidden cursor-pointer" style={{ borderBottom: '1px solid hsl(var(--border))' }}
-                                  onClick={() => setPreviewArtifact(artifact)}
-                                >
-                                  <img src={artifact.image_url} alt={artifact.filename} className="h-full w-full object-cover" />
-                                  <div className="absolute inset-0 bg-black/0 group-hover:bg-black/12 transition-colors duration-200 flex items-center justify-center">
-                                    <ZoomIn size={20} className="text-white opacity-0 group-hover:opacity-70 transition-opacity duration-200" />
-                                  </div>
-                                </div>
-                              )}
-                              <div className="px-2.5 py-2 flex items-center justify-between">
-                                <div className="font-medium truncate flex-1 text-[12px]">{artifact.filename}</div>
-                                {artifact.download_url && (
-                                  <a href={artifact.download_url} download={artifact.filename}
-                                    className="ml-1.5 flex-shrink-0 rounded p-1 transition-colors duration-150"
-                                    style={{ color: 'hsl(var(--muted-foreground))', opacity: 0.45 }}
-                                    onClick={(e) => e.stopPropagation()}
-                                  >
-                                    <Download size={13} />
-                                  </a>
-                                )}
-                              </div>
-                            </div>
-                          ) : (
-                            <div key={artifact.download_url || `${artifact.type}-${artifact.filename}`}
-                              className="w-[35%] min-w-[200px] rounded-xl overflow-hidden"
-                              style={{ border: '1px solid hsl(var(--border))', background: 'hsl(var(--card))' }}
-                            >
-                              <div className="px-2.5 py-2 flex items-center gap-2">
-                                {getFileIcon(artifact.filename)}
-                                <div className="font-medium truncate flex-1 text-[12px]">{artifact.filename}</div>
-                              </div>
-                              <div className="px-2.5 pb-2 flex items-center gap-1">
-                                {isPreviewable(artifact.filename) && (
-                                  <button type="button" onClick={() => setPreviewArtifact(artifact)}
-                                    className="inline-flex items-center gap-1 rounded-md px-1.5 py-0.5 text-[11px] transition-colors duration-150"
-                                    style={{ color: 'var(--ocean-500)' }}
-                                  >
-                                    <Eye size={12} /> 预览
-                                  </button>
-                                )}
-                                {artifact.download_url && (
-                                  <a href={artifact.download_url} download={artifact.filename}
-                                    className="inline-flex items-center gap-1 rounded-md px-1.5 py-0.5 text-[11px] transition-colors duration-150"
-                                    style={{ color: 'hsl(var(--muted-foreground))' }}
-                                    onClick={(e) => e.stopPropagation()}
-                                  >
-                                    <Download size={12} /> 下载
-                                  </a>
-                                )}
-                              </div>
-                            </div>
-                          ),
-                        )}
-                      </div>
+                    {!!message.artifacts?.length && (
+                      <ArtifactList artifacts={message.artifacts} onPreview={setPreviewArtifact} />
                     )}
-                    {!!message.references?.length && message.isComplete && block.type === "answer" && !isArchived && (
-                      <div className="mt-2.5 pt-2.5" style={{ borderTop: '1px solid hsl(var(--border))', opacity: 0.35 }}>
-                        <div className="text-[10px] font-semibold mb-1.5" style={{ color: 'hsl(var(--muted-foreground))' }}>参考来源</div>
-                        <div className="flex flex-col gap-1">
-                          {message.references.map((ref, i) => (
-                            <ReferenceItem key={i} reference={ref} index={i + 1} />
-                          ))}
-                        </div>
-                      </div>
+                    {!!message.references?.length && (
+                      <ReferenceList references={message.references} />
                     )}
                   </div>
-                );
-              })}
-
-              {isComplete && lastAnswerBlock && (
-                <div className="px-4 py-3 rounded-2xl rounded-tl-sm text-[13px] leading-relaxed"
-                  style={{
-                    background: 'var(--gradient-card)',
-                    border: '1px solid hsl(var(--border))',
-                    color: 'hsl(var(--foreground))',
-                    boxShadow: '0 2px 12px rgba(15,31,56,0.04)',
-                    backdropFilter: 'blur(6px)',
-                  }}
-                >
-                  <div className="prose prose-sm max-w-none" style={{ color: 'hsl(var(--foreground))' }}>
-                    <ReactMarkdown remarkPlugins={[remarkGfm]}>{lastAnswerBlock.content}</ReactMarkdown>
-                  </div>
-                  {!!message.artifacts?.length && (
-                    <div className="mt-2.5 flex flex-col gap-2.5 items-start">
-                      {message.artifacts.map((artifact) =>
-                        artifact.type === "image_generated" ? (
-                          <div key={artifact.download_url || artifact.image_url || `${artifact.type}-${artifact.filename}`}
-                            className="w-[35%] min-w-[200px] overflow-hidden rounded-xl group"
-                            style={{ border: '1px solid hsl(var(--border))', background: 'hsl(var(--card))' }}
-                          >
-                            {artifact.image_url && (
-                              <div className="relative h-24 w-full overflow-hidden cursor-pointer" style={{ borderBottom: '1px solid hsl(var(--border))' }}
-                                onClick={() => setPreviewArtifact(artifact)}
-                              >
-                                <img src={artifact.image_url} alt={artifact.filename} className="h-full w-full object-cover" />
-                                <div className="absolute inset-0 bg-black/0 group-hover:bg-black/12 transition-colors duration-200 flex items-center justify-center">
-                                  <ZoomIn size={20} className="text-white opacity-0 group-hover:opacity-70 transition-opacity duration-200" />
-                                </div>
-                              </div>
-                            )}
-                            <div className="px-2.5 py-2 flex items-center justify-between">
-                              <div className="font-medium truncate flex-1 text-[12px]">{artifact.filename}</div>
-                              {artifact.download_url && (
-                                <a href={artifact.download_url} download={artifact.filename}
-                                  className="ml-1.5 flex-shrink-0 rounded p-1 transition-colors duration-150"
-                                  style={{ color: 'hsl(var(--muted-foreground))', opacity: 0.45 }}
-                                  onClick={(e) => e.stopPropagation()}
-                                >
-                                  <Download size={13} />
-                                </a>
-                              )}
-                            </div>
-                          </div>
-                        ) : (
-                          <div key={artifact.download_url || `${artifact.type}-${artifact.filename}`}
-                            className="w-[35%] min-w-[200px] rounded-xl overflow-hidden"
-                            style={{ border: '1px solid hsl(var(--border))', background: 'hsl(var(--card))' }}
-                          >
-                            <div className="px-2.5 py-2 flex items-center gap-2">
-                              {getFileIcon(artifact.filename)}
-                              <div className="font-medium truncate flex-1 text-[12px]">{artifact.filename}</div>
-                            </div>
-                            <div className="px-2.5 pb-2 flex items-center gap-1">
-                              {isPreviewable(artifact.filename) && (
-                                <button type="button" onClick={() => setPreviewArtifact(artifact)}
-                                  className="inline-flex items-center gap-1 rounded-md px-1.5 py-0.5 text-[11px] transition-colors duration-150"
-                                  style={{ color: 'var(--ocean-500)' }}
-                                >
-                                  <Eye size={12} /> 预览
-                                </button>
-                              )}
-                              {artifact.download_url && (
-                                <a href={artifact.download_url} download={artifact.filename}
-                                  className="inline-flex items-center gap-1 rounded-md px-1.5 py-0.5 text-[11px] transition-colors duration-150"
-                                  style={{ color: 'hsl(var(--muted-foreground))' }}
-                                  onClick={(e) => e.stopPropagation()}
-                                >
-                                  <Download size={12} /> 下载
-                                </a>
-                              )}
-                            </div>
-                          </div>
-                        ),
-                      )}
-                    </div>
-                  )}
-                  {!!message.references?.length && (
-                    <div className="mt-2.5 pt-2.5" style={{ borderTop: '1px solid hsl(var(--border))', opacity: 0.35 }}>
-                      <div className="text-[10px] font-semibold mb-1.5" style={{ color: 'hsl(var(--muted-foreground))' }}>参考来源</div>
-                      <div className="flex flex-col gap-1">
-                        {message.references.map((ref, i) => (
-                          <ReferenceItem key={i} reference={ref} index={i + 1} />
-                        ))}
-                      </div>
-                    </div>
-                  )}
                 </div>
               )}
             </div>
@@ -529,6 +712,9 @@ export function ChatMessage({ message, onToggleThought, onUpdateAction }: ChatMe
   );
 }
 
+/* ═══════════════════════════════════════
+   ReferenceItem
+   ═══════════════════════════════════════ */
 function ReferenceItem({ reference, index }: { reference: ReferenceLink; index: number }) {
   const isWeb = !!reference.url;
   const displayTitle = reference.title.length > 60 ? reference.title.slice(0, 60) + "…" : reference.title;
@@ -536,14 +722,14 @@ function ReferenceItem({ reference, index }: { reference: ReferenceLink; index: 
   if (isWeb) {
     return (
       <a href={reference.url} target="_blank" rel="noopener noreferrer"
-        className="flex items-center gap-1.5 px-1.5 py-1 rounded-md text-[11px] transition-all duration-200 group"
+        className="flex items-center gap-1.5 px-1.5 py-1 rounded-md text-[11px] transition-all duration-200"
         onMouseEnter={(e) => { e.currentTarget.style.background = 'var(--ocean-50)'; }}
         onMouseLeave={(e) => { e.currentTarget.style.background = 'transparent'; }}
       >
         <span className="flex-shrink-0 w-4 h-4 rounded flex items-center justify-center text-[9px] font-bold" style={{ background: 'var(--ocean-50)', color: 'var(--ocean-500)' }}>
           {index}
         </span>
-        <ExternalLink size={10} className="flex-shrink-0 transition-colors duration-150" style={{ color: 'hsl(var(--muted-foreground))', opacity: 0.35 }} />
+        <ExternalLink size={10} className="flex-shrink-0" style={{ color: 'hsl(var(--muted-foreground))', opacity: 0.35 }} />
         <span className="truncate" style={{ color: 'hsl(var(--muted-foreground))' }}>{displayTitle}</span>
         {reference.source && <span className="flex-shrink-0 text-[9px] ml-auto" style={{ color: 'hsl(var(--muted-foreground))', opacity: 0.25 }}>{reference.source}</span>}
       </a>

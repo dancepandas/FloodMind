@@ -65,11 +65,11 @@ class QwenConfig:
         # 根据推理模式选择默认模型
         if self.enable_reasoning:
             default_model = "qwen-plus"  # 推理模式使用更强的模型
-            default_max_tokens = "4096"   # 推理需要更多token空间
+            default_max_tokens = "32768"
             default_temperature = "0.1"    # 更低的温度获得更确定性输出
         else:
             default_model = "qwen3-flash"  # 默认使用快速模型
-            default_max_tokens = "1536"
+            default_max_tokens = "8192"
             default_temperature = "0.3"
 
         self.model_name = os.getenv("QWEN_MODEL", default_model)

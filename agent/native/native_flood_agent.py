@@ -69,6 +69,9 @@ class NativeFloodAgent:
 ## 当前系统时间
 {current_time_context}
 
+## 当前会话信息
+{session_env}
+
 {project_context}
 
 ## 角色职责
@@ -124,7 +127,7 @@ class NativeFloodAgent:
 
 ## 定时任务处理
 当用户表达"每天、明天、某个时间、定时、自动、后台执行、提前安排任务"等需求时：
-1. 你必须先调用 `create_plan`，再调用 `create_scheduled_task` 写入任务列表，不要立即执行业务任务。
+1. 调用 `create_scheduled_task` 写入任务列表，不要立即执行业务任务。
 2. `command` 只保留未来真正要执行的业务任务，必须去掉"每天/定时/几点执行"等调度表达，避免后台执行时再次创建定时任务。
 3. 每日重复任务使用 `repeat="daily"` 和 `run_time="HH:MM"`；一次性任务使用 `repeat="none"` 和 `scheduled_at`。
 4. 任务默认绑定当前会话，用户后续可从前端查看该任务生成的新增文件。
@@ -149,6 +152,9 @@ class NativeFloodAgent:
 ## 执行工具细节
 - 调用工具时一次只传一个参数：例如要查看两个skill时，应该是`GetSkill(skill1)`，等待返回结果，再进行`GetSkill(skill2)`，等待返回结果
 - excel的sheet命名字符最长允许31个字符，所以stationCode太长时，sheet_name可能会被截断
+- Bash 可执行任何 shell 命令，不限于 Python；支持 python、node、npm 等运行时
+- skill 指定非 Python 技术栈时（如 JavaScript），用 Write 写脚本文件，再用 Bash 执行
+- 执行前确保依赖已安装；缺失时用 pip install / npm install 安装
 
 ## 并行子代理规则
 使用 ParallelTask 并行委派多个独立任务时：
@@ -221,6 +227,9 @@ class NativeFloodAgent:
 
 {project_context}
 
+## 当前会话信息
+{session_env}
+
 ## 你的职责
 1. 执行主代理分配的子任务
 2. 根据需要运行 skill 脚本
@@ -235,6 +244,9 @@ class NativeFloodAgent:
 
 ## 执行工具细节
 - 调用工具时一次只传一个参数
+- Bash 可执行任何 shell 命令，不限于 Python；支持 python、node、npm 等运行时
+- skill 指定非 Python 技术栈时，用 Write 写脚本文件，再用 Bash 执行
+- 所有需要传递路径的工具都只接收绝对路径
 
 ## 强约束
 - 不要猜测或杜撰 skill 中未声明的脚本、参数或字段
@@ -555,15 +567,29 @@ class NativeFloodAgent:
         project_context = self._context_runtime.load_project_rules()
         current_time_context = ContextRuntime.load_current_time_static()
 
+        output_dir = self._get_output_dir()
+        upload_dir = self._get_upload_dir()
+        os_name = "Windows" if os.name == "nt" else "Linux"
+        shell_name = "powershell" if os.name == "nt" else "bash"
+        session_env = (
+            f"会话输出目录: {output_dir}\n"
+            f"上传目录: {upload_dir}\n"
+            f"操作系统: {os_name}\n"
+            f"Shell: {shell_name}\n"
+            f"路径风格: {os_name}"
+        )
+
         orchestrator_prompt = self.SYSTEM_PROMPT.format(
             skill_catalog=self._skill_catalog,
             current_time_context=current_time_context,
             project_context=project_context,
+            session_env=session_env,
         )
 
         specialist_prompt = self.EXECUTION_SPECIALIST_PROMPT.format(
             skill_catalog=self._skill_catalog,
             project_context=project_context,
+            session_env=session_env,
         )
 
         self._orchestrator_executor = NativeAgentExecutor(

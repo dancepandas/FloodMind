@@ -271,16 +271,16 @@ def _finalize_tool_output(tool_name: str, output: str, **signature_parts: Any) -
 
 class GetSkillInput(BaseModel):
     """获取技能说明的输入参数"""
-    skill_name: str = Field(default="", description="技能名称")
+    skill_name: str = Field(description="[必填] 技能名称，如 'aojiang-hydro'、'docx'")
 
 
 
 class ExecBashInput(BaseModel):
     """执行 Bash 命令的输入参数"""
-    command: str = Field(default="", description="要执行的 Bash 命令")
-    workdir: str = Field(default="", description="工作目录，默认为当前会话输出目录")
-    timeout: int = Field(default=120, description="超时时间（秒）")
-    env: str = Field(default="{}", description="额外环境变量，JSON 对象格式")
+    command: str = Field(description="[必填] 要执行的 shell 命令（不要嵌套 powershell/bash 前缀）")
+    workdir: str = Field(default="", description="[可选] 工作目录（绝对路径），默认当前会话输出目录")
+    timeout: int = Field(default=120, description="[可选] 超时时间（秒），默认 120")
+    env: str = Field(default="{}", description="[可选] 额外环境变量，JSON 对象格式")
 
 
 def _strip_session_prefix(path_str: str) -> str:
@@ -294,12 +294,12 @@ def _resolve_path(path_str: str, *, access: str = "read") -> Path:
 
 class CreateScheduledTaskInput(BaseModel):
     """创建定时任务的输入参数"""
-    command: str = Field(default="", description="未来到点后交给Agent执行的自然语言任务，不要包含定时表达")
-    repeat: str = Field(default="none", description="重复规则：none 或 daily")
-    run_time: str = Field(default="", description="每日任务执行时间，HH:MM")
-    scheduled_at: str = Field(default="", description="一次性任务执行时间，ISO格式或 YYYY-MM-DD HH:MM:SS")
-    timezone: str = Field(default="Asia/Shanghai", description="时区标识，默认 Asia/Shanghai")
-    enabled: bool = Field(default=True, description="是否启用任务")
+    command: str = Field(description="[必填] 未来到点后交给Agent执行的自然语言任务，不要包含定时表达")
+    repeat: str = Field(default="none", description="[可选] 重复规则：none（一次性）或 daily（每日），默认 none")
+    run_time: str = Field(default="", description="[可选] 每日任务执行时间，格式 HH:MM")
+    scheduled_at: str = Field(default="", description="[可选] 一次性任务执行时间，ISO格式或 YYYY-MM-DD HH:MM:SS")
+    timezone: str = Field(default="Asia/Shanghai", description="[可选] 时区标识，默认 Asia/Shanghai")
+    enabled: bool = Field(default=True, description="[可选] 是否启用任务，默认 True")
 
 
 class ListScheduledTasksInput(BaseModel):
@@ -309,7 +309,7 @@ class ListScheduledTasksInput(BaseModel):
 
 class CancelScheduledTaskInput(BaseModel):
     """取消定时任务的输入参数"""
-    task_id: str = Field(default="", description="要取消的定时任务ID")
+    task_id: str = Field(description="[必填] 要取消的定时任务 ID")
 
 
 _SKILL_REGISTRY: List[Any] = []
@@ -370,9 +370,8 @@ def _impl_get_skill(skill_name: str = "") -> str:
 get_skill = build_agent_tool(
     name="GetSkill",
     description=(
-        "获取技能的完整说明和执行方法。"
-        "在执行任务前，先调用此工具了解技能的功能、参数和使用方法。"
-        "返回内容包括：技能描述、使用说明、可用脚本、参考文档。"
+        "获取技能的完整说明和执行方法。[必填] skill_name: 技能名称，如 'aojiang-hydro'、'docx'。"
+        "返回内容包含：技能描述、使用说明、可用脚本（含完整路径）、参考文档。"
     ),
     args_schema=GetSkillInput,
     func=_impl_get_skill,
@@ -638,16 +637,11 @@ def _impl_exec_bash(command: str = "", workdir: str = "", timeout: int = 120, en
 exec_bash = build_agent_tool(
     name="Bash",
     description=(
-        "通过当前环境可用的 shell 执行命令。"
-        "**环境信息：**"
-        "- 执行环境：自动选择可用 shell（优先 powershell/pwsh，其次 bash/sh）"
-        "- 当前 shell：由工具自动检测，不要假设固定是 PowerShell"
-        "- Python 命令：使用 `python` 或 `python3`"
-        "- 路径格式：跟随当前运行环境；Windows 用 Windows 路径，容器/Linux 用 POSIX 路径"
-        "- 不要在 command 中再嵌套 `powershell -Command`、`pwsh -Command`、`bash -lc` 或 `sh -lc`"
-        "- 工作目录默认为当前会话输出目录，可通过 workdir 覆盖"
-        "- 默认超时 120 秒，可通过 timeout 调整"
-        "- 默认传入 SESSION_OUTPUT_DIR、SESSION_ID、PYTHONIOENCODING、MPLBACKEND 等环境变量"
+        "[必填] command: 要执行的 shell 命令。"
+        "不要在 command 中嵌套 powershell -Command、pwsh -Command、bash -lc 或 sh -lc。"
+        "[可选] workdir: 工作目录（绝对路径），默认当前会话输出目录。"
+        "[可选] timeout: 超时秒数，默认 120。[可选] env: 额外环境变量（JSON格式）。"
+        "自动选择可用 shell。Python 用 python，Node.js 用 node 或 npm。"
     ),
     args_schema=ExecBashInput,
     func=_impl_exec_bash,
@@ -837,22 +831,22 @@ def _get_retriever():
 
 class KnowledgeSearchInput(BaseModel):
     """知识检索的输入参数"""
-    query: str = Field(default="", description="检索查询文本")
-    top_k: int = Field(default=5, description="返回结果数量")
-    asset_kind: str = Field(default="", description="可选过滤：text_document / excel_asset / gis_asset / image_asset")
-    index_mode: str = Field(default="", description="可选过滤：content_chunk / file_summary")
-    folder_level_1: str = Field(default="", description="可选过滤：一级目录名")
-    folder_level_2: str = Field(default="", description="可选过滤：二级目录名")
-    folder_level_3: str = Field(default="", description="可选过滤：三级目录名")
-    filename: str = Field(default="", description="可选过滤：文件名")
+    query: str = Field(description="[必填] 检索查询文本")
+    top_k: int = Field(default=5, description="[可选] 返回结果数量，默认 5")
+    asset_kind: str = Field(default="", description="[可选] 过滤：text_document / excel_asset / gis_asset / image_asset")
+    index_mode: str = Field(default="", description="[可选] 过滤：content_chunk / file_summary")
+    folder_level_1: str = Field(default="", description="[可选] 过滤：一级目录名")
+    folder_level_2: str = Field(default="", description="[可选] 过滤：二级目录名")
+    folder_level_3: str = Field(default="", description="[可选] 过滤：三级目录名")
+    filename: str = Field(default="", description="[可选] 过滤：文件名")
 
 
 class AddKnowledgeInput(BaseModel):
     """添加知识的输入参数"""
-    content: str = Field(default="", description="文档内容（文本）")
-    file_path: str = Field(default="", description="文件路径（可选，与content二选一）")
-    doc_name: str = Field(default="", description="文档名称（可选）")
-    force_method: Optional[str] = Field(default=None, description="强制处理方式: 'context' 或 'vector'")
+    content: str = Field(default="", description="[二选一必填] 文档内容（文本），与 file_path 二选一")
+    file_path: str = Field(default="", description="[二选一必填] 文件路径（绝对路径），与 content 二选一")
+    doc_name: str = Field(default="", description="[可选] 文档名称")
+    force_method: Optional[str] = Field(default=None, description="[可选] 强制处理方式：'context' 或 'vector'")
 
 
 def _impl_knowledge_search(
@@ -953,8 +947,8 @@ def _impl_knowledge_search(
 knowledge_search = build_agent_tool(
     name="KnowledgeSearch",
     description=(
-        "从知识库中检索相关参考资料。"
-        "用于查找专业知识、历史案例、技术文档等。"
+        "从知识库中检索相关参考资料。[必填] query: 检索查询文本。"
+        "[可选] top_k/asset_kind/index_mode/folder_level_*/filename: 过滤条件。"
     ),
     args_schema=KnowledgeSearchInput,
     func=_impl_knowledge_search,
@@ -1060,18 +1054,18 @@ add_knowledge = build_agent_tool(
 
 class WebSearchInput(BaseModel):
     """网络搜索的输入参数"""
-    query: str = Field(default="", description="搜索关键词")
-    count: int = Field(default=10, description="返回结果数量 (1-50)")
-    freshness: str = Field(default="py", description="时间范围筛选: pd(24小时), pw(7天), pm(31天), py(365天), 或 YYYY-MM-DDtoYYYY-MM-DD")
-    search_types: str = Field(default="web", description="搜索类型: web, video, image (多个用逗号分隔)")
-    site: str = Field(default="", description="指定站点搜索，如 baidu.com")
+    query: str = Field(description="[必填] 搜索关键词")
+    count: int = Field(default=10, description="[可选] 返回结果数量 (1-50)，默认 10")
+    freshness: str = Field(default="py", description="[可选] 时间范围：pd(24h), pw(7d), pm(31d), py(365d), 或 YYYY-MM-DDtoYYYY-MM-DD")
+    search_types: str = Field(default="web", description="[可选] 搜索类型: web, video, image（逗号分隔）")
+    site: str = Field(default="", description="[可选] 指定站点搜索，如 baidu.com")
 
 
 class FetchWebpageInput(BaseModel):
     """抓取网页正文的输入参数"""
-    url: str = Field(default="", description="要抓取的网页 URL")
-    max_chars: int = Field(default=12000, description="返回正文的最大字符数")
-    include_links: bool = Field(default=False, description="是否附带页面中的部分链接")
+    url: str = Field(description="[必填] 要抓取的网页 URL，如 https://example.com")
+    max_chars: int = Field(default=12000, description="[可选] 返回正文的最大字符数，默认 12000")
+    include_links: bool = Field(default=False, description="[可选] 是否附带页面中的部分链接")
 
 
 def _impl_web_search(
@@ -1257,9 +1251,7 @@ def _impl_web_search(
 web_search = build_agent_tool(
     name="WebSearch",
     description=(
-        "网络搜索工具，用于获取实时网络信息。"
-        "当用户需要搜索最新新闻、实时信息、网络资料时使用此工具。"
-        "支持时间范围筛选和站点限定搜索。"
+        "网络搜索。[必填] query: 搜索关键词。[可选] count/freshness/search_types/site: 过滤条件。"
     ),
     args_schema=WebSearchInput,
     func=_impl_web_search,
@@ -1394,9 +1386,7 @@ def _impl_fetch_webpage(
 fetch_webpage = build_agent_tool(
     name="WebFetch",
     description=(
-        "抓取指定网页 URL 的正文内容。"
-        "适用于先通过 web_search 找到候选链接，再进入具体网页抽取标题、正文和部分链接。"
-        "当搜索摘要不够详细时，优先使用此工具读取目标页面。"
+        "抓取网页正文。[必填] url: 网页 URL，如 https://example.com。[可选] max_chars: 最大字符数。[可选] include_links: 是否附带链接。"
     ),
     args_schema=FetchWebpageInput,
     func=_impl_fetch_webpage,
@@ -1734,8 +1724,8 @@ def _impl_update_project_instructions(
 update_project_instructions = build_agent_tool(
     name="UpdateProjectInstructions",
     description=(
-        "修改项目级或全局 AGENTS.md 指令文件，用于持久化用户偏好和规则。"
-        "写入前会自动备份原文件。此工具影响所有后续对话，请务必先向用户确认。"
+        "修改项目级或全局 AGENTS.md 指令文件。[必填] action: 操作类型 append/replace_section/remove_section。[必填] content: 要写入的内容。"
+        "[可选] section_title: 章节标题。[可选] scope: 范围 project 或 global。写入前会自动备份，请先向用户确认。"
     ),
     args_schema=UpdateProjectInstructionsInput,
     func=_impl_update_project_instructions,
@@ -1795,9 +1785,8 @@ def _impl_create_scheduled_task(
 create_scheduled_task = build_agent_tool(
     name="CreateScheduledTask",
     description=(
-        "创建后台定时任务。当用户要求在未来某个时间、每天、定时、自动执行某项任务时使用。"
-        "command 只能填写未来真正要执行的业务任务，不要包含'每天/定时/明天几点'等调度表达；"
-        "每日任务使用 repeat=daily 和 run_time=HH:MM，一次性任务使用 repeat=none 和 scheduled_at。"
+        "创建后台定时任务。[必填] command: 未来执行的业务任务描述，不要包含定时表达。"
+        "每日任务用 repeat=daily + run_time=HH:MM，一次性任务用 repeat=none + scheduled_at。[可选] timezone/enabled。"
     ),
     args_schema=CreateScheduledTaskInput,
     func=_impl_create_scheduled_task,
@@ -1870,7 +1859,7 @@ def _impl_cancel_scheduled_task(task_id: str = "") -> str:
 
 cancel_scheduled_task = build_agent_tool(
     name="CancelScheduledTask",
-    description="取消或停用一个后台定时任务。用户要求取消、停用定时任务时使用。",
+    description="取消定时任务。[必填] task_id: 要取消的任务 ID，通过 ListScheduledTasks 获取。",
     args_schema=CancelScheduledTaskInput,
     func=_impl_cancel_scheduled_task,
     is_readonly=False,

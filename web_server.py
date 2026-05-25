@@ -1441,15 +1441,8 @@ def chat():
         
         agent = get_or_create_agent(session_id)
         
-        session_output_dir = get_session_output_dir(session_id)
-        session_upload_dir = get_session_upload_dir(session_id)
-        
-        file_context = "\n\n[会话环境信息]\n"
-        file_context += f"输出目录: {session_output_dir}\n"
-        file_context += f"上传目录: {session_upload_dir}\n"
-        file_context += "生成文件时，请使用输出目录路径。\n"
-        
         session_file_map = _get_session_files_map(session_id)
+        file_context = ""
         if uploaded_files and session_file_map:
             available_files = []
             for file_id in uploaded_files:
@@ -1458,7 +1451,7 @@ def chat():
                     available_files.append(file_info)
             
             if available_files:
-                file_context += "\n[已上传的文件]\n"
+                file_context = "\n[已上传的文件]\n"
                 for f in available_files:
                     file_context += f"- 文件名: {f['name']}, 路径: {f['path']}\n"
                 file_context += "用户提到'已上传的文件'或'上传的文件'时，请使用上述路径。\n"

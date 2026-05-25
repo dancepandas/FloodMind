@@ -359,6 +359,52 @@
   animation-delay: 0.4s;
 }
 
+/* ═══ SubAgent Expand/Collapse ═══ */
+
+@keyframes sub-agent-expand {
+  from {
+    max-height: 0;
+    opacity: 0;
+    transform: translateY(-6px);
+  }
+  to {
+    max-height: 600px;
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes sub-agent-collapse {
+  from {
+    max-height: 600px;
+    opacity: 1;
+  }
+  to {
+    max-height: 0;
+    opacity: 0;
+    transform: translateY(-6px);
+  }
+}
+
+.animate-sub-agent-expand {
+  animation: sub-agent-expand 0.35s cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+
+.animate-sub-agent-collapse {
+  animation: sub-agent-collapse 0.25s cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+
+/* ═══ Depth Gauge ═══ */
+
+@keyframes depth-line-fill {
+  from { height: 0; }
+  to { height: 100%; }
+}
+
+.animate-depth-line-fill {
+  animation: depth-line-fill 0.6s cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+
 /* ═══ Stagger Children ═══ */
 
 .stagger-children > * {
@@ -569,4 +615,286 @@
   --gradient-ocean-teal: linear-gradient(135deg, var(--ocean-400), var(--teal-400));
   --gradient-subtle: linear-gradient(135deg, var(--ocean-50), var(--teal-50));
   --gradient-card: linear-gradient(180deg, rgba(16,22,32,0.8) 0%, rgba(16,22,32,0.5) 100%);
+}
+
+/* ═══════════════════════════════════════════════
+   Uiverse.io Components — Adapted to Hydro Theme
+   ═══════════════════════════════════════════════ */
+
+/* ─── Pulse Dots Loader (adamgiebl) → Thinking/Streaming ─── */
+
+.codex-pulse-dots {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  height: 16px;
+}
+
+.codex-pulse-dots .dot {
+  height: 6px;
+  width: 6px;
+  border-radius: 50%;
+  background-color: var(--ocean-300);
+  animation: codex-pulse 1.5s infinite ease-in-out;
+}
+
+.codex-pulse-dots .dot:nth-child(1) { animation-delay: -0.3s; }
+.codex-pulse-dots .dot:nth-child(2) { animation-delay: -0.1s; }
+.codex-pulse-dots .dot:nth-child(3) { animation-delay: 0.1s; }
+
+.codex-pulse-dots.teal .dot { background-color: var(--teal-300); }
+
+@keyframes codex-pulse {
+  0% {
+    transform: scale(0.8);
+    background-color: var(--ocean-200);
+    box-shadow: 0 0 0 0 rgba(143, 196, 232, 0.5);
+  }
+  50% {
+    transform: scale(1.3);
+    background-color: var(--ocean-400);
+    box-shadow: 0 0 0 6px rgba(143, 196, 232, 0);
+  }
+  100% {
+    transform: scale(0.8);
+    background-color: var(--ocean-200);
+    box-shadow: 0 0 0 0 rgba(143, 196, 232, 0.5);
+  }
+}
+
+.codex-pulse-dots.teal .dot {
+  animation-name: codex-pulse-teal;
+}
+
+@keyframes codex-pulse-teal {
+  0% {
+    transform: scale(0.8);
+    background-color: var(--teal-200);
+    box-shadow: 0 0 0 0 rgba(167, 243, 208, 0.5);
+  }
+  50% {
+    transform: scale(1.3);
+    background-color: var(--teal-400);
+    box-shadow: 0 0 0 6px rgba(167, 243, 208, 0);
+  }
+  100% {
+    transform: scale(0.8);
+    background-color: var(--teal-200);
+    box-shadow: 0 0 0 0 rgba(167, 243, 208, 0.5);
+  }
+}
+
+/* ─── Code Editor Card (Yaya12085) → Tool Output ─── */
+
+.codex-tool-output {
+  max-width: 100%;
+  background-color: var(--ocean-900);
+  box-shadow: 0 2px 12px rgba(15, 31, 56, 0.3);
+  border-radius: 8px;
+  padding: 2px;
+  overflow: hidden;
+}
+
+.codex-tool-output .header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin: 6px 10px;
+}
+
+.codex-tool-output .title {
+  font-family: var(--font-mono);
+  font-weight: 700;
+  font-size: 11px;
+  letter-spacing: 0.5px;
+  color: var(--ocean-300);
+}
+
+.codex-tool-output .editor-content {
+  margin: 0 10px 8px;
+  color: var(--ocean-200);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  line-height: 1.6;
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+
+.codex-tool-output .color-0 { color: var(--teal-400); }
+.codex-tool-output .color-1 { color: var(--ocean-300); }
+.codex-tool-output .color-2 { color: var(--amber-400); }
+
+/* ─── Three-body Loader (dovatgabriel) → SubAgent ─── */
+
+.codex-subagent-loader {
+  --uib-size: 20px;
+  --uib-speed: 0.8s;
+  --uib-color: var(--ocean-400);
+  position: relative;
+  display: inline-block;
+  height: var(--uib-size);
+  width: var(--uib-size);
+  animation: three-body-spin calc(var(--uib-speed) * 2.5) infinite linear;
+}
+
+.codex-subagent-loader .dot {
+  position: absolute;
+  height: 100%;
+  width: 30%;
+}
+
+.codex-subagent-loader .dot::after {
+  content: '';
+  position: absolute;
+  height: 0%;
+  width: 100%;
+  padding-bottom: 100%;
+  background-color: var(--uib-color);
+  border-radius: 50%;
+}
+
+.codex-subagent-loader .dot:nth-child(1) {
+  bottom: 5%;
+  left: 0;
+  transform: rotate(60deg);
+  transform-origin: 50% 85%;
+}
+
+.codex-subagent-loader .dot:nth-child(1)::after {
+  bottom: 0;
+  left: 0;
+  animation: three-body-wobble1 var(--uib-speed) infinite ease-in-out;
+  animation-delay: calc(var(--uib-speed) * -0.3);
+}
+
+.codex-subagent-loader .dot:nth-child(2) {
+  bottom: 5%;
+  right: 0;
+  transform: rotate(-60deg);
+  transform-origin: 50% 85%;
+}
+
+.codex-subagent-loader .dot:nth-child(2)::after {
+  bottom: 0;
+  left: 0;
+  animation: three-body-wobble1 var(--uib-speed) infinite calc(var(--uib-speed) * -0.15) ease-in-out;
+}
+
+.codex-subagent-loader .dot:nth-child(3) {
+  bottom: -5%;
+  left: 0;
+  transform: translateX(116.666%);
+}
+
+.codex-subagent-loader .dot:nth-child(3)::after {
+  top: 0;
+  left: 0;
+  animation: three-body-wobble2 var(--uib-speed) infinite ease-in-out;
+}
+
+@keyframes three-body-spin {
+  0% { transform: rotate(0deg); }
+  100% { transform: rotate(360deg); }
+}
+
+@keyframes three-body-wobble1 {
+  0%, 100% { transform: translateY(0%) scale(1); opacity: 1; }
+  50% { transform: translateY(-66%) scale(0.65); opacity: 0.8; }
+}
+
+@keyframes three-body-wobble2 {
+  0%, 100% { transform: translateY(0%) scale(1); opacity: 1; }
+  50% { transform: translateY(66%) scale(0.65); opacity: 0.8; }
+}
+
+/* ─── Tooltip (BishalSaini) → Step Hover ─── */
+
+.codex-step-tooltip {
+  position: relative;
+  display: inline-flex;
+}
+
+.codex-step-tooltip .tooltip-content {
+  position: absolute;
+  bottom: calc(100% + 6px);
+  left: 50%;
+  transform: translateX(-50%);
+  visibility: hidden;
+  opacity: 0;
+  width: max-content;
+  max-width: 200px;
+  background: linear-gradient(135deg, var(--ocean-500) 0%, var(--ocean-400) 100%);
+  color: #fff;
+  text-align: center;
+  padding: 6px 10px;
+  font-size: 10px;
+  line-height: 1.4;
+  border-radius: 8px;
+  transition: all 0.25s ease;
+  z-index: 50;
+  pointer-events: none;
+  clip-path: polygon(0 0, 100% 0, 100% 85%, 50% 100%, 0 85%);
+}
+
+.codex-step-tooltip:hover .tooltip-content {
+  visibility: visible;
+  opacity: 1;
+  transform: translateX(-50%) translateY(-4px);
+}
+
+/* ─── Checkbox Wipe (elijahgummer) → Step Complete ─── */
+
+.codex-step-check {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  position: relative;
+  cursor: default;
+  user-select: none;
+  width: 18px;
+  height: 18px;
+  border: 2px solid var(--teal-300);
+  border-radius: 6px;
+  overflow: hidden;
+  flex-shrink: 0;
+}
+
+.codex-step-check .checkmark {
+  position: absolute;
+  top: 0;
+  left: 0;
+  height: 100%;
+  width: 100%;
+  background-color: var(--teal-500);
+  border-bottom: 1px solid var(--teal-500);
+  box-shadow: 0 0 1px var(--teal-100), inset 0 -1.5px 2px var(--teal-300), inset 0 1.5px 2px rgba(0, 0, 0, 0.2);
+  border-radius: 4px;
+  transition: transform 0.3s ease-in-out;
+}
+
+.codex-step-check.completed .checkmark {
+  transform: translateY(0);
+  animation: check-wipe-down 0.4s ease-in-out forwards;
+}
+
+.codex-step-check.pending .checkmark {
+  transform: translateY(18px);
+}
+
+.codex-step-check .checkmark::before {
+  content: "";
+  position: absolute;
+  left: 5px;
+  top: 2px;
+  width: 3px;
+  height: 7px;
+  border: solid white;
+  border-width: 0 1.5px 1.5px 0;
+  transform: rotate(45deg);
+  box-shadow: 0 2px 1px rgba(0, 0, 0, 0.2);
+}
+
+@keyframes check-wipe-down {
+  0% { transform: translateY(-18px); }
+  100% { transform: translateY(0); }
 }

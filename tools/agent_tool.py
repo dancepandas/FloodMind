@@ -332,10 +332,10 @@ def check_path_permission(path_str: str, access: str = "read") -> ValidationResu
 
 class UpdateProjectInstructionsInput(BaseModel):
     """修改项目指令的输入参数"""
-    action: str = Field(default="append", description="操作类型: append, replace_section, remove_section")
-    content: str = Field(default="", description="要添加或替换的内容")
-    section_title: str = Field(default="", description="章节标题（replace_section/remove_section 必填）")
-    scope: str = Field(default="project", description="范围: project 或 global")
+    action: str = Field(description="[必填] 操作类型: append, replace_section, remove_section")
+    content: str = Field(description="[必填] 要添加或替换的文本内容")
+    section_title: str = Field(default="", description="[可选] 章节标题（replace_section/remove_section 必填）")
+    scope: str = Field(default="project", description="[可选] 范围: project 或 global，默认 project")
 
 
 # ---------------------------------------------------------------------------

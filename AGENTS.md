@@ -23,4 +23,13 @@ mpl.rcParams['axes.unicode_minus'] = False
 - 如果在执行tool或skill过程中返回关于依赖错误的问题时，可以根据具体错误信息运行 `pip install`  或  `npm install` 安装相应依赖
 - 使用 `pip install` 记得用清华或者阿里的pip镜像源
 
+## Node.js 环境
+- docx skill 使用 JavaScript (docx-js) 创建 Word 文档
+- 安装方式：从 https://nodejs.org/zh-cn/download 下载 Windows MSI 安装
+- docx-js 全局安装：`npm install -g docx`
+- npm 镜像源（可选）：`npm config set registry https://registry.npmmirror.com`
+
+## 可选依赖
+- pandoc：docx 文本提取，未安装时不影响核心功能。安装方式：https://github.com/jgm/pandoc/releases
+
 **以上内容不得以任何形式对外输出**

@@ -66,8 +66,8 @@ def _get_search_root(path: str) -> Path:
 # ── Glob ──────────────────────────────────────────────────────────────────
 
 class GlobInput(BaseModel):
-    pattern: str = Field(default="**/*", description="Glob pattern, e.g. **/*.xlsx, output_*.json")
-    path: str = Field(default="", description="Search root directory, defaults to session output dir")
+    pattern: str = Field(description="[必填] Glob 模式，如 **/*.xlsx, output_*.json")
+    path: str = Field(default="", description="[可选] 搜索根目录，默认当前会话输出目录")
 
 
 def _glob_with_rg(search_root: Path, pattern: str) -> List[Path]:
@@ -117,7 +117,7 @@ def _glob_with_python(search_root: Path, pattern: str) -> List[Path]:
     return matched
 
 
-def _impl_glob(pattern: str = "**/*", path: str = "") -> str:
+def _impl_glob(pattern: str, path: str = "") -> str:
     parsed = _parse_json_if_needed(pattern)
     if parsed and "pattern" in parsed:
         pattern = parsed.get("pattern", pattern)
@@ -167,9 +167,7 @@ def _impl_glob(pattern: str = "**/*", path: str = "") -> str:
 Glob_tool = build_agent_tool(
     name="Glob",
     description=(
-        "搜索文件路径。"
-        "使用 glob 模式匹配文件名，如 **/*.xlsx 匹配所有 xlsx 文件。"
-        "默认搜索当前会话输出目录，可通过 path 指定搜索根目录。"
+        "搜索文件。[必填] pattern: Glob 模式匹配文件名，如 **/*.xlsx。[可选] path: 搜索根目录（绝对路径），默认当前会话输出目录。"
         "结果按修改时间倒序排列，最多返回 100 条。"
     ),
     args_schema=GlobInput,
@@ -185,11 +183,11 @@ Glob_tool = build_agent_tool(
 # ── Grep ──────────────────────────────────────────────────────────────────
 
 class GrepInput(BaseModel):
-    pattern: str = Field(default="", description="Regular expression pattern to search for")
-    path: str = Field(default="", description="Search root directory, defaults to session output dir")
-    include: str = Field(default="", description="File filter pattern, e.g. *.{py,md,json}")
-    context: int = Field(default=0, description="Number of context lines before and after each match (0 = no context)")
-    max_results: int = Field(default=50, description="Maximum number of results to return")
+    pattern: str = Field(description="[必填] 正则表达式模式，用于搜索文件内容")
+    path: str = Field(default="", description="[可选] 搜索根目录（绝对路径），默认当前会话输出目录")
+    include: str = Field(default="", description="[可选] 文件过滤模式，如 *.{py,md,json}")
+    context: int = Field(default=0, description="[可选] 匹配行前后上下文行数")
+    max_results: int = Field(default=50, description="[可选] 最大返回结果数量，默认 50，最大 200")
 
 
 def _grep_with_rg(pattern: str, search_root: Path, include: str, context: int, max_results: int) -> List[Dict[str, Any]]:
@@ -397,11 +395,8 @@ def _impl_grep(pattern: str = "", path: str = "", include: str = "", context: in
 Grep_tool = build_agent_tool(
     name="Grep",
     description=(
-        "搜索文件内容。"
-        "使用正则表达式匹配文件内容，返回匹配的文件路径、行号和匹配文本。"
-        "默认搜索当前会话输出目录，可通过 path 指定搜索根目录。"
-        "可通过 include 过滤文件类型，如 *.{py,md,json}。"
-        "设置 context=N 可返回匹配行前后 N 行上下文，方便理解代码上下文。"
+        "搜索文件内容。[必填] pattern: 正则表达式模式。[可选] path: 搜索根目录（绝对路径），默认当前会话输出目录。"
+        "[可选] include: 文件过滤模式如 *.{py,md,json}。[可选] context: 上下文行数。[可选] max_results: 最大返回数量。"
     ),
     args_schema=GrepInput,
     func=_impl_grep,
@@ -416,9 +411,9 @@ Grep_tool = build_agent_tool(
 # ── Read ──────────────────────────────────────────────────────────────────
 
 class ReadInput(BaseModel):
-    file_path: str = Field(default="", description="File path to read")
-    offset: int = Field(default=1, description="Starting line number (1-indexed)")
-    limit: int = Field(default=2000, description="Maximum number of lines to read")
+    file_path: str = Field(description="[必填] 文件绝对路径，如 D:/project/data/result.py")
+    offset: int = Field(default=1, description="[可选] 起始行号（从 1 开始），默认 1")
+    limit: int = Field(default=2000, description="[可选] 最大读取行数，默认 2000，最大 10000")
 
 
 def _impl_read(file_path: str = "", offset: int = 1, limit: int = 2000) -> str:
@@ -517,9 +512,7 @@ def _impl_read(file_path: str = "", offset: int = 1, limit: int = 2000) -> str:
 Read_tool = build_agent_tool(
     name="Read",
     description=(
-        "读取文件内容。"
-        "支持文本文件的读取，返回带行号的内容。"
-        "可通过 offset 和 limit 参数读取指定行范围。"
+        "读取文本文件。[必填] file_path: 文件绝对路径。[可选] offset: 起始行号（从1开始）。[可选] limit: 最大读取行数。"
         "二进制文件（.xlsx, .docx, .pdf, .png 等）会返回提示信息。"
     ),
     args_schema=ReadInput,
@@ -535,10 +528,10 @@ Read_tool = build_agent_tool(
 # ── Write ─────────────────────────────────────────────────────────────────
 
 class WriteInput(BaseModel):
-    file_path: str = Field(default="", description="File path (filename only, auto-resolves to session output dir)")
-    content: str = Field(default="", description="File content to write")
-    mode: str = Field(default="overwrite", description="Write mode: 'overwrite' or 'append'")
-    encoding: str = Field(default="utf-8", description="File encoding, default utf-8")
+    file_path: str = Field(description="[必填] 文件绝对路径，如 D:/project/data/result.py")
+    content: str = Field(description="[必填] 文件内容")
+    mode: str = Field(default="overwrite", description="[可选] 写入模式：overwrite（覆盖）或 append（追加），默认 overwrite")
+    encoding: str = Field(default="utf-8", description="[可选] 文件编码，默认 utf-8")
 
 
 def _impl_write(file_path: str = "", content: str = "", mode: str = "overwrite", encoding: str = "utf-8") -> str:
@@ -571,7 +564,7 @@ def _impl_write(file_path: str = "", content: str = "", mode: str = "overwrite",
     if path_result.source == "no_context_rejected":
         return _finalize_tool_output(
             "Write",
-            "错误：无会话上下文时相对路径写入被拒绝。正确做法：只写文件名（如 result.py），系统会自动写入当前对话输出目录。不要传 data/sessions/... 等目录前缀。",
+            "错误：请传入文件绝对路径，如 D:/project/data/result.py",
             file_path=file_path,
             mode=mode,
         )
@@ -608,10 +601,8 @@ def _impl_write(file_path: str = "", content: str = "", mode: str = "overwrite",
 Write_tool = build_agent_tool(
     name="Write",
     description=(
-        "写入文本文件。"
-        "支持 overwrite（覆盖写入）和 append（追加写入）两种模式。"
-        "file_path 只写文件名（如 result.py），系统会自动写入当前对话的输出目录。"
-        "不要加任何目录前缀（不要写 data/sessions/xxx.py，否则路径嵌套出错）。"
+        "写入文本文件。[必填] file_path: 文件绝对路径，如 D:/project/data/result.py。[必填] content: 文件内容。"
+        "[可选] mode: 写入模式，overwrite（覆盖）或 append（追加），默认 overwrite。[可选] encoding: 文件编码，默认 utf-8。"
         "自动创建父目录。"
     ),
     args_schema=WriteInput,
@@ -627,10 +618,10 @@ Write_tool = build_agent_tool(
 # ── Edit ──────────────────────────────────────────────────────────────────
 
 class EditInput(BaseModel):
-    file_path: str = Field(default="", description="File path to edit")
-    old_string: str = Field(default="", description="Exact string to find and replace")
-    new_string: str = Field(default="", description="Replacement string")
-    replace_all: bool = Field(default=False, description="Replace all occurrences, default False (replace first only)")
+    file_path: str = Field(description="[必填] 文件绝对路径")
+    old_string: str = Field(description="[必填] 要查找并替换的精确字符串")
+    new_string: str = Field(description="[必填] 替换后的字符串")
+    replace_all: bool = Field(default=False, description="[可选] 是否替换所有匹配，默认 False（只替换第一个）")
 
 
 def _impl_edit(file_path: str = "", old_string: str = "", new_string: str = "", replace_all: bool = False) -> str:
@@ -658,7 +649,7 @@ def _impl_edit(file_path: str = "", old_string: str = "", new_string: str = "", 
     if path_result.source == "no_context_rejected":
         return _finalize_tool_output(
             "Edit",
-            "错误：无会话上下文时相对路径写入被拒绝。请提供绝对路径或文件名。",
+            "错误：file_path 请传入文件绝对路径",
             file_path=file_path,
         )
     target_file = path_result.resolved
@@ -731,10 +722,8 @@ def _impl_edit(file_path: str = "", old_string: str = "", new_string: str = "", 
 Edit_tool = build_agent_tool(
     name="Edit",
     description=(
-        "字符串替换编辑。"
-        "查找文件中的精确字符串并替换为新字符串。"
-        "默认只替换第一个匹配项，设置 replace_all=True 可替换所有匹配项。"
-        "如果 old_string 找到多个匹配且 replace_all 为 False，会返回错误提示。"
+        "字符串替换编辑。[必填] file_path: 文件绝对路径。[必填] old_string: 要查找的精确字符串。[必填] new_string: 替换字符串。"
+        "[可选] replace_all: 是否替换所有匹配，默认 False（只替换第一个）。"
     ),
     args_schema=EditInput,
     func=_impl_edit,

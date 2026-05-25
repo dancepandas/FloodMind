@@ -15,6 +15,8 @@ declare global {
   const Badge: typeof import('lucide-react').Badge
   const BarChart3: typeof import('lucide-react').BarChart3
   const Bot: typeof import('lucide-react').Bot
+  const Box: typeof import('lucide-react').Box
+  const Braces: typeof import('lucide-react').Braces
   const Brain: typeof import('lucide-react').Brain
   const Calendar: typeof import('lucide-react').Calendar
   const CalendarClock: typeof import('lucide-react').CalendarClock
@@ -58,6 +60,7 @@ declare global {
   const Layers: typeof import('lucide-react').Layers
   const List: typeof import('lucide-react').List
   const ListTree: typeof import('lucide-react').ListTree
+  const Loader: typeof import('lucide-react').Loader
   const Loader2: typeof import('lucide-react').Loader2
   const Loader2Icon: typeof import('lucide-react').Loader2Icon
   const MessageSquare: typeof import('lucide-react').MessageSquare

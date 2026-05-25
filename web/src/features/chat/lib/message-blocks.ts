@@ -312,6 +312,9 @@ export function finalizeThoughtBlocks(message: ChatMessage): ChatMessage {
   const lastAnswer = [...message.blocks].reverse().find((block) => block.type === "answer" && block.content.trim());
   const lastAnswerId = lastAnswer?.id;
   const blocks = message.blocks.map((block) => {
+    if (block.type === "error") {
+      return { ...block, isArchived: false };
+    }
     if (block.type === "thought") {
       return { ...block, isCollapsed: true, isStreaming: false, isArchived: true };
     }

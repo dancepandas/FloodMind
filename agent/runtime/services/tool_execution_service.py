@@ -18,6 +18,7 @@ ToolExecutionService — 统一工具执行管线
 - ToolFeedback 统一由 service 生成
 """
 
+import json
 import logging
 import threading
 from typing import Any, Callable, Dict, List, Optional
@@ -87,10 +88,12 @@ class ToolExecutionService:
 
         validation = tool.validate_input(call.arguments)
         if hasattr(validation, "valid") and not validation.valid:
+            args_preview = json.dumps(call.arguments, ensure_ascii=False)[:500] if call.arguments else "EMPTY"
+            reason = getattr(validation, "reason", "")
             feedback = ToolFeedback(
                 error_type="输入校验失败",
                 error_code="INPUT_VALIDATION_FAILED",
-                what_went_wrong=getattr(validation, "reason", ""),
+                what_went_wrong=f"工具 {tool.name} 输入校验失败：{reason}。收到参数：{args_preview}",
                 correct_usage="检查参数是否完整、格式是否正确，参考工具描述中的参数说明。",
                 retryable=True,
                 do_not_retry_same_call=False,
@@ -104,11 +107,16 @@ class ToolExecutionService:
 
         validated_args = self._validate_schema(tool, call.arguments)
         if validated_args is None:
+            args_preview = json.dumps(call.arguments, ensure_ascii=False)[:500] if call.arguments else "EMPTY"
+            raw_hint = ""
+            if hasattr(call, "_raw_arguments") and call._raw_arguments:
+                ends_with_brace = call._raw_arguments.endswith("}")
+                raw_hint = " 原始参数(JSON解析失败,长度=%d,末尾是'}'=%s): %s..." % (len(call._raw_arguments), ends_with_brace, call._raw_arguments[:200])
             feedback = ToolFeedback(
                 error_type="输入校验失败",
                 error_code="INPUT_VALIDATION_FAILED",
-                what_went_wrong=f"工具 {tool.name} 参数校验失败：必填参数缺失或类型不匹配",
-                correct_usage="检查参数是否完整、格式是否正确，参考工具描述中的参数说明。",
+                what_went_wrong=f"工具 {tool.name} 参数校验失败。收到参数：{args_preview}{raw_hint}",
+                correct_usage="检查参数名是否匹配、值类型是否正确。必填参数：参考工具描述中的 [必填] 标记。",
                 retryable=True,
                 do_not_retry_same_call=False,
             )
@@ -130,10 +138,17 @@ class ToolExecutionService:
             )
         except Exception as exc:
             logger.error("ToolExecutionService tool %s execution error: %s", call.name, exc, exc_info=True)
+            feedback = ToolFeedback(
+                error_type="执行失败",
+                error_code="TOOL_EXECUTION_ERROR",
+                what_went_wrong=str(exc),
+                correct_usage="检查参数是否正确，或查看工具文档。",
+                retryable=True,
+            )
             return ToolResult(
                 tool_call_id=call.id,
                 name=call.name,
-                content=f"工具执行失败: {exc}",
+                content=feedback.to_output_string(),
                 status="error",
             )
 
@@ -195,7 +210,18 @@ class ToolExecutionService:
             validated = schema.model_validate(arguments)
             return validated.model_dump()
         except ValidationError as e:
-            logger.warning("ToolExecutionService schema validation failed for %s: %s", tool.name, e)
+            missing_fields = [str(err["loc"][0]) for err in e.errors() if err["type"] == "missing"]
+            type_errors = [f"{'.'.join(str(x) for x in err['loc'])}: 期望={err.get('expected','?')}, 收到={err.get('received','?')}" for err in e.errors() if err["type"] != "missing"]
+            extra_fields = ['.'.join(str(x) for x in err['loc']) for err in e.errors() if err["type"] == "extra_forbidden"]
+            details = []
+            if missing_fields:
+                details.append(f"缺少字段: {missing_fields}")
+            if type_errors:
+                details.append(f"类型/格式错误: {type_errors}")
+            if extra_fields:
+                details.append(f"多余字段: {extra_fields}")
+            args_preview = json.dumps(arguments, ensure_ascii=False)[:500] if arguments else "EMPTY"
+            logger.warning("ToolExecutionService schema validation failed for %s: %s. Details: %s. Received: %s", tool.name, e, "; ".join(details), args_preview)
             return None
         except Exception as e:
             logger.warning("ToolExecutionService schema validation error for %s: %s", tool.name, e)

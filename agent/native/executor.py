@@ -133,7 +133,11 @@ class NativeAgentExecutor:
             logger.info("[EXEC] LLM stream done, iteration=%d, answer_len=%d, tool_calls=%d", iteration, len(current_answer), len(tool_calls))
             if tool_calls:
                 for tc in tool_calls:
-                    logger.info("[EXEC] tool_call: name=%s, id=%s, args_len=%d", tc.name, tc.id, len(json.dumps(tc.arguments, ensure_ascii=False)) if tc.arguments else 0)
+                    raw_note = ""
+                    if hasattr(tc, "_raw_arguments") and tc._raw_arguments:
+                        ends_with_brace = tc._raw_arguments.endswith("}")
+                        raw_note = " [RAW_PARSE_FAILED length=%d, ends_with_}=%s]" % (len(tc._raw_arguments), ends_with_brace)
+                    logger.info("[EXEC] tool_call: name=%s, id=%s, args=%s%s", tc.name, tc.id, json.dumps(tc.arguments, ensure_ascii=False)[:1000] if tc.arguments else "NONE", raw_note)
 
             if not tool_calls:
                 final_answer = current_answer
