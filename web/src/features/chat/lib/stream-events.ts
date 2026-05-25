@@ -8,6 +8,7 @@ import {
   updateActionBlockStatus,
 } from "@/features/chat/lib/message-blocks";
 import { createLogger } from "@/lib/logger";
+import { uuid } from "@/lib/utils";
 import type { ChatMessage, GeneratedArtifact, ReferenceLink, ToolActivity, WorkflowPlan } from "@/types/app";
 
 const log = createLogger("Stream");
@@ -70,6 +71,40 @@ interface StreamHandlers {
 export function applyStreamEvent(data: Record<string, any>, handlers: StreamHandlers) {
   const { updateAssistant, pushToolActivity, setWorkflow } = handlers;
   const eventType = data.type || "(no type)";
+
+  if (data.type === "error") {
+    const errorMsg = data.content || "处理请求时出错";
+    log.info(`[error] content="${errorMsg}"`);
+    updateAssistant((message) => ({
+      ...message,
+      blocks: [
+        ...finalizeThoughtBlocks(message).blocks,
+        {
+          id: uuid(),
+          type: "error" as const,
+          content: errorMsg,
+        },
+      ],
+    }));
+    return;
+  }
+
+  if (data.type === "llm_token_error") {
+    const errorMsg = data.content || "LLM模型服务账号Token余额不足";
+    log.info(`[llm_token_error] content="${errorMsg}"`);
+    updateAssistant((message) => ({
+      ...message,
+      blocks: [
+        ...finalizeThoughtBlocks(message).blocks,
+        {
+          id: uuid(),
+          type: "error" as const,
+          content: errorMsg,
+        },
+      ],
+    }));
+    return;
+  }
 
   if (data.type === "heartbeat") {
     return;
@@ -161,10 +196,14 @@ if (data.type === "action_start" || data.type === "tool_status") {
     const status = data.status === "error" ? "error" : "running";
     const toolName = data.tool_name || "tool";
     const callId = data.call_id || "";
+    const isSubAgent = toolName === "SubAgent" || toolName === "ParallelSubAgent" || toolName === "ParallelTask";
     log.info(`[${eventType}] tool="${toolName}" call_id="${callId}" status="${status}"`);
-    pushToolActivity(toolName, data.content || "", status);
-    const delegation = data.delegation || undefined;
-    updateAssistant((message) => appendActionBlock(message, toolName, status, data.content || "", delegation, callId));
+    pushToolActivity(toolName, isSubAgent ? "" : (data.content || ""), status);
+    // For SubAgent, use a simplified delegation without detailed task description
+    const delegation = isSubAgent
+      ? { task: "", label: "SubAgent", skill_name: "" }
+      : data.delegation || undefined;
+    updateAssistant((message) => appendActionBlock(message, toolName, status, isSubAgent ? "" : (data.content || ""), delegation, callId));
     return;
   }
 
@@ -201,14 +240,20 @@ if (data.type === "action_start" || data.type === "tool_status") {
   }
 
   if (data.type === "action_end" || data.type === "tool_result") {
-    const contentPreview = (data.content || "").slice(0, 120);
     const toolName = data.tool_name || "tool";
     const callId = data.call_id || "";
     const rawContent = data.content || "";
+    const isSubAgent = toolName === "SubAgent" || toolName === "ParallelSubAgent" || toolName === "ParallelTask";
+    // SubAgent only shows the tool name label, no internal content
+    const displayContent = isSubAgent ? "" : rawContent;
+    const contentPreview = displayContent.slice(0, 120);
     log.info(`[${eventType}] tool="${toolName}" call_id="${callId}" content=${contentPreview.length > 0 ? `"${contentPreview}…"` : "(empty)"}`);
-    pushToolActivity(toolName, rawContent, "done");
-    const delegation = data.delegation || undefined;
-    updateAssistant((message) => appendActionBlock(message, toolName, "done", rawContent, delegation, callId));
+    pushToolActivity(toolName, displayContent, "done");
+    // For SubAgent, use a simplified delegation label without summary
+    const delegation = isSubAgent
+      ? { task: "", label: "SubAgent", skill_name: "" }
+      : data.delegation || undefined;
+    updateAssistant((message) => appendActionBlock(message, toolName, "done", displayContent, delegation, callId));
 
     let refs: ReferenceLink[] | null = null;
     if (toolName === "knowledge_search") {

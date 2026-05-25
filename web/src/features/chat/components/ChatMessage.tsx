@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { ChevronDown, ChevronRight, User, Bot, FileText, AlertTriangle, CheckCircle2, Loader2, XCircle, Eye, Download, ZoomIn, ExternalLink, Layers, Wrench, ShieldAlert } from "lucide-react";
+import { ChevronDown, ChevronRight, User, FileText, AlertTriangle, Eye, Download, ZoomIn, ExternalLink, Layers, X, AlertCircle } from "lucide-react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import type { ChatMessage as ChatMessageModel, GeneratedArtifact, ReferenceLink, ActionDetail, MessageBlock } from "@/types/app";
@@ -29,27 +29,30 @@ function ThoughtBlock({ message, block, onToggleThought }: { message: ChatMessag
       <button
         type="button"
         onClick={() => onToggleThought(message.id, block.id)}
-        className="flex items-center gap-2 text-[10px] font-semibold tracking-wider transition-colors duration-200 px-1 py-1 rounded-md"
+        className="flex items-center gap-2 text-[10px] font-semibold tracking-wider transition-all duration-200 px-1.5 py-1 rounded-lg"
         style={{ color: 'var(--ocean-400)' }}
+        onMouseEnter={(e) => { e.currentTarget.style.background = 'var(--ocean-50)'; }}
+        onMouseLeave={(e) => { e.currentTarget.style.background = 'transparent'; }}
       >
         {block.isCollapsed ? <ChevronRight size={11} strokeWidth={2} /> : <ChevronDown size={11} strokeWidth={2} />}
         {block.isStreaming ? (
           <span className="relative flex items-center justify-center w-3.5 h-3.5">
             <SparkleIcon size={14} className="animate-star-spin-breathe" style={{ color: 'var(--ocean-500)' }} />
-            <span className="absolute inset-0 rounded-full animate-ping" style={{ background: 'var(--ocean-400)', opacity: 0.15 }} />
+            <span className="absolute inset-0 rounded-full animate-ping" style={{ background: 'var(--ocean-400)', opacity: 0.12 }} />
           </span>
         ) : (
-          <SparkleIcon size={11} style={{ color: 'var(--ocean-400)', opacity: 0.4 }} />
+          <SparkleIcon size={11} style={{ color: 'var(--ocean-400)', opacity: 0.35 }} />
         )}
         <span className="uppercase">{block.isStreaming ? "Thinking" : "Thought"}</span>
       </button>
       <div
-        className={`mt-1 ml-2.5 pl-3.5 pr-3 py-2.5 rounded-xl text-[11px] leading-relaxed transition-all duration-300 overflow-x-hidden overflow-y-auto ${block.isCollapsed ? "max-h-0 opacity-0 py-0 mt-0" : "max-h-36 opacity-100"}`}
+        className={`mt-1.5 ml-3 pl-4 pr-3 py-2.5 rounded-xl text-[11px] leading-relaxed transition-all duration-400 overflow-x-hidden overflow-y-auto ${block.isCollapsed ? "max-h-0 opacity-0 py-0 mt-0" : "max-h-36 opacity-100"}`}
         style={{
           background: 'var(--thought-bg)',
           border: '1px solid var(--thought-border)',
           color: 'hsl(var(--muted-foreground))',
-          opacity: 0.8,
+          opacity: block.isCollapsed ? 0 : 0.75,
+          backdropFilter: 'blur(4px)',
         }}
       >
         <div className="whitespace-pre-wrap break-words max-w-[65ch]">{block.content}</div>
@@ -61,23 +64,6 @@ function ThoughtBlock({ message, block, onToggleThought }: { message: ChatMessag
       </div>
     </div>
   );
-}
-
-function ActionStatusIcon({ status }: { status: ActionDetail["status"] }) {
-  if (status === "running") {
-    return (
-      <span className="relative flex items-center justify-center w-3.5 h-3.5">
-        <SparkleIcon size={12} className="animate-star-spin-breathe" style={{ color: 'var(--teal-500)' }} />
-      </span>
-    );
-  }
-  if (status === "pending_confirmation") {
-    return <ShieldAlert size={12} style={{ color: 'var(--amber-500)' }} strokeWidth={2} />;
-  }
-  if (status === "done") {
-    return <CheckCircle2 size={12} style={{ color: 'var(--teal-500)' }} strokeWidth={2} />;
-  }
-  return <XCircle size={12} style={{ color: 'hsl(var(--destructive))' }} strokeWidth={2} />;
 }
 
 function ActionBlock({ block, onToggleThought, message, onUpdateAction }: { block: ChatMessageModel["blocks"][number]; onToggleThought: (messageId: string, blockId: string) => void; message: ChatMessageModel; onUpdateAction?: (callId: string, status: ActionDetail["status"], content: string) => void }) {
@@ -100,63 +86,58 @@ function ActionBlock({ block, onToggleThought, message, onUpdateAction }: { bloc
       <button
         type="button"
         onClick={() => onToggleThought(message.id, block.id)}
-        className="flex items-center gap-2 text-[10px] font-semibold tracking-wider transition-colors duration-200 px-1 py-1 rounded-md"
-        style={{ color: 'hsl(var(--muted-foreground))', opacity: 0.75 }}
+        className="flex items-center gap-2 text-[10px] font-semibold tracking-wider transition-all duration-200 px-1.5 py-1 rounded-lg"
+        style={{ color: 'hsl(var(--muted-foreground))', opacity: 0.7 }}
+        onMouseEnter={(e) => { e.currentTarget.style.background = 'hsl(var(--muted))'; }}
+        onMouseLeave={(e) => { e.currentTarget.style.background = 'transparent'; }}
       >
         {isCollapsed ? <ChevronRight size={11} strokeWidth={2} /> : <ChevronDown size={11} strokeWidth={2} />}
         {isStreaming ? (
           <span className="relative flex items-center justify-center w-3.5 h-3.5">
             <SparkleIcon size={14} className="animate-star-spin-breathe" style={{ color: 'var(--teal-500)' }} />
-            <span className="absolute inset-0 rounded-full animate-ping" style={{ background: 'var(--teal-400)', opacity: 0.12 }} />
+            <span className="absolute inset-0 rounded-full animate-ping" style={{ background: 'var(--teal-400)', opacity: 0.1 }} />
           </span>
         ) : (
-          <Wrench size={10} style={{ color: 'hsl(var(--muted-foreground))', opacity: 0.4 }} strokeWidth={2} />
+          <SparkleIcon size={10} style={{ color: 'hsl(var(--muted-foreground))', opacity: 0.35 }} />
         )}
         <span className="uppercase">{headerLabel}</span>
       </button>
       <div
-        className={`mt-1 ml-2.5 pl-3.5 pr-3 py-2.5 rounded-xl text-[11px] leading-relaxed transition-all duration-300 overflow-hidden ${isCollapsed ? "max-h-0 opacity-0 py-0 mt-0" : "max-h-52 opacity-100 overflow-y-auto"}`}
+        className={`mt-1.5 ml-3 pl-4 pr-3 py-2.5 rounded-xl text-[11px] leading-relaxed transition-all duration-400 overflow-hidden ${isCollapsed ? "max-h-0 opacity-0 py-0 mt-0" : "max-h-52 opacity-100 overflow-y-auto"}`}
         style={{
           background: 'var(--action-bg)',
           border: '1px solid var(--action-border)',
+          backdropFilter: 'blur(4px)',
         }}
       >
-        <div className="flex flex-col gap-1.5">
-          {actions.map((action) => (
-            <div key={action.callId || action.toolName} className="flex flex-col">
-              <div className="flex items-center gap-2 py-0.5">
-                <ActionStatusIcon status={action.status} />
-                <span className={`text-[11px] font-medium tracking-tight ${action.status === "running" ? "" : action.status === "done" ? "" : ""}`}
-                  style={{ color: action.status === "running" ? 'hsl(var(--foreground))' : action.status === "done" ? 'hsl(var(--muted-foreground))' : 'hsl(var(--destructive))', opacity: action.status === "done" ? 0.7 : 1 }}
-                >
-                  {action.delegation?.label || getToolDisplayName(action.toolName)}
-                </span>
-                {action.status === "running" && (
-                  <span className="text-[9px] font-medium" style={{ color: 'hsl(var(--muted-foreground))', opacity: 0.35 }}>running</span>
+        <div className="flex flex-wrap gap-x-3 gap-y-1.5">
+          {actions.map((action) => {
+            const isSubAgent = action.toolName === 'SubAgent' || action.toolName === 'ParallelSubAgent';
+            const displayName = isSubAgent ? 'SubAgent' : getToolDisplayName(action.toolName);
+            return (
+              <div key={action.callId || action.toolName} className="flex items-center gap-1.5">
+                {action.status === "running" ? (
+                  <span className="relative flex items-center justify-center w-3 h-3">
+                    <SparkleIcon size={10} className="animate-star-spin-breathe" style={{ color: 'var(--teal-500)' }} />
+                  </span>
+                ) : action.status === "done" ? (
+                  <SparkleIcon size={8} style={{ color: 'var(--teal-500)', opacity: 0.5 }} />
+                ) : (
+                  <SparkleIcon size={8} style={{ color: 'hsl(var(--destructive))', opacity: 0.6 }} />
                 )}
+                <span className="text-[11px] font-medium tracking-tight"
+                  style={{
+                    color: action.status === "running" ? 'hsl(var(--foreground))'
+                      : isSubAgent ? 'var(--ocean-500)'
+                      : 'hsl(var(--muted-foreground))',
+                    opacity: action.status === "done" ? 0.65 : 1,
+                  }}
+                >
+                  {displayName}
+                </span>
               </div>
-              {action.status === "done" && action.delegation?.summary && (
-                <div className="ml-5 text-[10px] max-h-14 overflow-y-auto whitespace-pre-wrap break-all leading-relaxed" style={{ color: 'hsl(var(--muted-foreground))', opacity: 0.45 }}>
-                  {action.delegation.summary.slice(0, 300)}
-                </div>
-              )}
-              {action.status === "error" && action.content && (
-                <div className="ml-5 text-[10px] truncate max-w-[380px]" style={{ color: 'hsl(var(--destructive))', opacity: 0.6 }}>
-                  {action.content.slice(0, 80).replace(/\n/g, " ")}
-                </div>
-              )}
-              {action.status === "pending_confirmation" && (
-                <div className="ml-5 mt-0.5">
-                  {action.askReason && (
-                    <div className="text-[10px] max-w-[380px]" style={{ color: 'var(--amber-600)', opacity: 0.7 }}>
-                      {action.askReason}
-                    </div>
-                  )}
-                  <span className="text-[9px]" style={{ color: 'var(--amber-500)', opacity: 0.5 }}>等待确认…</span>
-                </div>
-              )}
-            </div>
-          ))}
+            );
+          })}
         </div>
         {isStreaming && (
           <div className="mt-2 h-[2px] w-16 rounded-full overflow-hidden" style={{ background: 'var(--teal-50)' }}>
@@ -168,25 +149,44 @@ function ActionBlock({ block, onToggleThought, message, onUpdateAction }: { bloc
   );
 }
 
+function ErrorBlock({ content }: { content: string }) {
+  return (
+    <div
+      className="w-full max-w-full px-4 py-3 rounded-2xl rounded-tl-sm text-[13px] leading-relaxed"
+      style={{
+        background: 'rgba(239, 68, 68, 0.06)',
+        border: '1px solid rgba(239, 68, 68, 0.18)',
+        color: 'hsl(var(--destructive))',
+        backdropFilter: 'blur(6px)',
+      }}
+    >
+      <div className="flex items-center gap-2">
+        <AlertCircle size={15} strokeWidth={1.8} style={{ opacity: 0.7 }} />
+        <span className="font-medium">{content}</span>
+      </div>
+    </div>
+  );
+}
+
 function ImagePreviewDialog({ artifact, open, onOpenChange }: { artifact: GeneratedArtifact; open: boolean; onOpenChange: (open: boolean) => void }) {
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="sm:max-w-4xl p-0 overflow-hidden bg-black/95 border-border" showCloseButton={false}>
+      <DialogContent className="sm:max-w-4xl p-0 overflow-hidden" style={{ background: 'rgba(0,0,0,0.95)' }} showCloseButton={false}>
         <DialogTitle className="sr-only">{artifact.filename}</DialogTitle>
         <DialogDescription className="sr-only">图片预览</DialogDescription>
         <div className="relative flex items-center justify-center min-h-[200px]">
           <img src={artifact.image_url || artifact.download_url} alt={artifact.filename} className="max-w-full max-h-[80vh] object-contain" />
           <div className="absolute top-3 right-3 flex gap-2">
             {artifact.download_url && (
-              <a href={artifact.download_url} download={artifact.filename} className="rounded-full bg-white/12 backdrop-blur-sm p-1.5 text-white/85 hover:bg-white/22 transition-colors duration-150" title="下载图片">
+              <a href={artifact.download_url} download={artifact.filename} className="rounded-full bg-white/10 backdrop-blur-sm p-1.5 text-white/80 hover:bg-white/20 transition-colors duration-150" title="下载图片">
                 <Download size={16} />
               </a>
             )}
-            <button type="button" onClick={() => onOpenChange(false)} className="rounded-full bg-white/12 backdrop-blur-sm p-1.5 text-white/85 hover:bg-white/22 transition-colors duration-150" title="关闭">
+            <button type="button" onClick={() => onOpenChange(false)} className="rounded-full bg-white/10 backdrop-blur-sm p-1.5 text-white/80 hover:bg-white/20 transition-colors duration-150" title="关闭">
               <X size={16} />
             </button>
           </div>
-          <div className="absolute bottom-3 left-3 text-white/50 text-[11px] bg-black/25 backdrop-blur-sm px-2 py-0.5 rounded-md">
+          <div className="absolute bottom-3 left-3 text-white/45 text-[11px] bg-black/20 backdrop-blur-sm px-2 py-0.5 rounded-md">
             {artifact.filename}
           </div>
         </div>
@@ -233,12 +233,12 @@ export function ChatMessage({ message, onToggleThought, onUpdateAction }: ChatMe
                 ? 'linear-gradient(135deg, var(--slate-600), var(--slate-700))'
                 : isSystem
                 ? 'linear-gradient(135deg, var(--amber-400), var(--amber-500))'
-                : 'linear-gradient(135deg, var(--ocean-500), var(--teal-500))',
+                : 'var(--ocean-500)',
               boxShadow: isUser
-                ? '0 2px 8px rgba(71, 85, 105, 0.2)'
+                ? '0 2px 8px rgba(71, 85, 105, 0.18)'
                 : isSystem
-                ? '0 2px 8px rgba(245, 158, 11, 0.2)'
-                : '0 2px 8px rgba(37, 99, 168, 0.2)',
+                ? '0 2px 8px rgba(245, 158, 11, 0.18)'
+                : '0 3px 12px rgba(37, 99, 168, 0.25)',
               color: 'white',
             }}
           >
@@ -249,11 +249,11 @@ export function ChatMessage({ message, onToggleThought, onUpdateAction }: ChatMe
         <div className={`flex flex-col gap-1.5 ${isUser ? "items-end" : "items-start"}`}>
           {isUser ? (
             <div
-              className="px-3.5 py-2 rounded-2xl rounded-tr-sm text-[13px] whitespace-pre-wrap leading-relaxed"
+              className="px-3.5 py-2.5 rounded-2xl rounded-tr-sm text-[13px] whitespace-pre-wrap leading-relaxed"
               style={{
                 background: 'var(--msg-user-bg)',
                 color: 'white',
-                boxShadow: '0 1px 6px rgba(37, 99, 168, 0.15)',
+                boxShadow: '0 2px 10px rgba(37, 99, 168, 0.12)',
               }}
             >
               {message.content}
@@ -265,7 +265,7 @@ export function ChatMessage({ message, onToggleThought, onUpdateAction }: ChatMe
                 background: 'var(--msg-system-bg)',
                 border: '1px solid var(--amber-200)',
                 color: 'var(--amber-900)',
-                opacity: 0.7,
+                opacity: 0.65,
               }}
             >
               {message.content}
@@ -273,7 +273,7 @@ export function ChatMessage({ message, onToggleThought, onUpdateAction }: ChatMe
           ) : (
             <div className="flex flex-col gap-2.5 w-full">
               {!isComplete && hiddenArchivedCount > 0 && (
-                <div className="self-start rounded-full px-2.5 py-1 text-[10px]" style={{ border: '1px solid hsl(var(--border))', background: 'hsl(var(--muted))', color: 'hsl(var(--muted-foreground))', opacity: 0.45 }}>
+                <div className="self-start rounded-full px-2.5 py-1 text-[10px]" style={{ border: '1px solid hsl(var(--border))', background: 'hsl(var(--muted))', color: 'hsl(var(--muted-foreground))', opacity: 0.4 }}>
                   已折叠 {hiddenArchivedCount} 个较早中间步骤
                 </div>
               )}
@@ -282,8 +282,10 @@ export function ChatMessage({ message, onToggleThought, onUpdateAction }: ChatMe
                 <button
                   type="button"
                   onClick={() => setShowProcess(!showProcess)}
-                  className="flex items-center gap-1.5 self-start rounded-md px-2.5 py-1 text-[10px] transition-all duration-200"
-                  style={{ border: '1px solid hsl(var(--border))', background: 'hsl(var(--muted))', color: 'hsl(var(--muted-foreground))', opacity: 0.5 }}
+                  className="flex items-center gap-1.5 self-start rounded-lg px-2.5 py-1 text-[10px] transition-all duration-200"
+                  style={{ border: '1px solid hsl(var(--border))', background: 'hsl(var(--muted))', color: 'hsl(var(--muted-foreground))', opacity: 0.45 }}
+                  onMouseEnter={(e) => { e.currentTarget.style.background = 'var(--ocean-50)'; e.currentTarget.style.borderColor = 'var(--ocean-200)'; e.currentTarget.style.color = 'var(--ocean-500)'; }}
+                  onMouseLeave={(e) => { e.currentTarget.style.background = 'hsl(var(--muted))'; e.currentTarget.style.borderColor = 'hsl(var(--border))'; e.currentTarget.style.color = 'hsl(var(--muted-foreground))'; e.currentTarget.style.opacity = '0.45'; }}
                 >
                   <Layers size={10} strokeWidth={1.8} />
                   {showProcess ? "收起中间过程" : `查看中间过程（${processCount}项）`}
@@ -300,8 +302,11 @@ export function ChatMessage({ message, onToggleThought, onUpdateAction }: ChatMe
                     if (block.type === "action") {
                       return <ActionBlock key={block.id} block={{ ...block, isCollapsed: true }} onToggleThought={onToggleThought} message={message} onUpdateAction={onUpdateAction} />;
                     }
+                    if (block.type === "error") {
+                      return <ErrorBlock key={block.id} content={block.content} />;
+                    }
                     return (
-                      <div key={block.id} className="px-3 py-2 rounded-xl text-[11px] leading-relaxed" style={{ background: 'hsl(var(--card))', border: '1px solid hsl(var(--border))', color: 'hsl(var(--muted-foreground))', opacity: 0.8 }}>
+                      <div key={block.id} className="px-3 py-2 rounded-xl text-[11px] leading-relaxed" style={{ background: 'hsl(var(--card))', border: '1px solid hsl(var(--border))', color: 'hsl(var(--muted-foreground))', opacity: 0.75 }}>
                         <ReactMarkdown remarkPlugins={[remarkGfm]}>{block.content.length > 200 ? block.content.slice(0, 200) + "…" : block.content}</ReactMarkdown>
                       </div>
                     );
@@ -319,6 +324,10 @@ export function ChatMessage({ message, onToggleThought, onUpdateAction }: ChatMe
                   return <ActionBlock key={block.id} block={block} onToggleThought={onToggleThought} message={message} onUpdateAction={onUpdateAction} />;
                 }
 
+                if (block.type === "error") {
+                  return <ErrorBlock key={block.id} content={block.content} />;
+                }
+
                 const displayContent = isArchived && block.isCollapsed && block.content.length > 120
                   ? block.content.slice(0, 120) + "…"
                   : block.content;
@@ -326,10 +335,11 @@ export function ChatMessage({ message, onToggleThought, onUpdateAction }: ChatMe
                 return (
                   <div key={block.id} className={`px-4 py-3 rounded-2xl rounded-tl-sm text-[13px] leading-relaxed transition-all duration-300 ${isArchived ? "opacity-40 scale-[0.995]" : "opacity-100"}`}
                     style={{
-                      background: 'hsl(var(--card))',
+                      background: 'var(--gradient-card)',
                       border: '1px solid hsl(var(--border))',
                       color: 'hsl(var(--foreground))',
-                      boxShadow: 'var(--shadow-sm)',
+                      boxShadow: '0 2px 12px rgba(15,31,56,0.04)',
+                      backdropFilter: 'blur(6px)',
                     }}
                   >
                     <div className="prose prose-sm max-w-none" style={{ color: 'hsl(var(--foreground))' }}>
@@ -358,7 +368,7 @@ export function ChatMessage({ message, onToggleThought, onUpdateAction }: ChatMe
                                 {artifact.download_url && (
                                   <a href={artifact.download_url} download={artifact.filename}
                                     className="ml-1.5 flex-shrink-0 rounded p-1 transition-colors duration-150"
-                                    style={{ color: 'hsl(var(--muted-foreground))', opacity: 0.5 }}
+                                    style={{ color: 'hsl(var(--muted-foreground))', opacity: 0.45 }}
                                     onClick={(e) => e.stopPropagation()}
                                   >
                                     <Download size={13} />
@@ -416,10 +426,11 @@ export function ChatMessage({ message, onToggleThought, onUpdateAction }: ChatMe
               {isComplete && lastAnswerBlock && (
                 <div className="px-4 py-3 rounded-2xl rounded-tl-sm text-[13px] leading-relaxed"
                   style={{
-                    background: 'hsl(var(--card))',
+                    background: 'var(--gradient-card)',
                     border: '1px solid hsl(var(--border))',
                     color: 'hsl(var(--foreground))',
-                    boxShadow: 'var(--shadow-sm)',
+                    boxShadow: '0 2px 12px rgba(15,31,56,0.04)',
+                    backdropFilter: 'blur(6px)',
                   }}
                 >
                   <div className="prose prose-sm max-w-none" style={{ color: 'hsl(var(--foreground))' }}>
@@ -448,7 +459,7 @@ export function ChatMessage({ message, onToggleThought, onUpdateAction }: ChatMe
                               {artifact.download_url && (
                                 <a href={artifact.download_url} download={artifact.filename}
                                   className="ml-1.5 flex-shrink-0 rounded p-1 transition-colors duration-150"
-                                  style={{ color: 'hsl(var(--muted-foreground))', opacity: 0.5 }}
+                                  style={{ color: 'hsl(var(--muted-foreground))', opacity: 0.45 }}
                                   onClick={(e) => e.stopPropagation()}
                                 >
                                   <Download size={13} />
@@ -503,7 +514,7 @@ export function ChatMessage({ message, onToggleThought, onUpdateAction }: ChatMe
               )}
             </div>
           )}
-          <span className="text-[9px] px-0.5 font-mono" style={{ color: 'hsl(var(--muted-foreground))', opacity: 0.35 }}>
+          <span className="text-[9px] px-0.5 font-mono" style={{ color: 'hsl(var(--muted-foreground))', opacity: 0.3 }}>
             {new Date(message.timestamp).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}
           </span>
         </div>
@@ -525,26 +536,28 @@ function ReferenceItem({ reference, index }: { reference: ReferenceLink; index: 
   if (isWeb) {
     return (
       <a href={reference.url} target="_blank" rel="noopener noreferrer"
-        className="flex items-center gap-1.5 px-1.5 py-1 rounded-md text-[11px] transition-colors duration-150 group"
+        className="flex items-center gap-1.5 px-1.5 py-1 rounded-md text-[11px] transition-all duration-200 group"
+        onMouseEnter={(e) => { e.currentTarget.style.background = 'var(--ocean-50)'; }}
+        onMouseLeave={(e) => { e.currentTarget.style.background = 'transparent'; }}
       >
-        <span className="flex-shrink-0 w-4 h-4 rounded flex items-center justify-center text-[9px] font-semibold" style={{ background: 'var(--ocean-50)', color: 'var(--ocean-500)' }}>
+        <span className="flex-shrink-0 w-4 h-4 rounded flex items-center justify-center text-[9px] font-bold" style={{ background: 'var(--ocean-50)', color: 'var(--ocean-500)' }}>
           {index}
         </span>
-        <ExternalLink size={10} className="flex-shrink-0 transition-colors duration-150" style={{ color: 'hsl(var(--muted-foreground))', opacity: 0.4 }} />
+        <ExternalLink size={10} className="flex-shrink-0 transition-colors duration-150" style={{ color: 'hsl(var(--muted-foreground))', opacity: 0.35 }} />
         <span className="truncate" style={{ color: 'hsl(var(--muted-foreground))' }}>{displayTitle}</span>
-        {reference.source && <span className="flex-shrink-0 text-[9px] ml-auto" style={{ color: 'hsl(var(--muted-foreground))', opacity: 0.3 }}>{reference.source}</span>}
+        {reference.source && <span className="flex-shrink-0 text-[9px] ml-auto" style={{ color: 'hsl(var(--muted-foreground))', opacity: 0.25 }}>{reference.source}</span>}
       </a>
     );
   }
 
   return (
     <div className="flex items-center gap-1.5 px-1.5 py-1 rounded-md text-[11px]">
-      <span className="flex-shrink-0 w-4 h-4 rounded flex items-center justify-center text-[9px] font-semibold" style={{ background: 'var(--ocean-50)', color: 'var(--ocean-500)' }}>
+      <span className="flex-shrink-0 w-4 h-4 rounded flex items-center justify-center text-[9px] font-bold" style={{ background: 'var(--ocean-50)', color: 'var(--ocean-500)' }}>
         {index}
       </span>
-      <FileText size={10} className="flex-shrink-0" style={{ color: 'hsl(var(--muted-foreground))', opacity: 0.4 }} />
+      <FileText size={10} className="flex-shrink-0" style={{ color: 'hsl(var(--muted-foreground))', opacity: 0.35 }} />
       <span className="truncate" style={{ color: 'hsl(var(--muted-foreground))' }}>{displayTitle}</span>
-      {reference.source && <span className="flex-shrink-0 text-[9px] ml-auto" style={{ color: 'hsl(var(--muted-foreground))', opacity: 0.3 }}>{reference.source}</span>}
+      {reference.source && <span className="flex-shrink-0 text-[9px] ml-auto" style={{ color: 'hsl(var(--muted-foreground))', opacity: 0.25 }}>{reference.source}</span>}
     </div>
   );
 }

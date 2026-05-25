@@ -350,20 +350,36 @@ class ToolRegistry:
 
     def __init__(self):
         self._tools: Dict[str, AgentTool] = {}
+        self._aliases: Dict[str, str] = {}
 
     def register(self, tool: AgentTool) -> None:
         """注册工具"""
         self._tools[tool.name] = tool
         logger.debug(f"工具注册: {tool.name}")
 
+    def register_alias(self, alias: str, tool_name: str) -> None:
+        """注册工具别名"""
+        if tool_name not in self._tools:
+            logger.warning(f"别名注册失败：工具 {tool_name} 不存在")
+            return
+        self._aliases[alias] = tool_name
+        logger.debug(f"别名注册: {alias} -> {tool_name}")
+
     def unregister(self, name: str) -> None:
         """注销工具"""
         if name in self._tools:
             del self._tools[name]
+        self._aliases = {a: t for a, t in self._aliases.items() if t != name}
 
     def get(self, name: str) -> Optional[AgentTool]:
-        """获取工具"""
-        return self._tools.get(name)
+        """获取工具（支持别名查找）"""
+        tool = self._tools.get(name)
+        if tool:
+            return tool
+        alias_target = self._aliases.get(name)
+        if alias_target:
+            return self._tools.get(alias_target)
+        return None
 
     def get_all(self) -> Dict[str, AgentTool]:
         """获取所有工具"""
@@ -410,9 +426,24 @@ class ToolRegistry:
         logger.debug(f"工具注册: {tool.name}")
 
     @classmethod
+    def register_alias(cls, alias: str, tool_name: str) -> None:
+        """注册别名到全局注册表"""
+        if tool_name not in global_tool_registry._tools:
+            logger.warning(f"别名注册失败：工具 {tool_name} 不存在")
+            return
+        global_tool_registry._aliases[alias] = tool_name
+        logger.debug(f"别名注册: {alias} -> {tool_name}")
+
+    @classmethod
     def get(cls, name: str) -> Optional[AgentTool]:
-        """从全局注册表获取工具"""
-        return global_tool_registry._tools.get(name)
+        """从全局注册表获取工具（支持别名）"""
+        tool = global_tool_registry._tools.get(name)
+        if tool:
+            return tool
+        alias_target = global_tool_registry._aliases.get(name)
+        if alias_target:
+            return global_tool_registry._tools.get(alias_target)
+        return None
 
     @classmethod
     def get_all(cls) -> Dict[str, AgentTool]:

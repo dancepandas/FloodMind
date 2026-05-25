@@ -1454,7 +1454,7 @@ function getSubagentLabel(stage) {
 
 function getDelegatedStageFromToolName(toolName) {
     const name = (toolName || '').toLowerCase();
-    if (name.includes('delegate_execution_specialist')) return 'execution_specialist';
+    if (name.includes('subagent')) return 'execution_specialist';
     return '';
 }
 
@@ -1769,23 +1769,27 @@ function toggleWorkflowTaskCard(header) {
 
 function getFriendlyToolName(toolName) {
     const friendlyNames = {
-        'get_skill': '获取技能说明',
-        'run_script': '执行脚本',
-        'exec_bash': '执行系统命令',
-        'exec_python_file': '执行 Python 文件',
-        'write_text_file': '写入文本文件',
-        'search_artifacts': '搜索历史脚本',
-        'read_artifact': '读取历史脚本',
-        'delegate_execution_specialist': '委派执行专项',
-        'read_file': '读取文件',
-        'knowledge_search': '搜索知识库',
-        'add_knowledge': '添加知识',
-        'prediction': '洪水预测',
-        'dataprocessing': '数据处理',
-        'word': '生成报告',
-        'training': '模型训练',
-        'validation': '模型验证',
-        'XAJModel': '物理模型计算',
+        'Bash': 'Bash',
+        'Glob': 'Glob',
+        'Grep': 'Grep',
+        'Read': 'Read',
+        'Write': 'Write',
+        'Edit': 'Edit',
+        'GetSkill': 'GetSkill',
+        'KnowledgeSearch': 'KnowledgeSearch',
+        'KnowledgeAdd': 'KnowledgeAdd',
+        'WebSearch': 'WebSearch',
+        'WebFetch': 'WebFetch',
+        'MemorySearch': 'MemorySearch',
+        'MemoryAdd': 'MemoryAdd',
+        'CreatePlan': 'CreatePlan',
+        'UpdateProjectInstructions': 'UpdateProjectInstructions',
+        'CreateScheduledTask': 'CreateScheduledTask',
+        'ListScheduledTasks': 'ListScheduledTasks',
+        'CancelScheduledTask': 'CancelScheduledTask',
+        'SubAgent': 'SubAgent',
+        'ParallelSubAgent': 'ParallelSubAgent',
+        'context_compress': 'ContextCompress',
     };
     
     if (!toolName) return '处理中...';

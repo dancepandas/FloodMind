@@ -5,10 +5,11 @@
 具备完整的行为元数据（readonly/destructive/concurrency_safe/interrupt_behavior）。
 
 工具分类：
-- 只读工具: get_skill, search_artifacts, read_artifact, knowledge_search, search_memory, search_tool_error_memory
-- 写入工具: write_text_file, update_project_instructions, add_knowledge, add_memory
-- 执行工具: exec_bash, run_script, exec_python_file
-- 网络工具: web_search
+- 只读工具: GetSkill, KnowledgeSearch, MemorySearch
+- 写入工具: UpdateProjectInstructions, KnowledgeAdd, MemoryAdd
+- 执行工具: Bash
+- 网络工具: WebSearch, WebFetch
+- 调度工具: CreateScheduledTask, ListScheduledTasks, CancelScheduledTask
 """
 
 import os
@@ -17,7 +18,6 @@ import json
 import logging
 import re
 import shutil
-import hashlib
 import subprocess
 import threading
 import contextvars
@@ -259,7 +259,6 @@ def _save_truncated_output(tool_name: str, output: str) -> Optional[str]:
 
 
 def _finalize_tool_output(tool_name: str, output: str, **signature_parts: Any) -> str:
-    _record_tool_error_memory(tool_name, output, **signature_parts)
     signature = _build_call_signature(tool_name, **signature_parts)
     result = _apply_retry_guard(tool_name, signature, output)
     if len(result) > _MAX_INLINE_OUTPUT_CHARS:
@@ -275,27 +274,13 @@ class GetSkillInput(BaseModel):
     skill_name: str = Field(default="", description="技能名称")
 
 
-class RunScriptInput(BaseModel):
-    """执行脚本的输入参数"""
-    skill_name: str = Field(default="", description="技能名称")
-    script_name: str = Field(default="", description="脚本文件名，如 main.py")
-    args: Union[str, List] = Field(default="", description="脚本参数，JSON数组或列表")
-    env: str = Field(default="{}", description="环境变量，JSON对象格式")
-
 
 class ExecBashInput(BaseModel):
     """执行 Bash 命令的输入参数"""
     command: str = Field(default="", description="要执行的 Bash 命令")
+    workdir: str = Field(default="", description="工作目录，默认为当前会话输出目录")
     timeout: int = Field(default=120, description="超时时间（秒）")
-
-
-class ExecPythonFileInput(BaseModel):
-    """执行 Python 文件的输入参数"""
-    script_path: str = Field(default="", description="要执行的 Python 文件路径")
-    args: Union[str, List] = Field(default="", description="脚本参数，JSON数组或列表")
-    env: str = Field(default="{}", description="环境变量，JSON对象格式")
-    timeout: int = Field(default=900, description="超时时间（秒）")
-    workdir: str = Field(default="", description="工作目录，可选；默认使用脚本所在目录")
+    env: str = Field(default="{}", description="额外环境变量，JSON 对象格式")
 
 
 def _strip_session_prefix(path_str: str) -> str:
@@ -305,39 +290,6 @@ def _strip_session_prefix(path_str: str) -> str:
 
 def _resolve_path(path_str: str, *, access: str = "read") -> Path:
     return resolve_tool_path(path_str, access=access).resolved
-
-
-class WriteTextFileInput(BaseModel):
-    """写入文本文件的输入参数"""
-    file_path: str = Field(default="", description="要写入的文件路径")
-    content: str = Field(default="", description="完整文件内容")
-    encoding: str = Field(default="utf-8", description="文件编码，默认 utf-8")
-
-
-class SearchArtifactsInput(BaseModel):
-    """搜索历史产物的输入参数"""
-    query: str = Field(default="", description="搜索关键词，支持文件类型、任务类型、目标文件名等")
-    scope: str = Field(default="current", description="搜索范围：current 或 reusable")
-    path_filter: str = Field(default="", description="路径过滤，仅返回路径包含该子串的产物（如会话ID、目录名）")
-    limit: int = Field(default=10, description="返回结果上限，默认10")
-
-
-class CheckArtifactExistsInput(BaseModel):
-    """检查产物是否存在的输入参数"""
-    artifact_path: str = Field(default="", description="要检查的产物路径或文件名")
-    scope: str = Field(default="current", description="搜索范围：current 或 reusable")
-
-
-class SearchToolErrorMemoryInput(BaseModel):
-    """搜索工具错误记忆库的输入参数"""
-    query: str = Field(default="", description="搜索关键词，可用 tool 名、skill 名、脚本名、错误摘要等")
-    limit: int = Field(default=10, description="返回条数上限，默认 10")
-
-
-class ReadArtifactInput(BaseModel):
-    """读取文本产物的输入参数"""
-    artifact_path: str = Field(default="", description="产物文件路径")
-    max_chars: int = Field(default=12000, description="最多读取字符数，默认12000")
 
 
 class CreateScheduledTaskInput(BaseModel):
@@ -363,10 +315,6 @@ class CancelScheduledTaskInput(BaseModel):
 _SKILL_REGISTRY: List[Any] = []
 _SESSION_ROOT = _PROJECT_ROOT / "data" / "sessions"
 _REUSABLE_SCRIPT_EXTENSIONS = {".py"}
-_READABLE_ARTIFACT_EXTENSIONS = {".py", ".md", ".txt", ".json", ".csv"}
-_TOOL_ERROR_MEMORY_PATH = _PROJECT_ROOT / "data" / "tool_error_memory.md"
-_TOOL_ERROR_INDEX_PATH = _PROJECT_ROOT / "data" / ".tool_error_memory_index.json"
-_TOOL_ERROR_MEMORY_LOCK = threading.Lock()
 
 
 def set_skill_registry(skills: List[Any]):
@@ -407,229 +355,7 @@ def _get_active_session_id() -> str:
     return ""
 
 
-def _iter_candidate_artifacts(scope: str) -> List[Path]:
-    if not _SESSION_ROOT.exists():
-        return []
 
-    scope = (scope or "current").strip().lower()
-    candidates: List[Path] = []
-
-    if scope == "current":
-        session_id = _get_active_session_id()
-        if not session_id:
-            return []
-        session_dir = _SESSION_ROOT / session_id
-        # 搜索整个会话目录下的所有文件
-        for path in session_dir.rglob("*"):
-            if path.is_file():
-                candidates.append(path)
-        candidates.sort(key=lambda p: p.stat().st_mtime, reverse=True)
-        return candidates
-
-    if scope == "reusable":
-        # 跨会话搜索可复用脚本（outputs 目录下的 .py）
-        for outputs_dir in _SESSION_ROOT.glob("session-*/outputs"):
-            for path in outputs_dir.iterdir():
-                if path.is_file() and path.suffix.lower() in _REUSABLE_SCRIPT_EXTENSIONS:
-                    candidates.append(path)
-        candidates.sort(key=lambda p: p.stat().st_mtime, reverse=True)
-        return candidates
-
-    return []
-
-
-def _build_artifact_record(path: Path) -> Dict[str, Any]:
-    session_id = ""
-    for part in path.parts:
-        if part.startswith("session-"):
-            session_id = part
-            break
-
-    stat = path.stat()
-    ext = path.suffix.lower()
-    reusable = ext in _REUSABLE_SCRIPT_EXTENSIONS and path.parent.name == "outputs"
-    artifact_type = "text"
-    if ext == ".py":
-        artifact_type = "python_script"
-    elif ext == ".json":
-        artifact_type = "json"
-    elif ext in {".csv", ".tsv"}:
-        artifact_type = "table"
-    elif ext in {".xlsx", ".xls", ".xlsm"}:
-        artifact_type = "spreadsheet"
-
-    return {
-        "path": str(path),
-        "name": path.name,
-        "session_id": session_id,
-        "artifact_type": artifact_type,
-        "extension": ext,
-        "size_bytes": stat.st_size,
-        "updated_at": datetime.fromtimestamp(stat.st_mtime).isoformat(),
-        "reusable": reusable,
-    }
-
-
-def _artifact_matches_query(record: Dict[str, Any], query: str) -> bool:
-    if not query:
-        return True
-    searchable = " ".join([
-        str(record.get("name", "")).lower(),
-        str(record.get("path", "")).lower(),
-        str(record.get("artifact_type", "")).lower(),
-        str(record.get("extension", "")).lower(),
-        str(record.get("session_id", "")).lower(),
-    ])
-    # 支持逗号、空格分隔的多关键词，任一匹配即可
-    keywords = [w.strip().lower() for w in query.replace(",", " ").split() if len(w.strip()) > 1]
-    if not keywords:
-        return True
-    return any(kw in searchable for kw in keywords)
-
-
-def _resolve_artifact_candidates(artifact_path: str, scope: str = "current") -> List[Path]:
-    raw = str(artifact_path or "").strip().strip('"').strip("'")
-    if not raw:
-        return []
-
-    direct_path = Path(raw)
-    if direct_path.is_absolute():
-        resolved_direct = direct_path.resolve()
-    else:
-        resolved_direct = _resolve_path(raw)
-
-    candidates: List[Path] = []
-    if resolved_direct.exists() and resolved_direct.is_file():
-        candidates.append(resolved_direct)
-
-    normalized_raw = raw.replace("\\", "/").lower()
-    base_name = Path(raw).name.lower()
-    for path in _iter_candidate_artifacts(scope):
-        normalized_candidate = str(path).replace("\\", "/").lower()
-        if normalized_candidate == normalized_raw or normalized_candidate.endswith(normalized_raw):
-            candidates.append(path)
-            continue
-        if path.name.lower() == base_name:
-            candidates.append(path)
-
-    deduped: List[Path] = []
-    seen = set()
-    for path in candidates:
-        key = str(path.resolve())
-        if key not in seen:
-            seen.add(key)
-            deduped.append(path)
-    return deduped
-
-
-def _extract_error_core(output: str) -> str:
-    lines = [line.strip() for line in (output or "").splitlines() if line.strip()]
-    if not lines:
-        return ""
-    for line in reversed(lines):
-        if not line.lower().startswith("traceback"):
-            return line
-    return lines[-1]
-
-
-def _sanitize_error_signature_text(text: str) -> str:
-    normalized = (text or "").lower()
-    normalized = re.sub(r"[a-z]:\\[^\s]+", "<path>", normalized)
-    normalized = re.sub(r"/[^\s]+", "<path>", normalized)
-    normalized = re.sub(r"session-[0-9]+-[a-z0-9]+", "session-<id>", normalized)
-    normalized = re.sub(r"\b\d+\b", "<n>", normalized)
-    normalized = re.sub(r"\s+", " ", normalized).strip()
-    return normalized
-
-
-def _build_tool_error_entry(tool_name: str, output: str, signature_parts: Dict[str, Any]) -> Dict[str, Any]:
-    error_core = _extract_error_core(output)
-    target = signature_parts.get("script_name") or signature_parts.get("script_path") or signature_parts.get("skill_name") or signature_parts.get("command") or ""
-    raw_signature = " | ".join([tool_name, str(target), _sanitize_error_signature_text(error_core)])
-    signature = hashlib.sha1(raw_signature.encode("utf-8")).hexdigest()
-    input_fields = {key: _normalize_signature_value(value) for key, value in signature_parts.items() if value not in (None, "", [], {})}
-    now = datetime.now().isoformat()
-    return {
-        "signature": signature,
-        "tool_name": tool_name,
-        "target": str(target),
-        "input_fields": input_fields,
-        "error_core": error_core,
-        "full_error": (output or "").strip(),
-        "count": 1,
-        "first_seen": now,
-        "last_seen": now,
-    }
-
-
-def _load_tool_error_index() -> Dict[str, Any]:
-    if not _TOOL_ERROR_INDEX_PATH.exists():
-        return {"entries": []}
-    try:
-        return json.loads(_TOOL_ERROR_INDEX_PATH.read_text(encoding="utf-8"))
-    except Exception as e:
-        logger.warning(f"读取工具错误索引失败: {e}")
-        return {"entries": []}
-
-
-def _render_tool_error_markdown(entries: List[Dict[str, Any]]) -> str:
-    lines = [
-        "# 工具调用错误记忆库",
-        "",
-        "用于记录全局范围内出现过的 tool / skill / 脚本调用错误，帮助后续任务避免重复走弯路。",
-        "",
-    ]
-    for entry in sorted(entries, key=lambda item: item.get("last_seen", ""), reverse=True):
-        lines.extend([
-            f"## {entry.get('tool_name', 'unknown')} | {entry.get('target', 'unknown') or 'unknown'}",
-            "",
-            f"- 签名: `{entry.get('signature', '')}`",
-            f"- 首次记录: `{entry.get('first_seen', '')}`",
-            f"- 最近出现: `{entry.get('last_seen', '')}`",
-            f"- 累计次数: `{entry.get('count', 1)}`",
-            f"- 错误摘要: `{entry.get('error_core', '')}`",
-            "- 输入字段:",
-        ])
-        input_fields = entry.get("input_fields", {}) or {}
-        if input_fields:
-            for key, value in input_fields.items():
-                lines.append(f"  - `{key}`: `{value}`")
-        else:
-            lines.append("  - 无")
-        lines.extend([
-            "- 完整错误:",
-            "```text",
-            entry.get("full_error", ""),
-            "```",
-            "",
-        ])
-    return "\n".join(lines)
-
-
-def _save_tool_error_index(entries: List[Dict[str, Any]]) -> None:
-    _TOOL_ERROR_INDEX_PATH.parent.mkdir(parents=True, exist_ok=True)
-    _TOOL_ERROR_INDEX_PATH.write_text(json.dumps({"entries": entries}, ensure_ascii=False, indent=2), encoding="utf-8")
-    _TOOL_ERROR_MEMORY_PATH.write_text(_render_tool_error_markdown(entries), encoding="utf-8")
-
-
-def _record_tool_error_memory(tool_name: str, output: str, **signature_parts: Any) -> None:
-    if not _looks_like_error_output(output):
-        return
-    entry = _build_tool_error_entry(tool_name, output, signature_parts)
-    with _TOOL_ERROR_MEMORY_LOCK:
-        data = _load_tool_error_index()
-        entries = data.get("entries", [])
-        for existing in entries:
-            if existing.get("signature") == entry["signature"]:
-                existing["count"] = int(existing.get("count", 1)) + 1
-                existing["last_seen"] = datetime.now().isoformat()
-                if len(output or "") > len(existing.get("full_error", "")):
-                    existing["full_error"] = (output or "").strip()
-                    existing["error_core"] = entry["error_core"]
-                _save_tool_error_index(entries)
-                return
-        entries.append(entry)
-        _save_tool_error_index(entries)
 
 
 def _impl_get_skill(skill_name: str = "") -> str:
@@ -642,7 +368,7 @@ def _impl_get_skill(skill_name: str = "") -> str:
 
 
 get_skill = build_agent_tool(
-    name="get_skill",
+    name="GetSkill",
     description=(
         "获取技能的完整说明和执行方法。"
         "在执行任务前，先调用此工具了解技能的功能、参数和使用方法。"
@@ -662,7 +388,7 @@ get_skill = build_agent_tool(
 def _get_skill_cached(skill_name: str) -> str:
     skill_name = str(skill_name).strip()
     skill = _find_skill(skill_name)
-    
+
     if not skill:
         available = [s.name for s in _SKILL_REGISTRY]
         return _finalize_tool_output(
@@ -670,38 +396,66 @@ def _get_skill_cached(skill_name: str) -> str:
             f"未找到技能 '{skill_name}'。可用技能：{available}",
             skill_name=skill_name,
         )
-    
+
     lines = [
         f"=== 技能【{skill_name}】完整说明 ===",
         "",
         "【触发条件】",
         skill.description,
-        "",
-        "【使用说明】",
-        skill.prompt,
     ]
-    
+
+    if skill.compatibility:
+        lines.extend(["", "【依赖环境】", skill.compatibility])
+
+    lines.extend(["", "【使用说明】", skill.prompt])
+
     if skill.scripts:
         lines.extend([
             "",
             "【可执行脚本】",
-            "使用 run_script 工具执行以下脚本：",
+            "使用 Bash 工具执行以下脚本：",
         ])
         for script in skill.scripts:
-            lines.append(f"  - {script}")
+            if skill.skill_dir:
+                script_full = str(skill.skill_dir / "scripts" / script)
+            else:
+                script_full = script
+            lines.append(f"  - {script}  (完整路径: {script_full})")
         lines.append("")
         lines.append("示例：")
-        lines.append(f"  run_script(skill_name='{skill_name}', script_name='{skill.scripts[0]}', args='[]')")
-    
+        if skill.scripts:
+            first_script = skill.scripts[0]
+            if skill.skill_dir:
+                first_path = str(skill.skill_dir / "scripts" / first_script)
+            else:
+                first_path = first_script
+            lines.append(f"  Bash(command=\"python {first_path} --arg1 value1\")")
+
     if skill.references:
         lines.extend([
             "",
             "【参考文档】",
-            "使用 read_artifact 工具读取以下文档：",
+            "使用 Read 工具读取以下文档：",
         ])
         for ref in skill.references:
-            lines.append(f"  - {ref}")
-    
+            if skill.skill_dir:
+                full_path = str(skill.skill_dir / ref)
+            else:
+                full_path = ref
+            lines.append(f"  - {ref}  (完整路径: {full_path})")
+
+    if skill.assets:
+        lines.extend([
+            "",
+            "【资源文件】",
+        ])
+        for asset in skill.assets:
+            if skill.skill_dir:
+                full_path = str(skill.skill_dir / asset)
+            else:
+                full_path = asset
+            lines.append(f"  - {asset}  (完整路径: {full_path})")
+
     if skill.is_knowledge_only:
         lines.extend([
             "",
@@ -709,243 +463,83 @@ def _get_skill_cached(skill_name: str) -> str:
             "这是知识型技能，提供专业知识和指导。",
             "请根据上述说明直接回答用户问题，无需执行脚本。",
         ])
-    
+
     return _finalize_tool_output("get_skill", "\n".join(lines), skill_name=skill_name)
 
 
-def _impl_search_tool_error_memory(query: str = "", limit: int = 10) -> str:
-    query = (query or "").strip()
-    if not query:
-        return _finalize_tool_output("search_tool_error_memory", "错误：搜索关键词不能为空", query=query, limit=limit)
-
-    data = _load_tool_error_index()
-    entries = data.get("entries", [])
-    if not entries:
-        return _finalize_tool_output("search_tool_error_memory", "工具错误记忆库为空", query=query, limit=limit)
-
-    tokens = [token for token in query.lower().split() if token]
-    matches = []
-    for entry in entries:
-        searchable = " ".join([
-            str(entry.get("tool_name", "")),
-            str(entry.get("target", "")),
-            str(entry.get("error_core", "")),
-            json.dumps(entry.get("input_fields", {}), ensure_ascii=False),
-        ]).lower()
-        if all(token in searchable for token in tokens):
-            matches.append(entry)
-
-    if not matches:
-        return _finalize_tool_output("search_tool_error_memory", f"未找到与 '{query}' 相关的历史错误", query=query, limit=limit)
-
-    lines = [f"找到 {min(len(matches), limit)} 条相关历史错误：", ""]
-    for index, entry in enumerate(matches[: max(1, limit)], start=1):
-        lines.extend([
-            f"{index}. 工具: {entry.get('tool_name', '')}",
-            f"   目标: {entry.get('target', '') or 'unknown'}",
-            f"   错误摘要: {entry.get('error_core', '')}",
-            f"   累计次数: {entry.get('count', 1)}",
-            f"   最近出现: {entry.get('last_seen', '')}",
-            "",
-        ])
-    lines.append(f"完整记录文件: {_TOOL_ERROR_MEMORY_PATH}")
-    return _finalize_tool_output("search_tool_error_memory", "\n".join(lines), query=query, limit=limit)
 
 
-search_tool_error_memory = build_agent_tool(
-    name="search_tool_error_memory",
-    description="搜索全局工具错误记忆库，帮助避免重复踩坑。",
-    args_schema=SearchToolErrorMemoryInput,
-    func=_impl_search_tool_error_memory,
-    is_readonly=True,
-    is_destructive=False,
-    is_concurrency_safe=True,
-    check_permissions_fn=make_readonly_permission_fn(),
-    permission_policy=ToolPermissionPolicy(policy_type="readonly"),
-)
 
 
-def _impl_run_script(skill_name: str = "", script_name: str = "", args: Union[str, List] = "", env: str = "{}") -> str:
-    parsed = _parse_json_if_needed(skill_name)
-    if parsed and 'script_name' in parsed:
-        skill_name = parsed.get('skill_name', skill_name)
-        script_name = parsed.get('script_name', script_name)
-        args = parsed.get('args', args)
-        env = parsed.get('env', env)
-    
-    skill_name = str(skill_name).strip().strip('"').strip("'")
-    script_name = str(script_name).strip().strip('"').strip("'")
-    
-    _retry_block = _check_retry_guard_before_exec("run_script", skill_name=skill_name, script_name=script_name, args=args)
-    if _retry_block:
-        return _retry_block
-    
-    if not skill_name:
-        return _finalize_tool_output("run_script", "错误：skill_name 参数不能为空", skill_name=skill_name, script_name=script_name, args=args)
-
-    if not script_name:
-        return _finalize_tool_output("run_script", "错误：script_name 参数不能为空", skill_name=skill_name, script_name=script_name, args=args)
-    
-    skill = _find_skill(skill_name)
-    if not skill:
-        available = [s.name for s in _SKILL_REGISTRY]
-        return _finalize_tool_output(
-            "run_script",
-            f"未找到技能 '{skill_name}'。可用技能：{available}",
-            skill_name=skill_name,
-            script_name=script_name,
-            args=args,
-        )
-    
-    script_path = skill.get_script_path(script_name)
-    if not script_path:
-        return _finalize_tool_output(
-            "run_script",
-            f"技能 '{skill_name}' 中未找到脚本 '{script_name}'。可用脚本：{skill.scripts}",
-            skill_name=skill_name,
-            script_name=script_name,
-            args=args,
-        )
-    
-    args_list = _normalize_args(args)
-    
-    try:
-        env_dict = json.loads(env) if env else {}
-    except json.JSONDecodeError:
-        env_dict = {}
-    
-    try:
-        cmd = [sys.executable, str(script_path)] + args_list
-        
-        run_env = os.environ.copy()
-        run_env.update(env_dict)
-        run_env['PYTHONIOENCODING'] = 'utf-8'
-        
-        session_output_dir = _SESSION_CONTEXT.get("output_dir")
-        session_id = _SESSION_CONTEXT.get("session_id")
-        if session_id:
-            run_env['SESSION_ID'] = str(session_id)
-        if session_output_dir:
-            run_env['SESSION_OUTPUT_DIR'] = str(session_output_dir)
-            exec_cwd = str(session_output_dir)
-        else:
-            exec_cwd = str(script_path.parent)
-        
-        logger.info(f"执行脚本: {' '.join(cmd)}, cwd={exec_cwd}")
-        
-        process = subprocess.Popen(
-            cmd,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            env=run_env,
-            cwd=exec_cwd,
-            text=True,
-            encoding='utf-8',
-            errors='replace',
-        )
-        
-        stdout_lines = []
-        stderr_lines = []
-        
-        import threading
-        
-        def read_stream(stream, lines, log_level):
-            for line in iter(stream.readline, ''):
-                if line:
-                    lines.append(line)
-                    if log_level == 'INFO':
-                        logger.info(f"[脚本输出] {line.rstrip()}")
-                    else:
-                        logger.warning(f"[脚本错误] {line.rstrip()}")
-        
-        stdout_thread = threading.Thread(
-            target=read_stream, 
-            args=(process.stdout, stdout_lines, 'INFO'),
-            daemon=True
-        )
-        stderr_thread = threading.Thread(
-            target=read_stream, 
-            args=(process.stderr, stderr_lines, 'WARNING'),
-            daemon=True
-        )
-        
-        stdout_thread.start()
-        stderr_thread.start()
-        
-        try:
-            returncode = process.wait(timeout=900)
-        except subprocess.TimeoutExpired:
-            process.kill()
-            return _finalize_tool_output("run_script", "脚本执行超时（>900秒）", skill_name=skill_name, script_name=script_name, args=args_list)
-        
-        stdout_thread.join(timeout=5)
-        stderr_thread.join(timeout=5)
-        
-        stdout = ''.join(stdout_lines)
-        stderr = ''.join(stderr_lines)
-        
-        if returncode != 0:
-            return _finalize_tool_output(
-                "run_script",
-                f"脚本执行失败（退出码 {returncode}）：\n{stderr}",
-                skill_name=skill_name,
-                script_name=script_name,
-                args=args_list,
-            )
-
-        return _finalize_tool_output(
-            "run_script",
-            stdout or "脚本执行成功（无输出）",
-            skill_name=skill_name,
-            script_name=script_name,
-            args=args_list,
-        )
-        
-    except subprocess.TimeoutExpired:
-        return _finalize_tool_output("run_script", "脚本执行超时（>900秒）", skill_name=skill_name, script_name=script_name, args=args_list)
-    except Exception as e:
-        logger.error(f"脚本执行失败: {e}", exc_info=True)
-        return _finalize_tool_output(
-            "run_script",
-            f"脚本执行失败：{str(e)}",
-            skill_name=skill_name,
-            script_name=script_name,
-            args=args_list,
-        )
+_DANGEROUS_COMMAND_PATTERNS = [
+    re.compile(r'\brm\s+-rf\b', re.IGNORECASE),
+    re.compile(r'\brm\s+-r\b', re.IGNORECASE),
+    re.compile(r'\brmdir\s+/[sS]', re.IGNORECASE),
+    re.compile(r'\bdel\s+/[sS]', re.IGNORECASE),
+    re.compile(r'\bdel\s+/[fF]', re.IGNORECASE),
+    re.compile(r'\bdel\s+/[qQ]', re.IGNORECASE),
+    re.compile(r'\bformat\s+[A-Za-z]:', re.IGNORECASE),
+    re.compile(r'\bshred\b', re.IGNORECASE),
+    re.compile(r'\bdd\s+if=', re.IGNORECASE),
+    re.compile(r'\bmkfs\b', re.IGNORECASE),
+    re.compile(r'>\s*/dev/sd', re.IGNORECASE),
+    re.compile(r'\bchmod\s+-R\s+777\b', re.IGNORECASE),
+    re.compile(r'\bchown\s+-R\b', re.IGNORECASE),
+    re.compile(r'\bgit\s+push\s+--force\b', re.IGNORECASE),
+    re.compile(r'\bgit\s+reset\s+--hard\b', re.IGNORECASE),
+    re.compile(r'\bdocker\s+system\s+prune', re.IGNORECASE),
+    re.compile(r'\bdocker\s+rm\s+-f\b', re.IGNORECASE),
+    re.compile(r'\bRemove-Item\s+.*-Recurse', re.IGNORECASE),
+    re.compile(r'\bRemove-Item\s+.*-Force', re.IGNORECASE),
+    re.compile(r'\brd\s+/[sS]', re.IGNORECASE),
+    re.compile(r'\brd\s+/[qQ]', re.IGNORECASE),
+    re.compile(r'\bnet\s+user\b', re.IGNORECASE),
+    re.compile(r'\bnet\s+localgroup\b', re.IGNORECASE),
+    re.compile(r'\bpip\s+uninstall\b', re.IGNORECASE),
+    re.compile(r'\bconda\s+remove\b', re.IGNORECASE),
+    re.compile(r'\bnpm\s+uninstall\b', re.IGNORECASE),
+    re.compile(r'\btaskkill\s+/[fF]', re.IGNORECASE),
+    re.compile(r'\breg\s+delete\b', re.IGNORECASE),
+    re.compile(r'\bregedit\b', re.IGNORECASE),
+    re.compile(r'\bmsiexec\b', re.IGNORECASE),
+    re.compile(r'\bcertutil\b', re.IGNORECASE),
+    re.compile(r'\bpowershell\s+-enc', re.IGNORECASE),
+    re.compile(r'\bpwsh\s+-enc', re.IGNORECASE),
+    re.compile(r'\bcmd\s+/c\s+del\b', re.IGNORECASE),
+    re.compile(r'\bicacls\b', re.IGNORECASE),
+    re.compile(r'\bcacls\b', re.IGNORECASE),
+    re.compile(r'\bwbadmin\b', re.IGNORECASE),
+    re.compile(r'\bdiskpart\b', re.IGNORECASE),
+]
 
 
-run_script = build_agent_tool(
-    name="run_script",
-    description=(
-        "执行技能中的 Python 脚本。"
-        "在调用此工具前，必须先调用 get_skill 了解脚本用法。"
-        "脚本的工作目录已自动设为当前会话的输出目录，因此输出文件参数只写文件名（如 result.json），不要加任何目录前缀。"
-        "脚本的标准输出将作为结果返回。"
-    ),
-    args_schema=RunScriptInput,
-    func=_impl_run_script,
-    is_readonly=False,
-    is_destructive=True,
-    is_concurrency_safe=False,
-    check_permissions_fn=make_skill_script_permission_fn(),
-    permission_policy=ToolPermissionPolicy(policy_type="skill_script"),
-)
+def _check_dangerous_command(command: str) -> str:
+    for pattern in _DANGEROUS_COMMAND_PATTERNS:
+        if pattern.search(command):
+            return f"检测到危险命令模式，已拦截: {pattern.pattern}"
+    return ""
 
 
-def _impl_exec_bash(command: str = "", timeout: int = 120) -> str:
+def _impl_exec_bash(command: str = "", workdir: str = "", timeout: int = 120, env: str = "{}") -> str:
     parsed = _parse_json_if_needed(command)
     if parsed:
         command = parsed.get('command', command)
+        workdir = parsed.get('workdir', workdir)
         timeout = parsed.get('timeout', timeout)
-    
+        env = parsed.get('env', env)
+
     command = str(command).strip()
-    
+
     _retry_block = _check_retry_guard_before_exec("exec_bash", command=command, timeout=timeout)
     if _retry_block:
         return _retry_block
-    
+
     if not command:
         return _finalize_tool_output("exec_bash", "错误：命令不能为空", command=command, timeout=timeout)
+
+    _danger = _check_dangerous_command(command)
+    if _danger:
+        return _finalize_tool_output("exec_bash", _danger, command=command, timeout=timeout)
 
     normalized_command = command.lower()
     if normalized_command.startswith("powershell ") or normalized_command.startswith("powershell.exe ") or normalized_command.startswith("pwsh ") or normalized_command.startswith("pwsh.exe ") or normalized_command.startswith("bash ") or normalized_command.startswith("sh "):
@@ -955,154 +549,34 @@ def _impl_exec_bash(command: str = "", timeout: int = 120) -> str:
             command=command,
             timeout=timeout,
         )
-    
-    try:
-        logger.info(f"执行命令: {command}")
-        run_env = _build_exec_env()
-        Path(run_env['MPLCONFIGDIR']).mkdir(parents=True, exist_ok=True)
-        shell_prefix, shell_name = _detect_shell_command()
-        shell_cmd = shell_prefix + [command]
-        
-        result = subprocess.run(
-            shell_cmd,
-            capture_output=True,
-            timeout=timeout,
-            cwd=str(_PROJECT_ROOT),
-            env=run_env,
-        )
-        
-        stdout = result.stdout.decode('utf-8', errors='replace') if result.stdout else ""
-        stderr = result.stderr.decode('utf-8', errors='replace') if result.stderr else ""
-        
-        output = stdout
-        if stderr:
-            output += f"\n[stderr]: {stderr}"
-        if output:
-            output = f"[shell={shell_name}]\n{output}"
-        
-        if result.returncode != 0:
-            return _finalize_tool_output(
-                "exec_bash",
-                f"命令执行失败（退出码 {result.returncode}）：\n{output}",
-                command=command,
-                timeout=timeout,
-            )
-
-        return _finalize_tool_output("exec_bash", output or "命令执行成功（无输出）", command=command, timeout=timeout)
-        
-    except subprocess.TimeoutExpired:
-        return _finalize_tool_output("exec_bash", f"命令执行超时（>{timeout}秒）", command=command, timeout=timeout)
-    except Exception as e:
-        logger.error(f"命令执行失败: {e}", exc_info=True)
-        return _finalize_tool_output("exec_bash", f"命令执行失败：{str(e)}", command=command, timeout=timeout)
-
-
-exec_bash = build_agent_tool(
-    name="exec_bash",
-    description=(
-        "通过当前环境可用的 shell 执行命令。"
-        "用于执行系统命令，如文件操作、网络请求等。"
-        "注意：此工具会直接执行命令，请谨慎使用。"
-        "**环境信息：**"
-        "- 执行环境：自动选择可用 shell（优先 powershell/pwsh，其次 bash/sh）"
-        "- 当前 shell：由工具自动检测，不要假设固定是 PowerShell"
-        "- Python 命令：使用 `python` 或 `python3`"
-        "- 路径格式：跟随当前运行环境；Windows 用 Windows 路径，容器/Linux 用 POSIX 路径"
-        "- 不要在 command 中再嵌套 `powershell -Command`、`pwsh -Command`、`bash -lc` 或 `sh -lc`"
-        "- 复杂脚本优先写入 `.py` 文件，再用 `exec_python_file` 执行"
-    ),
-    args_schema=ExecBashInput,
-    func=_impl_exec_bash,
-    is_readonly=False,
-    is_destructive=True,
-    is_concurrency_safe=False,
-    check_permissions_fn=make_exec_permission_fn("command"),
-    permission_policy=ToolPermissionPolicy(policy_type="exec", command_field="command"),
-)
-
-
-def _impl_exec_python_file(
-    script_path: str = "",
-    args: Union[str, List] = "",
-    env: str = "{}",
-    timeout: int = 900,
-    workdir: str = "",
-) -> str:
-    parsed = _parse_json_if_needed(script_path)
-    if parsed and 'script_path' in parsed:
-        script_path = parsed.get('script_path', script_path)
-        args = parsed.get('args', args)
-        env = parsed.get('env', env)
-        timeout = parsed.get('timeout', timeout)
-        workdir = parsed.get('workdir', workdir)
-
-    script_path = str(script_path).strip().strip('"').strip("'")
-    workdir = str(workdir).strip().strip('"').strip("'")
-    args_list = _normalize_args(args)
-
-    if not script_path:
-        return _finalize_tool_output(
-            "exec_python_file",
-            "错误：script_path 参数不能为空",
-            script_path=script_path,
-            args=args_list,
-            timeout=timeout,
-            workdir=workdir,
-        )
-
-    script_file = resolve_tool_path(script_path, access="exec").resolved
-
-    if not script_file.exists() or not script_file.is_file():
-        return _finalize_tool_output(
-            "exec_python_file",
-            f"错误：Python 文件不存在: {script_file}",
-            script_path=str(script_file),
-            args=args_list,
-            timeout=timeout,
-            workdir=workdir,
-        )
-
-    if script_file.suffix.lower() != '.py':
-        return _finalize_tool_output(
-            "exec_python_file",
-            f"错误：仅支持执行 .py 文件，当前文件: {script_file.name}",
-            script_path=str(script_file),
-            args=args_list,
-            timeout=timeout,
-            workdir=workdir,
-        )
 
     try:
         env_dict = json.loads(env) if env else {}
     except json.JSONDecodeError:
         env_dict = {}
 
-    exec_cwd_path = None
-    if workdir:
-        from agent.runtime.services.path_service import get_path_service
-        cwd_result = get_path_service().resolve_simple(workdir, access="cwd")
-        exec_cwd_path = cwd_result.resolved
-    if exec_cwd_path is None:
-        session_output_dir = _SESSION_CONTEXT.get("output_dir")
-        if session_output_dir:
-            exec_cwd_path = Path(session_output_dir)
-        else:
-            exec_cwd_path = script_file.parent
-    exec_cwd = str(exec_cwd_path)
-
     try:
-        cmd = [sys.executable, str(script_file)] + args_list
+        logger.info(f"执行命令: {command}")
         run_env = _build_exec_env()
         run_env.update({str(k): str(v) for k, v in env_dict.items()})
+        Path(run_env['MPLCONFIGDIR']).mkdir(parents=True, exist_ok=True)
+        shell_prefix, shell_name = _detect_shell_command()
+        shell_cmd = shell_prefix + [command]
 
-        logger.info(f"执行 Python 文件: {' '.join(cmd)}")
+        if workdir and workdir.strip():
+            cwd = resolve_tool_path(workdir.strip(), access="read").resolved
+            if not cwd.is_dir():
+                cwd = Path(_SESSION_CONTEXT.get("output_dir", str(_PROJECT_ROOT)))
+                cwd = Path(_SESSION_CONTEXT.get("output_dir", str(_PROJECT_ROOT)))
+        else:
+            cwd = Path(_SESSION_CONTEXT.get("output_dir", str(_PROJECT_ROOT)))
 
         process = subprocess.Popen(
-            cmd,
+            shell_cmd,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             env=run_env,
-            cwd=str(exec_cwd),
+            cwd=str(cwd),
             text=True,
             encoding='utf-8',
             errors='replace',
@@ -1116,9 +590,9 @@ def _impl_exec_python_file(
                 if line:
                     lines.append(line)
                     if log_level == 'INFO':
-                        logger.info(f"[Python文件输出] {line.rstrip()}")
+                        logger.info(f"[命令输出] {line.rstrip()}")
                     else:
-                        logger.warning(f"[Python文件错误] {line.rstrip()}")
+                        logger.warning(f"[命令错误] {line.rstrip()}")
 
         stdout_thread = threading.Thread(target=read_stream, args=(process.stdout, stdout_lines, 'INFO'), daemon=True)
         stderr_thread = threading.Thread(target=read_stream, args=(process.stderr, stderr_lines, 'WARNING'), daemon=True)
@@ -1130,14 +604,7 @@ def _impl_exec_python_file(
             returncode = process.wait(timeout=timeout)
         except subprocess.TimeoutExpired:
             process.kill()
-            return _finalize_tool_output(
-                "exec_python_file",
-                f"Python 文件执行超时（>{timeout}秒）",
-                script_path=str(script_file),
-                args=args_list,
-                timeout=timeout,
-                workdir=str(exec_cwd),
-            )
+            return _finalize_tool_output("exec_bash", f"命令执行超时（>{timeout}秒）", command=command, timeout=timeout)
 
         stdout_thread.join(timeout=5)
         stderr_thread.join(timeout=5)
@@ -1145,356 +612,61 @@ def _impl_exec_python_file(
         stdout = ''.join(stdout_lines)
         stderr = ''.join(stderr_lines)
 
+        output = stdout
+        if stderr:
+            output += f"\n[stderr]: {stderr}"
+        if output:
+            output = f"[shell={shell_name}]\n{output}"
+
         if returncode != 0:
             return _finalize_tool_output(
-                "exec_python_file",
-                f"Python 文件执行失败（退出码 {returncode}）：\n{stderr}",
-                script_path=str(script_file),
-                args=args_list,
+                "exec_bash",
+                f"命令执行失败（退出码 {returncode}）：\n{output}",
+                command=command,
                 timeout=timeout,
-                workdir=str(exec_cwd),
             )
 
-        return _finalize_tool_output(
-            "exec_python_file",
-            stdout or "Python 文件执行成功（无输出）",
-            script_path=str(script_file),
-            args=args_list,
-            timeout=timeout,
-            workdir=str(exec_cwd),
-        )
+        return _finalize_tool_output("exec_bash", output or "命令执行成功（无输出）", command=command, timeout=timeout)
+
+    except subprocess.TimeoutExpired:
+        return _finalize_tool_output("exec_bash", f"命令执行超时（>{timeout}秒）", command=command, timeout=timeout)
     except Exception as e:
-        logger.error(f"Python 文件执行失败: {e}", exc_info=True)
-        return _finalize_tool_output(
-            "exec_python_file",
-            f"Python 文件执行失败：{str(e)}",
-            script_path=str(script_file),
-            args=args_list,
-            timeout=timeout,
-            workdir=str(exec_cwd),
-        )
+        logger.error(f"命令执行失败: {e}", exc_info=True)
+        return _finalize_tool_output("exec_bash", f"命令执行失败：{str(e)}", command=command, timeout=timeout)
 
 
-exec_python_file = build_agent_tool(
-    name="exec_python_file",
+exec_bash = build_agent_tool(
+    name="Bash",
     description=(
-        "执行一个本地 Python 文件。"
-        "适用于先通过 `write_text_file` 写出临时 `.py` 脚本，再稳定执行该脚本。"
-        "相比 `python -c \"...\"` 更适合多行逻辑、文件转换和 JSON 生成场景。"
-        "脚本的工作目录已自动设为当前对话的输出目录，因此输出文件参数只写文件名（如 result.json），不要加任何目录前缀。"
+        "通过当前环境可用的 shell 执行命令。"
+        "**环境信息：**"
+        "- 执行环境：自动选择可用 shell（优先 powershell/pwsh，其次 bash/sh）"
+        "- 当前 shell：由工具自动检测，不要假设固定是 PowerShell"
+        "- Python 命令：使用 `python` 或 `python3`"
+        "- 路径格式：跟随当前运行环境；Windows 用 Windows 路径，容器/Linux 用 POSIX 路径"
+        "- 不要在 command 中再嵌套 `powershell -Command`、`pwsh -Command`、`bash -lc` 或 `sh -lc`"
+        "- 工作目录默认为当前会话输出目录，可通过 workdir 覆盖"
+        "- 默认超时 120 秒，可通过 timeout 调整"
+        "- 默认传入 SESSION_OUTPUT_DIR、SESSION_ID、PYTHONIOENCODING、MPLBACKEND 等环境变量"
     ),
-    args_schema=ExecPythonFileInput,
-    func=_impl_exec_python_file,
+    args_schema=ExecBashInput,
+    func=_impl_exec_bash,
     is_readonly=False,
     is_destructive=True,
     is_concurrency_safe=False,
-    check_permissions_fn=make_exec_permission_fn("command", ["script_path", "workdir"]),
-    permission_policy=ToolPermissionPolicy(policy_type="exec", command_field="command", path_fields=["script_path", "workdir"]),
+    check_permissions_fn=make_exec_permission_fn("command"),
+    permission_policy=ToolPermissionPolicy(policy_type="exec", command_field="command"),
 )
 
 
-def _impl_write_text_file(file_path: str = "", content: str = "", encoding: str = "utf-8") -> str:
-    parsed = _parse_json_if_needed(file_path)
-    if parsed and 'file_path' in parsed:
-        file_path = parsed.get('file_path', file_path)
-        content = parsed.get('content', content)
-        encoding = parsed.get('encoding', encoding)
-
-    file_path = str(file_path).strip().strip('"').strip("'")
-    encoding = str(encoding).strip() or 'utf-8'
-
-    if not file_path:
-        _retry_block = _check_retry_guard_before_exec("write_text_file", file_path=file_path)
-        if _retry_block:
-            return _finalize_tool_output(
-                "write_text_file",
-                _retry_block,
-                file_path=file_path,
-                encoding=encoding,
-            )
-        return _finalize_tool_output(
-            "write_text_file",
-            "错误：file_path 参数不能为空",
-            file_path=file_path,
-            encoding=encoding,
-        )
-
-    path_result = resolve_tool_path(file_path, access="write")
-    if path_result.source == "no_context_rejected":
-        return _finalize_tool_output(
-            "write_text_file",
-            "错误：无会话上下文时相对路径写入被拒绝。正确做法：只写文件名（如 result.py），系统会自动写入当前对话输出目录。不要传 data/sessions/... 等目录前缀。",
-            file_path=file_path,
-            encoding=encoding,
-        )
-    target_file = path_result.resolved
-
-    try:
-        target_file.parent.mkdir(parents=True, exist_ok=True)
-        target_file.write_text(str(content), encoding=encoding)
-        return _finalize_tool_output(
-            "write_text_file",
-            f"文本文件写入成功：{target_file}",
-            file_path=str(target_file),
-            encoding=encoding,
-        )
-    except Exception as e:
-        logger.error(f"写入文本文件失败: {e}", exc_info=True)
-        return _finalize_tool_output(
-            "write_text_file",
-            f"写入文本文件失败：{str(e)}",
-            file_path=str(target_file),
-            encoding=encoding,
-        )
 
 
-write_text_file = build_agent_tool(
-    name="write_text_file",
-    description=(
-        "直接写入文本文件。"
-        "适用于生成临时 Python 脚本、JSON 文件、CSV 文件或其他文本文件，"
-        "可避免通过 PowerShell here-string 或复杂转义来写文件。"
-        "file_path 只写文件名（如 generate_data.py），系统会自动写入当前对话的输出目录。"
-        "不要加任何目录前缀（不要写 data/sessions/xxx.py，否则路径嵌套出错）。"
-        "不要传目录路径，只传文件名。"
-    ),
-    args_schema=WriteTextFileInput,
-    func=_impl_write_text_file,
-    is_readonly=False,
-    is_destructive=True,
-    is_concurrency_safe=False,
-    check_permissions_fn=make_write_permission_fn("file_path"),
-    permission_policy=ToolPermissionPolicy(policy_type="write", path_field="file_path"),
-)
 
 
-def _impl_search_artifacts(query: str = "", scope: str = "current", path_filter: str = "", limit: int = 10) -> str:
-    parsed = _parse_json_if_needed(query)
-    if parsed and 'query' in parsed:
-        query = parsed.get('query', query)
-        scope = parsed.get('scope', scope)
-        path_filter = parsed.get('path_filter', path_filter)
-        limit = parsed.get('limit', limit)
-
-    scope = str(scope).strip().lower() or "current"
-    path_filter = str(path_filter).strip()
-    try:
-        limit = max(1, min(int(limit), 20))
-    except Exception:
-        limit = 10
-
-    if scope not in {"current", "reusable"}:
-        return _finalize_tool_output(
-            "search_artifacts",
-            "错误：scope 仅支持 `current` 或 `reusable`",
-            query=query,
-            scope=scope,
-            path_filter=path_filter,
-            limit=limit,
-        )
-
-    candidates = _iter_candidate_artifacts(scope)
-    if path_filter:
-        pf_lower = path_filter.lower()
-        candidates = [p for p in candidates if pf_lower in str(p).lower()]
-
-    records = [_build_artifact_record(path) for path in candidates]
-    matched = [record for record in records if _artifact_matches_query(record, query)]
-    matched = matched[:limit]
-
-    if not matched:
-        return _finalize_tool_output(
-            "search_artifacts",
-            f"未找到匹配产物。scope={scope}, query={query!r}, path_filter={path_filter!r}",
-            query=query,
-            scope=scope,
-            path_filter=path_filter,
-            limit=limit,
-        )
-
-    lines = [f"找到 {len(matched)} 个匹配产物（scope={scope}）：", ""]
-    for idx, record in enumerate(matched, start=1):
-        lines.extend([
-            f"{idx}. {record['name']}",
-            f"   - 类型: {record['artifact_type']}",
-            f"   - 会话: {record['session_id'] or '-'}",
-            f"   - 路径: {record['path']}",
-            f"   - 大小: {record['size_bytes']} bytes",
-            f"   - 更新时间: {record['updated_at']}",
-            f"   - 可复用: {record['reusable']}",
-        ])
-
-    return _finalize_tool_output(
-        "search_artifacts",
-        "\n".join(lines),
-        query=query,
-        scope=scope,
-        path_filter=path_filter,
-        limit=limit,
-    )
 
 
-search_artifacts = build_agent_tool(
-    name="search_artifacts",
-    description=(
-        "搜索当前会话或历史可复用产物。"
-        "scope=current 搜索当前会话所有文件（包括 outputs 和 uploads 目录下的脚本、数据文件、图片等）。"
-        "scope=reusable 跨会话搜索可复用脚本。"
-        "path_filter 可按路径子串过滤（如会话ID、目录名）。"
-        "query 支持按文件名、路径、类型关键词搜索。"
-    ),
-    args_schema=SearchArtifactsInput,
-    func=_impl_search_artifacts,
-    is_readonly=True,
-    is_destructive=False,
-    is_concurrency_safe=True,
-    check_permissions_fn=make_readonly_permission_fn(),
-    permission_policy=ToolPermissionPolicy(policy_type="readonly"),
-)
 
 
-def _impl_check_artifact_exists(artifact_path: str = "", scope: str = "current") -> str:
-    parsed = _parse_json_if_needed(artifact_path)
-    if parsed and 'artifact_path' in parsed:
-        artifact_path = parsed.get('artifact_path', artifact_path)
-        scope = parsed.get('scope', scope)
-
-    artifact_path = str(artifact_path).strip().strip('"').strip("'")
-    scope = str(scope).strip().lower() or "current"
-    if not artifact_path:
-        return _finalize_tool_output(
-            "check_artifact_exists",
-            "错误：artifact_path 参数不能为空",
-            artifact_path=artifact_path,
-            scope=scope,
-        )
-
-    if scope not in {"current", "reusable"}:
-        return _finalize_tool_output(
-            "check_artifact_exists",
-            "错误：scope 仅支持 `current` 或 `reusable`",
-            artifact_path=artifact_path,
-            scope=scope,
-        )
-
-    candidates = _resolve_artifact_candidates(artifact_path, scope)
-    if not candidates:
-        return _finalize_tool_output(
-            "check_artifact_exists",
-            f"未找到目标产物：{artifact_path}",
-            artifact_path=artifact_path,
-            scope=scope,
-        )
-
-    lines = [f"确认找到 {len(candidates)} 个匹配产物：", ""]
-    for idx, path in enumerate(candidates, start=1):
-        lines.extend([
-            f"{idx}. {path.name}",
-            f"   - 路径: {path}",
-            f"   - 大小: {path.stat().st_size} bytes",
-            f"   - 更新时间: {datetime.fromtimestamp(path.stat().st_mtime).isoformat()}",
-        ])
-
-    return _finalize_tool_output(
-        "check_artifact_exists",
-        "\n".join(lines),
-        artifact_path=artifact_path,
-        scope=scope,
-    )
-
-
-check_artifact_exists = build_agent_tool(
-    name="check_artifact_exists",
-    description=(
-        "检查目标产物是否真实存在。"
-        "优先按给定路径直接判断；如果传入的是文件名或相对路径，则在当前会话 outputs"
-        "或 reusable 范围内做文件名/后缀匹配，适合校验 `.xlsx`、`.docx`、`.pdf`、图片等二进制产物。"
-    ),
-    args_schema=CheckArtifactExistsInput,
-    func=_impl_check_artifact_exists,
-    is_readonly=True,
-    is_destructive=False,
-    is_concurrency_safe=True,
-    check_permissions_fn=make_readonly_permission_fn(),
-    permission_policy=ToolPermissionPolicy(policy_type="readonly"),
-)
-
-
-def _impl_read_artifact(artifact_path: str = "", max_chars: int = 12000) -> str:
-    parsed = _parse_json_if_needed(artifact_path)
-    if parsed and 'artifact_path' in parsed:
-        artifact_path = parsed.get('artifact_path', artifact_path)
-        max_chars = parsed.get('max_chars', max_chars)
-
-    artifact_path = str(artifact_path).strip().strip('"').strip("'")
-    if not artifact_path:
-        return _finalize_tool_output(
-            "read_artifact",
-            "错误：artifact_path 参数不能为空",
-            artifact_path=artifact_path,
-            max_chars=max_chars,
-        )
-
-    path = resolve_tool_path(artifact_path, access="read").resolved
-
-    if not path.exists() or not path.is_file():
-        return _finalize_tool_output(
-            "read_artifact",
-            f"错误：产物文件不存在: {path}",
-            artifact_path=str(path),
-            max_chars=max_chars,
-        )
-
-    ext = path.suffix.lower()
-    if ext not in _READABLE_ARTIFACT_EXTENSIONS:
-        return _finalize_tool_output(
-            "read_artifact",
-            f"错误：当前仅支持读取 .py、.md、.txt、.json、.csv 文件，文件类型 {ext} 不支持直接读取",
-            artifact_path=str(path),
-            max_chars=max_chars,
-        )
-
-    try:
-        max_chars = max(1000, min(int(max_chars), 50000))
-    except Exception:
-        max_chars = 12000
-
-    try:
-        content = path.read_text(encoding="utf-8", errors="replace")
-        if len(content) > max_chars:
-            content = content[:max_chars] + "\n\n[已截断，仅读取前部内容]"
-        header = f"=== 产物内容: {path.name} ===\n路径: {path}\n"
-        return _finalize_tool_output(
-            "read_artifact",
-            header + "\n" + content,
-            artifact_path=str(path),
-            max_chars=max_chars,
-        )
-    except Exception as e:
-        logger.error(f"读取产物失败: {e}", exc_info=True)
-        return _finalize_tool_output(
-            "read_artifact",
-            f"读取产物失败：{str(e)}",
-            artifact_path=str(path),
-            max_chars=max_chars,
-        )
-
-
-read_artifact = build_agent_tool(
-    name="read_artifact",
-    description=(
-        "读取文本类产物内容。"
-        "支持读取 `.py`、`.md`、`.txt`、`.json`、`.csv` 文本文件。"
-        "不支持 Excel、`.docx` 等二进制文件，避免内存占用过大或上下文超限。"
-    ),
-    args_schema=ReadArtifactInput,
-    func=_impl_read_artifact,
-    is_readonly=True,
-    is_destructive=False,
-    is_concurrency_safe=True,
-    check_permissions_fn=make_read_path_permission_fn("artifact_path"),
-    permission_policy=ToolPermissionPolicy(policy_type="read_path", path_field="artifact_path"),
-)
 
 
 class _RAGConfigManager:
@@ -1779,7 +951,7 @@ def _impl_knowledge_search(
 
 
 knowledge_search = build_agent_tool(
-    name="knowledge_search",
+    name="KnowledgeSearch",
     description=(
         "从知识库中检索相关参考资料。"
         "用于查找专业知识、历史案例、技术文档等。"
@@ -1870,7 +1042,7 @@ def _impl_add_knowledge(
 
 
 add_knowledge = build_agent_tool(
-    name="add_knowledge",
+    name="KnowledgeAdd",
     description=(
         "将文档添加到知识库。"
         "小文档（<10KB）会作为临时上下文注入对话，"
@@ -2083,7 +1255,7 @@ def _impl_web_search(
 
 
 web_search = build_agent_tool(
-    name="web_search",
+    name="WebSearch",
     description=(
         "网络搜索工具，用于获取实时网络信息。"
         "当用户需要搜索最新新闻、实时信息、网络资料时使用此工具。"
@@ -2220,7 +1392,7 @@ def _impl_fetch_webpage(
 
 
 fetch_webpage = build_agent_tool(
-    name="fetch_webpage",
+    name="WebFetch",
     description=(
         "抓取指定网页 URL 的正文内容。"
         "适用于先通过 web_search 找到候选链接，再进入具体网页抽取标题、正文和部分链接。"
@@ -2293,7 +1465,7 @@ def _impl_add_memory(content: str = "", entry_type: str = "note") -> str:
 
 
 add_memory = build_agent_tool(
-    name="add_memory",
+    name="MemoryAdd",
     description=(
         "将重要内容添加到长期记忆。"
         "当用户明确要求记住某事，或识别到重要的决策、偏好、规则时使用此工具。"
@@ -2357,7 +1529,7 @@ def _impl_search_memory(
 
 
 search_memory = build_agent_tool(
-    name="search_memory",
+    name="MemorySearch",
     description=(
         "在记忆系统中搜索内容。"
         "当需要查找之前对话中的具体内容、或搜索Skills文档中的信息时使用此工具。"
@@ -2368,6 +1540,7 @@ search_memory = build_agent_tool(
     is_destructive=False,
     is_concurrency_safe=True,
     check_permissions_fn=make_readonly_permission_fn(),
+    permission_policy=ToolPermissionPolicy(policy_type="readonly"),
 )
 
 
@@ -2559,7 +1732,7 @@ def _impl_update_project_instructions(
 
 
 update_project_instructions = build_agent_tool(
-    name="update_project_instructions",
+    name="UpdateProjectInstructions",
     description=(
         "修改项目级或全局 AGENTS.md 指令文件，用于持久化用户偏好和规则。"
         "写入前会自动备份原文件。此工具影响所有后续对话，请务必先向用户确认。"
@@ -2570,6 +1743,7 @@ update_project_instructions = build_agent_tool(
     is_destructive=True,
     is_concurrency_safe=False,
     check_permissions_fn=make_ask_permission_fn("修改 AGENTS.md 指令文件会影响所有后续对话，需要用户确认"),
+    permission_policy=ToolPermissionPolicy(policy_type="ask", reason="修改 AGENTS.md 指令文件会影响所有后续对话"),
 )
 
 
@@ -2619,7 +1793,7 @@ def _impl_create_scheduled_task(
 
 
 create_scheduled_task = build_agent_tool(
-    name="create_scheduled_task",
+    name="CreateScheduledTask",
     description=(
         "创建后台定时任务。当用户要求在未来某个时间、每天、定时、自动执行某项任务时使用。"
         "command 只能填写未来真正要执行的业务任务，不要包含'每天/定时/明天几点'等调度表达；"
@@ -2631,6 +1805,7 @@ create_scheduled_task = build_agent_tool(
     is_destructive=False,
     is_concurrency_safe=False,
     check_permissions_fn=make_readonly_permission_fn(),
+    permission_policy=ToolPermissionPolicy(policy_type="state_write"),
 )
 
 
@@ -2660,7 +1835,7 @@ def _impl_list_scheduled_tasks(include_all_sessions: bool = True) -> str:
 
 
 list_scheduled_tasks = build_agent_tool(
-    name="list_scheduled_tasks",
+    name="ListScheduledTasks",
     description="查询定时任务列表。默认查询所有会话的定时任务。",
     args_schema=ListScheduledTasksInput,
     func=_impl_list_scheduled_tasks,
@@ -2668,6 +1843,7 @@ list_scheduled_tasks = build_agent_tool(
     is_destructive=False,
     is_concurrency_safe=True,
     check_permissions_fn=make_readonly_permission_fn(),
+    permission_policy=ToolPermissionPolicy(policy_type="readonly"),
 )
 
 
@@ -2693,7 +1869,7 @@ def _impl_cancel_scheduled_task(task_id: str = "") -> str:
 
 
 cancel_scheduled_task = build_agent_tool(
-    name="cancel_scheduled_task",
+    name="CancelScheduledTask",
     description="取消或停用一个后台定时任务。用户要求取消、停用定时任务时使用。",
     args_schema=CancelScheduledTaskInput,
     func=_impl_cancel_scheduled_task,
@@ -2701,20 +1877,20 @@ cancel_scheduled_task = build_agent_tool(
     is_destructive=False,
     is_concurrency_safe=False,
     check_permissions_fn=make_readonly_permission_fn(),
+    permission_policy=ToolPermissionPolicy(policy_type="state_write"),
 )
 
 
 def _register_all_tools():
     ToolRegistry.clear()
+
+    # ── 文件操作工具（Glob/Grep/Read/Write/Edit）──────────────────
+    from tools.file_tools import register_file_tools
+    register_file_tools()
+
+    # ── 核心工具（PascalCase 命名）─────────────────────────────────
     ToolRegistry.register(get_skill)
-    ToolRegistry.register(run_script)
-    ToolRegistry.register(search_tool_error_memory)
     ToolRegistry.register(exec_bash)
-    ToolRegistry.register(exec_python_file)
-    ToolRegistry.register(write_text_file)
-    ToolRegistry.register(search_artifacts)
-    ToolRegistry.register(check_artifact_exists)
-    ToolRegistry.register(read_artifact)
     ToolRegistry.register(knowledge_search)
     ToolRegistry.register(add_knowledge)
     ToolRegistry.register(web_search)
@@ -2725,6 +1901,20 @@ def _register_all_tools():
     ToolRegistry.register(create_scheduled_task)
     ToolRegistry.register(list_scheduled_tasks)
     ToolRegistry.register(cancel_scheduled_task)
+
+    # ── 别名注册（向后兼容）─────────────────────────────────────────
+    ToolRegistry.register_alias("get_skill", "GetSkill")
+    ToolRegistry.register_alias("exec_bash", "Bash")
+    ToolRegistry.register_alias("knowledge_search", "KnowledgeSearch")
+    ToolRegistry.register_alias("add_knowledge", "KnowledgeAdd")
+    ToolRegistry.register_alias("web_search", "WebSearch")
+    ToolRegistry.register_alias("fetch_webpage", "WebFetch")
+    ToolRegistry.register_alias("add_memory", "MemoryAdd")
+    ToolRegistry.register_alias("search_memory", "MemorySearch")
+    ToolRegistry.register_alias("update_project_instructions", "UpdateProjectInstructions")
+    ToolRegistry.register_alias("create_scheduled_task", "CreateScheduledTask")
+    ToolRegistry.register_alias("list_scheduled_tasks", "ListScheduledTasks")
+    ToolRegistry.register_alias("cancel_scheduled_task", "CancelScheduledTask")
 
     # ── 任务经验工具 ──────────────────────────────────────────
     from config.settings import settings as _settings
@@ -2749,7 +1939,7 @@ def _register_all_tools():
                 return f"检索任务经验时出错: {e}"
 
         ToolRegistry.register(build_agent_tool(
-            name="search_task_experience",
+            name="SearchTaskExperience",
             description="检索历史任务执行经验，避免重复踩坑。可指定树路径缩小检索范围。搜索命中会自动提升经验热度。",
             args_schema=_SearchTaskExperienceInput,
             func=_search_task_experience,
@@ -2769,7 +1959,7 @@ def _register_all_tools():
                 return f"浏览经验树时出错: {e}"
 
         ToolRegistry.register(build_agent_tool(
-            name="browse_experience_tree",
+            name="BrowseExperienceTree",
             description="按路径浏览经验树结构，查看摘要概览。不返回叶子详情，需要详情时使用 drill_down_experience。",
             args_schema=_BrowseExperienceTreeInput,
             func=_browse_experience_tree,
@@ -2789,7 +1979,7 @@ def _register_all_tools():
                 return f"下钻经验详情时出错: {e}"
 
         ToolRegistry.register(build_agent_tool(
-            name="drill_down_experience",
+            name="DrillDownExperience",
             description="从摘要节点展开到叶子详情，查看具体的坑点、解决方案和步骤。",
             args_schema=_DrillDownExperienceInput,
             func=_drill_down_experience,
@@ -2836,7 +2026,7 @@ def _register_all_tools():
                 return f"添加任务经验时出错: {e}"
 
         ToolRegistry.register(build_agent_tool(
-            name="add_task_experience",
+            name="AddTaskExperience",
             description="手动添加任务执行经验到经验树，供未来类似任务参考。包括坑点、解决方案、步骤摘要和可复用代码片段。",
             args_schema=_AddTaskExperienceInput,
             func=_add_task_experience,
@@ -2845,26 +2035,24 @@ def _register_all_tools():
             permission_policy=ToolPermissionPolicy(policy_type="state_write"),
         ))
 
+        ToolRegistry.register_alias("search_task_experience", "SearchTaskExperience")
+        ToolRegistry.register_alias("browse_experience_tree", "BrowseExperienceTree")
+        ToolRegistry.register_alias("drill_down_experience", "DrillDownExperience")
+        ToolRegistry.register_alias("add_task_experience", "AddTaskExperience")
+
 
 _register_all_tools()
 
 
 __all__ = [
     'get_skill',
-    'run_script',
     'exec_bash',
-    'exec_python_file',
-    'write_text_file',
-    'search_artifacts',
-    'check_artifact_exists',
-    'read_artifact',
     'knowledge_search',
     'add_knowledge',
     'web_search',
     'fetch_webpage',
     'add_memory',
     'search_memory',
-    'search_tool_error_memory',
     'update_project_instructions',
     'create_scheduled_task',
     'list_scheduled_tasks',

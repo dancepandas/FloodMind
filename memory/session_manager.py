@@ -421,7 +421,7 @@ class SessionManager:
                 pass
 
         if info:
-            return f"会话 {session_id[:8]}"
+            return "新会话"
 
         return "新会话"
 

@@ -1,5 +1,5 @@
 import { useRef, useState, useEffect } from "react";
-import { Send, Pause, Paperclip, ChevronDown, ShieldAlert, Check, X, Brain, Globe, Database } from "lucide-react";
+import { Send, Pause, Paperclip, ChevronDown, ShieldAlert, Brain, Globe, Database } from "lucide-react";
 import type { ModelOption, SessionConfig, PendingPermissionAsk } from "@/types/app";
 
 const PINNED_MODELS = ["glm_51", "qwen_36_plus", "deepseek_v4_flash", "minimax_m25"];
@@ -114,42 +114,42 @@ export function ChatComposer({
   }
 
   const sendBtnStyle = isRunning
-    ? { background: 'var(--amber-500)', color: 'white', boxShadow: '0 2px 8px rgba(245,158,11,0.3)' }
+    ? { background: 'var(--amber-500)', color: 'white', boxShadow: '0 2px 10px rgba(245,158,11,0.3)' }
     : value.trim().length > 0 && !disabled
-    ? { background: 'linear-gradient(135deg, var(--ocean-500), var(--teal-500))', color: 'white', boxShadow: '0 2px 8px rgba(37,99,168,0.25)' }
-    : { background: 'hsl(var(--muted))', color: 'hsl(var(--muted-foreground))', opacity: 0.3 };
+    ? { background: 'var(--gradient-ocean-teal)', color: 'white', boxShadow: '0 2px 12px rgba(37,99,168,0.25)' }
+    : { background: 'hsl(var(--muted))', color: 'hsl(var(--muted-foreground))', opacity: 0.25 };
 
   return (
     <div className="px-4 pt-2.5 pb-3" style={{ background: 'linear-gradient(to top, hsl(var(--background)), hsl(var(--background)))' }}>
       <div className="max-w-[780px] mx-auto">
         {pendingPermissionAsk && (
           <div
-            className="mb-2 flex items-center gap-2.5 px-3.5 py-2 rounded-xl"
+            className="mb-2.5 flex items-center gap-2.5 px-4 py-2.5 rounded-xl animate-scale-in"
             style={{
               background: 'var(--amber-50)',
               border: '1px solid var(--amber-200)',
-              boxShadow: '0 1px 4px rgba(245,158,11,0.08)',
+              boxShadow: '0 2px 8px rgba(245,158,11,0.08)',
             }}
           >
             <ShieldAlert size={15} style={{ color: 'var(--amber-500)' }} strokeWidth={2} />
             <div className="flex-1 min-w-0">
-              <div className="text-[12px] font-medium" style={{ color: 'var(--amber-800)' }}>权限确认</div>
+              <div className="text-[12px] font-semibold" style={{ color: 'var(--amber-800)' }}>权限确认</div>
               {pendingPermissionAsk.askReason && (
-                <div className="text-[11px] truncate" style={{ color: 'var(--amber-700)', opacity: 0.7 }}>{pendingPermissionAsk.askReason}</div>
+                <div className="text-[11px] truncate" style={{ color: 'var(--amber-700)', opacity: 0.6 }}>{pendingPermissionAsk.askReason}</div>
               )}
             </div>
-            <div className="flex gap-1.5 flex-shrink-0">
+            <div className="flex gap-2 flex-shrink-0">
               <button
                 type="button"
-                className="px-3 py-1 text-[11px] font-medium rounded-md transition-colors"
-                style={{ background: 'var(--teal-500)', color: 'white' }}
+                className="px-3.5 py-1.5 text-[11px] font-semibold rounded-lg transition-all duration-200 active:scale-[0.96]"
+                style={{ background: 'var(--teal-500)', color: 'white', boxShadow: '0 1px 6px rgba(16,185,129,0.2)' }}
                 onClick={() => onRespondPermissionAsk(true)}
               >
                 允许
               </button>
               <button
                 type="button"
-                className="px-3 py-1 text-[11px] font-medium rounded-md transition-colors"
+                className="px-3.5 py-1.5 text-[11px] font-semibold rounded-lg transition-all duration-200 active:scale-[0.96]"
                 style={{ background: 'hsl(var(--destructive))', color: 'white' }}
                 onClick={() => onRespondPermissionAsk(false)}
               >
@@ -160,21 +160,22 @@ export function ChatComposer({
         )}
 
         <div
-          className="relative flex items-end rounded-2xl transition-all duration-300"
+          className="relative flex items-end rounded-2xl transition-all duration-300 animate-border-glow"
           style={{
-            background: 'hsl(var(--card))',
+            background: 'var(--gradient-card)',
             border: '1px solid hsl(var(--border))',
-            boxShadow: 'var(--shadow-md)',
+            boxShadow: '0 4px 24px -4px rgba(15,31,56,0.08)',
+            backdropFilter: 'blur(8px)',
           }}
         >
           <button
             type="button"
             onClick={() => fileInputRef.current?.click()}
             disabled={isRunning}
-            className="p-3 h-[52px] flex items-center justify-center flex-shrink-0 rounded-l-xl transition-colors duration-200 disabled:opacity-30"
-            style={{ color: 'hsl(var(--muted-foreground))', opacity: 0.4 }}
-            onMouseEnter={(e) => { if (!isRunning) { e.currentTarget.style.color = 'var(--ocean-500)'; e.currentTarget.style.background = 'var(--sidebar-hover)'; }}}
-            onMouseLeave={(e) => { e.currentTarget.style.color = 'hsl(var(--muted-foreground))'; e.currentTarget.style.background = 'transparent'; }}
+            className="p-3 h-[52px] flex items-center justify-center flex-shrink-0 rounded-l-xl transition-all duration-200 disabled:opacity-25"
+            style={{ color: 'hsl(var(--muted-foreground))', opacity: 0.3 }}
+            onMouseEnter={(e) => { if (!isRunning) { e.currentTarget.style.color = 'var(--ocean-500)'; e.currentTarget.style.opacity = '1'; e.currentTarget.style.background = 'var(--ocean-50)'; }}}
+            onMouseLeave={(e) => { e.currentTarget.style.color = 'hsl(var(--muted-foreground))'; e.currentTarget.style.opacity = '0.3'; e.currentTarget.style.background = 'transparent'; }}
           >
             <Paperclip size={16} strokeWidth={1.8} />
           </button>
@@ -202,7 +203,7 @@ export function ChatComposer({
               }
             }}
             placeholder="输入预报任务指令..."
-            className="flex-1 max-h-[220px] min-h-[52px] py-3.5 px-2 bg-transparent resize-none outline-none text-[14px] leading-relaxed placeholder:opacity-30"
+            className="flex-1 max-h-[220px] min-h-[52px] py-3.5 px-2 bg-transparent resize-none outline-none text-[14px] leading-relaxed placeholder:opacity-25"
             style={{ color: 'hsl(var(--foreground))', fontFamily: 'var(--font-body)' }}
             rows={1}
             disabled={disabled || isRunning}
@@ -213,7 +214,7 @@ export function ChatComposer({
               type="button"
               onClick={isRunning ? onPause : onSubmit}
               disabled={!isRunning && (disabled || !value.trim())}
-              className={`p-2.5 rounded-lg flex items-center justify-center transition-all duration-250 active:scale-[0.94]`}
+              className="p-2.5 rounded-xl flex items-center justify-center transition-all duration-300 active:scale-[0.92]"
               style={sendBtnStyle}
             >
               {isRunning ? <Pause size={14} /> : <Send size={14} className={value.trim().length > 0 ? "ml-0.5" : ""} />}
@@ -229,25 +230,26 @@ export function ChatComposer({
               style={{
                 background: modelMenuOpen ? 'hsl(var(--muted))' : 'hsl(var(--muted))',
                 border: '1px solid hsl(var(--border))',
-                opacity: modelMenuOpen ? 1 : 0.6,
+                opacity: modelMenuOpen ? 1 : 0.55,
               }}
             >
               <ModelIcon modelKey={config.model_key} size={13} />
               <span className="font-medium truncate max-w-[120px]" style={{ color: 'hsl(var(--foreground))', opacity: 0.8 }}>
                 {currentModel?.label || config.model_key}
               </span>
-              <ChevronUp size={10} className={`transition-transform duration-250 ${modelMenuOpen ? "rotate-180" : ""}`} style={{ color: 'hsl(var(--muted-foreground))', opacity: 0.5 }} />
+              <ChevronUp size={10} className={`transition-transform duration-250 ${modelMenuOpen ? "rotate-180" : ""}`} style={{ color: 'hsl(var(--muted-foreground))', opacity: 0.45 }} />
             </button>
 
             {modelMenuOpen && (
               <>
                 <div className="fixed inset-0 z-40" onClick={() => setModelMenuOpen(false)} />
                 <div
-                  className="absolute bottom-full left-0 mb-1.5 z-50 min-w-[240px] py-0.5 max-h-[230px] overflow-y-auto rounded-lg"
+                  className="absolute bottom-full left-0 mb-1.5 z-50 min-w-[240px] py-0.5 max-h-[230px] overflow-y-auto rounded-xl"
                   style={{
-                    background: 'hsl(var(--popover))',
+                    background: 'rgba(255, 255, 255, 0.97)',
                     border: '1px solid hsl(var(--border))',
-                    boxShadow: 'var(--shadow-xl)',
+                    boxShadow: '0 12px 40px -8px rgba(15,31,56,0.18)',
+                    backdropFilter: 'blur(8px)',
                   }}
                 >
                   {sortedModels.map((model) => {
@@ -258,7 +260,7 @@ export function ChatComposer({
                         onClick={() => selectModel(model)}
                         className="w-full text-left px-3 py-2 transition-colors duration-150 flex items-center gap-2"
                         style={{
-                          background: isActive ? 'var(--sidebar-hover)' : 'transparent',
+                          background: isActive ? 'var(--ocean-50)' : 'transparent',
                         }}
                         onMouseEnter={(e) => { if (!isActive) e.currentTarget.style.background = 'hsl(var(--muted))'; }}
                         onMouseLeave={(e) => { if (!isActive) e.currentTarget.style.background = 'transparent'; }}
@@ -269,7 +271,7 @@ export function ChatComposer({
                             {model.label}
                           </div>
                           {model.description && (
-                            <div className="text-[9px]" style={{ color: 'hsl(var(--muted-foreground))', opacity: 0.4 }}>{model.description}</div>
+                            <div className="text-[9px]" style={{ color: 'hsl(var(--muted-foreground))', opacity: 0.35 }}>{model.description}</div>
                           )}
                         </div>
                         {isActive && (
@@ -331,7 +333,7 @@ export function ChatComposer({
             <span>RAG</span>
           </button>
 
-          <span className="ml-auto text-[9px] select-none tracking-wide" style={{ color: 'hsl(var(--muted-foreground))', opacity: 0.25 }}>
+          <span className="ml-auto text-[9px] select-none tracking-wide" style={{ color: 'hsl(var(--muted-foreground))', opacity: 0.22 }}>
             Enter 发送 · Shift+Enter 换行
           </span>
         </div>

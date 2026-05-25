@@ -1,4 +1,4 @@
-export type MessageBlockType = "thought" | "action" | "answer";
+export type MessageBlockType = "thought" | "action" | "answer" | "error";
 
 export interface ActionDetail {
   callId: string;

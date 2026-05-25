@@ -2,25 +2,27 @@ import type { ChatMessage, GeneratedArtifact, MessageBlock, ActionDetail } from 
 import { uuid } from "@/lib/utils";
 
 const TOOL_DISPLAY_NAMES: Record<string, string> = {
-  run_script: "运行脚本",
-  exec_bash: "执行命令",
-  exec_python_file: "运行Python",
-  write_text_file: "写入文件",
-  knowledge_search: "知识检索",
-  web_search: "网络搜索",
-  add_memory: "记忆存储",
-  search_memory: "记忆搜索",
-  search_artifacts: "产物搜索",
-  check_artifact_exists: "产物检查",
-  read_artifact: "读取产物",
-  create_plan: "创建计划",
-  update_project_instructions: "更新指令",
-  create_scheduled_task: "创建定时任务",
-  list_scheduled_tasks: "查看定时任务",
-  cancel_scheduled_task: "取消定时任务",
-  delegate_execution_specialist: "委派执行",
-  get_skill: "获取技能",
-  context_compress: "压缩历史对话",
+  Bash: "Bash",
+  Glob: "Glob",
+  Grep: "Grep",
+  Read: "Read",
+  Write: "Write",
+  Edit: "Edit",
+  GetSkill: "GetSkill",
+  KnowledgeSearch: "KnowledgeSearch",
+  KnowledgeAdd: "KnowledgeAdd",
+  WebSearch: "WebSearch",
+  WebFetch: "WebFetch",
+  MemorySearch: "MemorySearch",
+  MemoryAdd: "MemoryAdd",
+  CreatePlan: "CreatePlan",
+  UpdateProjectInstructions: "UpdateProjectInstructions",
+  CreateScheduledTask: "CreateScheduledTask",
+  ListScheduledTasks: "ListScheduledTasks",
+  CancelScheduledTask: "CancelScheduledTask",
+  SubAgent: "SubAgent",
+  ParallelSubAgent: "ParallelSubAgent",
+  context_compress: "ContextCompress",
 };
 
 export function getToolDisplayName(toolName: string): string {
@@ -164,6 +166,8 @@ function trimVisibleBlocks(blocks: MessageBlock[]): void {
 }
 
 function actionLabel(action: ActionDetail): string {
+  const isSubAgent = action.toolName === "SubAgent" || action.toolName === "ParallelSubAgent" || action.toolName === "ParallelTask";
+  if (isSubAgent) return "SubAgent";
   return action.delegation?.label || getToolDisplayName(action.toolName);
 }
 
@@ -280,6 +284,7 @@ function _recomputeActionBlockState(block: MessageBlock): void {
 
 function _updateActionBlock(message: ChatMessage, blocks: MessageBlock[], blockIdx: number, toolName: string, status: ActionDetail["status"], content: string, delegation: ActionDetail["delegation"] | undefined, callId: string): ChatMessage {
   const actionBlock = blocks[blockIdx];
+  const isSubAgent = toolName === "SubAgent" || toolName === "ParallelSubAgent" || toolName === "ParallelTask";
   const updatedActions = (actionBlock.actions || []).map((a) => {
     if (a.callId === callId || (a.toolName === toolName && a.status === "running")) {
       const updatedDelegation = delegation
@@ -289,8 +294,8 @@ function _updateActionBlock(message: ChatMessage, blocks: MessageBlock[], blockI
         ...a,
         callId: a.callId || callId,
         status,
-        content: status === "error" ? content : content.slice(0, 200),
-        delegation: updatedDelegation,
+        content: isSubAgent ? "" : (status === "error" ? content : content.slice(0, 200)),
+        delegation: isSubAgent ? { task: "", label: "SubAgent", skill_name: "" } : updatedDelegation,
       };
     }
     return a;

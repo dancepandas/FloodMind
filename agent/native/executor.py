@@ -147,7 +147,7 @@ class NativeAgentExecutor:
                 if call.name == "create_plan":
                     plan_created = True
 
-                if self._require_plan_before_delegate and call.name == "delegate_execution_specialist" and not plan_created:
+                if self._require_plan_before_delegate and call.name == "SubAgent" and not plan_created:
                     rejection_msg = "未先调用 create_plan 创建执行计划。请先调用 create_plan 工具创建执行计划，然后再委派执行单元。"
                     self.event_bus.emit_tool_status(call.name, "running", tool_input="", call_id=call.id)
                     result = ToolResult(

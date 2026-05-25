@@ -7,7 +7,6 @@ PathService — 统一路径解析服务
 设计原则：
 - 写入类工具没有 session context 时直接 rejected，不 fallback 到项目根
 - data/sessions/<id>/outputs/foo 输入统一归一成 foo
-- exec_python_file.workdir 必须通过 PathService 解析，执行时也使用 resolved path
 - 权限层和 _impl_* 层传递同一个 PathResolveResult
 """
 
@@ -40,6 +39,18 @@ _WRITE_ALLOWED_PREFIXES = [
 _WRITE_ALLOWED_TOPLEVEL_FILES = {
     "AGENTS.md",
 }
+
+
+_READ_ALLOWED_PREFIXES = [
+    _PROJECT_ROOT,
+]
+
+_READ_ALLOWED_OUTSIDE_PREFIXES = []
+try:
+    _home = Path.home()
+    _READ_ALLOWED_OUTSIDE_PREFIXES.append(_home / ".floodmind")
+except Exception:
+    pass
 
 
 class PathService:
@@ -181,7 +192,33 @@ class PathService:
                 return False, f"禁止访问系统目录: {pattern.pattern}"
         if access in ("write", "exec", "cwd") and not self.is_write_allowed(resolved):
             return False, f"写入路径 {resolved} 不在允许目录内"
+        if access == "read" and not self.is_read_allowed(resolved):
+            return False, f"读取路径 {resolved} 不在允许目录内"
         return True, ""
+
+    def is_read_allowed(self, resolved: Path) -> bool:
+        try:
+            resolved = resolved.resolve()
+        except Exception:
+            return False
+
+        for pattern in _FORBIDDEN_PATH_PATTERNS:
+            if pattern.match(str(resolved)):
+                return False
+
+        for prefix in _READ_ALLOWED_PREFIXES:
+            if self._is_relative_to(resolved, prefix):
+                return True
+
+        for prefix in _READ_ALLOWED_OUTSIDE_PREFIXES:
+            if self._is_relative_to(resolved, prefix):
+                return True
+
+        session_output = self._get_session_output_dir()
+        if session_output and self._is_relative_to(resolved, Path(session_output)):
+            return True
+
+        return True
 
     def _get_session_output_dir(self, session_id: str = "") -> Optional[str]:
         if session_id:

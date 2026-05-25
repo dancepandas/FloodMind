@@ -8,6 +8,7 @@ export {}
 declare global {
   const Activity: typeof import('react').Activity
   const AlarmClock: typeof import('lucide-react').AlarmClock
+  const AlertCircle: typeof import('lucide-react').AlertCircle
   const AlertTriangle: typeof import('lucide-react').AlertTriangle
   const ArrowLeft: typeof import('lucide-react').ArrowLeft
   const ArrowRight: typeof import('lucide-react').ArrowRight
@@ -36,6 +37,7 @@ declare global {
   const Cpu: typeof import('lucide-react').Cpu
   const Database: typeof import('lucide-react').Database
   const Download: typeof import('lucide-react').Download
+  const Droplets: typeof import('lucide-react').Droplets
   const ExternalLink: typeof import('lucide-react').ExternalLink
   const Eye: typeof import('lucide-react').Eye
   const File: typeof import('lucide-react').File
@@ -47,6 +49,7 @@ declare global {
   const Form: typeof import('lucide-react').Form
   const Fragment: typeof import('react').Fragment
   const Globe: typeof import('lucide-react').Globe
+  const Grid: typeof import('lucide-react').Grid
   const GripVerticalIcon: typeof import('lucide-react').GripVerticalIcon
   const History: typeof import('lucide-react').History
   const Home: typeof import('lucide-react').Home

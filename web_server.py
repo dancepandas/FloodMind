@@ -920,10 +920,9 @@ def sanitize_output(text: str) -> str:
         r'/home/[^\s\n]+/[^\s\n]*',
         r'session-[0-9]+-[a-z0-9]+',
         r'Invoking:\s*`[^`]+`',
-        r"Invoking:\s*`get_skill`\s*with\s*`[^`]+`",
-        r"Invoking:\s*`run_script`\s*with\s*`[^`]+`",
-        r"Invoking:\s*`exec_bash`\s*with\s*`[^`]+`",
-        r"Invoking:\s*`knowledge_search`\s*with\s*`[^`]+`",
+        r"Invoking:\s*`GetSkill`\s*with\s*`[^`]+`",
+        r"Invoking:\s*`Bash`\s*with\s*`[^`]+`",
+        r"Invoking:\s*`KnowledgeSearch`\s*with\s*`[^`]+`",
         r'=== 技能【[^】]+】完整说明 ===',
         r'\\data\\sessions\\[^\s\n]+',
         r'\\skills\\[^\s\n]+',
@@ -1554,7 +1553,14 @@ def chat():
                         return
 
                     if chunk.get("type") == "error":
-                        emit({'type': 'error', 'content': chunk.get('content', '处理请求时出错')})
+                        error_content = chunk.get('content', '处理请求时出错')
+                        is_timeout = "超时" in error_content or "timeout" in error_content.lower() or "timed out" in error_content.lower()
+                        emit({'type': 'error', 'content': error_content})
+                        if is_timeout:
+                            finish_stream_snapshot(session_id)
+                            emit({'type': 'stream_end'})
+                            _pump_stop_heartbeat.set()
+                            return
                         continue
 
                     if chunk.get("type") == "permission_ask":
@@ -1590,20 +1596,12 @@ def chat():
                         tool_input = chunk.get('tool_input', '')
                         if tool_input:
                             safe_chunk['tool_input'] = tool_input
-                        if tool_input and chunk.get('tool_name', '') == 'delegate_execution_specialist':
-                            try:
-                                parsed = json.loads(tool_input) if isinstance(tool_input, str) else tool_input
-                                if isinstance(parsed, dict):
-                                    task_desc = parsed.get('task', '')
-                                    skill_name = parsed.get('skill_name', '')
-                                    if task_desc:
-                                        safe_chunk['delegation'] = {
-                                            'task': task_desc,
-                                            'skill_name': skill_name,
-                                            'label': f"执行专家: {task_desc}" + (f" (skill: {skill_name})" if skill_name else ""),
-                                        }
-                            except (json.JSONDecodeError, TypeError):
-                                safe_chunk['delegation'] = {'task': str(tool_input)[:200], 'label': f"执行专家: {str(tool_input)[:100]}"}
+                        if tool_input and chunk.get('tool_name', '') in ('SubAgent', 'ParallelSubAgent', 'ParallelTask'):
+                            safe_chunk['delegation'] = {
+                                'task': '',
+                                'skill_name': '',
+                                'label': 'SubAgent',
+                            }
                         if chunk.get('status') == 'error':
                             safe_chunk['content'] = '工具执行失败，智能体正在继续处理。'
                         touch_stream_snapshot(session_id)
@@ -1632,7 +1630,7 @@ def chat():
                         if call_id:
                             result_event['call_id'] = call_id
 
-                        if tool_name == 'delegate_execution_specialist':
+                        if tool_name == 'SubAgent':
                             try:
                                 payload = json.loads(original_content)
                                 if isinstance(payload, dict):

@@ -8,9 +8,10 @@
 
 新增技能只需：
 1. 在 skills/ 下创建 <skill-name>/ 文件夹
-2. 创建 SKILL.md（填写 frontmatter + 使用说明）
+2. 创建 SKILL.md（填写 frontmatter + 使用说明，name 必填，description 强烈建议填写）
 3. 可选：创建 scripts/ 目录放置脚本
 4. 可选：创建 references/ 目录放置参考文档
+5. 可选：创建 assets/ 目录放置模板、图标等资源文件
 
 无需修改任何代码！
 """

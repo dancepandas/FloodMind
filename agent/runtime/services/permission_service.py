@@ -46,19 +46,33 @@ class PermissionService:
         self._path_service = path_service
         self._dangerous_command_patterns = [
             re.compile(r'\brm\s+-rf\b', re.IGNORECASE),
+            re.compile(r'\brm\s+-rf\b', re.IGNORECASE),
             re.compile(r'\bdel\s+/[sS]\b', re.IGNORECASE),
+            re.compile(r'\bdel\s+/[fF]\b', re.IGNORECASE),
+            re.compile(r'\bdel\s+/[qQ]\b', re.IGNORECASE),
             re.compile(r'\bformat\s+[A-Za-z]:', re.IGNORECASE),
             re.compile(r'\brmdir\s+/[sS]\b', re.IGNORECASE),
             re.compile(r'\bshred\b', re.IGNORECASE),
             re.compile(r'\bdd\s+if=', re.IGNORECASE),
             re.compile(r'\bmkfs\b', re.IGNORECASE),
             re.compile(r'>\s*/dev/sd', re.IGNORECASE),
-            re.compile(r'\bchmod\s+-R\s+777\b', re.IGNORECASE),
-            re.compile(r'\bchown\s+-R\b', re.IGNORECASE),
             re.compile(r'\bgit\s+push\s+--force\b', re.IGNORECASE),
             re.compile(r'\bgit\s+reset\s+--hard\b', re.IGNORECASE),
             re.compile(r'\bdocker\s+system\s+prune', re.IGNORECASE),
             re.compile(r'\bdocker\s+rm\s+-f\b', re.IGNORECASE),
+            re.compile(r'\bRemove-Item\s+.*-Recurse\b', re.IGNORECASE),
+            re.compile(r'\bRemove-Item\s+.*-Force\b', re.IGNORECASE),
+            re.compile(r'\btaskkill\s+/[fF]', re.IGNORECASE),
+            re.compile(r'\bnet\s+user\b', re.IGNORECASE),
+            re.compile(r'\bnet\s+localgroup\b', re.IGNORECASE),
+            re.compile(r'\bdiskpart\b', re.IGNORECASE),
+            re.compile(r'\breg\s+delete\b', re.IGNORECASE),
+            re.compile(r'\bregedit\b', re.IGNORECASE),
+            re.compile(r'\bicacls\b', re.IGNORECASE),
+            re.compile(r'\bcacls\b', re.IGNORECASE),
+            re.compile(r'\bwbadmin\b', re.IGNORECASE),
+            re.compile(r'\bpowershell\s+-enc', re.IGNORECASE),
+            re.compile(r'\bpwsh\s+-enc\b', re.IGNORECASE),
         ]
 
     def check(self, request: PermissionRequest) -> PermissionDecision:
@@ -108,7 +122,7 @@ class PermissionService:
             return self._check_read_path_policy(normalized, policy.path_field)
 
         if policy.policy_type == "internal":
-            if tool_name == "delegate_execution_specialist":
+            if tool_name == "SubAgent":
                 return PermissionDecision(behavior=PermissionBehavior.ALLOW)
             return PermissionDecision(behavior=PermissionBehavior.DENY, reason=f"internal 策略仅允许系统内建工具，工具 {tool_name or '未知'} 不在白名单")
 
@@ -368,7 +382,7 @@ def evaluate_static_tool_policy(
     if policy.policy_type in _STATIC_ALLOW_POLICIES:
         return PermissionDecision(behavior=PermissionBehavior.ALLOW)
     if policy.policy_type == "internal":
-        if tool_name == "delegate_execution_specialist":
+        if tool_name == "SubAgent":
             return PermissionDecision(behavior=PermissionBehavior.ALLOW)
         return PermissionDecision(
             behavior=PermissionBehavior.DENY,
