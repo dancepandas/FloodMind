@@ -89,6 +89,7 @@ declare global {
   const Suspense: typeof import('react').Suspense
   const Table: typeof import('lucide-react').Table
   const Terminal: typeof import('lucide-react').Terminal
+  const Text: typeof import('lucide-react').Text
   const Trash2: typeof import('lucide-react').Trash2
   const TriangleAlertIcon: typeof import('lucide-react').TriangleAlertIcon
   const User: typeof import('lucide-react').User

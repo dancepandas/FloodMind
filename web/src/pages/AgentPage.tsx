@@ -31,6 +31,7 @@ const AgentPage = () => {
     handlePauseResume,
     handleNewSession,
     handleDeleteSession,
+    handleQuickSubmit,
     loadSession,
     toggleThought,
     updateAction,
@@ -86,6 +87,7 @@ const AgentPage = () => {
             onUpload={handleUpload}
             onToggleThought={toggleThought}
             onUpdateAction={updateAction}
+            onQuickSubmit={handleQuickSubmit}
             onConfigChange={setConfig}
             pendingPermissionAsk={pendingPermissionAsk}
             onRespondPermissionAsk={handleRespondPermissionAsk}
@@ -149,6 +151,7 @@ const AgentPage = () => {
           onUpload={handleUpload}
           onToggleThought={toggleThought}
           onUpdateAction={updateAction}
+          onQuickSubmit={handleQuickSubmit}
           onConfigChange={setConfig}
           pendingPermissionAsk={pendingPermissionAsk}
           onRespondPermissionAsk={handleRespondPermissionAsk}

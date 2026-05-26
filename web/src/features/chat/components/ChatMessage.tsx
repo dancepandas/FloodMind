@@ -6,11 +6,14 @@ import type { ChatMessage as ChatMessageModel, GeneratedArtifact, ReferenceLink,
 import { Dialog, DialogContent, DialogTitle, DialogDescription } from "@/components/ui/dialog";
 import { DocumentPreviewDialog, isPreviewable, getFileExt, getFileIcon } from "./DocumentPreviewDialog";
 import { getToolDisplayName } from "@/features/chat/lib/message-blocks";
+import { parseTaskList } from "@/features/chat/lib/parse-task-list";
+import { CheckboxGroupList } from "@/features/chat/components/CheckboxGroupList";
 
 interface ChatMessageProps {
   message: ChatMessageModel;
   onToggleThought: (messageId: string, blockId: string) => void;
   onUpdateAction?: (callId: string, status: ActionDetail["status"], content: string) => void;
+  onQuickSubmit?: (text: string) => void;
 }
 
 const MAX_ARCHIVED_BLOCKS = 4;
@@ -489,7 +492,7 @@ function ReferenceList({ references }: { references: ReferenceLink[] }) {
 /* ═══════════════════════════════════════
    Main ChatMessage component
    ═══════════════════════════════════════ */
-export function ChatMessage({ message, onToggleThought, onUpdateAction }: ChatMessageProps) {
+export function ChatMessage({ message, onToggleThought, onUpdateAction, onQuickSubmit }: ChatMessageProps) {
   const isUser = message.role === "human";
   const isSystem = message.role === "system";
   const [previewArtifact, setPreviewArtifact] = useState<GeneratedArtifact | null>(null);
@@ -547,14 +550,14 @@ export function ChatMessage({ message, onToggleThought, onUpdateAction }: ChatMe
           {/* User message */}
           {isUser ? (
             <div
-              className="px-3.5 py-2.5 rounded-2xl rounded-tr-sm text-[13px] whitespace-pre-wrap leading-relaxed"
+              className="px-3.5 py-2.5 rounded-2xl rounded-tr-sm text-[13px] leading-relaxed"
               style={{
                 background: 'var(--msg-user-bg)',
                 color: 'white',
                 boxShadow: '0 2px 10px rgba(37, 99, 168, 0.12)',
               }}
             >
-              {message.content}
+              <ReactMarkdown remarkPlugins={[remarkGfm]}>{message.content}</ReactMarkdown>
             </div>
           ) : isSystem ? (
             <div
@@ -646,9 +649,7 @@ export function ChatMessage({ message, onToggleThought, onUpdateAction }: ChatMe
                         backdropFilter: 'blur(6px)',
                       }}
                     >
-                      <div className="prose prose-sm max-w-none" style={{ color: 'hsl(var(--foreground))' }}>
-                        <ReactMarkdown remarkPlugins={[remarkGfm]}>{displayContent}</ReactMarkdown>
-                      </div>
+                      <MarkdownContent content={displayContent} onQuickSubmit={onQuickSubmit} />
                       {!!message.artifacts?.length && block.type === "answer" && !isArchived && (
                         <ArtifactList artifacts={message.artifacts} onPreview={setPreviewArtifact} />
                       )}
@@ -673,19 +674,17 @@ export function ChatMessage({ message, onToggleThought, onUpdateAction }: ChatMe
                     <MessageSquare size={12} style={{ color: 'var(--ocean-400)', opacity: 0.5 }} />
                     <span className="text-[11px] font-semibold" style={{ color: 'var(--ocean-500)' }}>Answer</span>
                   </div>
-                  <div
-                    className="ml-[26px] mr-1 px-3.5 py-3 rounded-lg text-[13px] leading-relaxed"
-                    style={{
-                      background: 'var(--gradient-card)',
-                      border: '1px solid hsl(var(--border))',
-                      color: 'hsl(var(--foreground))',
-                      boxShadow: '0 2px 12px rgba(15,31,56,0.04)',
-                      backdropFilter: 'blur(6px)',
-                    }}
-                  >
-                    <div className="prose prose-sm max-w-none" style={{ color: 'hsl(var(--foreground))' }}>
-                      <ReactMarkdown remarkPlugins={[remarkGfm]}>{lastAnswerBlock.content}</ReactMarkdown>
-                    </div>
+                    <div
+                      className="ml-[26px] mr-1 px-3.5 py-3 rounded-lg text-[13px] leading-relaxed"
+                      style={{
+                        background: 'var(--gradient-card)',
+                        border: '1px solid hsl(var(--border))',
+                        color: 'hsl(var(--foreground))',
+                        boxShadow: '0 2px 12px rgba(15,31,56,0.04)',
+                        backdropFilter: 'blur(6px)',
+                      }}
+                    >
+                      <MarkdownContent content={lastAnswerBlock.content} onQuickSubmit={onQuickSubmit} />
                     {!!message.artifacts?.length && (
                       <ArtifactList artifacts={message.artifacts} onPreview={setPreviewArtifact} />
                     )}
@@ -744,6 +743,54 @@ function ReferenceItem({ reference, index }: { reference: ReferenceLink; index: 
       <FileText size={10} className="flex-shrink-0" style={{ color: 'hsl(var(--muted-foreground))', opacity: 0.35 }} />
       <span className="truncate" style={{ color: 'hsl(var(--muted-foreground))' }}>{displayTitle}</span>
       {reference.source && <span className="flex-shrink-0 text-[9px] ml-auto" style={{ color: 'hsl(var(--muted-foreground))', opacity: 0.25 }}>{reference.source}</span>}
+    </div>
+  );
+}
+
+/* ─── Markdown with Interactive Task List Support ─── */
+function MarkdownContent({ content, onQuickSubmit }: { content: string; onQuickSubmit?: (text: string) => void }) {
+  const segments = parseTaskList(content);
+
+  if (segments.length === 0) return null;
+  if (segments.every((s) => s.type === "text")) {
+    return (
+      <div className="prose prose-sm max-w-none" style={{ color: 'hsl(var(--foreground))' }}>
+        <ReactMarkdown remarkPlugins={[remarkGfm]}>{content}</ReactMarkdown>
+      </div>
+    );
+  }
+
+  const soloTexts: { index: number; content: string }[] = [];
+  const checkboxGroups: { label: string; items: import("@/features/chat/lib/parse-task-list").CheckboxItem[] }[] = [];
+
+  for (let i = 0; i < segments.length; i++) {
+    const seg = segments[i];
+    if (seg.type === "checkbox") {
+      const prevText = i > 0 && segments[i - 1].type === "text" ? segments[i - 1].content : "";
+      checkboxGroups.push({ label: prevText, items: seg.items || [] });
+    }
+  }
+
+  for (let i = 0; i < segments.length; i++) {
+    const seg = segments[i];
+    if (seg.type === "text") {
+      const nextIsCheckbox = i + 1 < segments.length && segments[i + 1].type === "checkbox";
+      if (!nextIsCheckbox) {
+        soloTexts.push({ index: i, content: seg.content });
+      }
+    }
+  }
+
+  return (
+    <div className="flex flex-col gap-1" style={{ color: 'hsl(var(--foreground))' }}>
+      {soloTexts.map((t) => (
+        <div key={t.index} className="prose prose-sm max-w-none">
+          <ReactMarkdown remarkPlugins={[remarkGfm]}>{t.content}</ReactMarkdown>
+        </div>
+      ))}
+      {checkboxGroups.length > 0 && (
+        <CheckboxGroupList groups={checkboxGroups} onSubmit={onQuickSubmit} />
+      )}
     </div>
   );
 }

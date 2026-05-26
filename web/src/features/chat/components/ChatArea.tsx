@@ -19,6 +19,7 @@ interface ChatAreaProps {
   onUpload: (file: File) => void;
   onToggleThought: (messageId: string, blockId: string) => void;
   onUpdateAction?: (callId: string, status: ActionDetail["status"], content: string) => void;
+  onQuickSubmit?: (text: string) => void;
   onConfigChange: (config: SessionConfig) => void;
   pendingPermissionAsk: PendingPermissionAsk | null;
   onRespondPermissionAsk: (approved: boolean) => void;
@@ -38,6 +39,7 @@ export function ChatArea({
   onUpload,
   onToggleThought,
   onUpdateAction,
+  onQuickSubmit,
   onConfigChange,
   pendingPermissionAsk,
   onRespondPermissionAsk,
@@ -83,7 +85,7 @@ export function ChatArea({
             />
             <div className={`w-full ${isMobile ? 'max-w-full' : 'max-w-[780px]'} mx-auto flex flex-col relative z-10 stagger-children`}>
               {messages.map((message) => (
-                <ChatMessage key={message.id} message={message} onToggleThought={onToggleThought} onUpdateAction={onUpdateAction} />
+                <ChatMessage key={message.id} message={message} onToggleThought={onToggleThought} onUpdateAction={onUpdateAction} onQuickSubmit={onQuickSubmit} />
               ))}
             </div>
             <div ref={bottomRef} />

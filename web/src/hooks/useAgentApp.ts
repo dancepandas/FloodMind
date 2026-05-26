@@ -566,6 +566,103 @@ export function useAgentApp() {
     }
   }, [config, inputValue, isStreaming, pushToolActivity, refreshSessionIndex, sessionId, uploadedFiles]);
 
+  const handleQuickSubmit = useCallback(async (text: string) => {
+    const content = text.trim();
+    if (!content || isStreaming) return;
+    log.info("handleQuickSubmit:", content.slice(0, 80));
+    const userMessage = createUserMessage(content);
+    const assistantMessage = createAssistantMessage();
+    setMessages((prev) => [...prev, userMessage, assistantMessage]);
+    setIsStreaming(true);
+    wasStreamingRef.current = true;
+    let eventCount = 0;
+
+    try {
+      const response = await createChatRequest(sessionId, content, [], assistantMessage.id);
+      if (!response.ok || !response.body) {
+        throw new Error(`Chat request failed: ${response.status}`);
+      }
+
+      const reader = response.body.getReader();
+      readerRef.current = reader;
+      const decoder = new TextDecoder();
+      let buffer = "";
+
+      const updateAssistant = (updater: (message: ChatMessage) => ChatMessage) => {
+        setMessages((prev) => prev.map((message) => (message.id === assistantMessage.id ? updater(message) : message)));
+      };
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split("\n");
+        buffer = lines.pop() || "";
+        for (const line of lines) {
+          const trimmed = line.trim();
+          if (!trimmed) continue;
+          try {
+            const data = JSON.parse(trimmed) as Record<string, any>;
+            eventCount++;
+            applyStreamEvent(data, {
+              updateAssistant,
+              pushToolActivity,
+              setWorkflow,
+            });
+          } catch { /* skip parse errors */ }
+        }
+      }
+    } catch (error) {
+      log.error("handleQuickSubmit: stream error", error);
+      let retries = 0;
+      let resumed = false;
+      while (retries < MAX_RETRIES && !resumed) {
+        try {
+          await sleep(Math.min(1000 * Math.pow(2, retries), 30000));
+          const resumeResponse = await resumeStreamRequest(sessionId, eventCount);
+          if (resumeResponse.ok && resumeResponse.body) {
+            const resumeReader = resumeResponse.body.getReader();
+            readerRef.current = resumeReader;
+            const decoder = new TextDecoder();
+            let resumeBuffer = "";
+            const resumeUpdateAssistant = (updater: (message: ChatMessage) => ChatMessage) => {
+              setMessages((prev) => prev.map((message) => (message.id === assistantMessage.id ? updater(message) : message)));
+            };
+            while (true) {
+              const { done, value } = await resumeReader.read();
+              if (done) break;
+              resumeBuffer += decoder.decode(value, { stream: true });
+              const lines = resumeBuffer.split("\n");
+              resumeBuffer = lines.pop() || "";
+              for (const line of lines) {
+                const trimmed = line.trim();
+                if (!trimmed) continue;
+                try {
+                  const data = JSON.parse(trimmed) as Record<string, any>;
+                  applyStreamEvent(data, { updateAssistant: resumeUpdateAssistant, pushToolActivity, setWorkflow });
+                } catch { /* skip parse errors */ }
+              }
+            }
+            resumed = true;
+          } else {
+            retries++;
+          }
+        } catch (retryErr) {
+          retries++;
+        }
+      }
+      if (!resumed) {
+        setMessages((prev) => prev.map((message) => message.id === assistantMessage.id ? setAssistantFinalContent(message, "抱歉，连接中断。") : message));
+      }
+    } finally {
+      setIsStreaming(false);
+      wasStreamingRef.current = false;
+      readerRef.current = null;
+      await saveSession(sessionId);
+      await refreshSessionIndex();
+    }
+  }, [isStreaming, pushToolActivity, refreshSessionIndex, sessionId]);
+
   const handleUpload = useCallback(async (file: File) => {
     await uploadFile(sessionId, file);
     await refreshFiles(sessionId);
@@ -691,6 +788,7 @@ export function useAgentApp() {
     handlePauseResume,
     handleNewSession,
     handleDeleteSession,
+    handleQuickSubmit,
     loadSession,
     toggleThought,
     updateAction,

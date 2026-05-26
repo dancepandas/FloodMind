@@ -217,6 +217,7 @@ class NativeFloodAgent:
 
 ## 文档声明
 - 在生成的word、excel、PDF等文件任务中，必须在文件内容最后加上“以上内容由FloodMind生成，请认真核对内容正确性”文字。
+- 生成内容复杂、选题不明等word、PDF等文件时，可以先使用 doc-coauthoring 技能向用户确定必要信息。
 
 ## 输出规范
 - 最终输出不要包含会话环境内部信息
