@@ -9,6 +9,7 @@ interface ChatAreaProps {
   messages: ChatMessageModel[];
   inputValue: string;
   isStreaming: boolean;
+  isReconnecting: boolean;
   isPaused: boolean;
   availableModels: ModelOption[];
   config: SessionConfig;
@@ -27,6 +28,7 @@ export function ChatArea({
   messages,
   inputValue,
   isStreaming,
+  isReconnecting,
   isPaused,
   availableModels,
   config,
@@ -90,6 +92,7 @@ export function ChatArea({
             value={inputValue}
             disabled={isStreaming && !isPaused}
             isRunning={isStreaming}
+            isReconnecting={isReconnecting}
             models={availableModels}
             config={config}
             onChange={onInputChange}

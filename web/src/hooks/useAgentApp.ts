@@ -52,6 +52,11 @@ import type {
 const log = createLogger("App");
 
 const STORAGE_KEY = "floodmind_react_session_id";
+const MAX_RETRIES = 10;
+
+function sleep(ms: number) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
 
 function generateSessionId() {
   return `session-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
@@ -92,11 +97,13 @@ export function useAgentApp() {
   const [availableModels, setAvailableModels] = useState<ModelOption[]>([]);
   const [config, setConfig] = useState<SessionConfig>({ model_key: "deepseek_v4_flash", enable_search: true, enable_rag: true, enable_reasoning: true });
   const [runtimeState, setRuntimeState] = useState<SessionRuntimeState>({ isPaused: false });
+  const [isReconnecting, setIsReconnecting] = useState(false);
   const readerRef = useRef<ReadableStreamDefaultReader<Uint8Array> | null>(null);
   const configRef = useRef(config);
   configRef.current = config;
   const initializedSessionRef = useRef<string | null>(null);
   const initPromiseRef = useRef<Promise<void> | null>(null);
+  const wasStreamingRef = useRef(false);
 
   const refreshSessionIndex = useCallback(async () => {
     const items = await fetchSessions();
@@ -308,6 +315,70 @@ export function useAgentApp() {
     });
   }, []);
 
+  /* ─── Auto-reconnect: when page becomes visible, resume lost stream ─── */
+  useEffect(() => {
+    const handleVisibility = async () => {
+      if (document.visibilityState !== 'visible') return;
+      if (!wasStreamingRef.current) return;
+      if (readerRef.current) return;
+
+      log.info("visibilitychange: page visible, resuming lost stream");
+      setIsReconnecting(true);
+      let retries = 0;
+      while (retries < MAX_RETRIES) {
+        try {
+          const status = await fetchSessionStatus(sessionId);
+          if (status.in_progress?.message_id && status.in_progress.is_streaming) {
+            const inProgressId = status.in_progress.message_id;
+            log.info("visibilitychange: resuming stream", inProgressId);
+            const assistantMessage = createAssistantMessage(inProgressId);
+            setMessages((prev) => [...prev, assistantMessage]);
+            setIsStreaming(true);
+
+            const response = await resumeStreamRequest(sessionId);
+            if (response.ok && response.body) {
+              const reader = response.body.getReader();
+              readerRef.current = reader;
+              const decoder = new TextDecoder();
+              let buffer = "";
+
+              const updateAssistant = (updater: (message: ChatMessage) => ChatMessage) => {
+                setMessages((prev) => prev.map((msg) => (msg.id === inProgressId ? updater(msg) : msg)));
+              };
+
+              while (true) {
+                const { done, value } = await reader.read();
+                if (done) break;
+                buffer += decoder.decode(value, { stream: true });
+                const lines = buffer.split("\n");
+                buffer = lines.pop() || "";
+                for (const line of lines) {
+                  const trimmed = line.trim();
+                  if (!trimmed) continue;
+                  try {
+                    const data = JSON.parse(trimmed) as Record<string, any>;
+                    applyStreamEvent(data, { updateAssistant, pushToolActivity, setWorkflow });
+                  } catch { /* skip parse errors */ }
+                }
+              }
+            }
+          }
+          break;
+        } catch (err) {
+          retries++;
+          log.warn(`visibilitychange: resume attempt ${retries}/${MAX_RETRIES} failed`, err);
+          if (retries >= MAX_RETRIES) break;
+          await sleep(Math.min(1000 * Math.pow(2, retries), 30000));
+        }
+      }
+      setIsReconnecting(false);
+      wasStreamingRef.current = false;
+    };
+
+    document.addEventListener('visibilitychange', handleVisibility);
+    return () => document.removeEventListener('visibilitychange', handleVisibility);
+  }, [sessionId, pushToolActivity]);
+
   const SLASH_COMMANDS: Record<string, string> = {
     "/help": "显示所有可用命令",
     "/logs": "下载应用日志文件（zip）",
@@ -386,6 +457,7 @@ export function useAgentApp() {
     setMessages((prev) => [...prev, userMessage, assistantMessage]);
     setInputValue("");
     setIsStreaming(true);
+    wasStreamingRef.current = true;
     let eventCount = 0;
 
     try {
@@ -438,44 +510,53 @@ export function useAgentApp() {
       }
       log.info(`SSE stream ended, total events=${eventCount}`);
     } catch (error) {
-      log.error("handleSubmit: stream error, attempting resume", error);
-      try {
-        const resumeResponse = await resumeStreamRequest(sessionId, eventCount);
-        if (resumeResponse.ok && resumeResponse.body) {
-          const resumeReader = resumeResponse.body.getReader();
-          readerRef.current = resumeReader;
-          const decoder = new TextDecoder();
-          let resumeBuffer = "";
-          const resumeUpdateAssistant = (updater: (message: ChatMessage) => ChatMessage) => {
-            setMessages((prev) => prev.map((message) => (message.id === assistantMessage.id ? updater(message) : message)));
-          };
-          while (true) {
-            const { done, value } = await resumeReader.read();
-            if (done) break;
-            resumeBuffer += decoder.decode(value, { stream: true });
-            const lines = resumeBuffer.split("\n");
-            resumeBuffer = lines.pop() || "";
-            for (const line of lines) {
-              const trimmed = line.trim();
-              if (!trimmed) continue;
-              try {
-                const data = JSON.parse(trimmed) as Record<string, any>;
-                applyStreamEvent(data, { updateAssistant: resumeUpdateAssistant, pushToolActivity, setWorkflow });
-              } catch (parseErr) {
-                log.warn("Resume JSON parse error", trimmed.slice(0, 200), parseErr);
+      log.error("handleSubmit: stream error, retrying with backoff", error);
+      let retries = 0;
+      let resumed = false;
+      while (retries < MAX_RETRIES && !resumed) {
+        try {
+          await sleep(Math.min(1000 * Math.pow(2, retries), 30000));
+          const resumeResponse = await resumeStreamRequest(sessionId, eventCount);
+          if (resumeResponse.ok && resumeResponse.body) {
+            const resumeReader = resumeResponse.body.getReader();
+            readerRef.current = resumeReader;
+            const decoder = new TextDecoder();
+            let resumeBuffer = "";
+            const resumeUpdateAssistant = (updater: (message: ChatMessage) => ChatMessage) => {
+              setMessages((prev) => prev.map((message) => (message.id === assistantMessage.id ? updater(message) : message)));
+            };
+            while (true) {
+              const { done, value } = await resumeReader.read();
+              if (done) break;
+              resumeBuffer += decoder.decode(value, { stream: true });
+              const lines = resumeBuffer.split("\n");
+              resumeBuffer = lines.pop() || "";
+              for (const line of lines) {
+                const trimmed = line.trim();
+                if (!trimmed) continue;
+                try {
+                  const data = JSON.parse(trimmed) as Record<string, any>;
+                  applyStreamEvent(data, { updateAssistant: resumeUpdateAssistant, pushToolActivity, setWorkflow });
+                } catch { /* skip parse errors */ }
               }
             }
+            resumed = true;
+            log.info("handleSubmit: resume succeeded after disconnect");
+          } else {
+            retries++;
           }
-          log.info("handleSubmit: resume completed after disconnect");
-        } else {
-          throw new Error("Resume request failed");
+        } catch (retryErr) {
+          retries++;
+          log.warn(`handleSubmit: resume attempt ${retries}/${MAX_RETRIES} failed`, retryErr);
         }
-      } catch (resumeError) {
-        log.warn("handleSubmit: resume failed, showing error", resumeError);
-        setMessages((prev) => prev.map((message) => message.id === assistantMessage.id ? setAssistantFinalContent(message, "抱歉，连接失败，请检查后端服务。") : message));
+      }
+      if (!resumed) {
+        log.warn("handleSubmit: all retries exhausted, showing error");
+        setMessages((prev) => prev.map((message) => message.id === assistantMessage.id ? setAssistantFinalContent(message, "抱歉，连接中断，已尝试自动重连但未恢复。") : message));
       }
     } finally {
       setIsStreaming(false);
+      wasStreamingRef.current = false;
       readerRef.current = null;
       log.info("handleSubmit: saving session");
       await saveSession(sessionId);
@@ -601,6 +682,7 @@ export function useAgentApp() {
     runtimeState,
     inputValue,
     isStreaming,
+    isReconnecting,
     availableModels,
     setInputValue,
     handleSubmit,

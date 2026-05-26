@@ -20,6 +20,7 @@ const AgentPage = () => {
     runtimeState,
     inputValue,
     isStreaming,
+    isReconnecting,
     availableModels,
     config,
     setInputValue,
@@ -75,6 +76,7 @@ const AgentPage = () => {
             messages={messages}
             inputValue={inputValue}
             isStreaming={isStreaming}
+            isReconnecting={isReconnecting}
             isPaused={runtimeState.isPaused}
             availableModels={availableModels}
             config={config}
@@ -137,6 +139,7 @@ const AgentPage = () => {
           messages={messages}
           inputValue={inputValue}
           isStreaming={isStreaming}
+          isReconnecting={isReconnecting}
           isPaused={runtimeState.isPaused}
           availableModels={availableModels}
           config={config}

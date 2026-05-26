@@ -53,6 +53,7 @@ interface ChatComposerProps {
   value: string;
   disabled?: boolean;
   isRunning?: boolean;
+  isReconnecting?: boolean;
   models: ModelOption[];
   config: SessionConfig;
   onChange: (value: string) => void;
@@ -68,6 +69,7 @@ export function ChatComposer({
   value,
   disabled,
   isRunning,
+  isReconnecting,
   models,
   config,
   onChange,
@@ -156,6 +158,24 @@ export function ChatComposer({
                 拒绝
               </button>
             </div>
+          </div>
+        )}
+
+        {isReconnecting && (
+          <div
+            className="mb-2.5 flex items-center gap-2.5 px-4 py-2.5 rounded-xl animate-scale-in"
+            style={{
+              background: 'var(--ocean-50)',
+              border: '1px solid var(--ocean-200)',
+            }}
+          >
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" style={{ color: 'var(--ocean-500)' }} className="animate-spin">
+              <circle cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="3" opacity="0.3" fill="none" />
+              <path d="M12 2a10 10 0 0 1 10 10" stroke="currentColor" strokeWidth="3" strokeLinecap="round" fill="none" />
+            </svg>
+            <span className="text-[12px] font-medium" style={{ color: 'var(--ocean-500)' }}>
+              连接已断开，正在自动重连...
+            </span>
           </div>
         )}
 
