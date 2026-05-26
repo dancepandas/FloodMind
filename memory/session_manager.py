@@ -430,7 +430,7 @@ class SessionManager:
         """从用户输入中提取标题，去除环境信息前缀"""
         text = content.strip()
         # 去除 [会话环境信息]... 前缀块，找到环境信息结束后的实际用户消息
-        if "[会话环境信息]" in text:
+        if "[会话环境信息]" in text or "[已上传的文件]" in text:
             # 找到最后一个环境信息标记之后的内容
             markers = ["[会话环境信息]", "[已上传的文件]"]
             last_end = 0

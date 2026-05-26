@@ -21,6 +21,7 @@ from flask import Flask, request, jsonify, Response, send_from_directory, send_f
 from flask_cors import CORS
 from dotenv import load_dotenv
 from werkzeug.utils import secure_filename
+import mimetypes
 
 # 加载环境变量
 load_dotenv()
@@ -99,7 +100,8 @@ os.makedirs(os.path.join(DATA_DIR, 'vector_store'), exist_ok=True)
 
 logger.info(f"DATA_DIR: {DATA_DIR}")
 
-ALLOWED_EXTENSIONS = {'csv', 'xlsx', 'xls', 'txt', 'json', 'docx', 'pdf', 'md'}
+ALLOWED_EXTENSIONS = {'csv', 'xlsx', 'xls', 'txt', 'json', 'docx', 'pdf', 'md',
+                      'png', 'jpg', 'jpeg', 'webp', 'gif', 'bmp'}
 
 session_manager = SessionManager({
     "max_active_sessions": int(os.environ.get('MAX_SESSIONS', 10)),
@@ -123,7 +125,7 @@ session_abort_flags_lock = threading.RLock()
 session_streaming_flags: Dict[str, bool] = {}
 session_streaming_lock = threading.RLock()
 
-IMAGE_EXTENSIONS = {'.png', '.jpg', '.jpeg'}
+IMAGE_EXTENSIONS = {'.png', '.jpg', '.jpeg', '.webp', '.gif', '.bmp'}
 DOWNLOADABLE_EXTENSIONS = {
     '.docx': 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
     '.pdf': 'application/pdf',
@@ -1033,13 +1035,19 @@ def upload_file():
         file.save(file_path)
         
         # 记录文件信息
+        ext = os.path.splitext(filename)[1].lower()
+        kind = 'image' if ext in IMAGE_EXTENSIONS else 'document'
+        mime_type = mimetypes.guess_type(filename)[0] or ('image/png' if ext in IMAGE_EXTENSIONS else 'application/octet-stream')
+
         session_file_map = _get_session_files_map(session_id)
         session_file_map[file_id] = {
             'id': file_id,
             'name': filename,
             'path': file_path,
             'size': os.path.getsize(file_path),
-            'upload_time': datetime.now().isoformat()
+            'upload_time': datetime.now().isoformat(),
+            'kind': kind,
+            'mime_type': mime_type,
         }
         with session_files_lock:
             session_files[session_id] = session_file_map
@@ -1457,10 +1465,42 @@ def chat():
                 file_context += "用户提到'已上传的文件'或'上传的文件'时，请使用上述路径。\n"
         
         enhanced_message = file_context + "\n\n" + message if file_context else message
-        
+
+        # 构建图片附件列表
+        from agent.native.types import Attachment
+        attachments = []
+        if uploaded_files and session_file_map:
+            for file_id in uploaded_files:
+                if file_id in session_file_map:
+                    info = session_file_map[file_id]
+                    if info.get('kind') == 'image':
+                        attachments.append(Attachment(
+                            file_id=info['id'],
+                            name=info['name'],
+                            path=info['path'],
+                            kind='image',
+                            mime_type=info.get('mime_type', 'image/png'),
+                            size=info['size'],
+                        ))
+            if attachments:
+                # 检查当前模型是否支持视觉
+                current_model_key = state.get('model_key', get_default_model_key())
+                preset = get_preset(current_model_key)
+                if preset and not preset.get('supports_vision'):
+                    with session_streaming_lock:
+                        session_streaming_flags.pop(session_id, None)
+                    vision_model_names = [
+                        m['label'] for m in get_models_list()
+                        if m.get('supports_vision')
+                    ]
+                    return jsonify({
+                        'error': f'当前模型不支持图像理解，请切换至支持视觉的模型（{" / ".join(vision_model_names)}）后再上传图片'
+                    }), 400
+                logger.info("本轮请求携带 %d 张图片附件", len(attachments))
+
         request_started_at = time.time()
 
-        def _run_agent_pump(snapshot, event_buffer, resume_event, approved_artifact_paths, streamed_text_parts):
+        def _run_agent_pump(snapshot, event_buffer, resume_event, approved_artifact_paths, streamed_text_parts, attachments):
             """Background thread: consume agent.stream() and write to event_buffer via emit()."""
             is_workflow_stream = False
             final_answer_text = ""
@@ -1483,7 +1523,7 @@ def chat():
                 return _buffered_yield(event_buffer, payload, resume_event, buffer_lock)
 
             try:
-                for chunk in agent.stream(enhanced_message, enable_reasoning=enable_reasoning, user_message=message, abort_check=lambda: session_abort_flags.get(session_id, False)):
+                for chunk in agent.stream(enhanced_message, enable_reasoning=enable_reasoning, user_message=message, attachments=attachments, abort_check=lambda: session_abort_flags.get(session_id, False)):
                     with session_abort_flags_lock:
                         is_aborted = session_abort_flags.get(session_id, False)
                     if is_aborted:
@@ -1726,7 +1766,7 @@ def chat():
 
             pump_thread = threading.Thread(
                 target=_run_agent_pump,
-                args=(snapshot, event_buffer, resume_event, approved_artifact_paths, streamed_text_parts),
+                args=(snapshot, event_buffer, resume_event, approved_artifact_paths, streamed_text_parts, attachments),
                 daemon=True,
                 name=f"agent-pump-{session_id[:8]}",
             )
