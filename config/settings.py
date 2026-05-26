@@ -79,7 +79,7 @@ class QwenConfig:
         self.temperature = float(os.getenv("QWEN_TEMPERATURE", default_temperature))
         self.top_p = float(os.getenv("QWEN_TOP_P", "0.9"))
 
-        self.enable_search = os.getenv("QWEN_ENABLE_SEARCH", "false").lower() == "true"
+        self.enable_search = os.getenv("QWEN_ENABLE_SEARCH", "true").lower() == "false"
 class AgentConfig:
     """智能体配置"""
     

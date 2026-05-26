@@ -64,7 +64,7 @@ class QwenLLMService:
 
         logger.info(
             f"QwenLLMService 初始化: model={self.model_name}, "
-            f"base_url={self.base_url}, thinking={enable_thinking}"
+            f"base_url={self.base_url}, thinking={self.enable_thinking}"
         )
 
     @property

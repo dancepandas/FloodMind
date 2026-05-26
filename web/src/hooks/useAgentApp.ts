@@ -90,7 +90,7 @@ export function useAgentApp() {
   const [inputValue, setInputValue] = useState("");
   const [isStreaming, setIsStreaming] = useState(false);
   const [availableModels, setAvailableModels] = useState<ModelOption[]>([]);
-  const [config, setConfig] = useState<SessionConfig>({ model_key: "qwen_36_plus", enable_search: false, enable_rag: true, enable_reasoning: true });
+  const [config, setConfig] = useState<SessionConfig>({ model_key: "deepseek_v4_flash", enable_search: true, enable_rag: true, enable_reasoning: true });
   const [runtimeState, setRuntimeState] = useState<SessionRuntimeState>({ isPaused: false });
   const readerRef = useRef<ReadableStreamDefaultReader<Uint8Array> | null>(null);
   const configRef = useRef(config);

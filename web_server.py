@@ -542,7 +542,7 @@ def ensure_session_state(session_id: str) -> dict[str, Any]:
     with session_states_lock:
         state = session_states.setdefault(session_id, {})
         state.setdefault('model_key', get_default_model_key())
-        state.setdefault('enable_search', False)
+        state.setdefault('enable_search', True)
         state.setdefault('enable_rag', True)
         state.setdefault('enable_reasoning', True)
         state.setdefault('is_paused', False)
@@ -835,7 +835,7 @@ def get_or_create_agent(session_id: str):
     
     with session_states_lock:
         state = dict(session_states.get(session_id, {}))
-    enable_search = state.get('enable_search', False)
+    enable_search = state.get('enable_search', True)
     enable_rag = state.get('enable_rag', settings.rag.enabled)
     enable_reasoning = state.get('enable_reasoning', True)
     model_key = state.get('model_key') or get_default_model_key()
@@ -1356,7 +1356,7 @@ def init_agent():
     try:
         data = request.get_json()
         session_id = _require_session_id(data.get('session_id', 'default'))
-        enable_search = data.get('enable_search', False)
+        enable_search = data.get('enable_search', True)
         enable_rag = data.get('enable_rag', True)
         enable_reasoning = data.get('enable_reasoning', True)
         model_key = data.get('model_key', '').strip()

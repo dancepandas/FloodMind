@@ -93,7 +93,7 @@ def create_agent_for_session(session_manager: SessionManager, session_id: str):
         persist_dir=session_manager.get_memory_dir(session_id),
         llm=llm_service,
     )
-    return create_flood_agent(llm_service=llm_service, memory=memory, session_id=session_id, enable_search=False)
+    return create_flood_agent(llm_service=llm_service, memory=memory, session_id=session_id, enable_search=True)
 
 
 def get_or_create_agent(session_manager: SessionManager, session_id: str):
