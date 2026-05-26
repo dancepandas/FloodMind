@@ -1,5 +1,6 @@
 import { useRef, useState, useEffect } from "react";
 import { Send, Pause, Paperclip, ChevronDown, ShieldAlert, Brain, Globe, Database } from "lucide-react";
+import { useIsMobile } from "@/hooks/use-mobile";
 import type { ModelOption, SessionConfig, PendingPermissionAsk } from "@/types/app";
 
 const PINNED_MODELS = ["deepseek_v4_flash", "glm_51", "qwen_36_plus", "minimax_m25"];
@@ -77,6 +78,7 @@ export function ChatComposer({
   pendingPermissionAsk,
   onRespondPermissionAsk,
 }: ChatComposerProps) {
+  const isMobile = useIsMobile();
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const [modelMenuOpen, setModelMenuOpen] = useState(false);
@@ -119,7 +121,7 @@ export function ChatComposer({
 
   return (
     <div className="px-4 pt-2.5 pb-3" style={{ background: 'linear-gradient(to top, hsl(var(--background)), hsl(var(--background)))' }}>
-      <div className="max-w-[780px] mx-auto">
+      <div className={`${isMobile ? 'w-full' : 'max-w-[780px]'} mx-auto`}>
         {pendingPermissionAsk && (
           <div
             className="mb-2.5 flex items-center gap-2.5 px-4 py-2.5 rounded-xl animate-scale-in"
@@ -331,7 +333,7 @@ export function ChatComposer({
             <span>RAG</span>
           </button>
 
-          <span className="ml-auto text-[9px] select-none tracking-wide" style={{ color: 'hsl(var(--muted-foreground))', opacity: 0.22 }}>
+          <span className={`${isMobile ? 'hidden' : ''} ml-auto text-[9px] select-none tracking-wide`} style={{ color: 'hsl(var(--muted-foreground))', opacity: 0.22 }}>
             Enter 发送 · Shift+Enter 换行
           </span>
         </div>

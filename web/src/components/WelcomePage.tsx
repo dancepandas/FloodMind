@@ -1,6 +1,7 @@
 import { useState, useEffect, useRef, useCallback } from 'react'
 import { createPortal } from 'react-dom'
 import { Send, Paperclip, Brain, Globe, Database, ChevronDown } from 'lucide-react'
+import { useIsMobile } from '@/hooks/use-mobile'
 import type { ModelOption, SessionConfig, PendingPermissionAsk } from '@/types/app'
 
 const PINNED_MODELS = ['deepseek_v4_flash', 'glm_51', 'qwen_36_plus', 'minimax_m25']
@@ -76,6 +77,7 @@ export default function WelcomePage({
   onUpload,
   onConfigChange,
 }: WelcomePageProps) {
+  const isMobile = useIsMobile();
   const [mounted, setMounted] = useState(false)
   const [proverb] = useState(() => PROVERBS[Math.floor(Math.random() * PROVERBS.length)])
   const [modelOpen, setModelOpen] = useState(false)
@@ -172,15 +174,15 @@ export default function WelcomePage({
         {/* Brand */}
         <div className={`flex flex-col items-center mb-6 ${transitionClass(0)}`} style={delayStyle(0)}>
           <div className="relative mb-5">
-            <div className="inline-flex items-center justify-center w-14 h-14 rounded-2xl animate-glow-pulse"
+            <div className={`inline-flex items-center justify-center ${isMobile ? 'w-12 h-12' : 'w-14 h-14'} rounded-2xl animate-glow-pulse`}
               style={{ background: 'var(--ocean-500)', boxShadow: '0 8px 32px rgba(37,99,168,0.25)' }}>
-              <img src="/floodmind-icon.svg" alt="FloodMind" className="w-8 h-8" style={{ filter: 'brightness(0) invert(1)' }} />
+              <img src="/floodmind-icon.svg" alt="FloodMind" className={`${isMobile ? 'w-6 h-6' : 'w-8 h-8'}`} style={{ filter: 'brightness(0) invert(1)' }} />
             </div>
             <div className="absolute -bottom-1 -right-1 w-4 h-4 rounded-full border-2 flex items-center justify-center" style={{ background: 'var(--teal-400)', borderColor: 'hsl(var(--background))' }}>
               <svg width="6" height="6" viewBox="0 0 24 24" fill="white"><path d="M9 16.17L4.83 12l-1.42 1.41L9 19 21 7l-1.41-1.41L9 16.17z" /></svg>
             </div>
           </div>
-          <h1 className="text-[28px] font-semibold tracking-tight mb-2" style={{ color: 'hsl(var(--foreground))', fontFamily: 'var(--font-display)' }}>
+          <h1 className={`${isMobile ? 'text-[22px]' : 'text-[28px]'} font-semibold tracking-tight mb-2`} style={{ color: 'hsl(var(--foreground))', fontFamily: 'var(--font-display)' }}>
             FloodMind
           </h1>
           <p className="text-[13px] text-center max-w-[360px] leading-relaxed" style={{ color: 'hsl(var(--muted-foreground))', opacity: 0.55 }}>
@@ -373,7 +375,7 @@ export default function WelcomePage({
               </button>
 
               {/* Hint */}
-              <span className="ml-auto text-[10px] select-none" style={{ color: 'hsl(var(--muted-foreground))', opacity: 0.2 }}>
+              <span className={`${isMobile ? 'hidden' : ''} ml-auto text-[10px] select-none`} style={{ color: 'hsl(var(--muted-foreground))', opacity: 0.2 }}>
                 Enter ↵
               </span>
             </div>

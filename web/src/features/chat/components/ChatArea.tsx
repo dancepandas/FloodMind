@@ -2,6 +2,7 @@ import { useEffect, useRef } from "react";
 import { ChatComposer } from "@/features/chat/components/ChatComposer";
 import { ChatMessage } from "@/features/chat/components/ChatMessage";
 import WelcomePage from "@/components/WelcomePage";
+import { useIsMobile } from "@/hooks/use-mobile";
 import type { ChatMessage as ChatMessageModel, ModelOption, SessionConfig, ActionDetail, PendingPermissionAsk } from "@/types/app";
 
 interface ChatAreaProps {
@@ -39,6 +40,7 @@ export function ChatArea({
   pendingPermissionAsk,
   onRespondPermissionAsk,
 }: ChatAreaProps) {
+  const isMobile = useIsMobile();
   const scrollContainerRef = useRef<HTMLDivElement>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
 
@@ -69,7 +71,7 @@ export function ChatArea({
         />
       ) : (
         <>
-          <div ref={scrollContainerRef} className="flex-1 overflow-y-auto px-6 py-6 scroll-smooth relative">
+          <div ref={scrollContainerRef} className="flex-1 overflow-y-auto px-4 sm:px-6 py-4 sm:py-6 scroll-smooth relative">
             <div
               className="absolute inset-0 pointer-events-none opacity-[0.03]"
               style={{
@@ -77,7 +79,7 @@ export function ChatArea({
                 backgroundSize: '60px 60px',
               }}
             />
-            <div className="w-full max-w-[780px] mx-auto flex flex-col relative z-10 stagger-children">
+            <div className={`w-full ${isMobile ? 'max-w-full' : 'max-w-[780px]'} mx-auto flex flex-col relative z-10 stagger-children`}>
               {messages.map((message) => (
                 <ChatMessage key={message.id} message={message} onToggleThought={onToggleThought} onUpdateAction={onUpdateAction} />
               ))}

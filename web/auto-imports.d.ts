@@ -63,12 +63,14 @@ declare global {
   const Loader: typeof import('lucide-react').Loader
   const Loader2: typeof import('lucide-react').Loader2
   const Loader2Icon: typeof import('lucide-react').Loader2Icon
+  const Menu: typeof import('lucide-react').Menu
   const MessageSquare: typeof import('lucide-react').MessageSquare
   const MinusIcon: typeof import('lucide-react').MinusIcon
   const MoreHorizontal: typeof import('lucide-react').MoreHorizontal
   const MoreHorizontalIcon: typeof import('lucide-react').MoreHorizontalIcon
   const OctagonXIcon: typeof import('lucide-react').OctagonXIcon
   const PanelLeftIcon: typeof import('lucide-react').PanelLeftIcon
+  const PanelRightClose: typeof import('lucide-react').PanelRightClose
   const Paperclip: typeof import('lucide-react').Paperclip
   const Pause: typeof import('lucide-react').Pause
   const Play: typeof import('lucide-react').Play
