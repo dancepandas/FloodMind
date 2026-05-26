@@ -20,6 +20,7 @@ from typing import Any, Dict, List, Optional
 from agent.native.types import (
     AgentLoopState,
     AgentResult,
+    Attachment,
     ExecutionPlan,
     RunContext,
 )
@@ -1018,7 +1019,7 @@ class NativeFloodAgent:
             return upload_dir
         return ""
 
-    def stream(self, user_input: str, enable_reasoning: bool = False, user_message: str = "", abort_check: Optional[Any] = None):
+    def stream(self, user_input: str, enable_reasoning: bool = False, user_message: str = "", attachments: Optional[List[Attachment]] = None, abort_check: Optional[Any] = None):
         """
         流式运行智能体，通过 Queue + threading 实现真实流式。
         与 FloodAgent.stream() 输出格式兼容。
@@ -1054,7 +1055,7 @@ class NativeFloodAgent:
                     context = RunContext(
                         session_id=self.session_id,
                         user_text=user_input,
-                        attachments=[],
+                        attachments=attachments or [],
                         output_dir=output_dir,
                         upload_dir=upload_dir,
                         enable_reasoning=enable_reasoning,
@@ -1118,7 +1119,7 @@ class NativeFloodAgent:
                     agent_result = self._orchestrator_executor.run(
                         context=context,
                         user_text=user_input,
-                        attachments=[],
+                        attachments=attachments or [],
                         memory_messages=memory_messages,
                         abort_check=abort_check,
                     )

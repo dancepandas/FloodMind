@@ -462,7 +462,15 @@ export function useAgentApp() {
 
     try {
       const response = await createChatRequest(sessionId, content, uploadedFiles.map((file) => file.id), assistantMessage.id);
-      if (!response.ok || !response.body) {
+      if (!response.ok) {
+        let detail = `Chat request failed: ${response.status}`;
+        try {
+          const body = await response.json();
+          if (body.error) detail = body.error;
+        } catch {}
+        throw new Error(detail);
+      }
+      if (!response.body) {
         throw new Error(`Chat request failed: ${response.status}`);
       }
 
@@ -510,10 +518,19 @@ export function useAgentApp() {
       }
       log.info(`SSE stream ended, total events=${eventCount}`);
     } catch (error) {
-      log.error("handleSubmit: stream error, retrying with backoff", error);
-      let retries = 0;
-      let resumed = false;
-      while (retries < MAX_RETRIES && !resumed) {
+      const errMsg = error instanceof Error ? error.message : String(error);
+      const isClientError = errMsg.includes("400") || errMsg.includes("不支持的") || errMsg.includes("不支持");
+      log.error("handleSubmit: stream error", error);
+      if (isClientError) {
+        setMessages((prev) => prev.map((message) =>
+          message.id === assistantMessage.id
+            ? setAssistantFinalContent(message, errMsg)
+            : message
+        ));
+      } else {
+        let retries = 0;
+        let resumed = false;
+        while (retries < MAX_RETRIES && !resumed) {
         try {
           await sleep(Math.min(1000 * Math.pow(2, retries), 30000));
           const resumeResponse = await resumeStreamRequest(sessionId, eventCount);
@@ -553,6 +570,7 @@ export function useAgentApp() {
       if (!resumed) {
         log.warn("handleSubmit: all retries exhausted, showing error");
         setMessages((prev) => prev.map((message) => message.id === assistantMessage.id ? setAssistantFinalContent(message, "抱歉，连接中断，已尝试自动重连但未恢复。") : message));
+      }
       }
     } finally {
       setIsStreaming(false);

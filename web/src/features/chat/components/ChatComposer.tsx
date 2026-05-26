@@ -3,7 +3,7 @@ import { Send, Pause, Paperclip, ChevronDown, ShieldAlert, Brain, Globe, Databas
 import { useIsMobile } from "@/hooks/use-mobile";
 import type { ModelOption, SessionConfig, PendingPermissionAsk } from "@/types/app";
 
-const PINNED_MODELS = ["deepseek_v4_flash", "glm_51", "qwen_36_plus", "minimax_m25"];
+const PINNED_MODELS = ["deepseek_v4_flash", "deepseek_v4_pro", "qwen_36_plus", "qwen_35_plus", "qwen3_6_27b_local", "glm_51", "glm_5", "kimi_k2_5", "kimi_k2_6", "minimax_m25", "minimax_m21"];
 
 function sortModels(models: ModelOption[]): ModelOption[] {
   const pinned: ModelOption[] = [];
@@ -20,12 +20,13 @@ function sortModels(models: ModelOption[]): ModelOption[] {
 }
 
 const MODEL_ICON_MAP: Record<string, string> = {
-  qwen_35_plus: "qwen",
+  deepseek_v4_flash: "deepseek",
+  deepseek_v4_pro: "deepseek",
   qwen_36_plus: "qwen",
+  qwen_35_plus: "qwen",
+  qwen3_6_27b_local: "qwen",
   glm_51: "zhipu",
   glm_5: "zhipu",
-  deepseek_v4_pro: "deepseek",
-  deepseek_v4_flash: "deepseek",
   kimi_k2_5: "kimi",
   kimi_k2_6: "kimi",
   minimax_m25: "minimax",
@@ -202,11 +203,20 @@ export function ChatComposer({
           <input
             ref={fileInputRef}
             type="file"
-            accept=".csv,.xlsx,.xls,.txt,.json,.docx,.pdf,.md"
+            accept=".csv,.xlsx,.xls,.txt,.json,.docx,.pdf,.md,.png,.jpg,.jpeg,.webp,.gif,.bmp"
             className="hidden"
             onChange={(event) => {
               const file = event.target.files?.[0];
-              if (file) onUpload(file);
+              if (file) {
+                const imageExts = ['.png','.jpg','.jpeg','.webp','.gif','.bmp'];
+                const ext = '.' + file.name.split('.').pop()?.toLowerCase();
+                if (imageExts.includes(ext) && currentModel && !currentModel.supports_vision) {
+                  alert(`当前模型 ${currentModel.label} 不支持图像理解，请切换至支持视觉的模型后再上传图片。`);
+                  event.currentTarget.value = "";
+                  return;
+                }
+                onUpload(file);
+              }
               event.currentTarget.value = "";
             }}
           />
