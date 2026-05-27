@@ -22,3 +22,9 @@ __pycache__/
 /.opencode/
 /models/阿里云文档/
 /source/
+
+# desktop build artifacts
+/desktop/vendor_cache/
+/desktop/build_staging/
+/desktop/dist/
+/desktop/*.exe

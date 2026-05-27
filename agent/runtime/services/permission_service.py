@@ -122,7 +122,7 @@ class PermissionService:
             return self._check_read_path_policy(normalized, policy.path_field)
 
         if policy.policy_type == "internal":
-            if tool_name == "SubAgent":
+            if tool_name in ("SubAgent", "ParallelTask"):
                 return PermissionDecision(behavior=PermissionBehavior.ALLOW)
             return PermissionDecision(behavior=PermissionBehavior.DENY, reason=f"internal 策略仅允许系统内建工具，工具 {tool_name or '未知'} 不在白名单")
 
@@ -382,7 +382,7 @@ def evaluate_static_tool_policy(
     if policy.policy_type in _STATIC_ALLOW_POLICIES:
         return PermissionDecision(behavior=PermissionBehavior.ALLOW)
     if policy.policy_type == "internal":
-        if tool_name == "SubAgent":
+        if tool_name in ("SubAgent", "ParallelTask"):
             return PermissionDecision(behavior=PermissionBehavior.ALLOW)
         return PermissionDecision(
             behavior=PermissionBehavior.DENY,
