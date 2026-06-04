@@ -195,16 +195,14 @@ def run(task, model, verbose):
     _validate_api_key()
 
     from floodmind.config.settings import settings
-    from floodmind.models import get_qwen_llm_service
+    from floodmind.agent.native.model_client import ModelClient
     from floodmind.memory import DualMemory
     from floodmind.agent import create_flood_agent
 
     if model:
         settings.model.model_name = model
 
-    llm = get_qwen_llm_service(
-        api_key=settings.model.api_key,
-        model_name=settings.model.model_name,
+    llm = ModelClient.from_settings(
         temperature=settings.model.temperature,
         max_tokens=settings.model.max_tokens,
     )
@@ -565,7 +563,7 @@ def _run_web(host: str = "0.0.0.0", port: int = 13014, open_browser: bool = Fals
 def _run_chat_legacy(model=None, reasoning=None) -> int:
     """旧的纯文本 chat 模式（保留向后兼容）"""
     from floodmind.config.settings import settings
-    from floodmind.models import get_qwen_llm_service
+    from floodmind.agent.native.model_client import ModelClient
     from floodmind.memory import DualMemory
     from floodmind.agent import create_flood_agent
 
@@ -577,9 +575,7 @@ def _run_chat_legacy(model=None, reasoning=None) -> int:
     click.echo(f"\n  FloodMind v1.0.0  —  {settings.model.model_name}")
     click.echo("  输入 'exit' 退出, 'clear' 清空记忆, 'memory' 查看记忆\n")
 
-    llm = get_qwen_llm_service(
-        api_key=settings.model.api_key,
-        model_name=settings.model.model_name,
+    llm = ModelClient.from_settings(
         temperature=settings.model.temperature,
         max_tokens=settings.model.max_tokens,
     )

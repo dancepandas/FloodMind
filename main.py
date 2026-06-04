@@ -12,7 +12,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 from floodmind.config.settings import settings
-from floodmind.models import get_qwen_llm_service
+from floodmind.agent.native.model_client import ModelClient
 from floodmind.memory import SimpleMemory
 from floodmind.agent import create_flood_agent
 
@@ -73,9 +73,7 @@ def init_agent():
     
     # 2. 初始化Qwen大模型服务
     try:
-        llm_service = get_qwen_llm_service(
-            api_key=settings.qwen.api_key,
-            model_name=settings.qwen.model_name,
+        llm_service = ModelClient.from_settings(
             temperature=settings.qwen.temperature,
             max_tokens=settings.qwen.max_tokens,
         )

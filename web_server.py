@@ -27,7 +27,7 @@ import mimetypes
 load_dotenv()
 
 from floodmind.config.settings import settings
-from floodmind.models import QwenLLMService, get_qwen_llm_service, create_llm_service_from_preset
+from floodmind.agent.native.model_client import ModelClient
 from floodmind.config.model_presets import get_preset, get_default_model_key, get_models_list, resolve_api_key, resolve_base_url
 from floodmind.memory import SimpleMemory, DualMemory, SessionManager
 from floodmind.memory.session_manager import validate_session_id
@@ -359,7 +359,7 @@ def _generate_session_title(message: str, model_key: str = "") -> str:
     if model_key:
         preset = get_preset(model_key)
         if preset:
-            llm = QwenLLMService(
+            llm = ModelClient(
                 api_key=resolve_api_key(preset),
                 model_name=preset["model_name"],
                 base_url=resolve_base_url(preset),
@@ -368,17 +368,13 @@ def _generate_session_title(message: str, model_key: str = "") -> str:
                 enable_thinking=False,
             )
         else:
-            llm = QwenLLMService(
-                api_key=settings.qwen.api_key,
-                model_name=settings.qwen.model_name,
+            llm = ModelClient.from_settings(
                 temperature=0.2,
                 max_tokens=60,
                 enable_thinking=False,
             )
     else:
-        llm = QwenLLMService(
-            api_key=settings.qwen.api_key,
-            model_name=settings.qwen.model_name,
+        llm = ModelClient.from_settings(
             temperature=0.2,
             max_tokens=60,
             enable_thinking=False,
@@ -798,17 +794,15 @@ def create_agent_for_session(session_id: str, enable_search: bool = False, enabl
         enable_rag = settings.rag.enabled
 
     if model_key:
-        llm_service = create_llm_service_from_preset(
+        llm_service = ModelClient.from_settings_with_preset(
             model_key,
             enable_reasoning=enable_reasoning,
         )
     else:
-        llm_service = get_qwen_llm_service(
-            api_key=settings.qwen.api_key,
-            model_name=settings.qwen.model_name,
+        llm_service = ModelClient.from_settings(
             temperature=settings.qwen.temperature,
             max_tokens=settings.qwen.max_tokens,
-            enable_reasoning=enable_reasoning,
+            enable_thinking=enable_reasoning,
         )
     
     memory_dir = session_manager.get_memory_dir(session_id)

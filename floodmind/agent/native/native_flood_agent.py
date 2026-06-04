@@ -67,15 +67,16 @@ class _InstanceToolRegistry:
 
 
 class NativeFloodAgent:
-    SYSTEM_PROMPT = """你是大水云科技开发的FloodMind。
+    # ── Prompt 拆分为三部分，以最大化 prompt cache 前缀命中率 ──
+    #
+    # msg[0] STATIC_GLOBAL: 角色/工作流/规则/工具目录/技能目录 — 跨 session 永不变化
+    # msg[1] STATIC_PER_PROJECT: AGENTS.md 项目/全局规则 — 仅 AGENTS.md 变更时变化
+    # msg[2] STATIC_PER_SESSION: 系统时间 + 会话路径/环境 — 每个 session 不同
+    #
+    # 顺序：STATIC_GLOBAL → STATIC_PER_PROJECT → STATIC_PER_SESSION
+    # 这样 DashScope/OpenAI 的 prompt cache prefix 能命中 msg[0]（甚至 msg[0]+msg[1]）
 
-## 当前系统时间
-{current_time_context}
-
-## 当前会话信息
-{session_env}
-
-{project_context}
+    SYSTEM_PROMPT_STATIC_GLOBAL = """你是大水云科技开发的FloodMind。
 
 ## 角色职责
 1. 分析用户意图和最终目标
@@ -92,9 +93,6 @@ class NativeFloodAgent:
 - 不要过度思考
 - 最终产物检查：对任何最终产物，必须完整查看产物内容并对比用户意图/上传文件，确保产物质量
 
-## 可用工具
-{tool_descriptions}
-
 ### 何时自己完成
 - 写报告、写文档等需要丰富上下文和连续思考的任务 → 自己做，不要委派
 - 简单的文件读写、脚本执行 → 自己做
@@ -103,7 +101,7 @@ class NativeFloodAgent:
 ### 何时使用子代理
 - 需要并行执行多个独立子任务（如同时搜索多个话题）→ 用 ParallelTask
 - 耗时较长的脚本/模型运行 → 用 Task
-- 委派技巧：1、需要依赖对话上下文和连续思考的任务，委派时要将对话上下文和核心要点一起告知子代理，2、不要过度限制子代理，只需要明确的任务描述、用户提供的数据和文件内容\路径、最终产物是什么即可。
+- 委派技巧：1、需要依赖对话上下文和连续思考的任务，委派时要将对话上下文和核心要点一起告知子代理，2、不要过度限制子代理，只需要明确的任务描述、用户提供的数据和文件内容\\路径、最终产物是什么即可。
 
 
 ## 定时任务处理
@@ -153,6 +151,9 @@ class NativeFloodAgent:
 ## 可用 skills
 {skill_catalog}
 
+## 可用工具
+{tool_descriptions}
+
 ## 工作流
 ### 1. 分析目标
 先明确：
@@ -199,7 +200,7 @@ class NativeFloodAgent:
 - 如果用户只要求文字结果，即使工具天然输出文件，也以文字汇总为主，文件仅作为可下载附件
 
 ## 文档声明
-- 在生成的word、excel、PDF等文件任务中，必须在文件内容最后加上“以上内容由FloodMind生成，请认真核对内容正确性”文字。
+- 在生成的word、excel、PDF等文件任务中，必须在文件内容最后加上"以上内容由FloodMind生成，请认真核对内容正确性"文字。
 - 生成内容复杂、选题不明等word、PDF等文件时，可以先使用 doc-coauthoring 技能向用户确定必要信息。
 
 ## 输出规范
@@ -207,12 +208,19 @@ class NativeFloodAgent:
 - 标准 Markdown 格式输出
 """
 
-    EXECUTION_SPECIALIST_PROMPT = """你是 FloodMind 子代理，负责完成主代理分配的子任务。
+    SYSTEM_PROMPT_PROJECT_TEMPLATE = """{project_context}"""
 
-{project_context}
+    SYSTEM_PROMPT_SESSION_TEMPLATE = """## 当前系统时间
+{current_time_context}
 
 ## 当前会话信息
-{session_env}
+{session_env}"""
+
+    # 兼容旧代码引用（合并模板，保留以便需要时使用）
+    SYSTEM_PROMPT = "{project_context}\n" + SYSTEM_PROMPT_STATIC_GLOBAL + SYSTEM_PROMPT_SESSION_TEMPLATE
+
+
+    SPECIALIST_STATIC_GLOBAL = """你是 FloodMind 子代理，负责完成主代理分配的子任务。
 
 ## 你的职责
 1. 执行主代理分配的子任务
@@ -260,6 +268,14 @@ class NativeFloodAgent:
 - 明确返回直接结果，如生成文件路径、读取/搜索结果、关键输出摘要
 - 不要给出下一步建议，不要说明后续如何使用，由主代理决定后续动作
 """
+
+    SPECIALIST_PROJECT_TEMPLATE = """{project_context}"""
+
+    SPECIALIST_SESSION_TEMPLATE = """## 当前会话信息
+{session_env}"""
+
+    # 兼容旧代码引用
+    EXECUTION_SPECIALIST_PROMPT = "{project_context}\n" + SPECIALIST_STATIC_GLOBAL + SPECIALIST_SESSION_TEMPLATE
 
     _ARTIFACT_EXTENSIONS = {".json", ".csv", ".xlsx", ".xls", ".docx", ".pdf", ".md", ".txt", ".png", ".jpg", ".jpeg"}
 
@@ -563,61 +579,41 @@ class NativeFloodAgent:
 
     def _init_model_client(self) -> None:
         if self.llm_service is not None:
-            api_key = self.llm_service.api_key
-            base_url = self.llm_service.base_url
-            model_name = self.llm_service.model_name
-            temperature = self.llm_service.temperature
-            max_tokens = self.llm_service.max_tokens
-
-            if not api_key or not api_key.strip():
-                raise ValueError(
-                    "未配置 API Key。\n"
-                    "请设置环境变量 FLOODMIND_API_KEY 或 DASHSCOPE_API_KEY，\n"
-                    "或运行 floodmind config set provider.dashscope.options.apiKey <你的key>"
-                )
-            self._model_client = ModelClient(
-                api_key=api_key,
-                base_url=base_url,
-                model_name=model_name,
-                temperature=temperature,
-                max_tokens=max_tokens,
-            )
-            if self.llm_service.enable_reasoning:
+            # 兼容外部传入 LLM service 的旧路径（如 web_server 传入的 get_qwen_llm_service）
+            if hasattr(self.llm_service, "enable_reasoning") and self.llm_service.enable_reasoning:
+                thinking = True
                 self._orchestrator_extra_body = {"enable_thinking": True}
+            else:
+                thinking = False
+                self._orchestrator_extra_body = {}
+
+            self._model_client = ModelClient(
+                api_key=getattr(self.llm_service, "api_key", ""),
+                base_url=getattr(self.llm_service, "base_url", ""),
+                model_name=getattr(self.llm_service, "model_name", ""),
+                temperature=getattr(self.llm_service, "temperature", 0.3),
+                max_tokens=getattr(self.llm_service, "max_tokens", 4096),
+                enable_thinking=thinking,
+            )
             return
 
-        from floodmind.config.model_presets import get_preset, resolve_api_key, resolve_base_url, get_default_model_key
+        # 默认路径：从 settings.json 读取
+        from floodmind.config.model_presets import get_default_model_key, get_preset
 
         model_key = get_default_model_key()
         preset = get_preset(model_key)
         if not preset:
             raise ValueError(f"未知的模型预设: {model_key}")
 
-        api_key = resolve_api_key(preset)
-        base_url = resolve_base_url(preset)
-
-        if not api_key or not api_key.strip():
-            raise ValueError(
-                "未配置 API Key。\n"
-                "请设置环境变量 FLOODMIND_API_KEY 或 DASHSCOPE_API_KEY，\n"
-                "或运行 floodmind config set providers.dashscope.api_key <你的key>"
-            )
-
-        if self._enable_reasoning and preset.get("supports_reasoning"):
-            temperature = preset.get("thinking_temperature", 0.2)
-            max_tokens = preset.get("thinking_max_tokens", 4096)
+        enable_thinking = bool(self._enable_reasoning and preset.get("supports_reasoning"))
+        if enable_thinking:
             self._orchestrator_extra_body = {"enable_thinking": True}
         else:
-            temperature = preset.get("default_temperature", 0.3)
-            max_tokens = preset.get("default_max_tokens", 4096)
             self._orchestrator_extra_body = {}
 
-        self._model_client = ModelClient(
-            api_key=api_key,
-            base_url=base_url,
-            model_name=preset["model_name"],
-            temperature=temperature,
-            max_tokens=max_tokens,
+        self._model_client = ModelClient.from_settings_with_preset(
+            model_key=model_key,
+            enable_reasoning=enable_thinking,
         )
 
     def _init_executors(self) -> None:
@@ -649,23 +645,38 @@ class NativeFloodAgent:
 
         tool_descriptions = self._build_tool_descriptions(self._orchestrator_registry)
 
-        # Use agent-specific prompt if defined, otherwise default SYSTEM_PROMPT
+        # Use agent-specific prompt if defined, otherwise split into three parts for cache reuse.
         agent_prompt = getattr(self._agent_info, "prompt", "") if self._agent_info else ""
-        base_prompt = agent_prompt if agent_prompt else self.SYSTEM_PROMPT
+        if agent_prompt:
+            # 旧路径：agent_info 自定义了整套 prompt，仍然合并为单条
+            orchestrator_prompts = [
+                agent_prompt.format(
+                    skill_catalog=self._skill_catalog,
+                    current_time_context=current_time_context,
+                    project_context=project_context,
+                    session_env=session_env,
+                    tool_descriptions=tool_descriptions,
+                )
+            ]
+        else:
+            # 新路径：拆分为三条 system messages
+            orchestrator_prompts = [
+                self.SYSTEM_PROMPT_STATIC_GLOBAL.format(
+                    skill_catalog=self._skill_catalog,
+                    tool_descriptions=tool_descriptions,
+                ),
+                self.SYSTEM_PROMPT_PROJECT_TEMPLATE.format(project_context=project_context),
+                self.SYSTEM_PROMPT_SESSION_TEMPLATE.format(
+                    current_time_context=current_time_context,
+                    session_env=session_env,
+                ),
+            ]
 
-        orchestrator_prompt = base_prompt.format(
-            skill_catalog=self._skill_catalog,
-            current_time_context=current_time_context,
-            project_context=project_context,
-            session_env=session_env,
-            tool_descriptions=tool_descriptions,
-        )
-
-        specialist_prompt = self.EXECUTION_SPECIALIST_PROMPT.format(
-            skill_catalog=self._skill_catalog,
-            project_context=project_context,
-            session_env=session_env,
-        )
+        specialist_prompts = [
+            self.SPECIALIST_STATIC_GLOBAL.format(skill_catalog=self._skill_catalog),
+            self.SPECIALIST_PROJECT_TEMPLATE.format(project_context=project_context),
+            self.SPECIALIST_SESSION_TEMPLATE.format(session_env=session_env),
+        ]
 
         self._orchestrator_executor = NativeAgentExecutor(
             model_client=self._model_client,
@@ -674,7 +685,7 @@ class NativeFloodAgent:
             message_builder=self._message_builder,
             max_iterations=50,
             extra_body=self._orchestrator_extra_body,
-            system_prompt=orchestrator_prompt,
+            system_prompts=orchestrator_prompts,
             tools_schema=self._orchestrator_registry.tools_schema(),
             tool_registry=self._orchestrator_registry,
             require_plan_before_delegate=False,
@@ -686,7 +697,7 @@ class NativeFloodAgent:
             event_bus=self._event_bus,
             message_builder=self._message_builder,
             max_iterations=50,
-            system_prompt=specialist_prompt,
+            system_prompts=specialist_prompts,
             tools_schema=self._specialist_registry.tools_schema(),
             tool_registry=self._specialist_registry,
         )
@@ -715,7 +726,8 @@ class NativeFloodAgent:
         return count
 
     def _rebuild_system_prompts(self) -> None:
-        """用最新的 _skill_catalog 重建 orchestrator 和 specialist 的 system prompt"""
+        """当 skill catalog / tool 列表刷新时，只需重建 STATIC_GLOBAL 部分
+        （PROJECT 和 SESSION 部分是稳定的）。"""
         if not self._orchestrator_executor or not self._specialist_executor:
             return
 
@@ -723,20 +735,34 @@ class NativeFloodAgent:
         ctc = getattr(self, "_current_time_context", "")
         se = getattr(self, "_session_env", "")
 
-        orch_prompt = self.SYSTEM_PROMPT.format(
-            skill_catalog=self._skill_catalog,
-            current_time_context=ctc,
-            project_context=pc,
-            session_env=se,
-        )
-        self._orchestrator_executor.system_prompt = orch_prompt
+        agent_prompt = getattr(self._agent_info, "prompt", "") if self._agent_info else ""
+        if agent_prompt:
+            # 旧路径：agent_info 自定义 prompt，仍合并为单条
+            tool_descriptions = self._build_tool_descriptions(self._orchestrator_registry)
+            merged = agent_prompt.format(
+                skill_catalog=self._skill_catalog,
+                current_time_context=ctc,
+                project_context=pc,
+                session_env=se,
+                tool_descriptions=tool_descriptions,
+            )
+            self._orchestrator_executor.system_prompts = [merged]
+        else:
+            tool_descriptions = self._build_tool_descriptions(self._orchestrator_registry)
+            new_global = self.SYSTEM_PROMPT_STATIC_GLOBAL.format(
+                skill_catalog=self._skill_catalog,
+                tool_descriptions=tool_descriptions,
+            )
+            # 只替换第 0 条（STATIC_GLOBAL），保留 PROJECT 和 SESSION 不变
+            prompts = list(self._orchestrator_executor.system_prompts)
+            prompts[0] = new_global
+            self._orchestrator_executor.system_prompts = prompts
 
-        spec_prompt = self.EXECUTION_SPECIALIST_PROMPT.format(
-            skill_catalog=self._skill_catalog,
-            project_context=pc,
-            session_env=se,
-        )
-        self._specialist_executor.system_prompt = spec_prompt
+        # 子代理的 STATIC_GLOBAL 也需要刷新 skill catalog
+        new_spec_global = self.SPECIALIST_STATIC_GLOBAL.format(skill_catalog=self._skill_catalog)
+        spec_prompts = list(self._specialist_executor.system_prompts)
+        spec_prompts[0] = new_spec_global
+        self._specialist_executor.system_prompts = spec_prompts
 
     def refresh_skills(self) -> None:
         """刷新 skill 注册表并重建 Agent 的 system prompt"""
@@ -982,7 +1008,7 @@ class NativeFloodAgent:
                 upload_dir=self._get_upload_dir(),
             )
 
-        specialist_prompt = self._specialist_executor.system_prompt if self._specialist_executor else ""
+        specialist_prompts = list(self._specialist_executor.system_prompts) if self._specialist_executor else []
 
         results: Dict[str, Dict[str, Any]] = {}
 
@@ -998,7 +1024,7 @@ class NativeFloodAgent:
                     break
 
         if use_dag and self._last_loop_state is not None and self._last_loop_state.plan is not None:
-            return self._run_dag_batches(tasks, context, specialist_prompt, max_concurrent, results)
+            return self._run_dag_batches(tasks, context, specialist_prompts, max_concurrent, results)
 
         # 原有扁平并行逻辑
         def _run_single(idx: int, task_def: Dict[str, Any]) -> tuple:
@@ -1024,7 +1050,7 @@ class NativeFloodAgent:
                 event_bus=step_event_bus,
                 message_builder=MessageBuilder(),
                 max_iterations=50,
-                system_prompt=specialist_prompt,
+                system_prompts=list(specialist_prompts),
                 tools_schema=self._specialist_registry.tools_schema(),
                 tool_registry=self._specialist_registry,
             )
@@ -1107,7 +1133,7 @@ class NativeFloodAgent:
         }
         return json.dumps(payload, ensure_ascii=False, indent=2)
 
-    def _run_dag_batches(self, tasks: list, context: RunContext, specialist_prompt: str, max_concurrent: int, results: Dict[str, Any]) -> str:
+    def _run_dag_batches(self, tasks: list, context: RunContext, specialist_prompts: list, max_concurrent: int, results: Dict[str, Any]) -> str:
         """按 DAG 拓扑层级分批并行执行"""
         plan = self._last_loop_state.plan
 
@@ -1143,7 +1169,7 @@ class NativeFloodAgent:
                     event_bus=step_event_bus,
                     message_builder=MessageBuilder(),
                     max_iterations=50,
-                    system_prompt=specialist_prompt,
+                    system_prompts=list(specialist_prompts),
                     tools_schema=self._specialist_registry.tools_schema(),
                     tool_registry=self._specialist_registry,
                 )
@@ -1404,8 +1430,8 @@ class NativeFloodAgent:
                     ask_service = get_ask_service()
                     ask_service.set_emit_fn(lambda event: self._event_bus.emit(event), session_id=self.session_id)
 
-                    memory_messages = []
-                    history_used = False
+                    experience_context = self._build_experience_context()
+                    history_text = ""
                     if hasattr(self.memory, "get_chat_history_for_system_prompt"):
                         context_chars = len(self._orchestrator_executor.system_prompt or "")
                         cw = settings.agent.context_window
@@ -1413,15 +1439,20 @@ class NativeFloodAgent:
                             total_context_chars=context_chars,
                             context_window=cw,
                             event_bus=self._event_bus,
-                        )
-                        if history_text:
-                            history_used = True
-                            memory_messages = [{
-                                "role": "system",
-                                "content": history_text,
-                            }]
+                        ) or ""
 
-                    if not history_used:
+                    memory_messages = []
+                    if experience_context:
+                        memory_messages.append({
+                            "role": "system",
+                            "content": experience_context,
+                        })
+                    if history_text:
+                        memory_messages.append({
+                            "role": "system",
+                            "content": history_text,
+                        })
+                    if not memory_messages:
                         if hasattr(self.memory, "get_openai_messages"):
                             memory_messages = self.memory.get_openai_messages()
                         elif hasattr(self.memory, "get_full_messages"):
@@ -1432,14 +1463,6 @@ class NativeFloodAgent:
                             memory_messages = self._message_builder.build_memory_messages(
                                 self.memory.get_messages()
                             )
-
-                    # 注入相关任务经验到上下文
-                    experience_context = self._build_experience_context()
-                    if experience_context:
-                        memory_messages.append({
-                            "role": "system",
-                            "content": experience_context,
-                        })
 
                     agent_result = self._orchestrator_executor.run(
                         context=context,

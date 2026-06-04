@@ -7,6 +7,7 @@ Native Agent Runtime - NativeAgentExecutor
 
 import json
 import logging
+import os
 import time
 from typing import Any, Callable, Dict, List, Optional
 
@@ -33,6 +34,7 @@ class NativeAgentExecutor:
         max_iterations: int = 50,
         extra_body: Optional[dict] = None,
         system_prompt: str = "",
+        system_prompts: Optional[List[str]] = None,
         tools_schema: Optional[List[dict]] = None,
         tool_registry: Optional[Any] = None,
         require_plan_before_delegate: bool = False,
@@ -43,10 +45,37 @@ class NativeAgentExecutor:
         self.message_builder = message_builder or MessageBuilder()
         self.max_iterations = max_iterations
         self.extra_body = extra_body or {}
-        self.system_prompt = system_prompt
+        # 兼容单 prompt 和多 prompt 模式：
+        # - system_prompts 优先；
+        # - 回退到 [system_prompt]（保留旧调用方）
+        if system_prompts is not None:
+            self._system_prompts: List[str] = [p for p in system_prompts if p]
+        elif system_prompt:
+            self._system_prompts = [system_prompt]
+        else:
+            self._system_prompts = []
         self._tools_schema = tools_schema
         self._tool_registry = tool_registry
         self._require_plan_before_delegate = require_plan_before_delegate
+
+    # --- 公共访问接口（保持向后兼容） ---
+    @property
+    def system_prompt(self) -> str:
+        """所有 system prompts 的合并视图（向后兼容；仅用于日志/长度计算）。"""
+        return "\n".join(self._system_prompts)
+
+    @system_prompt.setter
+    def system_prompt(self, value: str) -> None:
+        """向后兼容的 setter：覆盖为单条 prompt。"""
+        self._system_prompts = [value] if value else []
+
+    @property
+    def system_prompts(self) -> List[str]:
+        return self._system_prompts
+
+    @system_prompts.setter
+    def system_prompts(self, value: List[str]) -> None:
+        self._system_prompts = [p for p in value if p]
 
     def set_tools_schema(self, schema: List[dict]) -> None:
         self._tools_schema = schema
@@ -87,15 +116,6 @@ class NativeAgentExecutor:
             tools_param = self._tools_schema if self._tools_schema else None
 
             logger.info("[EXEC] calling LLM stream, iteration=%d, messages=%d, tools=%d", iteration, len(messages), len(tools_param) if tools_param else 0)
-
-            # 临时日志：记录完整prompt
-            logger.debug("[PROMPT DEBUG] === 完整prompt (iteration=%d) ===", iteration)
-            logger.debug("[PROMPT DEBUG] 消息数: %d, tools数: %d", len(messages), len(tools_param) if tools_param else 0)
-            for i, msg in enumerate(messages):
-                role = msg.get("role", "unknown")
-                content = str(msg.get("content", ""))
-                logger.debug("[PROMPT DEBUG] msg[%d] role=%s, content_len=%d", i, role, len(content))
-                logger.debug("[PROMPT DEBUG] msg[%d] content前500字: %s", i, content[:500])
 
             for event in self.model_client.stream_chat(
                 messages=messages,
@@ -254,8 +274,10 @@ class NativeAgentExecutor:
         memory_messages: Optional[List[dict]],
     ) -> List[dict]:
         messages: List[dict] = []
-        if self.system_prompt:
-            messages.append(self.message_builder.build_system_message(self.system_prompt))
+        # 多条 system prompt（STATIC_GLOBAL → PROJECT → SESSION 顺序），
+        # 这样 DashScope/OpenAI 的前缀缓存能命中 STATIC_GLOBAL 部分
+        for sp in self._system_prompts:
+            messages.append(self.message_builder.build_system_message(sp))
         if memory_messages:
             messages.extend(memory_messages)
         messages.append(self.message_builder.build_user_message(user_text, attachments))

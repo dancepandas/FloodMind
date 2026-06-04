@@ -13,6 +13,9 @@ import threading
 
 from flask import Flask, request, jsonify, Response, stream_with_context
 
+from floodmind.config.settings import settings
+from floodmind.agent.native.model_client import ModelClient
+
 logger = logging.getLogger(__name__)
 
 _app = Flask("floodmind-server")
@@ -26,9 +29,7 @@ def _get_or_create_agent(session_id: str):
     global _llm
     with _llm_lock:
         if _llm is None:
-            _llm = get_qwen_llm_service(
-                api_key=settings.model.api_key,
-                model_name=settings.model.model_name,
+            _llm = ModelClient.from_settings(
                 temperature=settings.model.temperature,
                 max_tokens=settings.model.max_tokens,
             )
@@ -173,9 +174,7 @@ def api_compact_session(session_id: str):
     if agent is None and _llm is None:
         with _llm_lock:
             if _llm is None:
-                _llm = get_qwen_llm_service(
-                    api_key=settings.model.api_key,
-                    model_name=settings.model.model_name,
+                _llm = ModelClient.from_settings(
                     temperature=settings.model.temperature,
                     max_tokens=settings.model.max_tokens,
                 )

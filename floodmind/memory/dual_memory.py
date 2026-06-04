@@ -362,28 +362,27 @@ class DualMemory:
                 self._last_sent_turn_index = last_complete
                 return result
 
-        # 非压缩：增量拼接
-        new_turns = self._turns[self._last_sent_turn_index:]
-        if not new_turns:
-            return self._cached_history_text
-
-        incremental_text = self._build_turns_text(new_turns)
-        if self._cached_history_text:
-            incremental_body = incremental_text
-            if incremental_body.startswith("[对话历史]"):
-                incremental_body = incremental_body[len("[对话历史]"):]
-            result = self._cached_history_text + incremental_body
-        else:
-            result = incremental_text
-
+        # 全量重建（确保 final_answer 已填入后再输出）
+        result = self._build_turns_text(self._turns)
         self._cached_history_text = result
         self._last_sent_turn_index = len(self._turns)
         return result
 
     def _build_turns_text(self, turns: List[Dict[str, Any]]) -> str:
-        """将轮次列表格式化为文本"""
+        """将轮次列表格式化为文本
+        
+        注意：如果最后一轮尚未完成（final_answer 为空），则跳过它。
+        因为当前轮的用户输入会作为单独的 user message 发送给 LLM，
+        包含在历史中会导致重复且破坏缓存前缀。
+        """
+        # 跳过尾部未完成的当前轮（避免与 msg[3] user message 重复）
+        effective_turns = turns
+        if turns and not turns[-1].get("final_answer"):
+            effective_turns = turns[:-1]
+        if not effective_turns:
+            return ""
         lines = ["[对话历史]"]
-        for turn in turns:
+        for turn in effective_turns:
             idx = turn.get("turn_index", 0)
             lines.append(f"\n第{idx}轮:")
             lines.append(f"用户: {turn.get('user_input', '')}")

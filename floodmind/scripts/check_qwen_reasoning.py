@@ -4,7 +4,7 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 
-from floodmind.models.qwen_llm_service import QwenLLMService
+from floodmind.agent.native.model_client import ModelClient
 
 
 def main() -> None:
@@ -14,35 +14,50 @@ def main() -> None:
     if not api_key:
         raise RuntimeError("未设置 DASHSCOPE_API_KEY")
 
-    service = QwenLLMService(
-        api_key=api_key,
-        model_name=os.getenv("QWEN_MODEL", "qwen3-flash"),
-        reasoning_model=os.getenv("QWEN_REASONING_MODEL", "qwen-plus"),
+    reasoning_prompt = "请先简短思考，再回答：1+1 等于几？"
+
+    # === invoke 非流式调用，带推理 ===
+    print("=== invoke (enable_thinking=True) ===")
+    service = ModelClient.from_settings(
+        model_name=os.getenv("QWEN_REASONING_MODEL", "qwen-plus"),
         temperature=0.1,
         max_tokens=512,
-        enable_reasoning=True,
+        enable_thinking=True,
     )
-
-    llm = service.get_llm()
-    prompt = "请先简短思考，再回答：1+1等于几？"
-
-    print("=== invoke ===")
-    response = llm.invoke(prompt)
+    response = service.invoke(reasoning_prompt)
     print("content:", getattr(response, "content", ""))
     print("additional_kwargs keys:", sorted(list(getattr(response, "additional_kwargs", {}).keys())))
     print("reasoning_content:", getattr(response, "additional_kwargs", {}).get("reasoning_content", ""))
 
-    print("\n=== stream ===")
+    # === invoke 普通调用，无推理 ===
+    print("\n=== invoke (enable_thinking=False) ===")
+    service2 = ModelClient.from_settings(
+        model_name=os.getenv("QWEN_MODEL", "qwen3-flash"),
+        temperature=0.1,
+        max_tokens=512,
+        enable_thinking=False,
+    )
+    response2 = service2.invoke("你好，1+1=?")
+    print("content:", getattr(response2, "content", ""))
+
+    # === stream_chat 流式调用，观察 reasoning / token / done 事件 ===
+    print("\n=== stream_chat ===")
     saw_reasoning = False
-    for chunk in llm.stream(prompt):
-        additional_kwargs = getattr(chunk, "additional_kwargs", {}) or {}
-        reasoning = additional_kwargs.get("reasoning_content", "")
-        content = getattr(chunk, "content", "")
-        if reasoning:
+    messages = [{"role": "user", "content": reasoning_prompt}]
+    service3 = ModelClient.from_settings(
+        model_name=os.getenv("QWEN_REASONING_MODEL", "qwen-plus"),
+        temperature=0.1,
+        max_tokens=512,
+        enable_thinking=True,
+    )
+    for event in service3.stream_chat(messages):
+        if event.type == "reasoning":
             saw_reasoning = True
-            print("reasoning chunk:", reasoning)
-        if content:
-            print("content chunk:", content)
+            print("reasoning chunk:", event.content)
+        elif event.type == "token":
+            print("content chunk:", event.content)
+        elif event.type in ("done", "error", "timeout", "usage"):
+            print(f"[{event.type}] {event.content[:80] if event.content else ''}")
 
     print("\nstream reasoning seen:", saw_reasoning)
 

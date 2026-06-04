@@ -10,7 +10,7 @@ from textual.screen import Screen
 from textual.widgets import Static
 
 from floodmind.config.settings import settings
-from floodmind.models import get_qwen_llm_service
+from floodmind.agent.native.model_client import ModelClient
 from floodmind.memory import DualMemory, create_session as store_create_session
 from floodmind.agent import create_flood_agent
 from floodmind.tui.widgets.prompt import PromptInput
@@ -97,31 +97,28 @@ class ChatScreen(Screen[None]):
         try:
             store_create_session(session_id=self._sid)
             if model_name:
-                from floodmind.config.model_presets import get_preset, resolve_api_key, resolve_base_url
+                from floodmind.config.model_presets import get_preset
                 preset = get_preset(model_name)
                 if preset:
-                    llm = get_qwen_llm_service(
-                        api_key=resolve_api_key(preset),
+                    llm = ModelClient(
+                        api_key=preset.get("api_key") or settings.model.api_key,
                         model_name=preset["model_name"],
-                        base_url=resolve_base_url(preset),
+                        base_url=preset.get("default_base_url") or "",
                         temperature=preset.get("default_temperature", 0.3),
                         max_tokens=preset.get("default_max_tokens", 8192),
-                        enable_reasoning=settings.model.enable_reasoning,
+                        enable_thinking=bool(settings.model.enable_reasoning),
                     )
                 else:
-                    llm = get_qwen_llm_service(
-                        api_key=settings.model.api_key,
+                    llm = ModelClient.from_settings(
                         model_name=model_name,
                         temperature=settings.model.temperature,
                         max_tokens=settings.model.max_tokens,
                     )
             else:
-                llm = get_qwen_llm_service(
-                    api_key=settings.model.api_key,
-                    model_name=settings.model.model_name,
+                llm = ModelClient.from_settings(
                     temperature=settings.model.temperature,
                     max_tokens=settings.model.max_tokens,
-                    enable_reasoning=settings.model.enable_reasoning,
+                    enable_thinking=bool(settings.model.enable_reasoning),
                 )
             if self._agent is not None and hasattr(self._agent, 'memory'):
                 memory = self._agent.memory

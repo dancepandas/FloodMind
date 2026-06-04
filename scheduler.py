@@ -20,7 +20,7 @@ from floodmind.agent.native import create_flood_agent
 from floodmind.agent.scheduled_task_runtime import ScheduledTaskRuntime
 from floodmind.config.settings import settings
 from floodmind.memory import DualMemory, SessionManager
-from floodmind.models import get_qwen_llm_service, create_llm_service_from_preset
+from floodmind.agent.native.model_client import ModelClient
 from floodmind.config.model_presets import get_default_model_key
 from floodmind.tools import set_rag_config, set_session_context
 
@@ -80,7 +80,7 @@ def create_agent_for_session(session_manager: SessionManager, session_id: str):
     )
 
     model_key = get_default_model_key()
-    llm_service = create_llm_service_from_preset(
+    llm_service = ModelClient.from_settings_with_preset(
         model_key,
         enable_reasoning=settings.qwen.enable_reasoning,
     )
@@ -165,7 +165,7 @@ def run_once(runtime: ScheduledTaskRuntime, session_manager: SessionManager, loo
                 logger.info("经验树巡检: 开始执行...")
                 try:
                     model_key = get_default_model_key()
-                    llm_service = create_llm_service_from_preset(model_key, enable_reasoning=False)
+                    llm_service = ModelClient.from_settings_with_preset(model_key, enable_reasoning=False)
                     stats = store.run_maintenance(llm_service)
                     logger.info(f"经验树巡检: 完成, 统计={stats}")
                 except Exception as e:

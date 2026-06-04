@@ -263,8 +263,8 @@ def get_llm_client(provider_id: str = "", model_id: str = "", **kwargs):
     if ck in _client_cache:
         return _client_cache[ck]
 
-    from floodmind.models.qwen_llm_service import QwenLLMService
-    client = QwenLLMService(
+    from floodmind.agent.native.model_client import ModelClient
+    client = ModelClient(
         api_key=api_key,
         base_url=base_url,
         model_name=model_id,
