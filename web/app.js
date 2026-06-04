@@ -1678,7 +1678,7 @@ function addSearchResultCard(messageId, content) {
     
     // 生成搜索结果HTML
     const resultsHtml = searchResults.slice(0, 6).map((item, index) => `
-        <a href="${escapeHtml(item.url || '#')}" target="_blank" class="search-result-item">
+        <a href="${escapeHtml(item.url || '#')}" target="_blank" rel="noopener noreferrer" class="search-result-item">
             <div class="search-result-number">${index + 1}</div>
             <div class="search-result-content">
                 <div class="search-result-title">${escapeHtml(item.title || '无标题')}</div>

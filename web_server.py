@@ -26,17 +26,14 @@ import mimetypes
 # 加载环境变量
 load_dotenv()
 
-# 添加项目根目录到路径
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-
-from config.settings import settings
-from models import QwenLLMService, get_qwen_llm_service, create_llm_service_from_preset
-from config.model_presets import get_preset, get_default_model_key, get_models_list, resolve_api_key, resolve_base_url
-from memory import SimpleMemory, DualMemory, SessionManager
-from memory.session_manager import validate_session_id
-from agent.native import create_flood_agent
-from agent.scheduled_task_runtime import get_scheduled_task_runtime
-from tools import set_rag_config, set_memory_instance, set_session_context
+from floodmind.config.settings import settings
+from floodmind.models import QwenLLMService, get_qwen_llm_service, create_llm_service_from_preset
+from floodmind.config.model_presets import get_preset, get_default_model_key, get_models_list, resolve_api_key, resolve_base_url
+from floodmind.memory import SimpleMemory, DualMemory, SessionManager
+from floodmind.memory.session_manager import validate_session_id
+from floodmind.agent.native import create_flood_agent
+from floodmind.agent.scheduled_task_runtime import get_scheduled_task_runtime
+from floodmind.tools import set_rag_config, set_memory_instance, set_session_context
 
 # 配置日志
 logs_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'logs')
@@ -88,7 +85,14 @@ else:
 STATIC_WEB_DIR = REACT_DIST_DIR if USE_REACT_FRONTEND else LEGACY_WEB_DIR
 
 app = Flask(__name__, static_folder=STATIC_WEB_DIR)
-CORS(app)
+CORS(app, origins=[
+    "http://localhost:5173",
+    "http://localhost:13014",
+    "http://127.0.0.1:5173",
+    "http://127.0.0.1:13014",
+], supports_credentials=True)
+
+app.config['MAX_CONTENT_LENGTH'] = 500 * 1024 * 1024  # 500 MB upload limit
 
 logger.debug(f"USE_REACT_FRONTEND: {USE_REACT_FRONTEND}")
 logger.debug(f"STATIC_WEB_DIR: {STATIC_WEB_DIR}")
@@ -346,31 +350,53 @@ def build_uploaded_file_preview(file_info: dict) -> dict:
     return preview
 
 
-def _generate_session_title(message: str) -> str:
+def _generate_session_title(message: str, model_key: str = "") -> str:
     prompt = (
         "请根据用户问题拟一个简短的中文会话标题，用于左侧历史会话列表展示。"
         "要求：10到18个字，突出任务目标，不要带引号，不要解释，不要句号。\n\n"
         f"用户问题：{message}"
     )
-    # 标题生成是后台辅助任务，必须使用独立实例，避免污染会话主链路的推理模式。
-    llm = QwenLLMService(
-        api_key=settings.qwen.api_key,
-        model_name=settings.qwen.model_name,
-        temperature=0.2,
-        max_tokens=60,
-        enable_thinking=False,
-    )
-    raw = (llm.invoke(prompt).content or '').strip()
+    if model_key:
+        preset = get_preset(model_key)
+        if preset:
+            llm = QwenLLMService(
+                api_key=resolve_api_key(preset),
+                model_name=preset["model_name"],
+                base_url=resolve_base_url(preset),
+                temperature=0.2,
+                max_tokens=60,
+                enable_thinking=False,
+            )
+        else:
+            llm = QwenLLMService(
+                api_key=settings.qwen.api_key,
+                model_name=settings.qwen.model_name,
+                temperature=0.2,
+                max_tokens=60,
+                enable_thinking=False,
+            )
+    else:
+        llm = QwenLLMService(
+            api_key=settings.qwen.api_key,
+            model_name=settings.qwen.model_name,
+            temperature=0.2,
+            max_tokens=60,
+            enable_thinking=False,
+        )
+    result = llm.invoke(prompt)
+    if result is None or not hasattr(result, 'content'):
+        return ""
+    raw = (result.content or '').strip()
     title = raw.splitlines()[0].strip().strip('"“”')
     title = re.sub(r"^[#\-*\d.\s]+", "", title).strip()
     return title[:24] if title else ''
 
 
-def schedule_session_title_generation(session_id: str, message: str) -> None:
+def schedule_session_title_generation(session_id: str, message: str, model_key: str = "") -> None:
     """后台异步生成会话标题，不向前端展示过程。"""
     def _worker() -> None:
         try:
-            title = _generate_session_title(message)
+            title = _generate_session_title(message, model_key=model_key)
             if title:
                 session_manager.update_session_title(session_id, title)
                 logger.info(f"会话标题已更新: {session_id} -> {title}")
@@ -1434,7 +1460,7 @@ def chat():
         session_manager.increment_message_count(session_id)
         session_info = session_manager.get_session_info(session_id)
         if session_info and session_info.message_count == 1 and not session_info.title:
-            schedule_session_title_generation(session_id, message)
+            schedule_session_title_generation(session_id, message, model_key=state.get('model_key', ''))
         
         with session_abort_flags_lock:
             session_abort_flags[session_id] = False
@@ -1467,7 +1493,7 @@ def chat():
         enhanced_message = file_context + "\n\n" + message if file_context else message
 
         # 构建图片附件列表
-        from agent.native.types import Attachment
+        from floodmind.agent.native.types import Attachment
         attachments = []
         if uploaded_files and session_file_map:
             for file_id in uploaded_files:
@@ -1576,7 +1602,11 @@ def chat():
                             snapshot['raw_reasoning'] += chunk.get('content', '')
                             snapshot['reasoning'] = snapshot['raw_reasoning']
                             touch_stream_snapshot(session_id)
-                            emit({'type': 'thought_delta', 'content': chunk.get('content', '')})
+                            event = {'type': 'thought_delta', 'content': chunk.get('content', '')}
+                            step_key = chunk.get('step_key', '')
+                            if step_key:
+                                event['step_key'] = step_key
+                            emit(event)
                         continue
 
                     if chunk.get("type") == "llm_token_error":
@@ -1619,11 +1649,14 @@ def chat():
 
                     if chunk.get("type") in {"tool_status", "action_start"}:
                         call_id = chunk.get('call_id', '')
+                        step_key = chunk.get('step_key', '')
                         safe_chunk = {
                             'type': 'action_start',
                             'tool_name': chunk.get('tool_name', ''),
                             'status': chunk.get('status', 'running'),
                         }
+                        if step_key:
+                            safe_chunk['step_key'] = step_key
                         if call_id:
                             safe_chunk['call_id'] = call_id
                         tool_input = chunk.get('tool_input', '')
@@ -1662,6 +1695,9 @@ def chat():
                         result_event = {'type': 'action_end', 'tool_name': tool_name, 'content': filtered_content}
                         if call_id:
                             result_event['call_id'] = call_id
+                        step_key = chunk.get('step_key', '')
+                        if step_key:
+                            result_event['step_key'] = step_key
 
                         if tool_name == 'SubAgent':
                             try:
@@ -1694,7 +1730,11 @@ def chat():
                         streamed_text_parts.append(chunk["content"])
                         snapshot['content'] += chunk['content']
                         touch_stream_snapshot(session_id)
-                        emit({'type': 'answer_delta', 'content': chunk["content"]})
+                        event = {'type': 'answer_delta', 'content': chunk["content"]}
+                        step_key = chunk.get('step_key', '')
+                        if step_key:
+                            event['step_key'] = step_key
+                        emit(event)
                         continue
 
                 final_text = final_answer_text.strip() or ''.join(streamed_text_parts)
@@ -1735,7 +1775,7 @@ def chat():
 
                 session_info = session_manager.get_session_info(session_id)
                 if session_info and not session_info.title:
-                    from memory.session_manager import SessionManager as _SM
+                    from floodmind.memory.session_manager import SessionManager as _SM
                     title = _SM._extract_title_from_user_input(message)
                     session_manager.update_session_title(session_id, title)
 
@@ -1773,6 +1813,8 @@ def chat():
             pump_thread.start()
 
             replayed = 0
+            stream_start = time.time()
+            _SSE_MAX_LIFETIME_SEC = 600  # 10-minute max stream lifetime
             try:
                 while True:
                     with buffer_lock:
@@ -1782,6 +1824,10 @@ def chat():
                         replayed += 1
 
                     if not snapshot.get('is_streaming'):
+                        break
+
+                    if time.time() - stream_start > _SSE_MAX_LIFETIME_SEC:
+                        yield _make_sse_event("notify", {"level": "warning", "message": "会话已超过最大时长，连接自动关闭"})
                         break
 
                     resume_event.wait(timeout=5.0)
@@ -2049,7 +2095,7 @@ def delete_session_route(session_id: str):
     try:
         session_id = _require_session_id(session_id)
         
-        from agent.runtime.adapters.flask_permission_api import handle_permission_cancel_session
+        from floodmind.agent.runtime.adapters.flask_permission_api import handle_permission_cancel_session
         cancelled = handle_permission_cancel_session(session_id)
         if cancelled:
             logger.info(f"删除会话 {session_id}: 已取消 {cancelled} 个 pending ASK")
@@ -2350,7 +2396,7 @@ def add_long_term_memory():
 def permission_respond():
     """用户对权限 ASK 请求的响应"""
     try:
-        from agent.runtime.adapters.flask_permission_api import handle_permission_respond
+        from floodmind.agent.runtime.adapters.flask_permission_api import handle_permission_respond
         data = request.get_json() or {}
         result, status_code = handle_permission_respond(data)
         return jsonify(result), status_code
@@ -2363,7 +2409,7 @@ def permission_respond():
 def permission_pending():
     """查询当前所有 pending ASK 请求"""
     try:
-        from agent.runtime.adapters.flask_permission_api import handle_permission_pending
+        from floodmind.agent.runtime.adapters.flask_permission_api import handle_permission_pending
         session_id = _require_session_id(request.args.get('session_id', 'default'))
         result, status_code = handle_permission_pending(session_id)
         return jsonify(result), status_code
@@ -2383,7 +2429,7 @@ def pause_session():
         ensure_session_state(session_id)['is_paused'] = True
 
         try:
-            from agent.runtime.adapters.flask_permission_api import handle_permission_cancel_session
+            from floodmind.agent.runtime.adapters.flask_permission_api import handle_permission_cancel_session
             cancelled = handle_permission_cancel_session(session_id)
             if cancelled:
                 logger.info(f"暂停会话 {session_id}: 已取消 {cancelled} 个 pending ASK")
@@ -2573,7 +2619,7 @@ if __name__ == '__main__':
     
     logger.info("预加载 Embedding 模型与知识检索器...")
     try:
-        from tools.base_tools import _get_retriever, set_rag_config
+        from floodmind.tools.base_tools import _get_retriever, set_rag_config
         set_rag_config(enabled=True, persist_dir="./data/vector_store", embedding_model="BAAI/bge-base-zh-v1.5", top_k=10, session_id=None)
         _get_retriever()
         logger.info("Embedding 模型与知识检索器预加载完成")
@@ -2596,35 +2642,45 @@ if __name__ == '__main__':
         else:
             import platform
             if platform.system() == 'Windows':
-                from waitress import serve
-                logger.info(f"使用 waitress 生产服务器 (Windows)")
-                serve(app, host=args.host, port=args.port, threads=8, channel_timeout=300)
+                try:
+                    from waitress import serve
+                    logger.info(f"使用 waitress 生产服务器 (Windows)")
+                    serve(app, host=args.host, port=args.port, threads=8, channel_timeout=300)
+                except ImportError:
+                    logger.warning("waitress 未安装，使用 Flask 开发服务器（不建议生产使用）")
+                    logger.warning("安装: pip install waitress")
+                    app.run(host=args.host, port=args.port, threaded=True)
             else:
-                from gunicorn.app.base import BaseApplication
+                try:
+                    from gunicorn.app.base import BaseApplication
 
-                class StandaloneApplication(BaseApplication):
-                    def __init__(self, application, options=None):
-                        self.options = options or {}
-                        self.application = application
-                        super().__init__()
+                    class StandaloneApplication(BaseApplication):
+                        def __init__(self, application, options=None):
+                            self.options = options or {}
+                            self.application = application
+                            super().__init__()
 
-                    def load_config(self):
-                        for key, value in self.options.items():
-                            if key in self.cfg.settings and value is not None:
-                                self.cfg.set(key.lower(), value)
+                        def load_config(self):
+                            for key, value in self.options.items():
+                                if key in self.cfg.settings and value is not None:
+                                    self.cfg.set(key.lower(), value)
 
-                    def load(self):
-                        return self.application
+                        def load(self):
+                            return self.application
 
-                options = {
-                    'bind': f'{args.host}:{args.port}',
-                    'workers': 1,
-                    'timeout': 300,
-                    'worker_class': 'gthread',
-                    'threads': 4,
-                }
-                logger.info(f"使用 gunicorn 生产服务器 (Linux)")
-                StandaloneApplication(app, options).run()
+                    options = {
+                        'bind': f'{args.host}:{args.port}',
+                        'workers': 1,
+                        'timeout': 300,
+                        'worker_class': 'gthread',
+                        'threads': 4,
+                    }
+                    logger.info(f"使用 gunicorn 生产服务器 (Linux)")
+                    StandaloneApplication(app, options).run()
+                except ImportError:
+                    logger.warning("gunicorn 未安装，使用 Flask 开发服务器（不建议生产使用）")
+                    logger.warning("安装: pip install gunicorn")
+                    app.run(host=args.host, port=args.port, threaded=True)
     finally:
         session_manager.stop_cleanup_thread()
         session_manager.save_all()

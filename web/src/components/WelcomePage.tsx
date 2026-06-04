@@ -1,8 +1,9 @@
 import { useState, useEffect, useRef, useCallback } from 'react'
 import { createPortal } from 'react-dom'
-import { Send, Paperclip, Brain, Globe, Database, ChevronDown } from 'lucide-react'
+import { Send, Paperclip, Brain, Globe, Database, ChevronDown, ListTree, ChevronRight } from 'lucide-react'
 import { useIsMobile } from '@/hooks/use-mobile'
-import type { ModelOption, SessionConfig, PendingPermissionAsk } from '@/types/app'
+import { FileCard } from '@/features/chat/components/FileCard'
+import type { ModelOption, SessionConfig, PendingPermissionAsk, UploadedFileItem, WorkflowPlan } from '@/types/app'
 
 const PINNED_MODELS = ['deepseek_v4_flash', 'deepseek_v4_pro', 'qwen_36_plus', 'qwen_35_plus', 'qwen3_6_27b_local', 'glm_51', 'glm_5', 'kimi_k2_5', 'kimi_k2_6', 'minimax_m25', 'minimax_m21']
 
@@ -61,6 +62,8 @@ interface WelcomePageProps {
   disabled?: boolean
   models: ModelOption[]
   config: SessionConfig
+  files?: UploadedFileItem[]
+  workflow?: WorkflowPlan | null
   onChange: (value: string) => void
   onSubmit: () => void
   onUpload: (file: File) => void
@@ -72,6 +75,8 @@ export default function WelcomePage({
   disabled,
   models,
   config,
+  files = [],
+  workflow,
   onChange,
   onSubmit,
   onUpload,
@@ -82,6 +87,7 @@ export default function WelcomePage({
   const [proverb] = useState(() => PROVERBS[Math.floor(Math.random() * PROVERBS.length)])
   const [modelOpen, setModelOpen] = useState(false)
   const [menuPos, setMenuPos] = useState<{ top: number; left: number; minWidth: number } | null>(null)
+  const [workflowExpanded, setWorkflowExpanded] = useState(false)
   const textareaRef = useRef<HTMLTextAreaElement>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
   const modelBtnRef = useRef<HTMLButtonElement>(null)
@@ -144,6 +150,10 @@ export default function WelcomePage({
     `transition-all duration-700 ease-out ${mounted ? 'opacity-100 translate-y-0' : 'opacity-0 translate-y-4'}`
   const delayStyle = (ms: number) => ({ transitionDelay: `${ms}ms` })
 
+  const completedSteps = workflow?.steps?.filter((s) => s.status === "completed").length || 0;
+  const totalSteps = workflow?.steps?.length || 0;
+  const hasContext = files.length > 0 || (workflow?.steps?.length || 0) > 0;
+
   return (
     <div className="flex-1 flex flex-col items-center justify-center relative overflow-hidden hydro-wave-bg">
       {/* Animated atmospheric layers */}
@@ -203,6 +213,98 @@ export default function WelcomePage({
             </p>
           </div>
         </div>
+
+        {/* Inline context bar */}
+        {hasContext && (
+          <div className={`w-full mb-4 ${transitionClass(120)}`} style={delayStyle(120)}>
+            <div
+              className="rounded-xl overflow-hidden"
+              style={{
+                background: 'var(--glass-bg)',
+                border: '1px solid hsl(var(--border))',
+                backdropFilter: 'blur(8px)',
+              }}
+            >
+              {/* File cards */}
+              {files.length > 0 && (
+                <div className="flex items-start gap-3 px-4 py-3 overflow-x-auto">
+                  {files.map((file) => (
+                    <FileCard
+                      key={file.id}
+                      file={file}
+                    />
+                  ))}
+                </div>
+              )}
+
+              {/* Workflow steps */}
+              {workflow?.steps && workflow.steps.length > 0 && (
+                <div style={{ borderTop: files.length > 0 ? '1px solid hsl(var(--border))' : 'none' }}>
+                  <button
+                    onClick={() => setWorkflowExpanded(!workflowExpanded)}
+                    className="w-full flex items-center gap-2 px-3 py-2 text-[11px] transition-colors duration-200"
+                    onMouseEnter={(e) => { e.currentTarget.style.background = 'hsl(var(--muted))'; }}
+                    onMouseLeave={(e) => { e.currentTarget.style.background = 'transparent'; }}
+                  >
+                    <ListTree size={12} style={{ color: 'var(--teal-400)' }} strokeWidth={1.8} />
+                    <div className="h-1 flex-1 rounded-full overflow-hidden max-w-[80px]" style={{ background: 'hsl(var(--muted))' }}>
+                      <div className="h-full rounded-full transition-all duration-500" style={{ width: `${(completedSteps / totalSteps) * 100}%`, background: 'var(--gradient-ocean-teal)' }} />
+                    </div>
+                    <span className="font-semibold" style={{ color: 'hsl(var(--foreground))' }}>
+                      {completedSteps}/{totalSteps}
+                    </span>
+                    <span className="truncate max-w-[140px]" style={{ color: 'hsl(var(--muted-foreground))', opacity: 0.5 }}>
+                      {workflow.steps.find(s => s.status === 'running')?.title || workflow.steps[workflow.steps.length - 1]?.title || ''}
+                    </span>
+                    <span className="ml-auto flex-shrink-0" style={{ color: 'hsl(var(--muted-foreground))', opacity: 0.3 }}>
+                      {workflowExpanded ? <ChevronDown size={12} /> : <ChevronRight size={12} />}
+                    </span>
+                  </button>
+                  {workflowExpanded && (
+                    <div className="px-3 pb-2 flex flex-col gap-0.5">
+                      {workflow.steps.map((step, index) => (
+                        <div key={step.key || `${index}`} className="flex items-center gap-2 py-1 px-2 rounded-md transition-colors duration-200"
+                          onMouseEnter={(e) => { e.currentTarget.style.background = 'hsl(var(--muted))'; }}
+                          onMouseLeave={(e) => { e.currentTarget.style.background = 'transparent'; }}
+                        >
+                          <div className="w-3 h-3 rounded-full flex items-center justify-center flex-shrink-0"
+                            style={{
+                              background: step.status === "completed" ? 'var(--teal-50)' : step.status === "running" ? 'var(--ocean-50)' : step.status === "error" ? '#fef2f2' : 'hsl(var(--muted))',
+                              color: step.status === "completed" ? 'var(--teal-500)' : step.status === "running" ? 'var(--ocean-500)' : step.status === "error" ? 'hsl(var(--destructive))' : 'hsl(var(--muted-foreground))',
+                            }}
+                          >
+                            {step.status === "running" ? (
+                              <SparkleIcon size={7} />
+                            ) : step.status === "completed" ? (
+                              <svg width="7" height="7" viewBox="0 0 24 24" fill="currentColor"><path d="M9 16.17L4.83 12l-1.42 1.41L9 19 21 7l-1.41-1.41L9 16.17z" /></svg>
+                            ) : step.status === "error" ? (
+                              <svg width="7" height="7" viewBox="0 0 24 24" fill="currentColor"><circle cx="12" cy="12" r="10" /></svg>
+                            ) : (
+                              <svg width="7" height="7" viewBox="0 0 24 24" fill="currentColor" opacity="0.3"><circle cx="12" cy="12" r="10" /></svg>
+                            )}
+                          </div>
+                          <span className="text-[10px] truncate"
+                            style={{
+                              color: step.status === "completed" ? 'var(--teal-600)' : step.status === "error" ? 'hsl(var(--destructive))' : step.status === "running" ? 'hsl(var(--foreground))' : 'hsl(var(--muted-foreground))',
+                              opacity: step.status === "pending" ? 0.45 : 1,
+                            }}
+                          >
+                            {step.title || step.label}
+                          </span>
+                          {step.status === "running" && (
+                            <span className="ml-auto text-[8px] font-semibold animate-pulse-subtle flex-shrink-0" style={{ color: 'var(--ocean-400)', opacity: 0.5 }}>
+                              执行中
+                            </span>
+                          )}
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
+          </div>
+        )}
 
         {/* Input card */}
         <div className={`w-full ${transitionClass(160)}`} style={delayStyle(160)}>
@@ -397,4 +499,12 @@ export default function WelcomePage({
       </div>
     </div>
   )
+}
+
+function SparkleIcon({ size = 12 }: { size?: number }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" className="animate-star-spin-breathe">
+      <path d="M12 0L13.5 8.5L22 6L15 12L22 18L13.5 15.5L12 24L10.5 15.5L2 18L9 12L2 6L10.5 8.5L12 0Z" fill="currentColor" />
+    </svg>
+  );
 }

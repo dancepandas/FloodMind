@@ -1,5 +1,6 @@
 import { AlarmClock, Download, FileText } from "lucide-react";
 import { buildApiUrl } from "@/api/client";
+import { formatFileSize } from "@/features/chat/components/FileCard";
 import {
   Dialog,
   DialogContent,
@@ -167,11 +168,4 @@ function formatDateTime(value?: string) {
     hour: "2-digit",
     minute: "2-digit",
   });
-}
-
-function formatFileSize(bytes: number) {
-  if (!bytes) return "";
-  if (bytes < 1024) return `${bytes} B`;
-  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
-  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 }

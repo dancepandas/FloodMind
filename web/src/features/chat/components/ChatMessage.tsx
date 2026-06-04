@@ -152,15 +152,36 @@ function ActionBlock({ block, onToggleThought, message, onUpdateAction, stepInde
   const isCollapsed = block.isCollapsed;
   const isArchived = block.isArchived;
   const [expandedSubAgents, setExpandedSubAgents] = useState<Set<string>>(new Set());
+  const [expandedStepGroups, setExpandedStepGroups] = useState<Set<string>>(new Set());
 
   const subAgentActions = actions.filter((a) => a.toolName === 'SubAgent' || a.toolName === 'ParallelSubAgent' || a.toolName === 'ParallelTask');
   const toolActions = actions.filter((a) => a.toolName !== 'SubAgent' && a.toolName !== 'ParallelSubAgent' && a.toolName !== 'ParallelTask');
+
+  // Separate top-level tool actions from sub-agent internal tool actions by step_key
+  const ungroupedToolActions = toolActions.filter((a) => !a.step_key);
+  const toolActionsByStep: Record<string, ActionDetail[]> = {};
+  for (const a of toolActions) {
+    if (a.step_key) {
+      if (!toolActionsByStep[a.step_key]) toolActionsByStep[a.step_key] = [];
+      toolActionsByStep[a.step_key].push(a);
+    }
+  }
+  const stepGroups = Object.entries(toolActionsByStep);
 
   const toggleSubAgent = (callId: string) => {
     setExpandedSubAgents((prev) => {
       const next = new Set(prev);
       if (next.has(callId)) next.delete(callId);
       else next.add(callId);
+      return next;
+    });
+  };
+
+  const toggleStepGroup = (stepKey: string) => {
+    setExpandedStepGroups((prev) => {
+      const next = new Set(prev);
+      if (next.has(stepKey)) next.delete(stepKey);
+      else next.add(stepKey);
       return next;
     });
   };
@@ -204,10 +225,10 @@ function ActionBlock({ block, onToggleThought, message, onUpdateAction, stepInde
             borderLeft: '2px solid var(--teal-300)',
           }}
         >
-          {/* Tool calls */}
-          {toolActions.length > 0 && (
+          {/* Top-level tool calls (no step_key) */}
+          {ungroupedToolActions.length > 0 && (
             <div className="flex flex-col gap-[6px]">
-              {toolActions.map((action) => {
+              {ungroupedToolActions.map((action) => {
                 const displayName = getToolDisplayName(action.toolName);
                 return (
                   <div key={action.callId || action.toolName} className="flex items-center gap-2">
@@ -233,9 +254,77 @@ function ActionBlock({ block, onToggleThought, message, onUpdateAction, stepInde
             </div>
           )}
 
+          {/* Sub-agent internal tool calls grouped by step_key */}
+          {stepGroups.length > 0 && (() => {
+            const allExpanded = expandedStepGroups.has("__all__");
+            const totalDone = stepGroups.reduce((sum, [, actions]) => sum + actions.filter(a => a.status === "done").length, 0);
+            const totalCount = stepGroups.reduce((sum, [, actions]) => sum + actions.length, 0);
+            const stepLabels = stepGroups.map(([key]) => key).join(", ");
+            return (
+            <div className={`${ungroupedToolActions.length > 0 ? 'mt-2 pt-2' : ''}`} style={ungroupedToolActions.length > 0 ? { borderTop: '1px dashed var(--action-border)' } : undefined}>
+              <button
+                type="button"
+                onClick={() => toggleStepGroup("__all__")}
+                className="w-full flex items-center gap-1.5 px-2 py-1 rounded-md text-left transition-colors duration-150 hover:opacity-80"
+                style={{ background: 'var(--ocean-50)', border: '1px solid var(--ocean-100)' }}
+              >
+                <ChevronRight size={9} style={{ color: 'var(--ocean-400)', transform: allExpanded ? 'rotate(90deg)' : 'rotate(0deg)', transition: 'transform 0.2s' }} />
+                <svg width={10} height={10} viewBox="0 0 24 24" fill="none" stroke="var(--ocean-400)" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                  <rect x="3" y="3" width="18" height="18" rx="2" ry="2"/><line x1="3" y1="9" x2="21" y2="9"/><line x1="9" y1="21" x2="9" y2="9"/>
+                </svg>
+                <span className="text-[10px] font-semibold" style={{ color: 'var(--ocean-500)' }}>
+                  {stepGroups.length}个子代理
+                </span>
+                <span className="text-[9px]" style={{ color: 'hsl(var(--muted-foreground))', opacity: 0.4 }}>
+                  {totalDone}/{totalCount}项
+                </span>
+                <span className="text-[9px] truncate ml-auto" style={{ color: 'hsl(var(--muted-foreground))', opacity: 0.25, maxWidth: '180px' }}>
+                  {stepLabels}
+                </span>
+              </button>
+              {allExpanded && (
+                <div className="flex flex-col gap-2 mt-1.5 ml-2">
+                  {stepGroups.map(([stepKey, stepActions]) => (
+                    <div key={stepKey} className="rounded-md overflow-hidden" style={{ background: 'var(--ocean-50)', border: '1px solid var(--ocean-100)' }}>
+                      <div className="flex items-center gap-1.5 px-2 py-1" style={{ borderBottom: '1px solid var(--ocean-100)' }}>
+                        <span className="text-[10px] font-semibold" style={{ color: 'var(--ocean-500)' }}>{stepKey}</span>
+                        <span className="text-[9px]" style={{ color: 'hsl(var(--muted-foreground))', opacity: 0.4 }}>
+                          {stepActions.filter(a => a.status === "done").length}/{stepActions.length}
+                        </span>
+                      </div>
+                      <div className="flex flex-col gap-[4px] px-2 py-1.5">
+                        {stepActions.map((action) => {
+                          const displayName = getToolDisplayName(action.toolName);
+                          return (
+                            <div key={action.callId || action.toolName} className="flex items-center gap-2">
+                              <StatusIcon status={action.status} size={10} />
+                              <span className="text-[11px] font-medium" style={{
+                                fontFamily: 'var(--font-mono)',
+                                color: action.status === "running" ? 'hsl(var(--foreground))' : 'hsl(var(--muted-foreground))',
+                                opacity: action.status === "done" ? 0.7 : 1,
+                              }}>
+                                {displayName}
+                              </span>
+                              {action.content && action.status === "done" && (
+                                <span className="text-[10px] truncate" style={{ color: 'hsl(var(--muted-foreground))', opacity: 0.4, maxWidth: '150px' }}>
+                                  {action.content.slice(0, 40)}
+                                </span>
+                              )}
+                            </div>
+                          );
+                        })}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+            );
+          })()}
+
           {/* SubAgents */}
           {subAgentActions.length > 0 && (
-            <div className={`flex flex-col gap-1.5 ${toolActions.length > 0 ? 'mt-2 pt-2' : ''}`} style={toolActions.length > 0 ? { borderTop: '1px dashed var(--action-border)' } : undefined}>
+            <div className={`flex flex-col gap-1.5 ${(ungroupedToolActions.length > 0 || stepGroups.length > 0) ? 'mt-2 pt-2' : ''}`} style={(ungroupedToolActions.length > 0 || stepGroups.length > 0) ? { borderTop: '1px dashed var(--action-border)' } : undefined}>
               {subAgentActions.map((action) => (
                 <SubAgentCard
                   key={action.callId}

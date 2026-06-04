@@ -1,0 +1,25 @@
+{
+  "name": "floodmind-tui",
+  "version": "1.0.0",
+  "type": "module",
+  "private": true,
+  "scripts": {
+    "dev": "bun run src/index.tsx",
+    "build": "bun build src/index.tsx --outdir dist --target node"
+  },
+  "dependencies": {
+    "@opentui/core": "latest",
+    "@opentui/keymap": "latest",
+    "@opentui/solid": "0.3.1",
+    "ink": "^7.0.5",
+    "react": "^19.2.7",
+    "react-dom": "^19.2.7",
+    "solid-js": "^1.9.13"
+  },
+  "devDependencies": {
+    "@types/bun": "latest",
+    "@types/node": "^25.9.1",
+    "@types/react": "^19.2.16",
+    "typescript": "^5.7.0"
+  }
+}

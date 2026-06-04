@@ -20,6 +20,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     fonts-wqy-zenhei \
     libreoffice \
     poppler-utils \
+    nodejs \
+    npm \
     && fc-cache -fv \
     && rm -rf /var/lib/apt/lists/*
 
@@ -31,6 +33,8 @@ ENV PIP_RETRIES=10
 
 COPY requirements.txt .
 RUN pip install --no-cache-dir --progress-bar off -r requirements.txt
+
+RUN npm install -g docx
 
 COPY . .
 
@@ -54,4 +58,4 @@ EXPOSE 13014
 HEALTHCHECK --interval=30s --timeout=10s --start-period=10s --retries=3 \
     CMD curl -f http://localhost:13014/api/health || exit 1
 
-CMD ["python", "web_server.py", "--host", "0.0.0.0", "--port", "13014"]
+CMD ["python", "-m", "waitress", "--host=0.0.0.0", "--port=13014", "--threads=16", "web_server:app"]

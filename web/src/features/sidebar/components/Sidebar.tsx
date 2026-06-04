@@ -1,4 +1,4 @@
-import { MessageSquare, Plus, Trash2, Wifi, Database, Cpu } from "lucide-react";
+import { MessageSquare, Plus, Trash2, Wifi, Database, Cpu, Clock } from "lucide-react";
 import type { SessionSummary } from "@/types/app";
 
 interface SidebarProps {
@@ -7,6 +7,7 @@ interface SidebarProps {
   onNewSession: () => void;
   onSelectSession: (sessionId: string) => void;
   onDeleteSession: (sessionId: string) => void;
+  onShowScheduledTasks: () => void;
 }
 
 export function Sidebar({
@@ -15,6 +16,7 @@ export function Sidebar({
   onNewSession,
   onSelectSession,
   onDeleteSession,
+  onShowScheduledTasks,
 }: SidebarProps) {
   return (
     <div
@@ -75,6 +77,31 @@ export function Sidebar({
         >
           <Plus size={14} className="transition-transform duration-300 group-hover:rotate-90" strokeWidth={2.2} />
           <span>新建预报任务</span>
+        </button>
+
+        <button
+          onClick={onShowScheduledTasks}
+          className="group relative overflow-hidden flex items-center justify-center gap-2 w-full px-3.5 py-2.5 rounded-xl text-[13px] font-medium transition-all duration-300 active:scale-[0.97] mt-2"
+          style={{
+            background: 'var(--gradient-subtle)',
+            border: '1px solid var(--amber-200)',
+            color: 'var(--amber-700)',
+          }}
+          onMouseEnter={(e) => {
+            e.currentTarget.style.background = 'linear-gradient(135deg, var(--amber-400), var(--amber-500))';
+            e.currentTarget.style.color = 'white';
+            e.currentTarget.style.borderColor = 'transparent';
+            e.currentTarget.style.boxShadow = '0 4px 20px rgba(245,158,11,0.28)';
+          }}
+          onMouseLeave={(e) => {
+            e.currentTarget.style.background = 'var(--gradient-subtle)';
+            e.currentTarget.style.color = 'var(--amber-700)';
+            e.currentTarget.style.borderColor = 'var(--amber-200)';
+            e.currentTarget.style.boxShadow = 'none';
+          }}
+        >
+          <Clock size={14} className="transition-transform duration-300 group-hover:scale-110" strokeWidth={2.2} />
+          <span>定时任务</span>
         </button>
       </div>
 

@@ -1,0 +1,57 @@
+{
+  "provider": {
+    "dashscope": {
+      "name": "DashScope (Alibaba)",
+      "options": {
+        "apiKey": "",
+        "baseURL": "https://dashscope.aliyuncs.com/compatible-mode/v1"
+      },
+      "models": {
+        "deepseek-v4-flash": {
+          "name": "DeepSeek V4 Flash",
+          "description": "快速高效，适合日常任务",
+          "maxTokens": 65536,
+          "temperature": 0.3,
+          "supportsReasoning": true,
+          "supportsVision": false
+        },
+        "deepseek-v4-pro": {
+          "name": "DeepSeek V4 Pro",
+          "description": "编程、数学与通用任务表现出色",
+          "maxTokens": 65536,
+          "temperature": 0.3,
+          "supportsReasoning": true,
+          "supportsVision": false
+        },
+        "qwen3.6-plus": {
+          "name": "Qwen 3.6 Plus",
+          "description": "阿里混合推理模型，支持图像理解",
+          "maxTokens": 32768,
+          "temperature": 0.3,
+          "supportsReasoning": true,
+          "supportsVision": true
+        }
+      }
+    }
+  },
+  "model": {
+    "provider": "dashscope",
+    "model": "deepseek-v4-flash",
+    "temperature": 0.3,
+    "maxTokens": 65536,
+    "enableReasoning": false,
+    "enableSearch": false
+  },
+  "agent": {
+    "maxHistory": 20,
+    "contextWindow": 32768,
+    "enableChronosWarmup": false
+  },
+  "rag": {
+    "enabled": true,
+    "persistDir": "./data/vector_store",
+    "embeddingModel": "BAAI/bge-base-zh-v1.5",
+    "topK": 10
+  },
+  "mcpServers": []
+}

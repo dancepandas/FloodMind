@@ -17,6 +17,20 @@ import type { FilePreview, GeneratedArtifact, UploadedFileItem, WorkflowPlan, Wo
 import { isPreviewable } from "@/features/chat/components/DocumentPreviewDialog";
 import { DocumentPreviewDialog } from "@/features/chat/components/DocumentPreviewDialog";
 import { ScheduledTasksPanel } from "@/features/scheduler/components/ScheduledTasksPanel";
+import { formatFileSize } from "@/features/chat/components/FileCard";
+
+function getFileExt(filename: string): string {
+  return filename.split(".").pop()?.toLowerCase() || "";
+}
+
+function getFileIconConfig(filename: string): { color: string; bg: string } {
+  const ext = getFileExt(filename);
+  if (ext === "pdf") return { color: "#ef4444", bg: "#fef2f2" };
+  if (["docx", "doc"].includes(ext)) return { color: "#3b82f6", bg: "#eff6ff" };
+  if (["xlsx", "xls", "csv"].includes(ext)) return { color: "#16a34a", bg: "#f0fdf4" };
+  if (["png", "jpg", "jpeg", "gif", "webp", "bmp", "svg"].includes(ext)) return { color: "#a855f7", bg: "#faf5ff" };
+  return { color: "var(--ocean-400)", bg: "var(--ocean-50)" };
+}
 
 function SparkleIcon({ size = 12, className = "" }: { size?: number; className?: string }) {
   return (
@@ -113,7 +127,9 @@ export function ContextPanel({ sessionId, files, workflow, selectedPreview, onPr
                 </span>
               </div>
             ) : (
-              files.map((file) => (
+              files.map((file) => {
+                const iconCfg = getFileIconConfig(file.name);
+                return (
                 <button
                   key={file.id}
                   onClick={() => onPreviewFile(file.id)}
@@ -138,7 +154,7 @@ export function ContextPanel({ sessionId, files, workflow, selectedPreview, onPr
                 >
                   <div
                     className="p-1 rounded-lg flex-shrink-0"
-                    style={{ background: 'var(--ocean-50)', color: 'var(--ocean-400)' }}
+                    style={{ background: iconCfg.bg, color: iconCfg.color }}
                   >
                     <FileText size={13} strokeWidth={1.8} />
                   </div>
@@ -151,7 +167,8 @@ export function ContextPanel({ sessionId, files, workflow, selectedPreview, onPr
                     </span>
                   </div>
                 </button>
-              ))
+                );
+              })
             )}
           </div>
           {selectedPreview && (
@@ -411,10 +428,4 @@ function TablePreview({ columns, rows }: { columns: string[]; rows: string[][] }
       </table>
     </div>
   );
-}
-
-function formatFileSize(bytes: number) {
-  if (bytes < 1024) return `${bytes} B`;
-  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
-  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 }

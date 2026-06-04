@@ -7,11 +7,9 @@
 /reference/
 /.env
 /.trae/
-/tests/
 /docs/
 /data/
 /.dockerignore
-/ARCHITECTURE.md
 /docker-compose.yml
 /logs/
 /fig/
@@ -20,11 +18,16 @@
 /.claude/
 __pycache__/
 /.opencode/
-/models/阿里云文档/
 /source/
+/build/
+/floodmind.egg-info/
+*.egg-info/
 
 # desktop build artifacts
 /desktop/vendor_cache/
 /desktop/build_staging/
 /desktop/dist/
 /desktop/*.exe
+/desktop/
+/tui-ts/node_modules/
+floodmind/tui-ts/node_modules/

@@ -1,12 +1,13 @@
 import { useState } from 'react';
 import { ChatArea } from '@/features/chat/components/ChatArea';
-import { ContextPanel } from '@/features/context/components/ContextPanel';
+import { FilePreviewPanel } from '@/features/chat/components/FilePreviewPanel';
 import { Sidebar } from '@/features/sidebar/components/Sidebar';
+import { ScheduledTasksPanel } from '@/features/scheduler/components/ScheduledTasksPanel';
 import { useAgentApp } from '@/hooks/useAgentApp';
 import { useIsMobile } from '@/hooks/use-mobile';
 import { Sheet, SheetContent } from '@/components/ui/sheet';
-import { Drawer, DrawerContent, DrawerHeader, DrawerTitle } from '@/components/ui/drawer';
-import { Menu, PanelRightClose } from 'lucide-react';
+import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/components/ui/dialog';
+import { Menu, Clock } from 'lucide-react';
 
 const AgentPage = () => {
   const {
@@ -42,7 +43,7 @@ const AgentPage = () => {
 
   const isMobile = useIsMobile();
   const [mobileSidebarOpen, setMobileSidebarOpen] = useState(false);
-  const [mobileContextOpen, setMobileContextOpen] = useState(false);
+  const [showScheduledTasks, setShowScheduledTasks] = useState(false);
 
   if (isMobile) {
     return (
@@ -64,11 +65,11 @@ const AgentPage = () => {
             </span>
           </div>
           <button
-            onClick={() => setMobileContextOpen(true)}
+            onClick={() => setShowScheduledTasks(true)}
             className="p-2 rounded-lg active:scale-90 transition-transform"
-            style={{ color: 'hsl(var(--foreground))' }}
+            style={{ color: 'var(--amber-500)' }}
           >
-            <PanelRightClose size={20} strokeWidth={1.8} />
+            <Clock size={20} strokeWidth={1.8} />
           </button>
         </div>
 
@@ -81,6 +82,8 @@ const AgentPage = () => {
             isPaused={runtimeState.isPaused}
             availableModels={availableModels}
             config={config}
+            files={uploadedFiles}
+            workflow={workflow}
             onInputChange={setInputValue}
             onSubmit={handleSubmit}
             onPause={handlePauseResume}
@@ -89,6 +92,7 @@ const AgentPage = () => {
             onUpdateAction={updateAction}
             onQuickSubmit={handleQuickSubmit}
             onConfigChange={setConfig}
+            onPreviewFile={handlePreviewFile}
             pendingPermissionAsk={pendingPermissionAsk}
             onRespondPermissionAsk={handleRespondPermissionAsk}
           />
@@ -102,27 +106,24 @@ const AgentPage = () => {
               onNewSession={() => { handleNewSession(); setMobileSidebarOpen(false); }}
               onSelectSession={(id) => { loadSession(id); setMobileSidebarOpen(false); }}
               onDeleteSession={handleDeleteSession}
+              onShowScheduledTasks={() => { setShowScheduledTasks(true); setMobileSidebarOpen(false); }}
             />
           </SheetContent>
         </Sheet>
 
-        <Drawer open={mobileContextOpen} onOpenChange={setMobileContextOpen}>
-          <DrawerContent className="!max-h-[70vh]">
-            <DrawerHeader className="px-0 pt-2 pb-0">
-              <DrawerTitle className="sr-only">上下文面板</DrawerTitle>
-            </DrawerHeader>
-            <div className="px-0 overflow-y-auto flex-1 min-h-0">
-              <ContextPanel
-                sessionId={sessionId}
-                files={uploadedFiles}
-                workflow={workflow}
-                selectedPreview={selectedPreview}
-                onPreviewFile={handlePreviewFile}
-                onClosePreview={closePreview}
-              />
+        <Dialog open={showScheduledTasks} onOpenChange={setShowScheduledTasks}>
+          <DialogContent className="sm:max-w-2xl max-h-[85vh] flex flex-col">
+            <DialogHeader>
+              <DialogTitle className="flex items-center gap-2">
+                <Clock size={18} style={{ color: 'var(--amber-500)' }} strokeWidth={1.8} />
+                <span>定时任务</span>
+              </DialogTitle>
+            </DialogHeader>
+            <div className="flex-1 min-h-0 overflow-y-auto">
+              <ScheduledTasksPanel />
             </div>
-          </DrawerContent>
-        </Drawer>
+          </DialogContent>
+        </Dialog>
       </div>
     );
   }
@@ -136,6 +137,7 @@ const AgentPage = () => {
           onNewSession={handleNewSession}
           onSelectSession={loadSession}
           onDeleteSession={handleDeleteSession}
+          onShowScheduledTasks={() => setShowScheduledTasks(true)}
         />
         <ChatArea
           messages={messages}
@@ -145,6 +147,8 @@ const AgentPage = () => {
           isPaused={runtimeState.isPaused}
           availableModels={availableModels}
           config={config}
+          files={uploadedFiles}
+          workflow={workflow}
           onInputChange={setInputValue}
           onSubmit={handleSubmit}
           onPause={handlePauseResume}
@@ -153,17 +157,39 @@ const AgentPage = () => {
           onUpdateAction={updateAction}
           onQuickSubmit={handleQuickSubmit}
           onConfigChange={setConfig}
+          onPreviewFile={handlePreviewFile}
           pendingPermissionAsk={pendingPermissionAsk}
           onRespondPermissionAsk={handleRespondPermissionAsk}
         />
-        <ContextPanel
-          sessionId={sessionId}
-          files={uploadedFiles}
-          workflow={workflow}
-          selectedPreview={selectedPreview}
-          onPreviewFile={handlePreviewFile}
-          onClosePreview={closePreview}
-        />
+
+        {selectedPreview && (
+          <div
+            className="shrink-0 animate-slide-in-right"
+            style={{
+              width: '45vw',
+              minWidth: '480px',
+              maxWidth: '60vw',
+              height: '100%',
+              borderLeft: '1px solid hsl(var(--border))',
+            }}
+          >
+            <FilePreviewPanel preview={selectedPreview} onClose={closePreview} />
+          </div>
+        )}
+
+        <Dialog open={showScheduledTasks} onOpenChange={setShowScheduledTasks}>
+          <DialogContent className="sm:max-w-2xl max-h-[85vh] flex flex-col">
+            <DialogHeader>
+              <DialogTitle className="flex items-center gap-2">
+                <Clock size={18} style={{ color: 'var(--amber-500)' }} strokeWidth={1.8} />
+                <span>定时任务</span>
+              </DialogTitle>
+            </DialogHeader>
+            <div className="flex-1 min-h-0 overflow-y-auto">
+              <ScheduledTasksPanel />
+            </div>
+          </DialogContent>
+        </Dialog>
       </div>
     </div>
   );

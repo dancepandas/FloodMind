@@ -179,7 +179,7 @@ function findActionByToolNameRunning(actions: ActionDetail[], toolName: string):
   return actions.findIndex((a) => a.toolName === toolName && a.status === "running");
 }
 
-export function appendActionBlock(message: ChatMessage, toolName: string, status: ActionDetail["status"], content: string, delegation?: ActionDetail["delegation"], callId?: string, askId?: string, askReason?: string, askSessionId?: string): ChatMessage {
+export function appendActionBlock(message: ChatMessage, toolName: string, status: ActionDetail["status"], content: string, delegation?: ActionDetail["delegation"], callId?: string, askId?: string, askReason?: string, askSessionId?: string, stepKey?: string): ChatMessage {
   const blocks = message.blocks.map((b) => {
     const copy: MessageBlock = { ...b };
     if (b.actions) {
@@ -203,6 +203,7 @@ export function appendActionBlock(message: ChatMessage, toolName: string, status
       status,
       content: "",
       delegation,
+      step_key: stepKey || undefined,
       askId,
       askReason,
       sessionId: askSessionId,
@@ -247,12 +248,12 @@ export function appendActionBlock(message: ChatMessage, toolName: string, status
         (b) => b.type === "action" && b.actions?.some((a) => a.toolName === toolName && a.status === "running")
       );
       if (fallbackIdx >= 0) {
-        return _updateActionBlock(message, blocks, fallbackIdx, toolName, status, content, delegation, effectiveCallId);
+        return _updateActionBlock(message, blocks, fallbackIdx, toolName, status, content, delegation, effectiveCallId, stepKey);
       }
     }
 
     if (actionBlockIdx >= 0) {
-      return _updateActionBlock(message, blocks, actionBlockIdx, toolName, status, content, delegation, effectiveCallId);
+      return _updateActionBlock(message, blocks, actionBlockIdx, toolName, status, content, delegation, effectiveCallId, stepKey);
     }
 
     return { ...message, blocks };
@@ -282,7 +283,7 @@ function _recomputeActionBlockState(block: MessageBlock): void {
   }
 }
 
-function _updateActionBlock(message: ChatMessage, blocks: MessageBlock[], blockIdx: number, toolName: string, status: ActionDetail["status"], content: string, delegation: ActionDetail["delegation"] | undefined, callId: string): ChatMessage {
+function _updateActionBlock(message: ChatMessage, blocks: MessageBlock[], blockIdx: number, toolName: string, status: ActionDetail["status"], content: string, delegation: ActionDetail["delegation"] | undefined, callId: string, stepKey?: string): ChatMessage {
   const actionBlock = blocks[blockIdx];
   const isSubAgent = toolName === "SubAgent" || toolName === "ParallelSubAgent" || toolName === "ParallelTask";
   const updatedActions = (actionBlock.actions || []).map((a) => {
@@ -296,6 +297,7 @@ function _updateActionBlock(message: ChatMessage, blocks: MessageBlock[], blockI
         status,
         content: isSubAgent ? "" : (status === "error" ? content : content.slice(0, 200)),
         delegation: isSubAgent ? { task: "", label: "SubAgent", skill_name: "" } : updatedDelegation,
+        step_key: stepKey || a.step_key,
       };
     }
     return a;

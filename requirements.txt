@@ -66,3 +66,7 @@ tqdm>=4.65.0
 # Windows
 comtypes>=1.4.0
 pywin32>=306
+
+# Testing
+pytest>=7.0
+pytest-mock>=3.10

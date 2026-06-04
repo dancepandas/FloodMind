@@ -16,15 +16,13 @@ load_dotenv()
 os.environ.setdefault('HF_ENDPOINT', 'https://hf-mirror.com')
 os.environ.setdefault('HF_HUB_OFFLINE', '1')
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-
-from agent.native import create_flood_agent
-from agent.scheduled_task_runtime import ScheduledTaskRuntime
-from config.settings import settings
-from memory import DualMemory, SessionManager
-from models import get_qwen_llm_service, create_llm_service_from_preset
-from config.model_presets import get_default_model_key
-from tools import set_rag_config, set_session_context
+from floodmind.agent.native import create_flood_agent
+from floodmind.agent.scheduled_task_runtime import ScheduledTaskRuntime
+from floodmind.config.settings import settings
+from floodmind.memory import DualMemory, SessionManager
+from floodmind.models import get_qwen_llm_service, create_llm_service_from_preset
+from floodmind.config.model_presets import get_default_model_key
+from floodmind.tools import set_rag_config, set_session_context
 
 
 PROJECT_ROOT = Path(__file__).resolve().parent
@@ -161,7 +159,7 @@ def run_once(runtime: ScheduledTaskRuntime, session_manager: SessionManager, loo
     # ── 经验树巡检 ──────────────────────────────────────────
     if settings.task_experience.enabled:
         try:
-            from memory.task_experience import get_task_experience_store
+            from floodmind.memory.task_experience import get_task_experience_store
             store = get_task_experience_store()
             if store.should_run_maintenance():
                 logger.info("经验树巡检: 开始执行...")
@@ -182,7 +180,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="FloodMind scheduled task scheduler")
     parser.add_argument("--once", action="store_true", help="只执行一次心跳扫描")
     parser.add_argument("--lookback-minutes", type=int, default=int(os.environ.get("SCHEDULER_LOOKBACK_MINUTES", 60)))
-    parser.add_argument("--lookahead-minutes", type=int, default=int(os.environ.get("SCHEDULER_LOOKAHEAD_MINUTES", 60)))
+    parser.add_argument("--lookahead-minutes", type=int, default=int(os.environ.get("SCHEDULER_LOOKAHEAD_MINUTES", 5)))
     parser.add_argument("--limit", type=int, default=int(os.environ.get("SCHEDULER_MAX_TASKS_PER_HEARTBEAT", 1)))
     args = parser.parse_args()
 
@@ -190,7 +188,8 @@ def main() -> int:
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     (DATA_DIR / "sessions").mkdir(parents=True, exist_ok=True)
 
-    runtime = ScheduledTaskRuntime()
+    from floodmind.agent.scheduled_task_runtime import get_scheduled_task_runtime
+    runtime = get_scheduled_task_runtime()
     session_manager = build_session_manager()
     logger.info("FloodMind Scheduler 已启动，任务文件: %s", runtime.storage_path)
 

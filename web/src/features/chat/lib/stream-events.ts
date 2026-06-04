@@ -123,18 +123,23 @@ export function applyStreamEvent(data: Record<string, any>, handlers: StreamHand
   }
 
   if (data.type === "thought_delta" || data.type === "reasoning") {
+    // Sub-agent thoughts (with step_key) should not leak into main display
+    if (data.step_key) return;
     log.debug(`[${eventType}] len=${(data.content || "").length}`);
     updateAssistant((message) => appendThoughtBlock(message, data.content || "", true));
     return;
   }
 
   if (data.type === "thought_summary") {
+    if (data.step_key) return;
     log.debug(`[${eventType}] len=${(data.content || "").length}`);
     updateAssistant((message) => appendThoughtBlock(message, data.content || "", false));
     return;
   }
 
   if (data.type === "answer_delta" || data.type === "token") {
+    // Sub-agent answer deltas (with step_key) should not leak into main display
+    if (data.step_key) return;
     log.debug(`[${eventType}] len=${(data.content || "").length}`);
     updateAssistant((message) => appendAnswerBlock(message, data.content || "", true));
     return;
@@ -196,14 +201,15 @@ if (data.type === "action_start" || data.type === "tool_status") {
     const status = data.status === "error" ? "error" : "running";
     const toolName = data.tool_name || "tool";
     const callId = data.call_id || "";
+    const stepKey = data.step_key || "";
     const isSubAgent = toolName === "SubAgent" || toolName === "ParallelSubAgent" || toolName === "ParallelTask";
-    log.info(`[${eventType}] tool="${toolName}" call_id="${callId}" status="${status}"`);
+    log.info(`[${eventType}] tool="${toolName}" call_id="${callId}" status="${status}" step_key="${stepKey}"`);
     pushToolActivity(toolName, isSubAgent ? "" : (data.content || ""), status);
     // For SubAgent, use a simplified delegation without detailed task description
     const delegation = isSubAgent
       ? { task: "", label: "SubAgent", skill_name: "" }
       : data.delegation || undefined;
-    updateAssistant((message) => appendActionBlock(message, toolName, status, isSubAgent ? "" : (data.content || ""), delegation, callId));
+    updateAssistant((message) => appendActionBlock(message, toolName, status, isSubAgent ? "" : (data.content || ""), delegation, callId, undefined, undefined, undefined, stepKey));
     return;
   }
 
@@ -242,18 +248,19 @@ if (data.type === "action_start" || data.type === "tool_status") {
   if (data.type === "action_end" || data.type === "tool_result") {
     const toolName = data.tool_name || "tool";
     const callId = data.call_id || "";
+    const stepKey = data.step_key || "";
     const rawContent = data.content || "";
     const isSubAgent = toolName === "SubAgent" || toolName === "ParallelSubAgent" || toolName === "ParallelTask";
     // SubAgent only shows the tool name label, no internal content
     const displayContent = isSubAgent ? "" : rawContent;
     const contentPreview = displayContent.slice(0, 120);
-    log.info(`[${eventType}] tool="${toolName}" call_id="${callId}" content=${contentPreview.length > 0 ? `"${contentPreview}…"` : "(empty)"}`);
+    log.info(`[${eventType}] tool="${toolName}" call_id="${callId}" step_key="${stepKey}" content=${contentPreview.length > 0 ? `"${contentPreview}…"` : "(empty)"}`);
     pushToolActivity(toolName, displayContent, "done");
     // For SubAgent, use a simplified delegation label without summary
     const delegation = isSubAgent
       ? { task: "", label: "SubAgent", skill_name: "" }
       : data.delegation || undefined;
-    updateAssistant((message) => appendActionBlock(message, toolName, "done", displayContent, delegation, callId));
+    updateAssistant((message) => appendActionBlock(message, toolName, "done", displayContent, delegation, callId, undefined, undefined, undefined, stepKey));
 
     let refs: ReferenceLink[] | null = null;
     if (toolName === "knowledge_search") {
@@ -315,6 +322,8 @@ if (data.type === "action_start" || data.type === "tool_status") {
   }
 
   if (data.content) {
+    // Sub-agent content fallthrough (with step_key) should not leak into main display
+    if (data.step_key) return;
     const preview = (data.content || "").slice(0, 80);
     log.debug(`[content] type="${data.type || "(none)"}" len=${(data.content || "").length} preview="${preview}…"`);
     updateAssistant((message) => appendAnswerBlock(message, data.content || "", false));

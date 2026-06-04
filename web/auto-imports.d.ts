@@ -35,6 +35,7 @@ declare global {
   const CircleIcon: typeof import('lucide-react').CircleIcon
   const Clock: typeof import('lucide-react').Clock
   const CloudRain: typeof import('lucide-react').CloudRain
+  const Code: typeof import('lucide-react').Code
   const Command: typeof import('lucide-react').Command
   const Cpu: typeof import('lucide-react').Cpu
   const Database: typeof import('lucide-react').Database
@@ -43,6 +44,9 @@ declare global {
   const ExternalLink: typeof import('lucide-react').ExternalLink
   const Eye: typeof import('lucide-react').Eye
   const File: typeof import('lucide-react').File
+  const FileCode: typeof import('lucide-react').FileCode
+  const FileIcon: typeof import('lucide-react').FileIcon
+  const FileImage: typeof import('lucide-react').FileImage
   const FileSpreadsheet: typeof import('lucide-react').FileSpreadsheet
   const FileText: typeof import('lucide-react').FileText
   const FileType: typeof import('lucide-react').FileType
@@ -56,6 +60,7 @@ declare global {
   const History: typeof import('lucide-react').History
   const Home: typeof import('lucide-react').Home
   const Icon: typeof import('lucide-react').Icon
+  const Images: typeof import('lucide-react').Images
   const InfoIcon: typeof import('lucide-react').InfoIcon
   const Layers: typeof import('lucide-react').Layers
   const List: typeof import('lucide-react').List
@@ -77,6 +82,7 @@ declare global {
   const Plus: typeof import('lucide-react').Plus
   const RefreshCw: typeof import('lucide-react').RefreshCw
   const Route: typeof import('lucide-react').Route
+  const Rows: typeof import('lucide-react').Rows
   const Search: typeof import('lucide-react').Search
   const SearchIcon: typeof import('lucide-react').SearchIcon
   const Section: typeof import('lucide-react').Section
@@ -92,6 +98,7 @@ declare global {
   const Text: typeof import('lucide-react').Text
   const Trash2: typeof import('lucide-react').Trash2
   const TriangleAlertIcon: typeof import('lucide-react').TriangleAlertIcon
+  const Type: typeof import('lucide-react').Type
   const User: typeof import('lucide-react').User
   const Waves: typeof import('lucide-react').Waves
   const Wifi: typeof import('lucide-react').Wifi

@@ -11,10 +11,10 @@ from dotenv import load_dotenv
 # 必须在导入 settings 之前加载环境变量，否则 QwenConfig 初始化时读不到 .env 中的值
 load_dotenv()
 
-from config.settings import settings
-from models import get_qwen_llm_service
-from memory import SimpleMemory
-from agent import create_flood_agent
+from floodmind.config.settings import settings
+from floodmind.models import get_qwen_llm_service
+from floodmind.memory import SimpleMemory
+from floodmind.agent import create_flood_agent
 
 
 # 配置日志

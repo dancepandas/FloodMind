@@ -5,6 +5,7 @@ export interface ActionDetail {
   toolName: string;
   status: "running" | "done" | "error" | "pending_confirmation";
   content: string;
+  step_key?: string;
   askId?: string;
   askReason?: string;
   sessionId?: string;

@@ -1,0 +1,263 @@
+"""FloodMind TUI — ChatScreen (OpenCode-style dual-column layout)."""
+
+import time
+
+from textual import on, work
+from textual.app import ComposeResult
+from textual.binding import Binding
+from textual.containers import VerticalScroll, Vertical, Horizontal
+from textual.screen import Screen
+from textual.widgets import Static
+
+from floodmind.config.settings import settings
+from floodmind.models import get_qwen_llm_service
+from floodmind.memory import DualMemory, create_session as store_create_session
+from floodmind.agent import create_flood_agent
+from floodmind.tui.widgets.prompt import PromptInput
+from floodmind.tui.widgets.message import UserMessage, AssistantMessage, AssistantMeta, ToolCard
+from floodmind.tui.widgets.footer import StatusBar
+from floodmind.tui.sidebar import SessionSidebar
+from floodmind.tui.history import save_entry
+
+
+class ChatPromptInput(PromptInput):
+    BINDINGS = [Binding("escape", "app.pop_screen", "Close", key_display="esc")]
+
+
+class ChatScreen(Screen[None]):
+
+    CSS = """
+    ChatScreen {
+        layout: horizontal;
+        padding: 0;
+    }
+    #chat-main {
+        width: 1fr;
+        height: 100%;
+    }
+    #chat-spacer-top { height: 1; }
+    #chat-scroll {
+        height: 1fr;
+        background: #0a0a0a;
+        padding: 0 2;
+    }
+    #response-status {
+        height: 1;
+        color: #808080;
+        padding: 0 3;
+    }
+    ChatPromptInput {
+        height: auto;
+        max-height: 12;
+        margin: 0 2;
+        padding: 1 2;
+        border: solid #484848;
+        background: #141414;
+        color: #eeeeee;
+    }
+    ChatPromptInput:focus {
+        border: solid #9d7cd8;
+    }
+    """
+
+    def __init__(self, session_id: str, initial_text: str = ""):
+        super().__init__()
+        self._sid = session_id
+        self._initial = initial_text
+        self._agent = None
+        self._model_name = settings.model.model_name
+        self._current_msg = None
+
+    def compose(self) -> ComposeResult:
+        with Horizontal():
+            with Vertical(id="chat-main"):
+                yield Vertical(id="chat-spacer-top")
+                yield VerticalScroll(id="chat-scroll")
+                yield Static(id="response-status")
+                yield ChatPromptInput(id="prompt")
+                yield StatusBar()
+            yield SessionSidebar()
+
+    async def on_mount(self) -> None:
+        self._init_agent()
+        sidebar = self.query_one(SessionSidebar)
+        sidebar.update_title(f"Session {self._sid}")
+        sidebar.update_model(self._model_name)
+        prompt = self.query_one(ChatPromptInput)
+        prompt.submit_ready = True
+        prompt.focus()
+        if self._initial:
+            prompt.submit_ready = False
+            self._set_status("Sending...")
+            save_entry(self._initial)
+            await self._add_user_message(self._initial)
+            self._stream(self._initial)
+
+    def _init_agent(self, model_name: str = ""):
+        try:
+            store_create_session(session_id=self._sid)
+            if model_name:
+                from floodmind.config.model_presets import get_preset, resolve_api_key, resolve_base_url
+                preset = get_preset(model_name)
+                if preset:
+                    llm = get_qwen_llm_service(
+                        api_key=resolve_api_key(preset),
+                        model_name=preset["model_name"],
+                        base_url=resolve_base_url(preset),
+                        temperature=preset.get("default_temperature", 0.3),
+                        max_tokens=preset.get("default_max_tokens", 8192),
+                        enable_reasoning=settings.model.enable_reasoning,
+                    )
+                else:
+                    llm = get_qwen_llm_service(
+                        api_key=settings.model.api_key,
+                        model_name=model_name,
+                        temperature=settings.model.temperature,
+                        max_tokens=settings.model.max_tokens,
+                    )
+            else:
+                llm = get_qwen_llm_service(
+                    api_key=settings.model.api_key,
+                    model_name=settings.model.model_name,
+                    temperature=settings.model.temperature,
+                    max_tokens=settings.model.max_tokens,
+                    enable_reasoning=settings.model.enable_reasoning,
+                )
+            if self._agent is not None and hasattr(self._agent, 'memory'):
+                memory = self._agent.memory
+                if hasattr(memory, '_compressor') and hasattr(memory._compressor, '_llm'):
+                    memory._compressor._llm = llm
+            else:
+                memory = DualMemory(
+                    session_id=self._sid,
+                    max_short_term=settings.agent.max_history,
+                    context_window=settings.agent.context_window,
+                    llm=llm,
+                )
+            self._agent = create_flood_agent(
+                llm_service=llm, memory=memory, session_id=self._sid,
+            )
+        except Exception as e:
+            self.notify(str(e), title="Agent Error", severity="error")
+
+    @on(PromptInput.PromptSubmitted)
+    async def _on_submit(self, event: PromptInput.PromptSubmitted) -> None:
+        text = event.text.strip()
+        if text.startswith("/"):
+            cmd = text[1:].split()[0].lower()
+            if cmd in ("help", "h"):
+                from floodmind.tui.dialogs.help import HelpDialog
+                await self.app.push_screen(HelpDialog())
+            elif cmd == "models":
+                from floodmind.tui.dialogs.models import ModelsDialog
+                chosen = await self.app.push_screen(ModelsDialog())
+                if chosen:
+                    settings.model.model_name = chosen
+                    self._model_name = chosen
+                    self._init_agent(model_name=chosen)
+                    self.sidebar.update_model(chosen)
+                    self.notify(f"已切换为 {chosen}", title="模型切换")
+            elif cmd == "sessions":
+                from floodmind.tui.dialogs.sessions import SessionsDialog
+                await self.app.push_screen(SessionsDialog())
+            elif cmd == "mcp":
+                from floodmind.tui.dialogs.mcp import McpDialog
+                await self.app.push_screen(McpDialog())
+            elif cmd in ("new", "clear"):
+                self.app.pop_screen()
+            elif cmd in ("exit", "quit", "q"):
+                self.app.exit()
+            return
+
+        save_entry(text)
+        await self._add_user_message(text)
+        prompt = self.query_one(ChatPromptInput)
+        prompt.submit_ready = False
+        self._set_status("Assistant is responding...")
+        self._stream(text)
+
+    async def _add_user_message(self, text: str) -> None:
+        scroll = self.query_one("#chat-scroll", VerticalScroll)
+        w = UserMessage(text)
+        await scroll.mount(w)
+        scroll.scroll_end(animate=False)
+
+    def _set_status(self, text: str) -> None:
+        try:
+            self.query_one("#response-status", Static).update(f"  {text}")
+        except Exception:
+            pass
+
+    @work(thread=True, group="agent")
+    async def _stream(self, user_input: str) -> None:
+        if not self._agent:
+            return
+        t0 = time.time()
+        try:
+            for chunk in self._agent.stream(user_input):
+                t = chunk.get("type", "")
+                if t == "answer_delta":
+                    self.app.call_from_thread(self._on_token, chunk.get("content", ""))
+                elif t == "action_start":
+                    name = chunk.get("tool_name", "?")
+                    self.app.call_from_thread(self._add_tool, name)
+                elif t == "action_end":
+                    name = chunk.get("tool_name", "")
+                    out = chunk.get("content", "")
+                    self.app.call_from_thread(self._add_tool_done, name, out)
+                elif t in ("error", "llm_token_error"):
+                    self.app.call_from_thread(
+                        self._set_status, f"Error: {chunk.get('content', '')}"
+                    )
+        except Exception as e:
+            self.app.call_from_thread(self._set_status, f"Error: {e}")
+        finally:
+            dur = time.time() - t0
+            self.app.call_from_thread(self._on_done, dur)
+
+    def _on_token(self, text: str) -> None:
+        try:
+            scroll = self.query_one("#chat-scroll", VerticalScroll)
+            if self._current_msg is None:
+                self._current_msg = AssistantMessage(text, model_name=self._model_name)
+                scroll.mount(self._current_msg)
+            else:
+                self._current_msg.append_chunk(text)
+            if scroll.scroll_y >= scroll.max_scroll_y - 3:
+                scroll.scroll_end(animate=False)
+        except Exception:
+            pass
+
+    def _add_tool(self, name: str) -> None:
+        try:
+            scroll = self.query_one("#chat-scroll", VerticalScroll)
+            scroll.mount(ToolCard(tool_name=name))
+            scroll.scroll_end(animate=False)
+        except Exception:
+            pass
+
+    def _add_tool_done(self, name: str, output: str) -> None:
+        try:
+            scroll = self.query_one("#chat-scroll", VerticalScroll)
+            scroll.mount(ToolCard(tool_name=name, output=output, is_done=True))
+            scroll.scroll_end(animate=False)
+        except Exception:
+            pass
+
+    def _on_done(self, dur: float) -> None:
+        try:
+            if self._current_msg:
+                self._current_msg.finalize()
+                scroll = self.query_one("#chat-scroll", VerticalScroll)
+                meta = AssistantMeta(
+                    model_name=self._model_name,
+                    duration=f"{dur:.1f}s",
+                )
+                scroll.mount(meta)
+                self._current_msg = None
+            prompt = self.query_one(ChatPromptInput)
+            prompt.submit_ready = True
+            prompt.focus()
+            self._set_status("")
+        except Exception:
+            pass

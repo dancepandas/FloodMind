@@ -1,0 +1,123 @@
+[project]
+name = "floodmind"
+dynamic = ["version"]
+description = "基于大语言模型的智能洪水预报系统"
+requires-python = ">=3.10"
+readme = "README.md"
+license = { file = "LICENSE" }
+authors = [
+    { name = "大水云科技" }
+]
+keywords = ["flood-forecasting", "ai-agent", "llm", "hydrology", "mcp"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Science/Research",
+    "License :: Other/Proprietary License",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering :: Hydrology",
+]
+dependencies = [
+    # Core
+    "click>=8.0",
+    "pyyaml>=6.0",
+    "python-dotenv>=1.0",
+    "pydantic>=2.0",
+    "pydantic-settings>=2.0",
+    "openai>=1.0",
+    "httpx>=0.24",
+    "httpx-sse>=0.4",
+    "tiktoken>=0.5",
+    "websockets>=12.0",
+    # MCP
+    "mcp>=1.0",
+    # Web
+    "flask>=3.0",
+    "flask-cors>=4.0",
+    "werkzeug>=3.0",
+    # RAG
+    "chromadb>=0.4",
+    "sentence-transformers>=2.2",
+    # Data
+    "pandas>=2.0",
+    "openpyxl>=3.1",
+    "numpy>=1.24",
+    "scipy>=1.10",
+    # Viz
+    "matplotlib>=3.7",
+    "pillow>=10.0",
+    # UI
+    "rich>=13.0",
+    "textual>=0.52",
+    # Utils
+    "psutil>=5.9",
+    "schedule>=1.2",
+    "requests>=2.31",
+    "tenacity>=8.0",
+    "tqdm>=4.65",
+    "beautifulsoup4>=4.12",
+    "defusedxml>=0.7",
+    "jieba>=0.42",
+    "jsonschema>=4.17",
+]
+
+[project.optional-dependencies]
+gpu = [
+    "torch>=2.0",
+    "transformers>=4.30",
+    "accelerate>=0.20",
+    "chronos-forecasting>=2.0",
+]
+web = [
+    "waitress>=2.1",
+    "aiofiles>=23.0",
+    "gunicorn>=21.0",
+]
+doc = [
+    "pypdf>=3.0",
+    "pdfplumber>=0.10",
+    "python-docx>=1.0",
+    "python-pptx>=1.0",
+    "reportlab>=4.0",
+    "fpdf2>=2.7",
+    "docx2pdf>=0.1",
+    "lxml>=4.9",
+]
+all = [
+    "floodmind[gpu,web,doc]",
+]
+
+[project.scripts]
+floodmind = "floodmind.cli:main"
+
+[build-system]
+requires = ["setuptools>=75", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["floodmind*"]
+
+[tool.setuptools]
+py-modules = ["web_server", "start", "scheduler", "main", "sitecustomize"]
+
+[tool.setuptools.package-data]
+floodmind = [
+    "config/settings_template.json",
+    "MCP/**/*.py",
+    "server/*.py",
+    "skills/**/SKILL.md",
+    "skills/**/scripts/**",
+    "skills/**/templates/**",
+    "skills/**/references/**",
+    "skills/**/assets/**",
+]
+
+[tool.setuptools.dynamic]
+version = { attr = "floodmind.__version__" }
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+addopts = "-v --tb=short"
