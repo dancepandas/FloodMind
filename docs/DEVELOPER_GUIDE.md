@@ -13,11 +13,12 @@ FloodMind 是基于大语言模型的智能洪水预报 Agent 系统。本文档
 3. [Python API 集成](#3-python-api-集成)
 4. [HTTP API 集成](#4-http-api-集成)
 5. [自定义 Skill 开发](#5-自定义-skill-开发)
-6. [模型与 Provider 扩展](#6-模型与-provider-扩展)
-7. [构建自定义 Web 界面](#7-构建自定义-web-界面)
-8. [会话管理与记忆系统](#8-会话管理与记忆系统)
-9. [TUI 界面扩展](#9-tui-界面扩展)
-10. [项目结构参考](#10-项目结构参考)
+6. [系统提示词与身份定制](#6-系统提示词与身份定制)
+7. [模型与 Provider 扩展](#7-模型与-provider-扩展)
+8. [构建自定义 Web 界面](#8-构建自定义-web-界面)
+9. [会话管理与记忆系统](#9-会话管理与记忆系统)
+10. [TUI 界面扩展](#10-tui-界面扩展)
+11. [项目结构参考](#11-项目结构参考)
 
 ---
 
@@ -393,9 +394,182 @@ if __name__ == "__main__":
 
 ---
 
-## 6. 模型与 Provider 扩展
+## 6. 系统提示词与身份定制
 
-### 6.1 添加新的 LLM Provider
+FloodMind 的系统提示词采用分层可替换架构，支持从配置文件到代码级的多种定制方式。
+
+### 6.1 架构概述
+
+```
+┌─────────────────────────────────────────────┐
+│ Slot #0: 身份 (SOUL.md)                      │  ← 外部文件，可替换
+├─────────────────────────────────────────────┤
+│ Slot #1: 行为指导 (guidance.py 常量组合)      │  ← 可按需取舍
+├─────────────────────────────────────────────┤
+│ Slot #2: Skill 目录 + 工具目录               │  ← 运行时动态
+├─────────────────────────────────────────────┤
+│ Slot #3: 项目指令 (AGENTS.md)               │  ← 全局 + 项目级
+├─────────────────────────────────────────────┤
+│ Slot #4: 会话环境 (时间 + 路径 + OS)         │  ← 每会话不同
+└─────────────────────────────────────────────┘
+```
+
+### 6.2 编辑 SOUL.md（推荐，无需改代码）
+
+首次启动后在 `~/.floodmind/SOUL.md` 自动生成默认身份文件。编辑此文件即可替换智能体的身份定义：
+
+```markdown
+你是 MyBot，一个专注于数据分析的智能助手。
+
+## 角色职责
+1. 接收用户的数据文件和分析需求
+2. 执行统计分析、可视化、报告生成
+
+## 核心特质
+- 严谨的数据驱动型分析
+- 输出结果必须附带数据来源
+```
+
+当 `SOUL.md` 不存在或为空时，系统使用内置的 `DEFAULT_FLOODMIND_IDENTITY` 作为 fallback。
+
+**代码中的加载逻辑：**
+
+```python
+from floodmind.profile.soul import load_soul_md, DEFAULT_FLOODMIND_IDENTITY
+
+soul = load_soul_md() or DEFAULT_FLOODMIND_IDENTITY
+```
+
+### 6.3 编辑 AGENTS.md（项目级行为规则）
+
+AGENTS.md 在两个级别读取并按顺序拼接到系统提示词中：
+
+| 路径 | 作用域 | 典型用途 |
+|------|--------|----------|
+| `~/.floodmind/AGENTS.md` | 全局 | 跨项目的通用规则（字体、配色、文档模板等） |
+| `<工作目录>/AGENTS.md` | 项目级 | 特定项目的约束（绘图风格、数据规范等） |
+
+AGENTS.md 内容示例：
+
+```markdown
+## 绘图默认风格
+- 必须设置图例
+- 中文优先，使用 SimSun 字体
+- 图表配色使用蓝色系
+
+## 文档生成偏好
+- Word 文件使用公司标准模板
+- 报告末尾附免责声明
+```
+
+### 6.4 覆盖 Agent 类型提示词
+
+通过 `settings.json` 为特定 Agent 类型设置自定义 system prompt，该方式会**完全替换**（而非追加）该 Agent 类型的提示词：
+
+```json
+{
+  "agent": {
+    "agents": {
+      "build": {
+        "prompt": "你是一个专注于代码审查的 Agent。使用 {tool_descriptions} 等工具...\n{skill_catalog}"
+      },
+      "plan": {
+        "prompt": "你处于规划模式，只读分析和规划，不可修改文件。"
+      }
+    }
+  }
+}
+```
+
+Prompt 模板中可用的占位符：`{skill_catalog}`、`{tool_descriptions}`、`{project_context}`、`{session_env}`、`{current_time_context}`。
+
+### 6.5 代码级定制：组合 guidance 常量
+
+`floodmind/profile/guidance.py` 提供 11 个独立的行为指导常量，二次开发时可自由组合：
+
+| 常量 | 内容 |
+|------|------|
+| `WORK_METHOD_GUIDANCE` | 工作方式（自己完成 vs 子代理委派） |
+| `SCHEDULED_TASK_GUIDANCE` | 定时任务处理规则 |
+| `KNOWLEDGE_GUIDANCE` | 知识入库规则 |
+| `PREFERENCE_GUIDANCE` | 用户偏好处理规则 |
+| `TOOL_EXECUTION_GUIDANCE` | 工具执行细节 |
+| `PARALLEL_AGENT_GUIDANCE` | 并行子代理规则 |
+| `WORKFLOW_GUIDANCE` | 工作流 5 步 |
+| `WORK_PRINCIPLES_GUIDANCE` | 工作原则 8 条 |
+| `ARTIFACT_JUDGMENT_GUIDANCE` | 产物意图判定 + 文档声明 |
+| `OUTPUT_FORMAT_GUIDANCE` | 输出规范 |
+| `AOJIANG_STATION_GUIDANCE` | 敖江流域站点编码（业务专属） |
+
+子类化示例（只保留核心指导，去除敖江业务逻辑）：
+
+```python
+from floodmind.agent.native.native_flood_agent import NativeFloodAgent
+from floodmind.profile.soul import load_soul_md, DEFAULT_FLOODMIND_IDENTITY
+from floodmind.profile.guidance import (
+    WORK_METHOD_GUIDANCE,
+    TOOL_EXECUTION_GUIDANCE,
+    WORKFLOW_GUIDANCE,
+    WORK_PRINCIPLES_GUIDANCE,
+    OUTPUT_FORMAT_GUIDANCE,
+)
+
+class MyAgent(NativeFloodAgent):
+    @classmethod
+    def _build_stable_prompt(cls, skill_catalog, tool_descriptions, tool_registry=None):
+        soul = load_soul_md() or DEFAULT_FLOODMIND_IDENTITY
+        return "\n\n".join([
+            soul,
+            WORK_METHOD_GUIDANCE,
+            TOOL_EXECUTION_GUIDANCE,
+            WORKFLOW_GUIDANCE,
+            WORK_PRINCIPLES_GUIDANCE,
+            OUTPUT_FORMAT_GUIDANCE,
+            f"## 可用技能\n{skill_catalog}",
+            f"## 可用工具\n{tool_descriptions}",
+        ])
+```
+
+### 6.6 提示词优先级
+
+| 优先级 | 来源 | 说明 |
+|--------|------|------|
+| 1（最高） | `agent.agents.<name>.prompt` in settings.json | 完全覆盖某 Agent 类型 |
+| 2 | `~/.floodmind/SOUL.md` | 替换身份段，guidance 层不受影响 |
+| 3（默认） | `DEFAULT_FLOODMIND_IDENTITY` | SOUL.md 缺失时的 fallback |
+
+AGENTS.md 始终作为独立层（Slot #3）注入，不受上述优先级影响。
+
+### 6.7 Profile 路径隔离
+
+通过环境变量 `FLOODMIND_HOME` 可将整个配置目录重定向，实现不同部署场景的隔离：
+
+```bash
+# 开发环境
+set FLOODMIND_HOME=C:\dev\floodmind_config
+floodmind web
+
+# 生产环境
+set FLOODMIND_HOME=C:\prod\floodmind_config
+floodmind web
+```
+
+`FLOODMIND_HOME` 目录下的文件结构：
+
+```
+<FLOODMIND_HOME>/
+├── settings.json     # 主配置
+├── SOUL.md           # 身份定义
+├── AGENTS.md         # 全局指令
+├── sessions/         # 会话数据
+└── memories/         # 记忆存储
+```
+
+---
+
+## 7. 模型与 Provider 扩展
+
+### 7.1 添加新的 LLM Provider
 
 在 `~/.floodmind/settings.json` 中添加：
 
@@ -423,7 +597,7 @@ if __name__ == "__main__":
 }
 ```
 
-### 6.2 Python 中使用自定义模型
+### 7.2 Python 中使用自定义模型
 
 ```python
 from floodmind.agent.native.model_client import ModelClient
@@ -453,9 +627,9 @@ for event in llm.stream_chat([{"role": "user", "content": "你好"}]):
 
 ---
 
-## 7. 构建自定义 Web 界面
+## 8. 构建自定义 Web 界面
 
-### 7.1 集成内置 Web 前端
+### 8.1 集成内置 Web 前端
 
 FloodMind 的 Web 前端（`web/` 目录）是用 React 19 + TypeScript + Vite 7 构建的。前端通过 `/api/*` REST 端点与后端通信。
 
@@ -468,7 +642,7 @@ npm run build      # 生产构建
 
 生产模式下，Flask 后端会自动 serve `web/dist/` 中的静态文件。
 
-### 7.2 构建全新前端（仅使用后端 API）
+### 8.2 构建全新前端（仅使用后端 API）
 
 如果你要构建全新的前端（如 Vue、Next.js、移动端），只需调用 HTTP API：
 
@@ -508,7 +682,7 @@ while (true) {
 }
 ```
 
-### 7.3 自定义 Web 服务端口和配置
+### 8.3 自定义 Web 服务端口和配置
 
 ```python
 from web_server import app
@@ -523,9 +697,9 @@ serve(app, host="0.0.0.0", port=8080, threads=8)
 
 ---
 
-## 8. 会话管理与记忆系统
+## 9. 会话管理与记忆系统
 
-### 8.1 会话生命周期
+### 9.1 会话生命周期
 
 ```
 创建 → 活跃（对话中）→ 空闲（超时后）→ 清理（过期后）
@@ -553,7 +727,7 @@ for s in sm.list_sessions():
     print(f"{s['id']}: {s.get('title', '无标题')}")
 ```
 
-### 8.2 对话历史导出
+### 9.2 对话历史导出
 
 ```python
 from floodmind.memory import export_session_markdown
@@ -566,13 +740,13 @@ Path("conversation.md").write_text(markdown, encoding="utf-8")
 # floodmind session export session-xxx -o conversation.md
 ```
 
-### 8.3 自定义记忆后端
+### 9.3 自定义记忆后端
 
 `DualMemory` 存储对话历史到 `data/sessions/<id>/memory/chat_history.json`。如需自定义存储（如数据库），实现 `DualMemory` 的 `save_chat_history()` 和 `load_chat_history()` 方法即可。
 
 ---
 
-## 9. TUI 界面扩展
+## 10. TUI 界面扩展
 
 TUI（Terminal User Interface）基于 Textual 框架，位于 `floodmind/tui/`。
 
@@ -609,7 +783,7 @@ UserMessage {
 
 ---
 
-## 10. 项目结构参考
+## 11. 项目结构参考
 
 ```
 FloodMind/
@@ -631,6 +805,9 @@ FloodMind/
 │   │   ├── settings.py               #   settings.json 读取与模型
 │   │   ├── model_presets.py          #   model preset 解析
 │   │   └── provider_registry.py      #   Provider 注册与管理
+│   ├── profile/                      # 身份与提示词定制
+│   │   ├── soul.py                   #   SOUL.md 加载与种子
+│   │   └── guidance.py               #   行为指导常量（可组合）
 │   ├── memory/                       # 记忆与经验
 │   │   ├── dual_memory.py            #   双层记忆（短期 + 长期 + LLM 压缩）
 │   │   ├── experience_tree.py        #   经验树索引

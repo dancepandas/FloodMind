@@ -184,6 +184,88 @@ floodmind skill create my_skill   # 创建 Skill 模板
 # 编辑 skills/my_skill/SKILL.md 填写触发条件与执行逻辑
 ```
 
+### 自定义身份与提示词
+
+FloodMind 的系统提示词采用分层可替换架构，支持从配置到代码级的多种定制方式。
+
+#### 方式一：编辑 SOUL.md（推荐，无需改代码）
+
+首次启动后自动在 `~/.floodmind/SOUL.md` 生成默认身份文件，直接编辑即可替换智能体的身份描述：
+
+```markdown
+你是 MyBot，一个专注于 XX 领域的智能助手。
+
+## 角色职责
+1. 分析用户需求并提供专业解答
+2. 调用工具完成数据分析和报告生成
+
+## 核心特质
+- 专业严谨，注重数据准确性
+- 主动思考，善于引导用户明确需求
+```
+
+#### 方式二：编辑 AGENTS.md（项目级行为规则）
+
+在 `~/.floodmind/AGENTS.md`（全局）或 `<项目目录>/AGENTS.md`（项目级）中追加行为约束：
+
+```markdown
+## 绘图默认风格
+- 必须设置图例
+- 中文优先，使用 SimSun 字体
+
+## 文档生成偏好
+- Word 文件使用公司标准模板
+- 图表配色使用蓝色系
+```
+
+#### 方式三：覆盖 Agent 类型提示词
+
+在 `~/.floodmind/settings.json` 中为特定 Agent 类型设置自定义 system prompt：
+
+```json
+{
+  "agent": {
+    "agents": {
+      "build": {
+        "prompt": "你是一个专注于代码审查的 Agent..."
+      }
+    }
+  }
+}
+```
+
+#### 方式四：子类化组合 guidance 常量（代码级深度定制）
+
+```python
+from floodmind.agent.native.native_flood_agent import NativeFloodAgent
+from floodmind.profile.soul import load_soul_md, DEFAULT_FLOODMIND_IDENTITY
+from floodmind.profile.guidance import (
+    WORK_METHOD_GUIDANCE,
+    TOOL_EXECUTION_GUIDANCE,
+    WORKFLOW_GUIDANCE,
+)
+
+class MyAgent(NativeFloodAgent):
+    @classmethod
+    def _build_stable_prompt(cls, skill_catalog, tool_descriptions, tool_registry=None):
+        soul = load_soul_md() or "你是 MyAgent，一个自定义智能助手。"
+        return "\n\n".join([
+            soul,
+            WORK_METHOD_GUIDANCE,
+            TOOL_EXECUTION_GUIDANCE,
+            WORKFLOW_GUIDANCE,
+            f"## 可用技能\n{skill_catalog}",
+        ])
+```
+
+#### 提示词优先级（高→低）
+
+| 优先级 | 来源 | 说明 |
+|--------|------|------|
+| 1 | `agent.agents.<name>.prompt` | settings.json 中完全覆盖某 Agent 类型 |
+| 2 | `~/.floodmind/SOUL.md` | 外部身份文件，替换默认身份描述 |
+| 3 | `DEFAULT_FLOODMIND_IDENTITY` | 代码内置的 fallback 身份 |
+
 ### 模型扩展
 
 在 `~/.floodmind/settings.json` 中添加任意 OpenAI 兼容接口：
@@ -210,6 +292,16 @@ floodmind skill create my_skill   # 创建 Skill 模板
 ## 配置说明
 
 配置文件位于 `~/.floodmind/settings.json`，模板参考 `floodmind/config/settings_template.json`。
+
+### 配置文件一览
+
+`~/.floodmind/` 目录下的关键文件：
+
+| 文件 | 说明 |
+|------|------|
+| `settings.json` | 主配置文件（模型、Provider、Agent 参数） |
+| `SOUL.md` | 智能体身份定义（首次启动自动生成，可直接编辑） |
+| `AGENTS.md` | 全局行为规则与偏好约束（项目级放在工作目录下的 `AGENTS.md`） |
 
 ### OpenAI 兼容接口
 
@@ -296,6 +388,9 @@ FloodMind/
 │   │   ├── settings.py         #   配置模型
 │   │   ├── model_presets.py    #   模型预设
 │   │   └── settings_template.json  # 初始模板
+│   ├── profile/                # 身份与提示词定制
+│   │   ├── soul.py             #   SOUL.md 加载与种子
+│   │   └── guidance.py         #   行为指导常量（可组合）
 │   ├── memory/                 # 记忆与经验系统
 │   │   ├── dual_memory.py      #   双层记忆
 │   │   ├── experience_tree.py  #   经验树索引

@@ -45,9 +45,72 @@ if _hf_home:
 
 # ── Config Path ────────────────────────────────────────────
 
+_DEFAULT_HOME = Path.home() / ".floodmind"
+_PROFILES_ROOT = Path.home() / ".floodmind" / "profiles"
+
+# 活跃 Profile 缓存
+_active_profile_cache: Optional[str] = None
+
+
+def get_active_profile() -> str:
+    """读取 ~/.floodmind/active_profile，返回 profile 名称或 'default'。"""
+    global _active_profile_cache
+    if _active_profile_cache is not None:
+        return _active_profile_cache
+    env_profile = os.getenv("FLOODMIND_PROFILE", "").strip()
+    if env_profile:
+        _active_profile_cache = env_profile
+        return _active_profile_cache
+    active_file = _DEFAULT_HOME / "active_profile"
+    if active_file.exists():
+        try:
+            name = active_file.read_text(encoding="utf-8").strip()
+            if name and name != "default":
+                _active_profile_cache = name
+                return _active_profile_cache
+        except Exception:
+            pass
+    _active_profile_cache = "default"
+    return "default"
+
+
+def set_active_profile(name: str) -> None:
+    """设置活跃 profile，写入 active_profile 文件。"""
+    global _active_profile_cache
+    _active_profile_cache = None
+    _DEFAULT_HOME.mkdir(parents=True, exist_ok=True)
+    active_file = _DEFAULT_HOME / "active_profile"
+    if name == "default":
+        if active_file.exists():
+            active_file.unlink()
+    else:
+        active_file.write_text(name, encoding="utf-8")
+
+
+def get_floodmind_home() -> Path:
+    """返回当前生效的 FloodMind 根目录。
+
+    优先级：
+    1. FLOODMIND_HOME 环境变量
+    2. 活跃 profile 目录
+    3. ~/.floodmind/ (默认)
+    """
+    env_home = os.getenv("FLOODMIND_HOME", "").strip()
+    if env_home:
+        return Path(env_home)
+
+    profile = get_active_profile()
+    if profile and profile != "default":
+        profile_dir = _PROFILES_ROOT / profile
+        if profile_dir.is_dir():
+            return profile_dir
+
+    return _DEFAULT_HOME
+
+
 def _config_dir() -> Path:
-    """XDG config directory: ~/.floodmind/"""
-    return Path.home() / ".floodmind"
+    """配置目录：当前生效的 FLOODMIND_HOME"""
+    return get_floodmind_home()
 
 
 def _config_path() -> Path:
@@ -143,19 +206,6 @@ def _load_config() -> dict:
     if old_cfg:
         cfg = _deep_merge(cfg, old_cfg)
         _logger.debug("已加载旧配置: %s", old_path)
-
-    # 兼容旧的 YAML 路径
-    yaml_path = Path.home() / ".floodmind" / "settings.yaml"
-    if yaml_path.exists():
-        try:
-            import yaml
-            with open(yaml_path, "r", encoding="utf-8") as f:
-                yaml_cfg = yaml.safe_load(f)
-            if isinstance(yaml_cfg, dict):
-                cfg = _deep_merge(cfg, yaml_cfg)
-                _logger.debug("已加载旧 YAML 配置: %s", yaml_path)
-        except Exception:
-            pass
 
     return cfg
 

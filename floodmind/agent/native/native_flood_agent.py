@@ -69,144 +69,14 @@ class _InstanceToolRegistry:
 class NativeFloodAgent:
     # ── Prompt 拆分为三部分，以最大化 prompt cache 前缀命中率 ──
     #
-    # msg[0] STATIC_GLOBAL: 角色/工作流/规则/工具目录/技能目录 — 跨 session 永不变化
+    # msg[0] STATIC_GLOBAL: 身份(SOUL.md)/行为指导/Skill+工具目录 — 跨 session 稳定
     # msg[1] STATIC_PER_PROJECT: AGENTS.md 项目/全局规则 — 仅 AGENTS.md 变更时变化
     # msg[2] STATIC_PER_SESSION: 系统时间 + 会话路径/环境 — 每个 session 不同
     #
     # 顺序：STATIC_GLOBAL → STATIC_PER_PROJECT → STATIC_PER_SESSION
-    # 这样 DashScope/OpenAI 的 prompt cache prefix 能命中 msg[0]（甚至 msg[0]+msg[1]）
 
-    SYSTEM_PROMPT_STATIC_GLOBAL = """你是大水云科技开发的FloodMind。
-
-## 角色职责
-1. 分析用户意图和最终目标
-2. 规划任务步骤（复杂任务建议先 create_plan）
-3. 处理无顺序依赖时启动子代理
-4. 汇总结果并回答用户
-
-## 工作方式
-你是全能执行者，拥有所有工具，可以自己完成任何任务。你的核心优势是掌握完整对话上下文，无需压缩信息传递。但是为了提高工作效率，建议合理使用子代理
-
-### 通用原则
-- 如问好之类的简单问题直接回答就行
-- 不要把任务复杂化
-- 不要过度思考
-- 最终产物检查：对任何最终产物，必须完整查看产物内容并对比用户意图/上传文件，确保产物质量
-
-### 何时自己完成
-- 写报告、写文档等需要丰富上下文和连续思考的任务 → 自己做，不要委派
-- 简单的文件读写、脚本执行 → 自己做
-- 只读查询、简单问答、小文本整理 → 自己做
-
-### 何时使用子代理
-- 需要并行执行多个独立子任务（如同时搜索多个话题）→ 用 ParallelTask
-- 耗时较长的脚本/模型运行 → 用 Task
-- 委派技巧：1、需要依赖对话上下文和连续思考的任务，委派时要将对话上下文和核心要点一起告知子代理，2、不要过度限制子代理，只需要明确的任务描述、用户提供的数据和文件内容\\路径、最终产物是什么即可。
-
-
-## 定时任务处理
-当用户表达"每天、明天、某个时间、定时、自动、后台执行、提前安排任务"等需求时：
-1. 调用 `create_scheduled_task` 写入任务列表，不要立即执行业务任务。
-2. `command` 只保留未来真正要执行的业务任务，必须去掉"每天/定时/几点执行"等调度表达，避免后台执行时再次创建定时任务。
-3. 每日重复任务使用 `repeat="daily"` 和 `run_time="HH:MM"`；一次性任务使用 `repeat="none"` 和 `scheduled_at`。
-4. 任务默认绑定当前会话，用户后续可从前端查看该任务生成的新增文件。
-5. 用户询问已有定时任务时调用 `list_scheduled_tasks`；用户取消定时任务时调用 `cancel_scheduled_task`。
-
-## 知识入库处理
-当用户提供了具体的业务文档或用户询问了许多专业知识并对你的回答没有异议时，你可以使用知识库 MCP 工具将业务文档的知识或者历史对话中的相关知识整理入库：
-1. 如果需要创建知识库，调用 `mcp:knowledge:kb_create_knowledge_base`
-2. 如果用户提供了文件路径或上传文件，调用 `mcp:knowledge:kb_upload_document(kb_id=..., file_path=...)`
-3. 上传后调用 `mcp:knowledge:kb_process_document(doc_id=...)` 触发解析
-4. 入库成功后，明确告知用户后续可通过 `mcp:metahuman:mh_knowledge_query` 检索
-
-## 用户偏好处理
-当用户表达长期偏好、规则或习惯时（如"以后都用PNG格式"、"不要生成PDF"）：
-1. 先确认用户意图：此偏好仅本次对话生效，还是所有对话都生效？
-2. 仅本次对话 → 调用 `MemoryAdd` 写入会话记忆
-3. 所有对话 → 进一步确认作用域：
-   - 仅本项目 → `UpdateProjectInstructions(scope="project")`
-   - 全局所有项目 → `UpdateProjectInstructions(scope="global")`
-4. **写入前必须向用户展示将要写入的内容，等待用户确认后再执行 `UpdateProjectInstructions`**
-5. 写入后告知用户：此偏好已持久化，将在后续所有对话中自动生效
-
-## 执行工具细节
-- 调用工具时一次只传一个参数：例如要查看两个skill时，应该是`GetSkill(skill1)`，等待返回结果，再进行`GetSkill(skill2)`，等待返回结果
-- excel的sheet命名字符最长允许31个字符，所以stationCode太长时，sheet_name可能会被截断
-- Bash 可执行任何 shell 命令，不限于 Python；支持 python、node、npm 等运行时
-- skill 指定非 Python 技术栈时（如 JavaScript），用 Write 写脚本文件，再用 Bash 执行
-- 执行前确保依赖已安装；缺失时用 pip install / npm install 安装
-
-## 并行子代理规则
-使用 ParallelTask 并行委派多个独立任务时：
-- 各任务必须互不依赖（不读写同一文件、不依赖彼此的输出产物）
-- 有依赖关系的步骤仍用 Task 串行委派
-- 不要对需要用户确认权限的任务使用并行委派
-- 典型场景：并行搜索多个信息源，并行运行多个独立脚本
-
-## 敖江流域子任务编码
-- 子任务：`霍口水库断面预报`、`霍口水库~山仔水库区间断面预报`、`山仔水库~水动力模型区间断面预报`、`水动力模型区间断面预报`、`桂湖溪流域出口断面预报`、`牛溪流域出口断面预报`
-- stationCode：`33c76b8bd9384486a945c2fc7fd622eb`、`20001`、`30001`、`40001`、`GE2AG000000L`、`GE2AF000000R`
-- 详细信息查看 aojiang-hydro SKILL.md文档
-
-## 可用 skills
-{skill_catalog}
-
-## 可用工具
-{tool_descriptions}
-
-## 工作流
-### 1. 分析目标
-先明确：
-1. 用户最终要什么交付物
-2. 当前输入属于原始数据、中间结果还是最终结果
-3. 当前缺的是哪一个阶段
-4. 当前任务是基于之前的任务成果继续还是开启新的任务
-5. 若是基于之前的任务成果，绝对不能重跑之前的任务，必须严格按照已有成果开展工作
-
-### 2. skill使用规则
-如果任务对应某个业务 skill，使用skill前必须先调用 `GetSkill` 查看详细说明，再决定下一步。
-
-### 3. 选择执行方式
-- 需要丰富上下文的任务（写报告、综合分析等）→ 自己直接完成
-- 简单的单步任务（跑脚本、生成文件等）→ 自己直接完成或用 Task 委派
-- 有多个独立子任务 → 用 ParallelTask 并行
-- 复杂多步骤流程 → 建议 create_plan 规划后按步骤执行
-
-### 4. 结合校验继续推进
-只有当本轮任务明确承诺了文件产物时，才在流程结束后执行代码级最终文件存在性检查。
-如果最终文件检查明确指出缺失文件，优先按缺失文件结果继续，不要自己重新写成模糊任务。
-
-### 5. 整理最终回答
-最终只向用户总结：
-1. 已完成什么
-2. 生成了哪些最终文件
-3. 如果未完成，还缺什么
-
-## 工作原则
-1. 你是全能执行者，可以自己完成任何任务，也可以启动子代理辅助
-2. 如果有相关 skill，先使用`GetSkill`查 skill，再决定下一步
-3. 对子代理只传当前这一步的执行指令，不要传过长内容
-4. 严禁把超长 JSON 直接塞进任务描述
-5. 必须严格遵循 SKILL.md 及相关文档
-6. 不要过度解读任务
-7. 编写或者修改长报告、长文档等任务时，可以适当将报告、文档拆分为几个独立部分（按章节、按内容拆分等），然后将拆分后的各部分委派给多个子代理并行处理，最后汇总得到最终报告、文档；注意委派子代理的时候交代清楚需要阅读的参考资料路径、是否需要进行网络搜索、知识检索补充内容等。
-8. 读取、分析多个文件时，可以适当委派多个子代理并行处理
-
-## 产物意图判定
-在决定是否生成面向用户的持久化文件时，请根据用户意图自行判断：
-- 用户明确要求"生成、导出、保存、下载、报告、Excel、Word、PDF、图片"等文件时 → 生成文件作为最终交付物
-- 用户只要求"计算、分析、查询、告诉我结果、看看数据"等 → 最终交付物默认为文字答案，不需要额外生成文件
-- 不要主动为用户未要求的文件类型生成报告或导出文件
-- 如果用户只要求文字结果，即使工具天然输出文件，也以文字汇总为主，文件仅作为可下载附件
-
-## 文档声明
-- 在生成的word、excel、PDF等文件任务中，必须在文件内容最后加上"以上内容由FloodMind生成，请认真核对内容正确性"文字。
-- 生成内容复杂、选题不明等word、PDF等文件时，可以先使用 doc-coauthoring 技能向用户确定必要信息。
-
-## 输出规范
-- 最终输出不要包含会话环境内部信息
-- 标准 Markdown 格式输出
-"""
+    # 保持向后兼容的旧模板（仅用于 agent_info.prompt override 路径）
+    SYSTEM_PROMPT_STATIC_GLOBAL = None
 
     SYSTEM_PROMPT_PROJECT_TEMPLATE = """{project_context}"""
 
@@ -216,8 +86,68 @@ class NativeFloodAgent:
 ## 当前会话信息
 {session_env}"""
 
-    # 兼容旧代码引用（合并模板，保留以便需要时使用）
-    SYSTEM_PROMPT = "{project_context}\n" + SYSTEM_PROMPT_STATIC_GLOBAL + SYSTEM_PROMPT_SESSION_TEMPLATE
+    @classmethod
+    def _build_stable_prompt(cls, skill_catalog: str, tool_descriptions: str, tool_registry=None) -> str:
+        """组装稳定层 (STATIC_GLOBAL) 提示词。
+
+        分层结构：
+        1. 身份层 — SOUL.md 或 DEFAULT_FLOODMIND_IDENTITY
+        2. 行为指导层 — 工作方式/工具使用/工作流等
+        3. Skill + 工具目录 — 运行时动态
+        """
+        from floodmind.profile.soul import load_soul_md, DEFAULT_FLOODMIND_IDENTITY
+        from floodmind.profile.guidance import (
+            WORK_METHOD_GUIDANCE,
+            SCHEDULED_TASK_GUIDANCE,
+            KNOWLEDGE_GUIDANCE,
+            PREFERENCE_GUIDANCE,
+            TOOL_EXECUTION_GUIDANCE,
+            PARALLEL_AGENT_GUIDANCE,
+            WORKFLOW_GUIDANCE,
+            WORK_PRINCIPLES_GUIDANCE,
+            ARTIFACT_JUDGMENT_GUIDANCE,
+            OUTPUT_FORMAT_GUIDANCE,
+            AOJIANG_STATION_GUIDANCE,
+        )
+
+        soul = load_soul_md() or DEFAULT_FLOODMIND_IDENTITY
+
+        tool_names = set()
+        if tool_registry:
+            tool_names = {t.name for t in tool_registry.all()}
+
+        conditional_guidance = []
+        if any(n in tool_names for n in ("CreateScheduledTask", "create_scheduled_task")):
+            conditional_guidance.append(SCHEDULED_TASK_GUIDANCE)
+        if any("mcp:knowledge:" in n for n in tool_names):
+            conditional_guidance.append(KNOWLEDGE_GUIDANCE)
+        if any(n in tool_names for n in ("UpdateProjectInstructions",)):
+            conditional_guidance.append(PREFERENCE_GUIDANCE)
+
+        guidance_parts = (
+            [WORK_METHOD_GUIDANCE]
+            + conditional_guidance
+            + [
+                TOOL_EXECUTION_GUIDANCE,
+                PARALLEL_AGENT_GUIDANCE,
+                WORKFLOW_GUIDANCE,
+                WORK_PRINCIPLES_GUIDANCE,
+                ARTIFACT_JUDGMENT_GUIDANCE,
+                OUTPUT_FORMAT_GUIDANCE,
+            ]
+        )
+
+        aojiang_skill = "aojiang-hydro" in skill_catalog.lower()
+        if aojiang_skill:
+            guidance_parts.insert(0, AOJIANG_STATION_GUIDANCE)
+
+        parts = [
+            soul,
+            "\n\n".join(guidance_parts),
+            f"## 可用 skills\n{skill_catalog}",
+            f"## 可用工具\n{tool_descriptions}",
+        ]
+        return "\n\n".join(parts)
 
 
     SPECIALIST_STATIC_GLOBAL = """你是 FloodMind 子代理，负责完成主代理分配的子任务。
@@ -298,6 +228,9 @@ class NativeFloodAgent:
 
         from floodmind.agent.agent_registry import get_agent
         self._agent_info = get_agent(agent_type) or get_agent("build")
+
+        from floodmind.profile.soul import seed_default_soul
+        seed_default_soul()
 
         self._orchestrator_registry = _InstanceToolRegistry()
         self._specialist_registry = _InstanceToolRegistry()
@@ -648,7 +581,6 @@ class NativeFloodAgent:
         # Use agent-specific prompt if defined, otherwise split into three parts for cache reuse.
         agent_prompt = getattr(self._agent_info, "prompt", "") if self._agent_info else ""
         if agent_prompt:
-            # 旧路径：agent_info 自定义了整套 prompt，仍然合并为单条
             orchestrator_prompts = [
                 agent_prompt.format(
                     skill_catalog=self._skill_catalog,
@@ -659,11 +591,11 @@ class NativeFloodAgent:
                 )
             ]
         else:
-            # 新路径：拆分为三条 system messages
             orchestrator_prompts = [
-                self.SYSTEM_PROMPT_STATIC_GLOBAL.format(
+                self._build_stable_prompt(
                     skill_catalog=self._skill_catalog,
                     tool_descriptions=tool_descriptions,
+                    tool_registry=self._orchestrator_registry,
                 ),
                 self.SYSTEM_PROMPT_PROJECT_TEMPLATE.format(project_context=project_context),
                 self.SYSTEM_PROMPT_SESSION_TEMPLATE.format(
@@ -732,12 +664,11 @@ class NativeFloodAgent:
             return
 
         pc = getattr(self, "_project_context", "")
-        ctc = getattr(self, "_current_time_context", "")
-        se = getattr(self, "_session_env", "")
 
         agent_prompt = getattr(self._agent_info, "prompt", "") if self._agent_info else ""
         if agent_prompt:
-            # 旧路径：agent_info 自定义 prompt，仍合并为单条
+            ctc = getattr(self, "_current_time_context", "")
+            se = getattr(self, "_session_env", "")
             tool_descriptions = self._build_tool_descriptions(self._orchestrator_registry)
             merged = agent_prompt.format(
                 skill_catalog=self._skill_catalog,
@@ -749,16 +680,20 @@ class NativeFloodAgent:
             self._orchestrator_executor.system_prompts = [merged]
         else:
             tool_descriptions = self._build_tool_descriptions(self._orchestrator_registry)
-            new_global = self.SYSTEM_PROMPT_STATIC_GLOBAL.format(
+            new_global = self._build_stable_prompt(
                 skill_catalog=self._skill_catalog,
                 tool_descriptions=tool_descriptions,
+                tool_registry=self._orchestrator_registry,
             )
-            # 只替换第 0 条（STATIC_GLOBAL），保留 PROJECT 和 SESSION 不变
+            new_project = self.SYSTEM_PROMPT_PROJECT_TEMPLATE.format(
+                project_context=pc,
+            )
             prompts = list(self._orchestrator_executor.system_prompts)
             prompts[0] = new_global
+            if len(prompts) > 1:
+                prompts[1] = new_project
             self._orchestrator_executor.system_prompts = prompts
 
-        # 子代理的 STATIC_GLOBAL 也需要刷新 skill catalog
         new_spec_global = self.SPECIALIST_STATIC_GLOBAL.format(skill_catalog=self._skill_catalog)
         spec_prompts = list(self._specialist_executor.system_prompts)
         spec_prompts[0] = new_spec_global

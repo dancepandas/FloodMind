@@ -8,7 +8,7 @@ import pytest
 
 from floodmind.config.settings import (
     Settings, ModelConfig, AgentConfig, RAGConfig, TaskExperienceConfig,
-    get_config, _deep_merge, _load_json_config,
+    get_config, _deep_merge, _load_json_config, DEFAULT_CONFIG,
 )
 
 
@@ -44,7 +44,8 @@ class TestModelConfig:
 
 class TestAgentConfig:
     def test_defaults(self):
-        cfg = AgentConfig(get_config())
+        with patch("floodmind.config.settings.get_config", return_value=DEFAULT_CONFIG):
+            cfg = AgentConfig(DEFAULT_CONFIG)
         assert cfg.max_history == 20
         assert cfg.context_window == 32768
 

@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from floodmind.agent.runtime.contracts.messages import system_message
+from floodmind.config.settings import get_floodmind_home
 
 logger = logging.getLogger(__name__)
 
@@ -142,7 +143,7 @@ class ContextRuntime:
 
         parts = []
 
-        global_path = Path.home() / ".floodagent" / "AGENTS.md"
+        global_path = get_floodmind_home() / "AGENTS.md"
         global_ctx = self._read_agents_md(global_path, label="全局级指令")
         if global_ctx:
             parts.append(global_ctx)
