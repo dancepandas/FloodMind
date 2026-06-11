@@ -132,7 +132,11 @@ class TestNativeAgentExecutor:
         assert "中断" in result.final_output
 
     def test_executor_consecutive_failure_detection(self):
-        """Tool fails 5 times consecutively → forced termination."""
+        """Tool fails 5 times consecutively → forced termination.
+
+        Note: DOOM LOOP detection fires first at 3 calls with same arguments,
+        so the effective threshold here is 3 (the lower bound).
+        """
         mc = MagicMock(spec=ModelClient)
         tool_call_events = [
             ModelEvent(
@@ -157,6 +161,71 @@ class TestNativeAgentExecutor:
         )
         result = executor.run(self._make_context(), "failing task")
 
-        # Should have stopped before max_iterations due to consecutive failures
+        # DOOM LOOP (same args × 3) triggers before consecutive failure (× 5)
         assert tool_executor.execute.call_count < 10
-        assert tool_executor.execute.call_count >= 5
+        assert tool_executor.execute.call_count >= 3
+
+    def test_executor_doom_loop_same_args_even_on_success(self):
+        """连续 3 次相同工具+相同参数 → DOOM LOOP 检测触发，即使结果成功。"""
+        mc = MagicMock(spec=ModelClient)
+        tool_call_events = [
+            ModelEvent(
+                type="tool_call_done",
+                tool_call=ToolCall(id="t1", name="test_tool", arguments={"k": "v"}),
+            ),
+            ModelEvent(type="done"),
+        ]
+        mc.stream_chat.return_value = tool_call_events
+
+        from floodmind.agent.runtime.contracts.tools import ToolResult as NativeToolResult
+        tool_executor = MagicMock()
+        # All calls return success — DOOM LOOP still detects same args
+        tool_executor.execute.return_value = NativeToolResult(
+            tool_call_id="t1", name="test_tool", content="ok", status="completed"
+        )
+
+        executor = self._make_executor(
+            mc,
+            tool_executor=tool_executor,
+            tools_schema=[{"type": "function", "function": {"name": "test_tool"}}],
+            max_iterations=10,
+        )
+        result = executor.run(self._make_context(), "looping task")
+
+        # DOOM LOOP triggers at 3: stops before max_iterations (10)
+        assert tool_executor.execute.call_count < 10
+        assert tool_executor.execute.call_count == 3
+
+    def test_executor_consecutive_failure_without_doom_loop(self):
+        """连续失败但不触发 DOOM LOOP（不同参数），按连续失败检测。"""
+        mc = MagicMock(spec=ModelClient)
+        # Each iteration uses different arguments — DOOM LOOP won't fire
+        # but consecutive failure counter will
+        calls = []
+        def make_stream(*a, **kw):
+            idx = len(calls) + 1
+            calls.append(1)
+            return [
+                ModelEvent(type="tool_call_done",
+                           tool_call=ToolCall(id=f"t{idx}", name="test_tool", arguments={"k": idx})),
+                ModelEvent(type="done"),
+            ]
+        mc.stream_chat.side_effect = make_stream
+
+        from floodmind.agent.runtime.contracts.tools import ToolResult as NativeToolResult
+        tool_executor = MagicMock()
+        tool_executor.execute.return_value = NativeToolResult(
+            tool_call_id="t", name="test_tool", content="错误: fail", status="error"
+        )
+
+        executor = self._make_executor(
+            mc,
+            tool_executor=tool_executor,
+            tools_schema=[{"type": "function", "function": {"name": "test_tool"}}],
+            max_iterations=10,
+        )
+        result = executor.run(self._make_context(), "failing task")
+
+        # Consecutive failure (5) fires: stops before max_iterations
+        assert tool_executor.execute.call_count < 10
+        assert tool_executor.execute.call_count == 5

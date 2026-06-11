@@ -7,7 +7,7 @@ from unittest.mock import patch
 import pytest
 
 from floodmind.config.settings import (
-    Settings, ModelConfig, AgentConfig, RAGConfig, TaskExperienceConfig,
+    Settings, ModelConfig, AgentConfig, TaskExperienceConfig,
     get_config, _deep_merge, _load_json_config, DEFAULT_CONFIG,
 )
 
@@ -53,13 +53,6 @@ class TestAgentConfig:
     def test_env_override(self):
         cfg = AgentConfig(get_config())
         assert cfg.max_history == 30
-
-
-class TestRAGConfig:
-    def test_defaults(self):
-        cfg = RAGConfig(get_config())
-        assert cfg.enabled is True
-        assert cfg.top_k == 10
 
 
 class TestTaskExperienceConfig:

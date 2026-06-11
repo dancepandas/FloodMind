@@ -56,14 +56,14 @@ def test_1_imports():
 
     try:
         from floodmind.profile.guidance import (
-            WORK_METHOD_GUIDANCE, SCHEDULED_TASK_GUIDANCE, KNOWLEDGE_GUIDANCE,
-            PREFERENCE_GUIDANCE, TOOL_EXECUTION_GUIDANCE, PARALLEL_AGENT_GUIDANCE,
-            WORKFLOW_GUIDANCE, WORK_PRINCIPLES_GUIDANCE, ARTIFACT_JUDGMENT_GUIDANCE,
-            OUTPUT_FORMAT_GUIDANCE, AOJIANG_STATION_GUIDANCE,
+            WORK_METHOD_GUIDANCE, SCHEDULED_TASK_GUIDANCE,
+            PREFERENCE_GUIDANCE, TOOL_EXECUTION_GUIDANCE,
+            WORKFLOW_GUIDANCE, ARTIFACT_JUDGMENT_GUIDANCE,
+            OUTPUT_FORMAT_GUIDANCE, TODO_GUIDANCE,
         )
-        check("guidance.py all 11 constants", True)
+        check("guidance.py all 8 constants", True)
     except ImportError as e:
-        check("guidance.py all 11 constants", False, str(e))
+        check("guidance.py all 8 constants", False, str(e))
 
     try:
         from floodmind.config.settings import (
@@ -123,16 +123,13 @@ def test_3_guidance():
 
     constants = [
         ("WORK_METHOD_GUIDANCE", "工作方式"),
-        ("SCHEDULED_TASK_GUIDANCE", "定时任务处理"),
-        ("KNOWLEDGE_GUIDANCE", "知识入库处理"),
-        ("PREFERENCE_GUIDANCE", "用户偏好处理"),
-        ("TOOL_EXECUTION_GUIDANCE", "执行工具细节"),
-        ("PARALLEL_AGENT_GUIDANCE", "并行子代理规则"),
+        ("SCHEDULED_TASK_GUIDANCE", "定时任务"),
+        ("PREFERENCE_GUIDANCE", "用户偏好"),
+        ("TOOL_EXECUTION_GUIDANCE", "工具使用"),
         ("WORKFLOW_GUIDANCE", "工作流"),
-        ("WORK_PRINCIPLES_GUIDANCE", "工作原则"),
-        ("ARTIFACT_JUDGMENT_GUIDANCE", "产物意图判定"),
+        ("ARTIFACT_JUDGMENT_GUIDANCE", "产物判定"),
         ("OUTPUT_FORMAT_GUIDANCE", "输出规范"),
-        ("AOJIANG_STATION_GUIDANCE", "敖江流域"),
+        ("TODO_GUIDANCE", "任务规划"),
     ]
 
     for attr_name, keyword in constants:
@@ -166,38 +163,38 @@ def test_4_prompt_assembly():
     check("minimal: has workflow", "工作流" in p)
     check("minimal: has skill catalog", "test" in p)
     check("minimal: has tool descriptions", "Bash" in p)
-    check("minimal: NO scheduled", "定时任务处理" not in p)
-    check("minimal: NO knowledge", "知识入库处理" not in p)
-    check("minimal: NO preference", "用户偏好处理" not in p)
-    check("minimal: NO aojiang", "敖江流域" not in p)
+    check("minimal: NO scheduled", "定时任务" not in p)
+    check("minimal: NO preference", "用户偏好" not in p)
 
     # Case B: Full tools (all conditionals)
     reg_full = FakeReg([
-        'CreateScheduledTask', 'mcp:knowledge:kb_upload',
-        'UpdateProjectInstructions', 'Bash', 'GetSkill',
+        'CreateScheduledTask', 'UpdateProjectInstructions', 'Bash', 'GetSkill',
     ])
     p2 = NativeFloodAgent._build_stable_prompt(
-        skill_catalog='- aojiang-hydro: Ao model\n- xlsx: excel',
+        skill_catalog='- xlsx: excel',
         tool_descriptions='- Bash\n- GetSkill',
         tool_registry=reg_full,
     )
-    check("full: has scheduled", "定时任务处理" in p2)
-    check("full: has knowledge", "知识入库处理" in p2)
-    check("full: has preference", "用户偏好处理" in p2)
-    check("full: has aojiang", "敖江流域" in p2)
+    check("full: has scheduled", "定时任务" in p2)
+    check("full: has preference", "用户偏好" in p2)
+    check("full: has workflow", "工作流" in p2)
+    check("full: has output spec", "输出规范" in p2)
 
-    # Verify ordering: scheduled < knowledge < preference < tool_exec < parallel < workflow
+    # Verify ordering: todo < method < sched < pref < tool < workflow < artifact < output
     pos = {}
-    for label, kw in [("sched", "定时任务处理"), ("know", "知识入库处理"),
-                       ("pref", "用户偏好处理"), ("tool", "执行工具细节"),
-                       ("par", "并行子代理规则"), ("wf", "工作流")]:
+    for label, kw in [("todo", "任务规划"), ("method", "工作方式"),
+                       ("sched", "定时任务"), ("pref", "用户偏好"),
+                       ("tool", "工具使用"), ("wf", "工作流"),
+                       ("artifact", "产物判定"), ("output", "输出规范")]:
         try:
             pos[label] = p2.index(kw)
         except ValueError:
             pos[label] = -1
 
-    order_ok = (pos["sched"] < pos["know"] < pos["pref"] < pos["tool"]
-                < pos["par"] < pos["wf"])
+    order_ok = (
+        pos["todo"] < pos["method"] < pos["sched"] < pos["pref"]
+        < pos["tool"] < pos["wf"] < pos["artifact"] < pos["output"]
+    )
     check("full: guidance order correct", order_ok)
 
     # Case C: tool_registry=None (default)
@@ -205,7 +202,7 @@ def test_4_prompt_assembly():
         skill_catalog='', tool_descriptions='', tool_registry=None,
     )
     check("no registry: fallback works", len(p3) > 100)
-    check("no registry: no conditionals", "定时任务处理" not in p3)
+    check("no registry: no conditionals", "定时任务" not in p3)
 
 
 # ============================================================
