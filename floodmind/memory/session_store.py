@@ -29,6 +29,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
+import base64
+
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
@@ -80,7 +82,7 @@ CREATE TABLE IF NOT EXISTS parts (
     message_id  TEXT NOT NULL REFERENCES messages(id) ON DELETE CASCADE,
     session_id  TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
     sort_order  INTEGER NOT NULL DEFAULT 0,
-    type        TEXT NOT NULL CHECK(type IN ('text','tool','reasoning','file','compaction','error')),
+    type        TEXT NOT NULL CHECK(type IN ('text','tool','reasoning','file','compaction','error','step_start','step_finish','patch','retry')),
     text        TEXT NOT NULL DEFAULT '',
     metadata    TEXT NOT NULL DEFAULT '{}'
 );
@@ -110,7 +112,149 @@ CREATE INDEX IF NOT EXISTS idx_messages_parent  ON messages(session_id, parent_i
 CREATE INDEX IF NOT EXISTS idx_parts_message    ON parts(message_id, sort_order);
 CREATE INDEX IF NOT EXISTS idx_parts_session    ON parts(session_id);
 CREATE INDEX IF NOT EXISTS idx_tool_states_session ON tool_states(session_id);
+
+CREATE TABLE IF NOT EXISTS checkpoints (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    session_id      TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+    step            INTEGER NOT NULL DEFAULT 0,
+    agent_name      TEXT NOT NULL DEFAULT 'build',
+    plan_json       TEXT NOT NULL DEFAULT '{}',
+    messages_json   TEXT NOT NULL DEFAULT '[]',
+    events_json     TEXT NOT NULL DEFAULT '[]',
+    artifact_snapshot TEXT NOT NULL DEFAULT '',
+    created_at      REAL NOT NULL DEFAULT (strftime('%s', 'now'))
+);
+CREATE INDEX IF NOT EXISTS idx_checkpoints_session ON checkpoints(session_id, step);
+
+-- FTS5 full-text search for session content
+CREATE VIRTUAL TABLE IF NOT EXISTS search_index USING fts5(
+    text,
+    part_id UNINDEXED,
+    session_id UNINDEXED
+);
+
+CREATE TRIGGER IF NOT EXISTS trg_parts_insert_fts
+AFTER INSERT ON parts
+WHEN NEW.type IN ('text', 'tool', 'reasoning', 'error') AND NEW.text != ''
+BEGIN
+    INSERT INTO search_index (text, part_id, session_id)
+    VALUES (NEW.text, NEW.id, NEW.session_id);
+END;
+
+CREATE TRIGGER IF NOT EXISTS trg_parts_delete_fts
+AFTER DELETE ON parts
+BEGIN
+    DELETE FROM search_index WHERE part_id = OLD.id;
+END;
+
+CREATE TRIGGER IF NOT EXISTS trg_parts_update_fts
+AFTER UPDATE ON parts
+BEGIN
+    DELETE FROM search_index WHERE part_id = OLD.id;
+    INSERT INTO search_index (text, part_id, session_id)
+    SELECT NEW.text, NEW.id, NEW.session_id
+    WHERE NEW.type IN ('text', 'tool', 'reasoning', 'error') AND NEW.text != '';
+END;
+
+-- SyncEvent table: persistent event log for state replay / resume
+CREATE TABLE IF NOT EXISTS sync_events (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    session_id  TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+    event_index INTEGER NOT NULL DEFAULT 0,
+    event_type  TEXT NOT NULL DEFAULT '',
+    event_data  TEXT NOT NULL DEFAULT '{}',
+    created_at  TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_sync_events_session ON sync_events(session_id, event_index);
 """
+
+# ── Part type extension migration ────────────────────────────────
+
+def _migrate_parts_type_constraint(conn: sqlite3.Connection) -> None:
+    """Rebuild parts table to extend CHECK type constraint (SQLite limitation).
+
+    Adds: step_start, step_finish, patch, retry types.
+    Executes at schema init time, idempotent.
+    """
+    try:
+        info = conn.execute(
+            "SELECT sql FROM sqlite_master WHERE type='table' AND name='parts'"
+        ).fetchone()
+        if info and "step_start" in info["sql"]:
+            return  # Already migrated
+    except Exception:
+        pass
+
+    logger.info("Migrating parts table CHECK constraint for new part types...")
+    conn.executescript("""
+        DROP TRIGGER IF EXISTS trg_parts_insert_fts;
+        DROP TRIGGER IF EXISTS trg_parts_delete_fts;
+        DROP TRIGGER IF EXISTS trg_parts_update_fts;
+        ALTER TABLE parts RENAME TO parts_old;
+        CREATE TABLE parts (
+            id          TEXT PRIMARY KEY,
+            message_id  TEXT NOT NULL REFERENCES messages(id) ON DELETE CASCADE,
+            session_id  TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+            sort_order  INTEGER NOT NULL DEFAULT 0,
+            type        TEXT NOT NULL CHECK(type IN ('text','tool','reasoning','file','compaction','error','step_start','step_finish','patch','retry')),
+            text        TEXT NOT NULL DEFAULT '',
+            metadata    TEXT NOT NULL DEFAULT '{}'
+        );
+        INSERT INTO parts SELECT * FROM parts_old;
+        DROP TABLE parts_old;
+        CREATE INDEX IF NOT EXISTS idx_parts_message ON parts(message_id, sort_order);
+        CREATE INDEX IF NOT EXISTS idx_parts_session ON parts(session_id);
+        CREATE TRIGGER IF NOT EXISTS trg_parts_insert_fts
+        AFTER INSERT ON parts
+        WHEN NEW.type IN ('text', 'tool', 'reasoning', 'error') AND NEW.text != ''
+        BEGIN
+            INSERT INTO search_index (text, part_id, session_id)
+            VALUES (NEW.text, NEW.id, NEW.session_id);
+        END;
+        CREATE TRIGGER IF NOT EXISTS trg_parts_delete_fts
+        AFTER DELETE ON parts
+        BEGIN
+            DELETE FROM search_index WHERE part_id = OLD.id;
+        END;
+        CREATE TRIGGER IF NOT EXISTS trg_parts_update_fts
+        AFTER UPDATE ON parts
+        BEGIN
+            DELETE FROM search_index WHERE part_id = OLD.id;
+            INSERT INTO search_index (text, part_id, session_id)
+            SELECT NEW.text, NEW.id, NEW.session_id
+            WHERE NEW.type IN ('text', 'tool', 'reasoning', 'error') AND NEW.text != '';
+        END;
+    """)
+    conn.commit()
+    logger.info("Parts table migration complete")
+
+
+def _migrate_sessions_schema(conn: sqlite3.Connection) -> None:
+    """Add cost, model, permission columns to sessions/messages tables (incremental, idempotent)."""
+    existing = {row[1] for row in conn.execute("PRAGMA table_info(sessions)").fetchall()}
+    additions = [
+        ("tokens_cache_read", "INTEGER DEFAULT 0"),
+        ("tokens_cache_write", "INTEGER DEFAULT 0"),
+        ("cost", "REAL DEFAULT 0.0"),
+        ("model_info", "TEXT DEFAULT '{}'"),
+        ("permission_rules", "TEXT DEFAULT '[]'"),
+        ("version", "TEXT DEFAULT '1.0.0'"),
+    ]
+    for col_name, col_def in additions:
+        if col_name not in existing:
+            conn.execute(f"ALTER TABLE sessions ADD COLUMN {col_name} {col_def}")
+            logger.info("Added column sessions.%s", col_name)
+    msg_existing = {row[1] for row in conn.execute("PRAGMA table_info(messages)").fetchall()}
+    msg_additions = [
+        ("cost", "REAL DEFAULT 0.0"),
+        ("provider_info", "TEXT DEFAULT '{}'"),
+    ]
+    for col_name, col_def in msg_additions:
+        if col_name not in msg_existing:
+            conn.execute(f"ALTER TABLE messages ADD COLUMN {col_name} {col_def}")
+            logger.info("Added column messages.%s", col_name)
+    conn.commit()
+
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -140,6 +284,9 @@ def _get_conn(path: Optional[str] = None) -> sqlite3.Connection:
         conn.row_factory = sqlite3.Row
         conn.executescript(SCHEMA_SQL)
         conn.commit()
+        # Run migrations (idempotent, pass conn to avoid recursion)
+        _migrate_parts_type_constraint(conn)
+        _migrate_sessions_schema(conn)
         setattr(_local, key, conn)
     return conn
 
@@ -292,6 +439,118 @@ def get_last_assistant_message(session_id: str) -> Optional[Dict[str, Any]]:
         (session_id,),
     ).fetchone()
     return dict(row) if row else None
+
+
+# ── Cursor-based pagination helpers ────────────────────────────
+
+def _encode_cursor(message_id: str, created_at: str) -> str:
+    """Encode a pagination cursor: base64url(json({id, time})).
+
+    The cursor encodes the (created_at, id) tuple of the last item
+    on the current page, enabling stable keyset pagination.
+    """
+    payload = json.dumps({"id": message_id, "time": created_at})
+    return base64.urlsafe_b64encode(payload.encode()).decode().rstrip("=")
+
+
+def _decode_cursor(cursor: str) -> Tuple[str, str]:
+    """Decode a pagination cursor → (message_id, created_at)."""
+    # Restore base64 padding (urlsafe encoding strips =)
+    padding = 4 - len(cursor) % 4
+    if padding != 4:
+        cursor += "=" * padding
+    payload = json.loads(base64.urlsafe_b64decode(cursor.encode()).decode())
+    return payload["id"], payload["time"]
+
+
+def get_messages_page(
+    session_id: str,
+    limit: int = 50,
+    before_cursor: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Cursor-based paginated message query.
+
+    Returns:
+        {
+            "items": List[Dict],   # messages with populated parts/tool_states
+            "more": bool,          # True if more messages exist after this page
+            "cursor": str | None,  # cursor for the next page (None if no more)
+        }
+    """
+    conn = _get_conn()
+
+    if before_cursor:
+        before_id, before_time = _decode_cursor(before_cursor)
+        rows = conn.execute(
+            """
+            SELECT * FROM messages
+            WHERE session_id = ?
+              AND (created_at < ? OR (created_at = ? AND id < ?))
+            ORDER BY created_at DESC, id DESC
+            LIMIT ?
+            """,
+            (session_id, before_time, before_time, before_id, limit + 1),
+        ).fetchall()
+    else:
+        rows = conn.execute(
+            """
+            SELECT * FROM messages
+            WHERE session_id = ?
+            ORDER BY created_at DESC, id DESC
+            LIMIT ?
+            """,
+            (session_id, limit + 1),
+        ).fetchall()
+
+    more = len(rows) > limit
+    items = rows[:limit]
+
+    # Hydrate: batch-load parts for all returned messages
+    result = []
+    if items:
+        msg_ids = [row["id"] for row in items]
+        placeholders = ",".join("?" * len(msg_ids))
+        part_rows = conn.execute(
+            f"""SELECT * FROM parts
+                WHERE message_id IN ({placeholders})
+                ORDER BY message_id, sort_order""",
+            msg_ids,
+        ).fetchall()
+
+        # Group parts by message_id
+        parts_by_msg: Dict[str, List[Dict]] = {}
+        for pr in part_rows:
+            pd = dict(pr)
+            parts_by_msg.setdefault(pr["message_id"], []).append(pd)
+
+        # Batch-load tool states for all tool parts
+        tool_part_ids = [pr["id"] for pr in part_rows if pr["type"] == "tool"]
+        tool_states_by_part: Dict[str, Dict] = {}
+        if tool_part_ids:
+            ts_placeholders = ",".join("?" * len(tool_part_ids))
+            ts_rows = conn.execute(
+                f"SELECT * FROM tool_states WHERE part_id IN ({ts_placeholders})",
+                tool_part_ids,
+            ).fetchall()
+            for ts in ts_rows:
+                tool_states_by_part[ts["part_id"]] = dict(ts)
+
+        for row in items:
+            msg_dict = dict(row)
+            msg_parts = parts_by_msg.get(row["id"], [])
+            for p in msg_parts:
+                if p["type"] == "tool":
+                    p["tool_state"] = tool_states_by_part.get(p["id"])
+            msg_dict["parts"] = msg_parts
+            result.append(msg_dict)
+
+    # Build next cursor from the last item
+    next_cursor = None
+    if more and items:
+        last = items[-1]
+        next_cursor = _encode_cursor(last["id"], last["created_at"])
+
+    return {"items": result, "more": more, "cursor": next_cursor}
 
 
 def _insert_part(conn: sqlite3.Connection, session_id: str, message_id: str, order: int, part: Dict[str, Any]) -> str:
@@ -648,3 +907,78 @@ def migrate_from_json(sessions_dir: str = "./data/sessions") -> int:
 
     logger.info("Migration complete: %d sessions", migrated)
     return migrated
+
+
+# ---------------------------------------------------------------------------
+# FTS5 Search
+# ---------------------------------------------------------------------------
+
+def search_sessions(query: str, limit: int = 10) -> List[Dict[str, Any]]:
+    """Full-text search across session message parts."""
+    if not query or not query.strip():
+        return []
+
+    conn = _get_conn()
+    rows = conn.execute(
+        """
+        SELECT si.session_id, s.title, si.text AS highlighted_text
+        FROM search_index si
+        JOIN sessions s ON si.session_id = s.id
+        WHERE search_index MATCH ?
+        ORDER BY rank
+        LIMIT ?
+        """,
+        (query.strip(), limit),
+    ).fetchall()
+    return [dict(r) for r in rows]
+
+
+# ── SyncEvent — persistent event log for state replay ────────────────
+
+def append_sync_event(session_id: str, event_index: int, event_type: str, event_data: dict) -> None:
+    """Persist an event to the sync log for state replay / stream resume."""
+    conn = _get_conn()
+    conn.execute(
+        "INSERT INTO sync_events (session_id, event_index, event_type, event_data, created_at) VALUES (?,?,?,?,?)",
+        (session_id, event_index, event_type, json.dumps(event_data, ensure_ascii=False), _now()),
+    )
+    conn.commit()
+
+
+def get_sync_events(session_id: str, after_index: int = 0, limit: int = 200) -> List[Dict[str, Any]]:
+    """Retrieve events after a given index (for stream resume / replay)."""
+    conn = _get_conn()
+    rows = conn.execute(
+        """SELECT event_index, event_type, event_data, created_at
+           FROM sync_events
+           WHERE session_id = ? AND event_index > ?
+           ORDER BY event_index
+           LIMIT ?""",
+        (session_id, after_index, limit),
+    ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def get_last_event_index(session_id: str) -> int:
+    """Get the highest event_index for a session (0 if no events)."""
+    conn = _get_conn()
+    row = conn.execute(
+        "SELECT MAX(event_index) FROM sync_events WHERE session_id = ?",
+        (session_id,),
+    ).fetchone()
+    return row[0] if row and row[0] is not None else 0
+
+
+def rebuild_search_index() -> int:
+    """Rebuild the FTS5 index from all eligible parts. Returns number of rows indexed."""
+    conn = _get_conn()
+    conn.execute("DELETE FROM search_index")
+    cursor = conn.execute(
+        """
+        INSERT INTO search_index (text, part_id, session_id)
+        SELECT text, id, session_id FROM parts
+        WHERE type IN ('text', 'tool', 'reasoning', 'error') AND text != ''
+        """
+    )
+    conn.commit()
+    return cursor.rowcount
