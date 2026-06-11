@@ -1,4 +1,4 @@
-"""FloodMind TUI — ChatScreen (OpenCode-style dual-column layout)."""
+"""FloodMind TUI - ChatScreen (DEPRECATED: use simple_tui.py instead)."""
 
 import time
 
@@ -27,37 +27,8 @@ class ChatPromptInput(PromptInput):
 class ChatScreen(Screen[None]):
 
     CSS = """
-    ChatScreen {
-        layout: horizontal;
-        padding: 0;
-    }
-    #chat-main {
-        width: 1fr;
-        height: 100%;
-    }
     #chat-spacer-top { height: 1; }
-    #chat-scroll {
-        height: 1fr;
-        background: #0a0a0a;
-        padding: 0 2;
-    }
-    #response-status {
-        height: 1;
-        color: #808080;
-        padding: 0 3;
-    }
-    ChatPromptInput {
-        height: auto;
-        max-height: 12;
-        margin: 0 2;
-        padding: 1 2;
-        border: solid #484848;
-        background: #141414;
-        color: #eeeeee;
-    }
-    ChatPromptInput:focus {
-        border: solid #9d7cd8;
-    }
+    #chat-scroll { height: 1fr; padding: 0 1; }
     """
 
     def __init__(self, session_id: str, initial_text: str = ""):
@@ -95,6 +66,7 @@ class ChatScreen(Screen[None]):
 
     def _init_agent(self, model_name: str = ""):
         try:
+            memory = None
             store_create_session(session_id=self._sid)
             if model_name:
                 from floodmind.config.model_presets import get_preset
@@ -124,7 +96,7 @@ class ChatScreen(Screen[None]):
                 memory = self._agent.memory
                 if hasattr(memory, '_compressor') and hasattr(memory._compressor, '_llm'):
                     memory._compressor._llm = llm
-            else:
+            if memory is None:
                 memory = DualMemory(
                     session_id=self._sid,
                     max_short_term=settings.agent.max_history,
@@ -152,7 +124,8 @@ class ChatScreen(Screen[None]):
                     settings.model.model_name = chosen
                     self._model_name = chosen
                     self._init_agent(model_name=chosen)
-                    self.sidebar.update_model(chosen)
+                    sidebar = self.query_one(SessionSidebar)
+                    sidebar.update_model(chosen)
                     self.notify(f"已切换为 {chosen}", title="模型切换")
             elif cmd == "sessions":
                 from floodmind.tui.dialogs.sessions import SessionsDialog
@@ -186,7 +159,7 @@ class ChatScreen(Screen[None]):
             pass
 
     @work(thread=True, group="agent")
-    async def _stream(self, user_input: str) -> None:
+    def _stream(self, user_input: str) -> None:
         if not self._agent:
             return
         t0 = time.time()
@@ -195,6 +168,8 @@ class ChatScreen(Screen[None]):
                 t = chunk.get("type", "")
                 if t == "answer_delta":
                     self.app.call_from_thread(self._on_token, chunk.get("content", ""))
+                elif t == "thought_delta":
+                    self.app.call_from_thread(self._set_status, f"Thinking: {chunk.get('content', '')[:80]}...")
                 elif t == "action_start":
                     name = chunk.get("tool_name", "?")
                     self.app.call_from_thread(self._add_tool, name)
@@ -202,6 +177,16 @@ class ChatScreen(Screen[None]):
                     name = chunk.get("tool_name", "")
                     out = chunk.get("content", "")
                     self.app.call_from_thread(self._add_tool_done, name, out)
+                elif t == "llm_step_start":
+                    model = chunk.get("model", self._model_name)
+                    iteration = chunk.get("iteration", 0)
+                    self.app.call_from_thread(self._set_status, f"LLM: {model} (round {iteration + 1})")
+                elif t == "llm_step_end":
+                    reason = chunk.get("finish_reason", "?")
+                    self.app.call_from_thread(self._set_status, f"Step done: {reason}")
+                elif t == "retry_attempt":
+                    attempt = chunk.get("attempt", 0)
+                    self.app.call_from_thread(self._set_status, f"Retrying... (attempt {attempt})")
                 elif t in ("error", "llm_token_error"):
                     self.app.call_from_thread(
                         self._set_status, f"Error: {chunk.get('content', '')}"

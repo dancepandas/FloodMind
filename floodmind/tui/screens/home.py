@@ -1,11 +1,11 @@
-"""FloodMind TUI - HomeScreen (OpenCode-style centered welcome)."""
+"""FloodMind TUI - HomeScreen (DEPRECATED: use simple_tui.py instead)."""
 
 import uuid
 
 from textual import on
 from textual.app import ComposeResult
 from textual.binding import Binding
-from textual.containers import Vertical, Middle, Horizontal
+from textual.containers import Vertical
 from textual.screen import Screen
 from textual.widgets import Static
 
@@ -13,7 +13,7 @@ from floodmind.tui.widgets.logo import LogoWidget
 from floodmind.tui.widgets.welcome import TipsWidget
 from floodmind.tui.widgets.prompt import PromptInput
 from floodmind.tui.widgets.footer import StatusBar
-from floodmind.tui.screens.chat import ChatScreen
+from floodmind.tui.screens.main import MainScreen
 
 
 class HomePromptInput(PromptInput):
@@ -28,46 +28,20 @@ class HomeScreen(Screen[None]):
     ]
 
     CSS = """
-    HomeScreen {
-        background: #0a0a0a;
-    }
-
     #home-content {
         height: 1fr;
         align: center middle;
     }
-
     #logo-container {
-        width: 72;
-        height: 5;
-        content-align: center middle;
-        margin-bottom: 2;
+        width: 80; height: 5;
+        content-align: center middle; margin-bottom: 2;
     }
-
     #tip-container {
-        width: 72;
-        height: 1;
-        content-align: center middle;
-        margin-bottom: 1;
+        width: 72; height: 1;
+        content-align: center middle; margin-bottom: 1;
     }
-
     #prompt-container {
-        width: 72;
-        height: auto;
-    }
-
-    HomePromptInput {
-        width: 100%;
-        height: auto;
-        max-height: 12;
-        padding: 1 2;
-        border: solid #484848;
-        background: #141414;
-        color: #eeeeee;
-    }
-
-    HomePromptInput:focus {
-        border: solid #9d7cd8;
+        width: 72; height: auto;
     }
     """
 
@@ -84,7 +58,16 @@ class HomeScreen(Screen[None]):
     @on(PromptInput.PromptSubmitted)
     async def _on_submit(self, event: PromptInput.PromptSubmitted) -> None:
         session_id = uuid.uuid4().hex[:12]
-        await self.app.push_screen(ChatScreen(session_id, event.text))
+        app = self.app
+        await self.app.push_screen(
+            MainScreen(
+                host=getattr(app, "_host", "localhost"),
+                port=getattr(app, "_port", 13014),
+                model_hint=getattr(app, "_cli_model", ""),
+                session_id=session_id,
+                initial_text=event.text,
+            )
+        )
 
     def action_send(self) -> None:
         self.query_one(HomePromptInput).action_submit()
