@@ -14,7 +14,7 @@ import logging
 import re
 import threading
 import hashlib
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, List
 from datetime import datetime
 from pathlib import Path
 from flask import Flask, request, jsonify, Response, send_from_directory, send_file
@@ -33,7 +33,7 @@ from floodmind.memory import SimpleMemory, DualMemory, SessionManager
 from floodmind.memory.session_manager import validate_session_id
 from floodmind.agent.native import create_flood_agent
 from floodmind.agent.scheduled_task_runtime import get_scheduled_task_runtime
-from floodmind.tools import set_rag_config, set_memory_instance, set_session_context
+from floodmind.tools import set_memory_instance, set_session_context
 
 # 配置日志
 logs_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'logs')
@@ -116,6 +116,10 @@ session_manager = SessionManager({
     "cleanup_interval_minutes": int(os.environ.get('CLEANUP_INTERVAL', 60)),
     "data_dir": DATA_DIR,
 })
+
+# 会话级状态存储（供 REST API 查询）
+_session_todos: Dict[str, List[Dict[str, Any]]] = {}
+_session_token_usage: Dict[str, Dict[str, int]] = {}
 
 session_files: Dict[str, Dict[str, dict]] = {}
 session_files_lock = threading.RLock()
@@ -789,9 +793,12 @@ def create_agent_for_session(session_id: str, enable_search: bool = False, enabl
     """为会话创建 Agent 实例（Native Runtime）"""
     session_id = _require_session_id(session_id)
     logger.info(f"创建新的智能体实例: {session_id}, runtime={settings.agent.runtime}")
+    # 清理会话级状态，避免旧数据污染
+    _session_todos.pop(session_id, None)
+    _session_token_usage.pop(session_id, None)
     
     if enable_rag is None:
-        enable_rag = settings.rag.enabled
+        enable_rag = False  # RAG now via MCP, see settings mcpServers
 
     if model_key:
         llm_service = ModelClient.from_settings_with_preset(
@@ -826,17 +833,7 @@ def create_agent_for_session(session_id: str, enable_search: bool = False, enabl
     agent._session_enable_search = enable_search
     agent._session_enable_rag = enable_rag
     agent._session_enable_reasoning = enable_reasoning
-    
-    logger.info(f"RAG 配置: enabled={enable_rag}, persist_dir={settings.rag.persist_dir}")
-    
-    set_rag_config(
-        enabled=enable_rag,
-        persist_dir=settings.rag.persist_dir,
-        embedding_model=settings.rag.embedding_model,
-        top_k=settings.rag.top_k,
-        session_id=session_id,
-    )
-    
+
     set_session_context(
         session_id=session_id,
         output_dir=str(session_manager.get_output_dir(session_id)),
@@ -858,7 +855,7 @@ def get_or_create_agent(session_id: str):
     with session_states_lock:
         state = dict(session_states.get(session_id, {}))
     enable_search = state.get('enable_search', True)
-    enable_rag = state.get('enable_rag', settings.rag.enabled)
+    enable_rag = state.get('enable_rag', False)
     enable_reasoning = state.get('enable_reasoning', True)
     model_key = state.get('model_key') or get_default_model_key()
 
@@ -866,7 +863,7 @@ def get_or_create_agent(session_id: str):
     if agent:
         current_model_key = getattr(agent, '_session_model_key', get_default_model_key())
         current_enable_search = getattr(agent, '_session_enable_search', False)
-        current_enable_rag = getattr(agent, '_session_enable_rag', settings.rag.enabled)
+        current_enable_rag = getattr(agent, '_session_enable_rag', False)
         current_enable_reasoning = getattr(agent, '_session_enable_reasoning', True)
 
         if (
@@ -1466,8 +1463,26 @@ def chat():
             if hasattr(session_manager, '_agents') and session_id in session_manager._agents:
                 del session_manager._agents[session_id]
                 logger.info(f"推理模式变更，重新创建Agent: {session_id}")
-        
+
         agent = get_or_create_agent(session_id)
+
+        # Wire SyncEvent persistence: persist key events to SQLite for state replay
+        from floodmind.memory.session_store import get_last_event_index
+        _event_index_tracker = {"idx": get_last_event_index(session_id)}
+
+        def _persist_event(event: dict) -> None:
+            etype = event.get("type", "unknown")
+            if etype in ("heartbeat", "answer_delta", "thought_delta"):
+                return
+            try:
+                _event_index_tracker["idx"] += 1
+                from floodmind.memory.session_store import append_sync_event
+                append_sync_event(session_id, _event_index_tracker["idx"], etype, event)
+            except Exception:
+                pass
+
+        if hasattr(agent, '_event_bus'):
+            agent._event_bus.set_persist_callback(_persist_event)
         
         session_file_map = _get_session_files_map(session_id)
         file_context = ""
@@ -1720,16 +1735,54 @@ def chat():
 
                     if chunk.get("type") in {"token", "answer_delta"} and chunk.get("content"):
                         raw_content = chunk["content"]
-                        chunk["content"] = raw_content if is_workflow_stream else sanitize_output(raw_content)
-                        streamed_text_parts.append(chunk["content"])
-                        snapshot['content'] += chunk['content']
+                        safe_content = raw_content if is_workflow_stream else sanitize_output(raw_content)
+                        streamed_text_parts.append(safe_content)
+                        snapshot['content'] += safe_content
                         touch_stream_snapshot(session_id)
-                        event = {'type': 'answer_delta', 'content': chunk["content"]}
+                        event = {'type': 'answer_delta', 'content': safe_content}
                         step_key = chunk.get('step_key', '')
                         if step_key:
                             event['step_key'] = step_key
                         emit(event)
                         continue
+
+                    # ── Todo / Token / 其他未明确处理的类型 — 直接透传到前端 ──
+                    if chunk.get("type") == "todo_updated":
+                        touch_stream_snapshot(session_id)
+                        _session_todos[session_id] = chunk.get("todos", [])
+                        emit(chunk)
+                        continue
+                    if chunk.get("type") == "token_usage":
+                        touch_stream_snapshot(session_id)
+                        prev = _session_token_usage.get(session_id, {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0})
+                        _session_token_usage[session_id] = {
+                            "prompt_tokens": prev["prompt_tokens"] + chunk.get("prompt_tokens", 0),
+                            "completion_tokens": prev["completion_tokens"] + chunk.get("completion_tokens", 0),
+                            "total_tokens": prev["total_tokens"] + chunk.get("total_tokens", 0),
+                        }
+                        emit(chunk)
+                        continue
+
+                    # ── 新增事件类型（Phase 1-2 引入）──
+                    if chunk.get("type") == "llm_step_start":
+                        touch_stream_snapshot(session_id)
+                        emit(chunk)
+                        continue
+                    if chunk.get("type") == "llm_step_end":
+                        touch_stream_snapshot(session_id)
+                        emit(chunk)
+                        continue
+                    if chunk.get("type") == "retry_attempt":
+                        emit(chunk)
+                        continue
+                    if chunk.get("type") == "context_compress_start":
+                        emit(chunk)
+                        continue
+                    if chunk.get("type") == "context_compress_done":
+                        emit(chunk)
+                        continue
+
+                    # 未知事件类型：静默吞掉，避免干扰前端
 
                 final_text = final_answer_text.strip() or ''.join(streamed_text_parts)
                 approved_artifact_paths[:] = resolve_artifact_references(session_id, approved_artifact_paths, final_text)
@@ -1821,7 +1874,8 @@ def chat():
                         break
 
                     if time.time() - stream_start > _SSE_MAX_LIFETIME_SEC:
-                        yield _make_sse_event("notify", {"level": "warning", "message": "会话已超过最大时长，连接自动关闭"})
+                        yield stream_json_line({'type': 'notify', 'level': 'warning', 'message': '会话已超过最大时长，连接自动关闭'})
+                        yield stream_json_line({'type': 'stream_end'})
                         break
 
                     resume_event.wait(timeout=5.0)
@@ -1854,19 +1908,31 @@ def chat():
 
 @app.route('/api/stream/resume', methods=['GET'])
 def stream_resume():
-    """恢复断开的流式连接，回放已缓冲的事件并继续流式输出"""
+    """恢复断开的流式连接。优先从 sync_events 表回放持久化事件，
+    若无可回放则回退到内存 event_buffer 继续流式输出。"""
     session_id = _require_session_id(request.args.get('session_id', 'default'))
     after_index = int(request.args.get('after_index', '0'))
     state = ensure_session_state(session_id)
     snapshot = state.get('stream_snapshot')
 
-    if not snapshot:
-        return jsonify({'status': 'idle', 'message': '没有正在进行的流'}), 200
-
     def replay_and_continue():
-        event_buffer = snapshot.get('event_buffer', [])
-        buffer_lock = snapshot.get('buffer_lock', threading.Lock())
-        replayed = after_index
+        # 优先从 sync_events 表回放持久化事件
+        try:
+            from floodmind.memory.session_store import get_sync_events
+            persisted = get_sync_events(session_id, after_index=after_index, limit=500)
+            if persisted:
+                for evt in persisted:
+                    yield stream_json_line(json.loads(evt['event_data']))
+                after_replay = persisted[-1]['event_index']
+            else:
+                after_replay = after_index
+        except Exception:
+            after_replay = after_index
+
+        # 回退到内存 event_buffer 继续实时流
+        event_buffer = snapshot.get('event_buffer', []) if snapshot else []
+        buffer_lock = snapshot.get('buffer_lock', threading.Lock()) if snapshot else threading.Lock()
+        replayed = max(after_replay, after_index)
         stale_rounds = 0
         max_stale_rounds = 6
 
@@ -1878,7 +1944,7 @@ def stream_resume():
                 replayed += 1
                 stale_rounds = 0
 
-            if not snapshot.get('is_streaming'):
+            if not snapshot or not snapshot.get('is_streaming'):
                 break
 
             resume_event = snapshot.get('resume_event')
@@ -1893,7 +1959,7 @@ def stream_resume():
             if new_buf_len == buf_len:
                 stale_rounds += 1
                 if stale_rounds >= max_stale_rounds:
-                    logger.info("stream_resume: no new events for 30s, closing")
+                    yield stream_json_line({'type': 'stream_end'})
                     break
             else:
                 stale_rounds = 0
@@ -1903,17 +1969,40 @@ def stream_resume():
                 yield event_buffer[replayed]
                 replayed += 1
 
-    return Response(
-        replay_and_continue(),
-        mimetype='application/x-ndjson',
-        headers={
-            'Cache-Control': 'no-cache',
-            'X-Accel-Buffering': 'no',
-        }
-    )
+    if not snapshot:
+        return jsonify({'status': 'idle', 'message': '没有正在进行的流'}), 200
+    return Response(replay_and_continue(), mimetype='application/x-ndjson')
 
 
-@app.route('/api/clear', methods=['POST'])
+@app.route('/api/sessions/<session_id>/events', methods=['GET'])
+def get_session_events(session_id: str):
+    """事件溯源回放：获取指定 session 的持久化事件日志。
+
+    Query params:
+        after_index — 从哪个事件序号之后开始（默认 0）
+        limit       — 最大返回事件数（默认 200）
+    """
+    try:
+        from floodmind.memory.session_store import get_sync_events, get_last_event_index
+        session_id = _require_session_id(session_id)
+        after_index = request.args.get('after_index', 0, type=int)
+        limit = request.args.get('limit', 200, type=int)
+
+        events = get_sync_events(session_id, after_index=after_index, limit=limit)
+        last_index = get_last_event_index(session_id)
+
+        return jsonify({
+            'status': 'success',
+            'events': events,
+            'last_index': last_index,
+            'has_more': len(events) >= limit,
+        })
+    except Exception as e:
+        logger.error(f"获取事件失败: {e}")
+        return jsonify({'status': 'error', 'message': str(e)}), 500
+
+
+@app.route('/api/session/config', methods=['POST'])
 def clear_memory():
     """清空会话记忆"""
     try:
@@ -2083,6 +2172,36 @@ def get_session(session_id: str):
         }), 500
 
 
+@app.route('/api/sessions/<session_id>/messages', methods=['GET'])
+def get_session_messages_page(session_id: str):
+    """Cursor-based 分页获取会话消息。
+
+    Query params:
+        limit  — 每页数量（默认 50）
+        cursor — 上页返回的游标（首页不传）
+    """
+    try:
+        from floodmind.memory.session_store import get_messages_page
+        session_id = _require_session_id(session_id)
+        limit = request.args.get('limit', 50, type=int)
+        cursor = request.args.get('cursor', None, type=str)
+
+        result = get_messages_page(session_id, limit=limit, before_cursor=cursor or None)
+
+        return jsonify({
+            'status': 'success',
+            'messages': result['items'],
+            'more': result['more'],
+            'cursor': result['cursor'],
+        })
+    except Exception as e:
+        logger.error(f"分页获取消息失败: {e}")
+        return jsonify({
+            'status': 'error',
+            'message': str(e)
+        }), 500
+
+
 @app.route('/api/sessions/<session_id>', methods=['DELETE'])
 def delete_session_route(session_id: str):
     """删除会话"""
@@ -2104,7 +2223,9 @@ def delete_session_route(session_id: str):
             session_abort_flags.pop(session_id, None)
         with session_streaming_lock:
             session_streaming_flags.pop(session_id, None)
-        
+        _session_todos.pop(session_id, None)
+        _session_token_usage.pop(session_id, None)
+
         logger.info(f"已删除会话: {session_id}")
         
         return jsonify({
@@ -2269,6 +2390,36 @@ def get_memory_stats():
             'status': 'error',
             'message': str(e)
         }), 500
+
+
+@app.route('/api/todos', methods=['GET'])
+def get_todos_api():
+    """获取当前会话的 Todo 任务列表。"""
+    try:
+        session_id = _require_session_id(request.args.get('session_id', 'default'))
+        todos = _session_todos.get(session_id, [])
+        return jsonify({
+            'status': 'success',
+            'todos': todos,
+        })
+    except Exception as e:
+        logger.error(f"获取 Todo 列表失败: {e}")
+        return jsonify({'status': 'error', 'message': str(e)}), 500
+
+
+@app.route('/api/token-usage', methods=['GET'])
+def get_token_usage_api():
+    """获取当前会话的 Token 用量统计。"""
+    try:
+        session_id = _require_session_id(request.args.get('session_id', 'default'))
+        usage = _session_token_usage.get(session_id, {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0})
+        return jsonify({
+            'status': 'success',
+            'usage': usage,
+        })
+    except Exception as e:
+        logger.error(f"获取 Token 用量失败: {e}")
+        return jsonify({'status': 'error', 'message': str(e)}), 500
 
 
 @app.route('/api/memory/heartbeat', methods=['POST'])
@@ -2610,15 +2761,6 @@ if __name__ == '__main__':
     args = parser.parse_args()
     
     session_manager.start_cleanup_thread()
-    
-    logger.info("预加载 Embedding 模型与知识检索器...")
-    try:
-        from floodmind.tools.base_tools import _get_retriever, set_rag_config
-        set_rag_config(enabled=True, persist_dir="./data/vector_store", embedding_model="BAAI/bge-base-zh-v1.5", top_k=10, session_id=None)
-        _get_retriever()
-        logger.info("Embedding 模型与知识检索器预加载完成")
-    except Exception as e:
-        logger.warning(f"预加载知识检索器失败（不影响功能）: {e}")
     
     logger.info(f"启动 FloodAgent Web 服务器")
     logger.info(f"访问地址: http://{args.host}:{args.port}")
