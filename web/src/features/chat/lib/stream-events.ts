@@ -9,7 +9,7 @@ import {
 } from "@/features/chat/lib/message-blocks";
 import { createLogger } from "@/lib/logger";
 import { uuid } from "@/lib/utils";
-import type { ChatMessage, GeneratedArtifact, ReferenceLink, ToolActivity, WorkflowPlan } from "@/types/app";
+import type { ChatMessage, GeneratedArtifact, ReferenceLink, ToolActivity, WorkflowPlan, TodoState } from "@/types/app";
 
 const log = createLogger("Stream");
 
@@ -66,10 +66,12 @@ interface StreamHandlers {
   updateAssistant: (updater: (message: ChatMessage) => ChatMessage) => void;
   pushToolActivity: (toolName: string, content: string, status: ToolActivity["status"]) => void;
   setWorkflow: (updater: WorkflowPlan | ((prev: WorkflowPlan | null) => WorkflowPlan | null)) => void;
+  setTodos: (updater: TodoState | ((prev: TodoState) => TodoState)) => void;
+  setTokenUsage?: (usage: { prompt_tokens: number; completion_tokens: number; total_tokens: number }) => void;
 }
 
 export function applyStreamEvent(data: Record<string, any>, handlers: StreamHandlers) {
-  const { updateAssistant, pushToolActivity, setWorkflow } = handlers;
+  const { updateAssistant, pushToolActivity, setWorkflow, setTodos, setTokenUsage } = handlers;
   const eventType = data.type || "(no type)";
 
   if (data.type === "error") {
@@ -107,6 +109,30 @@ export function applyStreamEvent(data: Record<string, any>, handlers: StreamHand
   }
 
   if (data.type === "heartbeat") {
+    return;
+  }
+
+  // ── Phase 1-2 新增事件类型 ──
+
+  if (data.type === "llm_step_start") {
+    log.info(`[llm_step_start] iteration=${data.iteration} model=${data.model || ""}`);
+    pushToolActivity("llm", data.model ? `${data.model} (第${(data.iteration ?? 0) + 1}轮)` : `Step ${data.iteration ?? ""}`, "running");
+    return;
+  }
+
+  if (data.type === "llm_step_end") {
+    log.info(`[llm_step_end] reason=${data.finish_reason}`);
+    const reason = data.finish_reason === "tool_calls" ? "调用工具" : "完成";
+    pushToolActivity("llm", reason, "done");
+    if (data.tokens && setTokenUsage) {
+      setTokenUsage(data.tokens as { prompt_tokens: number; completion_tokens: number; total_tokens: number });
+    }
+    return;
+  }
+
+  if (data.type === "retry_attempt") {
+    log.info(`[retry_attempt] attempt=${data.attempt}`);
+    pushToolActivity("system", `重试第 ${data.attempt} 次...`, "running");
     return;
   }
 
@@ -318,6 +344,35 @@ if (data.type === "action_start" || data.type === "tool_status") {
   if (data.type === "stream_end") {
     log.info(`[${eventType}] stream complete`);
     updateAssistant((message) => finalizeThoughtBlocks(message));
+    return;
+  }
+
+  if (data.type === "todo_updated") {
+    const items = (data.todos || []) as Array<Record<string, any>>;
+    log.info(`[${eventType}] todos=${items.length}`);
+    setTodos({
+      items: items.map((t) => ({
+        id: String(t.id || ""),
+        content: String(t.content || ""),
+        status: ["pending", "in_progress", "completed", "cancelled"].includes(t.status)
+          ? t.status
+          : "pending",
+        priority: ["high", "normal", "low"].includes(t.priority)
+          ? t.priority
+          : "normal",
+        created_at: t.created_at,
+        updated_at: t.updated_at,
+      })),
+    });
+    return;
+  }
+
+  if (data.type === "token_usage" && setTokenUsage) {
+    setTokenUsage({
+      prompt_tokens: data.prompt_tokens || 0,
+      completion_tokens: data.completion_tokens || 0,
+      total_tokens: data.total_tokens || 0,
+    });
     return;
   }
 
