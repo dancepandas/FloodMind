@@ -1,9 +1,9 @@
 ---
-name: TSLM
+name: chronos
 description: "Use this skill whenever the user provides historical flow data and wants to predict future values using a time-series large model / AI model / data-driven model. Trigger when the user mentions: 时序大模型, AI预测, 数据驱动模型, Chronos, 流量预测, flood prediction, time series forecasting — even casually like '用AI预测一下流量' or '帮我预测未来的水位'. Do NOT trigger when the user only wants to preview or analyze data without prediction, or when they want to validate historical model accuracy (use validation skill instead)."
 ---
 
-# TSLM — 流量预测
+# chronos — 时序预测
 
 基于时序大模型（Chronos）的洪水预测，支持单变量和协变量模式。
 

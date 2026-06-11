@@ -6,8 +6,6 @@
 from floodmind.tools.base_tools import (
     get_skill,
     exec_bash,
-    knowledge_search,
-    add_knowledge,
     web_search,
     fetch_webpage,
     add_memory,
@@ -18,13 +16,12 @@ from floodmind.tools.base_tools import (
     cancel_scheduled_task,
     reset_retry_guard,
     set_skill_registry,
-    set_rag_config,
     set_memory_instance,
     set_session_context,
     get_current_session_output_dir,
     _register_all_tools,
 )
-
+from floodmind.tools.todo_tools import todo_write, todo_list
 from floodmind.tools.agent_tool import (
     AgentTool,
     ToolRegistry,
@@ -43,8 +40,6 @@ from floodmind.tools.agent_tool import (
 __all__ = [
     'get_skill',
     'exec_bash',
-    'knowledge_search',
-    'add_knowledge',
     'web_search',
     'fetch_webpage',
     'add_memory',
@@ -55,11 +50,12 @@ __all__ = [
     'cancel_scheduled_task',
     'reset_retry_guard',
     'set_skill_registry',
-    'set_rag_config',
     'set_memory_instance',
     'set_session_context',
     'get_current_session_output_dir',
     '_register_all_tools',
+    'todo_write',
+    'todo_list',
     'AgentTool',
     'ToolRegistry',
     'PermissionBehavior',

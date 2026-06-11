@@ -79,7 +79,7 @@ def run_menu(model: Optional[str] = None, port: int = 13014, host: str = "0.0.0.
         print("\n  再见！")
         return 0
     if choice == "t":
-        return _run_tui(model=model or "", port=port)
+        return _run_tui(model=model or "", port=port, host=host)
     if choice == "w":
         return _run_web(host=host, port=port, open_browser=True)
     if choice == "c":

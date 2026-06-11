@@ -1,24 +1,32 @@
-"""FloodMind TUI — Logo widget with shimmer animation."""
+"""FloodMind TUI — Logo widget with shimmer animation.
+
+使用 ThemeManager 语义颜色系统。
+"""
 
 import math
 from textual.widget import Widget
 from rich.text import Text
 from rich.console import RenderableType
 
-from floodmind.tui.theme import C
+from floodmind.tui.theme import get_color
 
 LOGO_LINES = [
-    " ███████ ██       ██████   ██████  ███    ███ ██ ███    ██ ██████ ",
-    " ██      ██      ██    ██ ██    ██ ████  ████ ██ ████   ██ ██   ██",
-    " █████   ██      ██    ██ ██    ██ ██ ████ ██ ██ ██ ██  ██ ██   ██",
-    " ██      ██      ██    ██ ██    ██ ██  ██  ██ ██ ██  ██ ██ ██   ██",
-    " ██      ███████  ██████   ██████  ██      ██ ██ ██   ████ ██████ ",
+    "███████ ██       ██████   ██████  ██████   ███    ███ ███ ███    ██ ██████  ",
+    "██      ██      ██    ██ ██    ██ ██   ██  ████  ████ ███ ████   ██ ██   ██ ",
+    "█████   ██      ██    ██ ██    ██ ██   ██  ██ ████ ██ ███ ██ ██  ██ ██   ██ ",
+    "██      ██      ██    ██ ██    ██ ██   ██  ██  ██  ██ ███ ██  ██ ██ ██   ██ ",
+    "██      ███████  ██████   ██████  ██████   ██      ██ ███ ██   ████ ██████  ",
 ]
 
 
 def _hex_to_rgb(h: str):
     h = h.lstrip("#")
-    return tuple(int(h[i : i + 2], 16) for i in (0, 2, 4))
+    if len(h) != 6:
+        return (128, 128, 128)
+    try:
+        return tuple(int(h[i : i + 2], 16) for i in (0, 2, 4))
+    except ValueError:
+        return (128, 128, 128)
 
 
 def _rgb_to_hex(r, g, b):
@@ -35,9 +43,9 @@ def _lerp_color(c1: str, c2: str, t: float) -> str:
 
 
 def _render_line(line: str, phase: float, max_width: int) -> Text:
-    muted = C["text_muted"]
-    bright = C["text"]
-    primary = C["primary"]
+    muted = get_color("textMuted", "#808080")
+    bright = get_color("text", "#e0e0e0")
+    primary = get_color("primary", "#5f87ff")
     peak = "#ffffff"
     half_width = max_width * 0.22
     text = Text()
@@ -61,7 +69,7 @@ def _render_line(line: str, phase: float, max_width: int) -> Text:
 
 class LogoWidget(Widget):
     can_focus = False
-    
+
     DEFAULT_CSS = """
     LogoWidget {
         width: 100%;

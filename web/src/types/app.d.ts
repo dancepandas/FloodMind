@@ -108,7 +108,6 @@ export interface WorkflowPlan {
 export interface SessionConfig {
     model_key: string;
     enable_search: boolean;
-    enable_rag: boolean;
     enable_reasoning: boolean;
 }
 export interface ModelOption {

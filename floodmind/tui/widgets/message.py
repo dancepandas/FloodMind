@@ -1,4 +1,7 @@
-"""FloodMind TUI — Message widgets (OpenCode-style cards)."""
+"""FloodMind TUI — Message widgets (OpenCode-style cards).
+
+使用 ThemeManager 语义颜色系统。
+"""
 
 from rich.markdown import Markdown
 from rich.text import Text
@@ -6,7 +9,7 @@ from rich.console import RenderableType
 from textual.widget import Widget
 from textual.reactive import reactive
 
-from floodmind.tui.theme import C, tool_icon
+from floodmind.tui.theme import tool_icon, get_color
 
 
 class UserMessage(Widget):
@@ -15,8 +18,8 @@ class UserMessage(Widget):
     CSS = """
     UserMessage {
         margin: 1 0 0 0;
-        border-left: thick #fab283;
-        background: #141414;
+        border-left: thick #5f87ff;
+        background: #1a1a2e;
         padding: 1 2;
     }
     """
@@ -40,12 +43,12 @@ class AssistantMessage(Widget):
     CSS = """
     AssistantMessage {
         margin: 1 0 0 0;
-        border-left: thick #9d7cd8;
-        background: #0a0a0a;
+        border-left: thick #7c6fae;
+        background: #0a0a0f;
         padding: 1 2;
     }
     AssistantMessage.-streaming {
-        border-left: thick #f5a742;
+        border-left: thick #e5a443;
     }
     """
 
@@ -88,7 +91,7 @@ class AssistantMeta(Widget):
     CSS = """
     AssistantMeta {
         height: 1;
-        color: #808080;
+        color: #808090;
         padding-left: 4;
         margin: 0;
     }
@@ -101,10 +104,10 @@ class AssistantMeta(Widget):
 
     def render(self):
         text = Text()
-        text.append("▣ ", style=C["accent"])
-        text.append(self._model, style=C["text"])
+        text.append("▣ ", style=get_color("accent"))
+        text.append(self._model, style=get_color("text"))
         if self._duration:
-            text.append(f" · {self._duration}", style=C["text_muted"])
+            text.append(f" · {self._duration}", style=get_color("textMuted"))
         return text
 
 
@@ -115,16 +118,16 @@ class ToolCard(Widget):
     CSS = """
     ToolCard {
         margin: 0 0;
-        border-left: thick #f5a742;
-        background: #141414;
+        border-left: thick #e5a443;
+        background: #1a1a2e;
         padding: 0 2;
         height: auto;
     }
     ToolCard.-completed {
-        border-left: thick #7fd88f;
+        border-left: thick #4caf7d;
     }
     #tool-output {
-        color: #808080;
+        color: #808090;
         padding-left: 2;
         max-height: 6;
     }
@@ -147,19 +150,18 @@ class ToolCard(Widget):
             self.add_class("completed")
 
     def render(self) -> RenderableType:
-        icon = tool_icon(self._tool_name)
         header = Text()
         if self.completed:
-            header.append(f"  ✓  ", style=C["success"])
+            header.append(f"  ✓  ", style=get_color("success"))
         else:
-            header.append(f"  ●  ", style=C["tool_run"])
-        header.append(self._tool_name, style=f"bold {C['text']}")
+            header.append(f"  ●  ", style=get_color("warning"))
+        header.append(self._tool_name, style=f"bold {get_color('text')}")
         result = Text()
         result.append_text(header)
         if self._output and self._output.strip() and self._output.strip() != "Running...":
             result.append("\n")
             preview = self._output[:300]
-            result.append(f"    {preview}", style=C["text_muted"])
+            result.append(f"    {preview}", style=get_color("textMuted"))
         return result
 
 
@@ -210,10 +212,9 @@ class ToolWidget(Widget):
         return self._output
 
     def render(self) -> RenderableType:
-        icon = tool_icon(self._tool_name)
         t = Text()
-        t.append(f"  {icon}  {self._tool_name}", style=f"bold {C['tool_run']}")
+        t.append(f"  {tool_icon(self._tool_name)}  {self._tool_name}", style=f"bold {get_color('warning')}")
         if self._output and self._output.strip() and self._output.strip() != "Running...":
             t.append("\n")
-            t.append(f"    {self._output[:300]}", style=C["text_muted"])
+            t.append(f"    {self._output[:300]}", style=get_color("textMuted"))
         return t

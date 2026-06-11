@@ -36,8 +36,8 @@ class ConfirmDialog(ModalScreen[bool]):
     #confirm-box {
         margin-top: 8;
         padding: 2 4;
-        border: solid $accent;
-        background: $surface;
+        border: solid #7c6fae;
+        background: #1a1a2e;
         min-width: 50;
     }
     #confirm-msg { margin-bottom: 2; }

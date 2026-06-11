@@ -1,0 +1,110 @@
+"""FloodMind TUI - HomeScreen (OpenCode-style centered welcome).
+
+设计原则 (tui-design-skill):
+- 居中的欢迎界面，清晰的信息层次
+- 输入框聚焦时视觉反馈
+- Footer hints 显示常用快捷键
+- 响应式: 小屏幕时组件自动缩放
+"""
+
+import uuid
+
+from textual import on
+from textual.app import ComposeResult
+from textual.binding import Binding
+from textual.containers import Vertical, Middle, Horizontal
+from textual.screen import Screen
+from textual.widgets import Static
+
+from floodmind.tui.widgets.logo import LogoWidget
+from floodmind.tui.widgets.welcome import TipsWidget
+from floodmind.tui.widgets.prompt import PromptInput
+from floodmind.tui.widgets.footer import StatusBar
+from floodmind.tui.screens.chat import ChatScreen
+
+
+class HomePromptInput(PromptInput):
+    """首页输入框 — 支持 Esc 退出."""
+
+    BINDINGS = [
+        Binding("escape", "app.quit", "退出", key_display="esc"),
+    ]
+
+
+class HomeScreen(Screen[None]):
+    """首页 — 欢迎界面和初始输入."""
+
+    BINDINGS = [
+        Binding("ctrl+j,alt+enter", "send", "发送", key_display="^j"),
+        Binding("ctrl+p", "command_palette", "命令面板"),
+        Binding("ctrl+o", "options", "选项"),
+        Binding("question_mark", "help", "帮助", key_display="?"),
+    ]
+
+    DEFAULT_CSS = """
+    HomeScreen {
+        background: $bg;
+    }
+    #home-content {
+        height: 1fr;
+        align: center middle;
+    }
+    #logo-container {
+        width: 72;
+        height: 5;
+        content-align: center middle;
+        margin-bottom: 2;
+    }
+    #tip-container {
+        width: 72;
+        height: 1;
+        content-align: center middle;
+        margin-bottom: 1;
+    }
+    #prompt-container {
+        width: 72;
+        height: auto;
+    }
+    HomePromptInput {
+        width: 100%;
+        height: auto;
+        max-height: 12;
+        padding: 1 2;
+        border: solid $border;
+        background: $surface;
+        color: $text;
+    }
+    HomePromptInput:focus {
+        border: solid $accent;
+    }
+    """
+
+    def compose(self) -> ComposeResult:
+        yield StatusBar()
+        with Vertical(id="home-content"):
+            with Vertical(id="logo-container"):
+                yield LogoWidget()
+            with Vertical(id="tip-container"):
+                yield TipsWidget()
+            with Vertical(id="prompt-container"):
+                yield HomePromptInput()
+
+    @on(PromptInput.PromptSubmitted)
+    async def _on_submit(self, event: PromptInput.PromptSubmitted) -> None:
+        session_id = uuid.uuid4().hex[:12]
+        await self.app.push_screen(ChatScreen(session_id, event.text))
+
+    def action_send(self) -> None:
+        self.query_one(HomePromptInput).action_submit()
+
+    def action_options(self) -> None:
+        from floodmind.tui.dialogs.models import ModelsDialog
+        self.push_screen(ModelsDialog())
+
+    def action_command_palette(self) -> None:
+        from floodmind.tui.dialogs.command_palette import CommandPaletteDialog
+        self.push_screen(CommandPaletteDialog())
+
+    def action_help(self) -> None:
+        from floodmind.tui.dialogs.help import HelpDialog
+        self.push_screen(HelpDialog())

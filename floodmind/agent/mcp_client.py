@@ -13,6 +13,7 @@ MCP (Model Context Protocol) Client
 
 import json
 import logging
+import os
 import subprocess
 import threading
 import time
@@ -131,9 +132,9 @@ class McpClientConnection:
         if not command:
             raise McpConnectionError("stdio transport 需要 command 参数")
         args = self._config.get("args", [])
+        # expand ~ in args for cross-platform paths
+        args = [os.path.expanduser(a) if isinstance(a, str) else a for a in args]
         env = self._config.get("env", {})
-
-        import os
         merged_env = {**os.environ, **env}
 
         self._process = subprocess.Popen(
@@ -143,6 +144,8 @@ class McpClientConnection:
             stderr=subprocess.PIPE,
             env=merged_env,
             text=True,
+            encoding="utf-8",
+            errors="replace",
         )
         # 守护线程持续排空 stderr，防止管道缓冲区满导致子进程死锁
         def _drain_stderr():

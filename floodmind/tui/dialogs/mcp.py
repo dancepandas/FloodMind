@@ -5,7 +5,7 @@ FloodMind TUI — /mcp dialog.
 from textual.app import ComposeResult
 from textual.screen import ModalScreen
 from textual.widgets import Static, Header, Button, OptionList
-from textual.containers import Horizontal, VerticalScroll
+from textual.containers import Horizontal
 from textual.binding import Binding
 
 from floodmind.config.settings import get_config, save_config
@@ -79,14 +79,14 @@ class McpDialog(ModalScreen[bool]):
     #mcp-title {
         width: 62;
         padding: 1 2 0 2;
-        background: $surface;
-        border: solid $accent;
+        background: #1a1a2e;
+        border: solid #7c6fae;
         border-bottom: none;
     }
     #mcp-list {
         width: 62;
         max-height: 16;
-        border: solid $accent;
+        border: solid #7c6fae;
         border-top: none;
         border-bottom: none;
     }
@@ -94,8 +94,8 @@ class McpDialog(ModalScreen[bool]):
         width: 62;
         align-horizontal: right;
         padding: 0 2 1 2;
-        background: $surface;
-        border: solid $accent;
+        background: #1a1a2e;
+        border: solid #7c6fae;
         border-top: none;
     }
     """

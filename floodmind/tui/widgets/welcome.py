@@ -1,10 +1,13 @@
-"""FloodMind TUI — Tips widget."""
+"""FloodMind TUI — Tips widget.
+
+使用 ThemeManager 语义颜色系统。
+"""
 
 import random
 from rich.text import Text
 from textual.widgets import Static
 
-from floodmind.tui.theme import C
+from floodmind.tui.theme import get_color
 
 TIPS = [
     "输入 / 查看所有可用命令",
@@ -37,6 +40,6 @@ class TipsWidget(Static):
 
     def render(self):
         text = Text()
-        text.append("● Tip ", style=C["warning"])
-        text.append(self._tip, style=C["text_muted"])
+        text.append("● Tip ", style=get_color("warning"))
+        text.append(self._tip, style=get_color("textMuted"))
         return text

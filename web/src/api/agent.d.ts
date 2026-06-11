@@ -11,7 +11,6 @@ interface InitResponse {
     model_key: string;
     model_name: string;
     enable_search: boolean;
-    enable_rag: boolean;
     enable_reasoning: boolean;
 }
 interface ConfigResponse {

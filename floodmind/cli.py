@@ -120,7 +120,7 @@ def main(ctx, tui, web_mode, port, host, model, reasoning, verbose):
 
     if tui:
         _validate_api_key()
-        return _run_tui(model=model or "", port=port)
+        return _run_tui(model=model or "", port=port, host=host)
 
     if web_mode:
         _validate_api_key()

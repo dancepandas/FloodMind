@@ -22,7 +22,7 @@ from floodmind.config.settings import settings
 from floodmind.memory import DualMemory, SessionManager
 from floodmind.agent.native.model_client import ModelClient
 from floodmind.config.model_presets import get_default_model_key
-from floodmind.tools import set_rag_config, set_session_context
+from floodmind.tools import set_session_context
 
 
 PROJECT_ROOT = Path(__file__).resolve().parent
@@ -71,14 +71,6 @@ def build_session_manager() -> SessionManager:
 
 def create_agent_for_session(session_manager: SessionManager, session_id: str):
     set_session_context(session_id=session_id, output_dir=str(session_manager.get_output_dir(session_id)))
-    set_rag_config(
-        enabled=settings.rag.enabled,
-        persist_dir=settings.rag.persist_dir,
-        embedding_model=settings.rag.embedding_model,
-        top_k=settings.rag.top_k,
-        session_id=session_id,
-    )
-
     model_key = get_default_model_key()
     llm_service = ModelClient.from_settings_with_preset(
         model_key,

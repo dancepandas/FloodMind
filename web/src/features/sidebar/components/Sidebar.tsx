@@ -1,4 +1,4 @@
-import { MessageSquare, Plus, Trash2, Wifi, Database, Cpu, Clock } from "lucide-react";
+import { MessageSquare, Plus, Trash2, Wifi, Cpu, Clock } from "lucide-react";
 import type { SessionSummary } from "@/types/app";
 
 interface SidebarProps {
@@ -173,7 +173,6 @@ export function Sidebar({
       >
         {[
           { Icon: Wifi, label: 'API', color: 'var(--teal-500)' },
-          { Icon: Database, label: 'RAG', color: 'var(--teal-400)' },
           { Icon: Cpu, label: 'LLM', color: 'var(--ocean-400)' },
         ].map(({ Icon, label, color }) => (
           <div key={label} className="flex items-center gap-1.5">

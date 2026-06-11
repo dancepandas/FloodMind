@@ -5,8 +5,8 @@
 具备完整的行为元数据（readonly/destructive/concurrency_safe/interrupt_behavior）。
 
 工具分类：
-- 只读工具: GetSkill, KnowledgeSearch, MemorySearch
-- 写入工具: UpdateProjectInstructions, KnowledgeAdd, MemoryAdd
+- 只读工具: GetSkill, MemorySearch, WebSearch, WebFetch
+- 写入工具: UpdateProjectInstructions, MemoryAdd
 - 执行工具: Bash
 - 网络工具: WebSearch, WebFetch
 - 调度工具: CreateScheduledTask, ListScheduledTasks, CancelScheduledTask
@@ -42,6 +42,12 @@ from floodmind.tools.agent_tool import (
     resolve_tool_path,
 )
 from floodmind.agent.runtime.contracts.permissions import ToolPermissionPolicy
+from floodmind.tools.session_context import (
+    SESSION_CONTEXT,
+    set_session_context,
+    get_current_session_output_dir,
+    get_current_session_id,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -51,7 +57,7 @@ _RETRY_GUARD_STATES: Dict[str, dict] = {}
 
 
 def _get_retry_guard_state() -> dict:
-    session_id = _SESSION_CONTEXT.get("session_id", "") or "default"
+    session_id = SESSION_CONTEXT.get("session_id", "") or "default"
     with _RETRY_GUARD_LOCK:
         if session_id not in _RETRY_GUARD_STATES:
             _RETRY_GUARD_STATES[session_id] = {
@@ -77,8 +83,8 @@ def _build_exec_env() -> Dict[str, str]:
     env['PYTHONPATH'] = str(_PROJECT_ROOT) if not existing_pythonpath else f"{_PROJECT_ROOT}{os.pathsep}{existing_pythonpath}"
     env.setdefault('MPLBACKEND', 'Agg')
     env.setdefault('MPLCONFIGDIR', str(_PROJECT_ROOT / 'data' / 'matplotlib'))
-    output_dir = _SESSION_CONTEXT.get("output_dir")
-    session_id = _SESSION_CONTEXT.get("session_id")
+    output_dir = SESSION_CONTEXT.get("output_dir")
+    session_id = SESSION_CONTEXT.get("session_id")
     if session_id:
         env['SESSION_ID'] = str(session_id)
     if output_dir:
@@ -571,9 +577,9 @@ def _impl_exec_bash(command: str = "", workdir: str = "", timeout: int = 120, en
         if workdir and workdir.strip():
             cwd = resolve_tool_path(workdir.strip(), access="read").resolved
             if not cwd.is_dir():
-                cwd = Path(_SESSION_CONTEXT.get("output_dir", str(_PROJECT_ROOT)))
+                cwd = Path(SESSION_CONTEXT.get("output_dir", str(_PROJECT_ROOT)))
         else:
-            cwd = Path(_SESSION_CONTEXT.get("output_dir", str(_PROJECT_ROOT)))
+            cwd = Path(SESSION_CONTEXT.get("output_dir", str(_PROJECT_ROOT)))
 
         process = subprocess.Popen(
             shell_cmd,
@@ -674,395 +680,6 @@ exec_bash = build_agent_tool(
 
 
 
-
-class _RAGConfigManager:
-    _RETRIEVER_KEYS = ("persist_dir", "embedding_model", "top_k")
-
-    def __init__(self):
-        self._config: Dict[str, Any] = {
-            "enabled": False,
-            "persist_dir": "./data/vector_store",
-            "embedding_model": "BAAI/bge-base-zh-v1.5",
-            "top_k": 5,
-            "session_id": None,
-        }
-        self._retriever: Optional[Any] = None
-
-    def get(self, key: str, default: Any = None) -> Any:
-        return self._config.get(key, default)
-
-    def update(self, **kwargs) -> None:
-        retriever_changed = any(
-            kwargs.get(k) != self._config.get(k) for k in self._RETRIEVER_KEYS
-        )
-        with _retriever_lock:
-            self._config.update(kwargs)
-            if retriever_changed:
-                self._retriever = None
-                logger.info(f"RAG 核心配置已变更，retriever 将重建: {kwargs}")
-            else:
-                logger.info(f"RAG 会话级配置已更新（retriever 保持复用）: {kwargs}")
-
-    @property
-    def retriever(self) -> Optional[Any]:
-        return self._retriever
-
-    @retriever.setter
-    def retriever(self, value: Optional[Any]) -> None:
-        self._retriever = value
-
-
-_RAG_CONFIG = _RAGConfigManager()
-_rag_cfg_var: contextvars.ContextVar[Dict[str, Any]] = contextvars.ContextVar(
-    "rag_config",
-    default={},
-)
-
-_session_ctx_var: contextvars.ContextVar[Dict[str, Any]] = contextvars.ContextVar(
-    "session_context",
-)
-
-
-class _SessionContextProxy:
-    def get(self, key: str, default: Any = None) -> Any:
-        return _session_ctx_var.get({}).get(key, default)
-
-    def __getitem__(self, key: str) -> Any:
-        return _session_ctx_var.get({}).get(key)
-
-    def __setitem__(self, key: str, value: Any) -> None:
-        ctx = dict(_session_ctx_var.get({}))
-        ctx[key] = value
-        _session_ctx_var.set(ctx)
-
-
-_SESSION_CONTEXT = _SessionContextProxy()
-
-
-def set_session_context(session_id: str, output_dir: Optional[str] = None):
-    ctx = {
-        "session_id": session_id,
-        "output_dir": None,
-    }
-    if output_dir:
-        ctx["output_dir"] = output_dir
-        os.makedirs(output_dir, exist_ok=True)
-    else:
-        ctx["output_dir"] = str(_SESSION_ROOT / session_id / "outputs")
-        os.makedirs(ctx["output_dir"], exist_ok=True)
-    _session_ctx_var.set(ctx)
-
-
-def get_current_session_output_dir() -> Optional[str]:
-    return _session_ctx_var.get({}).get("output_dir")
-
-
-def get_current_session_id() -> Optional[str]:
-    return _session_ctx_var.get({}).get("session_id")
-
-
-def set_rag_config(
-    enabled: bool = True,
-    persist_dir: str = "./data/vector_store",
-    embedding_model: str = "BAAI/bge-base-zh-v1.5",
-    top_k: int = 5,
-    session_id: Optional[str] = None,
-):
-    cfg = {
-        "enabled": enabled,
-        "persist_dir": persist_dir,
-        "embedding_model": embedding_model,
-        "top_k": top_k,
-        "session_id": session_id,
-    }
-    _rag_cfg_var.set(cfg)
-    _RAG_CONFIG.update(
-        enabled=enabled,
-        persist_dir=persist_dir,
-        embedding_model=embedding_model,
-        top_k=top_k,
-        session_id=session_id,
-    )
-
-
-_retriever_lock = threading.Lock()
-
-
-def _get_retriever():
-    active_cfg = {**_RAG_CONFIG._config, **_rag_cfg_var.get({})}
-    if not active_cfg.get("enabled", False):
-        logger.info("RAG 未启用")
-        return None
-
-    retriever_key = (
-        active_cfg.get("persist_dir", "./data/vector_store"),
-        active_cfg.get("embedding_model", "BAAI/bge-base-zh-v1.5"),
-        int(active_cfg.get("top_k", 5) or 5),
-    )
-
-    if getattr(_RAG_CONFIG, "_retriever_key", None) == retriever_key and _RAG_CONFIG.retriever is not None:
-        return _RAG_CONFIG.retriever
-
-    with _retriever_lock:
-        if getattr(_RAG_CONFIG, "_retriever_key", None) == retriever_key and _RAG_CONFIG.retriever is not None:
-            return _RAG_CONFIG.retriever
-        try:
-            from floodmind.rag.vector_store import VectorStoreManager
-            from floodmind.rag.embeddings import EmbeddingManager
-            persist_dir, embedding_model, top_k = retriever_key
-
-            logger.info(f"初始化检索器: persist_dir={persist_dir}, embedding_model={embedding_model}, top_k={top_k}")
-
-            import os
-            permanent_dir = os.path.join(persist_dir, "permanent")
-            if os.path.exists(permanent_dir):
-                logger.info(f"永久知识库目录存在: {permanent_dir}")
-                files = os.listdir(permanent_dir)
-                logger.info(f"永久知识库目录内容: {files}")
-            else:
-                logger.warning(f"永久知识库目录不存在: {permanent_dir}")
-
-            EmbeddingManager.reset()
-            embedding_mgr = EmbeddingManager(model_name=embedding_model)
-            store = VectorStoreManager(
-                persist_dir=persist_dir,
-                embedding_manager=embedding_mgr,
-            )
-
-            doc_count = store.get_document_count()
-            logger.info(f"永久知识库文档数: {doc_count}")
-
-            _RAG_CONFIG.retriever = store
-            _RAG_CONFIG._retriever_key = retriever_key
-            
-        except Exception as e:
-            logger.error(f"初始化检索器失败: {e}", exc_info=True)
-            return None
-    
-    return _RAG_CONFIG.retriever
-
-
-class KnowledgeSearchInput(BaseModel):
-    """知识检索的输入参数"""
-    query: str = Field(description="[必填] 检索查询文本")
-    top_k: int = Field(default=5, description="[可选] 返回结果数量，默认 5")
-    asset_kind: str = Field(default="", description="[可选] 过滤：text_document / excel_asset / gis_asset / image_asset")
-    index_mode: str = Field(default="", description="[可选] 过滤：content_chunk / file_summary")
-    folder_level_1: str = Field(default="", description="[可选] 过滤：一级目录名")
-    folder_level_2: str = Field(default="", description="[可选] 过滤：二级目录名")
-    folder_level_3: str = Field(default="", description="[可选] 过滤：三级目录名")
-    filename: str = Field(default="", description="[可选] 过滤：文件名")
-
-
-class AddKnowledgeInput(BaseModel):
-    """添加知识的输入参数"""
-    content: str = Field(default="", description="[二选一必填] 文档内容（文本），与 file_path 二选一")
-    file_path: str = Field(default="", description="[二选一必填] 文件路径（绝对路径），与 content 二选一")
-    doc_name: str = Field(default="", description="[可选] 文档名称")
-    force_method: Optional[str] = Field(default=None, description="[可选] 强制处理方式：'context' 或 'vector'")
-
-
-def _impl_knowledge_search(
-    query: str = "",
-    top_k: int = 5,
-    asset_kind: str = "",
-    index_mode: str = "",
-    folder_level_1: str = "",
-    folder_level_2: str = "",
-    folder_level_3: str = "",
-    filename: str = "",
-) -> str:
-    parsed = _parse_json_if_needed(query)
-    if parsed:
-        query = parsed.get('query', query)
-        top_k = parsed.get('top_k', top_k)
-        asset_kind = parsed.get('asset_kind', asset_kind)
-        index_mode = parsed.get('index_mode', index_mode)
-        folder_level_1 = parsed.get('folder_level_1', folder_level_1)
-        folder_level_2 = parsed.get('folder_level_2', folder_level_2)
-        folder_level_3 = parsed.get('folder_level_3', folder_level_3)
-        filename = parsed.get('filename', filename)
-    
-    query = str(query).strip().strip('"').strip("'")
-    
-    if not query:
-        return _finalize_tool_output("knowledge_search", "错误：检索查询不能为空", query=query, top_k=top_k)
-
-    metadata_filter = {
-        "asset_kind": asset_kind,
-        "index_mode": index_mode,
-        "folder_level_1": folder_level_1,
-        "folder_level_2": folder_level_2,
-        "folder_level_3": folder_level_3,
-        "filename": filename,
-    }
-    metadata_filter = {k: str(v).strip() for k, v in metadata_filter.items() if str(v).strip()}
-    
-    retriever = _get_retriever()
-    if retriever is None:
-        return _finalize_tool_output(
-            "knowledge_search",
-            "知识库暂未启用。您可以：\n1. 提供具体文本内容让我学习\n2. 或者我直接基于已有知识回答您的问题",
-            query=query,
-            top_k=top_k,
-        )
-    
-    try:
-        session_id = _rag_cfg_var.get({}).get("session_id") or get_current_session_id()
-        documents = retriever.search(
-            query=query,
-            k=top_k,
-            filter=metadata_filter if metadata_filter else None,
-        )
-
-        if not documents:
-            return _finalize_tool_output(
-                "knowledge_search",
-                f"知识库中暂未找到与 '{query}' 相关的内容。您可以：\n1. 提供相关资料让我学习\n2. 或者我直接基于已有知识回答您的问题",
-                query=query,
-                top_k=top_k,
-            )
-
-        context_text = "\n\n".join(
-            f"[{i+1}] {doc.page_content}"
-            for i, doc in enumerate(documents)
-        )
-
-        filter_text = ""
-        if metadata_filter:
-            filter_text = f"\n生效过滤条件: {json.dumps(metadata_filter, ensure_ascii=False)}\n"
-
-        response = f"找到 {len(documents)} 条相关知识：{filter_text}\n{context_text}"
-
-        return _finalize_tool_output(
-            "knowledge_search",
-            response,
-            query=query,
-            top_k=top_k,
-            asset_kind=asset_kind,
-            index_mode=index_mode,
-            folder_level_1=folder_level_1,
-            folder_level_2=folder_level_2,
-            folder_level_3=folder_level_3,
-            filename=filename,
-        )
-        
-    except Exception as e:
-        logger.error(f"知识检索失败: {e}")
-        return _finalize_tool_output(
-            "knowledge_search",
-            f"知识检索遇到问题: {str(e)}。您可以提供相关资料，或让我直接基于已有知识回答。",
-            query=query,
-            top_k=top_k,
-        )
-
-
-knowledge_search = build_agent_tool(
-    name="KnowledgeSearch",
-    description=(
-        "从知识库中检索相关参考资料。[必填] query: 检索查询文本。"
-        "[可选] top_k/asset_kind/index_mode/folder_level_*/filename: 过滤条件。"
-    ),
-    args_schema=KnowledgeSearchInput,
-    func=_impl_knowledge_search,
-    is_readonly=True,
-    is_destructive=False,
-    is_concurrency_safe=True,
-    check_permissions_fn=make_readonly_permission_fn(),
-    permission_policy=ToolPermissionPolicy(policy_type="readonly"),
-)
-
-
-def _impl_add_knowledge(
-    content: str = "",
-    file_path: str = "",
-    doc_name: str = "",
-    force_method: Optional[str] = None,
-) -> str:
-    parsed = _parse_json_if_needed(content)
-    if parsed and 'content' in parsed:
-        content = parsed.get('content', content)
-        file_path = parsed.get('file_path', file_path)
-        doc_name = parsed.get('doc_name', doc_name)
-        force_method = parsed.get('force_method', force_method)
-    
-    content = str(content).strip().strip('"').strip("'") if content else ""
-    file_path = str(file_path).strip().strip('"').strip("'") if file_path else ""
-    doc_name = str(doc_name).strip().strip('"').strip("'") if doc_name else ""
-    
-    if not content and not file_path:
-        return _finalize_tool_output("add_knowledge", "错误：必须提供 content 或 file_path 参数", content=content, file_path=file_path, doc_name=doc_name)
-    
-    retriever = _get_retriever()
-    if retriever is None:
-        return _finalize_tool_output("add_knowledge", "RAG 功能未启用。请在配置中启用 RAG。", content=content, file_path=file_path, doc_name=doc_name)
-    
-    try:
-        session_id = _rag_cfg_var.get({}).get("session_id") or get_current_session_id()
-        
-        metadata = {}
-        if doc_name:
-            metadata["doc_name"] = doc_name
-        
-        if file_path:
-            resolved_file_path = resolve_tool_path(file_path, access="read").resolved
-            ids = retriever.add_file(
-                file_path=str(resolved_file_path),
-                metadata=metadata,
-            )
-        else:
-            ids = retriever.add_text(
-                text=content,
-                metadata=metadata,
-            )
-
-        if ids:
-            return _finalize_tool_output(
-                "add_knowledge",
-                (
-                f"文档添加成功！\n"
-                f"- 处理方式: 向量库\n"
-                f"- 分块数量: {len(ids)}\n"
-                ),
-                content=content,
-                file_path=file_path,
-                doc_name=doc_name,
-            )
-        else:
-            return _finalize_tool_output(
-                "add_knowledge",
-                "文档添加失败：未生成任何分块",
-                content=content,
-                file_path=file_path,
-                doc_name=doc_name,
-            )
-            
-    except Exception as e:
-        logger.error(f"添加知识失败: {e}")
-        return _finalize_tool_output(
-            "add_knowledge",
-            f"添加知识失败: {str(e)}",
-            content=content,
-            file_path=file_path,
-            doc_name=doc_name,
-        )
-
-
-add_knowledge = build_agent_tool(
-    name="KnowledgeAdd",
-    description=(
-        "将文档添加到知识库。"
-        "小文档（<10KB）会作为临时上下文注入对话，"
-        "大文档会存入向量库供后续检索。"
-    ),
-    args_schema=AddKnowledgeInput,
-    func=_impl_add_knowledge,
-    is_readonly=False,
-    is_destructive=False,
-    is_concurrency_safe=False,
-    check_permissions_fn=make_read_path_permission_fn("file_path"),
-    permission_policy=ToolPermissionPolicy(policy_type="state_write"),
-)
 
 
 class WebSearchInput(BaseModel):
@@ -1907,8 +1524,6 @@ def _register_all_tools():
     # ── 核心工具（PascalCase 命名）─────────────────────────────────
     ToolRegistry.register(get_skill)
     ToolRegistry.register(exec_bash)
-    ToolRegistry.register(knowledge_search)
-    ToolRegistry.register(add_knowledge)
     ToolRegistry.register(web_search)
     ToolRegistry.register(fetch_webpage)
     ToolRegistry.register(add_memory)
@@ -1921,8 +1536,6 @@ def _register_all_tools():
     # ── 别名注册（向后兼容）─────────────────────────────────────────
     ToolRegistry.register_alias("get_skill", "GetSkill")
     ToolRegistry.register_alias("exec_bash", "Bash")
-    ToolRegistry.register_alias("knowledge_search", "KnowledgeSearch")
-    ToolRegistry.register_alias("add_knowledge", "KnowledgeAdd")
     ToolRegistry.register_alias("web_search", "WebSearch")
     ToolRegistry.register_alias("fetch_webpage", "WebFetch")
     ToolRegistry.register_alias("add_memory", "MemoryAdd")
@@ -2056,6 +1669,13 @@ def _register_all_tools():
         ToolRegistry.register_alias("drill_down_experience", "DrillDownExperience")
         ToolRegistry.register_alias("add_task_experience", "AddTaskExperience")
 
+    # ── Todo 任务管理工具 ──────────────────────────────────────────
+    from floodmind.tools.todo_tools import todo_write, todo_list
+    ToolRegistry.register(todo_write)
+    ToolRegistry.register(todo_list)
+    ToolRegistry.register_alias("todo_write", "TodoWrite")
+    ToolRegistry.register_alias("todo_list", "TodoList")
+
 
 _register_all_tools()
 
@@ -2063,8 +1683,6 @@ _register_all_tools()
 __all__ = [
     'get_skill',
     'exec_bash',
-    'knowledge_search',
-    'add_knowledge',
     'web_search',
     'fetch_webpage',
     'add_memory',
@@ -2075,7 +1693,6 @@ __all__ = [
     'cancel_scheduled_task',
     'reset_retry_guard',
     'set_skill_registry',
-    'set_rag_config',
     'set_memory_instance',
     'set_session_context',
     'get_current_session_output_dir',

@@ -783,6 +783,23 @@ export function ChatMessage({ message, onToggleThought, onUpdateAction, onQuickS
                   </div>
                 </div>
               )}
+              {/* Token usage */}
+              {isComplete && message.tokenUsage && message.tokenUsage.total_tokens > 0 && (
+                <div className="flex items-center gap-1.5 px-2.5" style={{ opacity: 0.45 }}>
+                  <span className="text-[9px] font-mono" style={{ color: 'hsl(var(--muted-foreground))' }}>
+                    ↑{message.tokenUsage.prompt_tokens}
+                  </span>
+                  <span className="text-[9px]" style={{ color: 'hsl(var(--muted-foreground))', opacity: 0.4 }}>·</span>
+                  <span className="text-[9px] font-mono" style={{ color: 'hsl(var(--muted-foreground))' }}>
+                    ↓{message.tokenUsage.completion_tokens}
+                  </span>
+                  <span className="text-[9px]" style={{ color: 'hsl(var(--muted-foreground))', opacity: 0.4 }}>·</span>
+                  <span className="text-[9px] font-mono" style={{ color: 'hsl(var(--muted-foreground))' }}>
+                    Σ{message.tokenUsage.total_tokens}
+                  </span>
+                  <span className="text-[9px] ml-0.5" style={{ color: 'hsl(var(--muted-foreground))', opacity: 0.3 }}>tokens</span>
+                </div>
+              )}
             </div>
           )}
           <span className="text-[9px] px-0.5 font-mono" style={{ color: 'hsl(var(--muted-foreground))', opacity: 0.3 }}>

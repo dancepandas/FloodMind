@@ -142,10 +142,6 @@ export default function WelcomePage({
     onConfigChange({ ...config, enable_search: !config.enable_search })
   }
 
-  function toggleRag() {
-    onConfigChange({ ...config, enable_rag: !config.enable_rag })
-  }
-
   const transitionClass = (delay: number) =>
     `transition-all duration-700 ease-out ${mounted ? 'opacity-100 translate-y-0' : 'opacity-0 translate-y-4'}`
   const delayStyle = (ms: number) => ({ transitionDelay: `${ms}ms` })
@@ -470,23 +466,6 @@ export default function WelcomePage({
               >
                 <Globe size={13} strokeWidth={1.8} />
                 <span>搜索</span>
-              </button>
-
-              {/* RAG toggle */}
-              <button
-                onClick={toggleRag}
-                className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-[12px] font-medium transition-all duration-200 active:scale-[0.96]"
-                style={{
-                  background: config.enable_rag ? 'var(--teal-50)' : 'transparent',
-                  border: `1px solid ${config.enable_rag ? 'var(--teal-200)' : 'hsl(var(--border))'}`,
-                  color: config.enable_rag ? 'var(--teal-500)' : 'hsl(var(--muted-foreground))',
-                  opacity: config.enable_rag ? 1 : 0.4,
-                  cursor: 'pointer',
-                }}
-                title="知识库检索"
-              >
-                <Database size={13} strokeWidth={1.8} />
-                <span>RAG</span>
               </button>
 
               {/* Hint */}

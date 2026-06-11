@@ -30,13 +30,13 @@ def _tool_list(*names: str) -> Set[str]:
 
 READONLY_TOOLS = _tool_list(
     "GetSkill", "Glob", "Grep", "Read",
-    "KnowledgeSearch", "MemorySearch",
+    "MemorySearch",
     "WebSearch", "WebFetch",
     "SearchTaskExperience", "BrowseExperienceTree", "DrillDownExperience",
     "ListScheduledTasks",
 )
 
-WRITE_TOOLS = _tool_list("Write", "Edit", "KnowledgeAdd", "MemoryAdd", "AddTaskExperience")
+WRITE_TOOLS = _tool_list("Write", "Edit", "MemoryAdd", "AddTaskExperience")
 
 EXEC_TOOLS = _tool_list("Bash")
 

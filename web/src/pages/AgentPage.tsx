@@ -3,6 +3,7 @@ import { ChatArea } from '@/features/chat/components/ChatArea';
 import { FilePreviewPanel } from '@/features/chat/components/FilePreviewPanel';
 import { Sidebar } from '@/features/sidebar/components/Sidebar';
 import { ScheduledTasksPanel } from '@/features/scheduler/components/ScheduledTasksPanel';
+import { AgentSidePanel } from '@/features/agent/components/AgentSidePanel';
 import { useAgentApp } from '@/hooks/useAgentApp';
 import { useIsMobile } from '@/hooks/use-mobile';
 import { Sheet, SheetContent } from '@/components/ui/sheet';
@@ -17,6 +18,8 @@ const AgentPage = () => {
     uploadedFiles,
     toolActivities,
     workflow,
+    todos,
+    sessionTokenUsage,
     selectedPreview,
     runtimeState,
     inputValue,
@@ -161,6 +164,8 @@ const AgentPage = () => {
           pendingPermissionAsk={pendingPermissionAsk}
           onRespondPermissionAsk={handleRespondPermissionAsk}
         />
+
+        <AgentSidePanel todos={todos} sessionTokenUsage={sessionTokenUsage} />
 
         {selectedPreview && (
           <div

@@ -9,8 +9,6 @@ const TOOL_DISPLAY_NAMES: Record<string, string> = {
   Write: "Write",
   Edit: "Edit",
   GetSkill: "GetSkill",
-  KnowledgeSearch: "KnowledgeSearch",
-  KnowledgeAdd: "KnowledgeAdd",
   WebSearch: "WebSearch",
   WebFetch: "WebFetch",
   MemorySearch: "MemorySearch",

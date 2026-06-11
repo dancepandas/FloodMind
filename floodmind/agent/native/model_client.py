@@ -138,8 +138,7 @@ class ModelClient:
             "temperature": temperature if temperature is not None else self.temperature,
             "max_tokens": max_tokens if max_tokens is not None else self.max_tokens,
         }
-        if "openai.com" in (self.base_url or ""):
-            request_params["stream_options"] = {"include_usage": True}
+        request_params["stream_options"] = {"include_usage": True}
 
         # 支持 extra_body（如 enable_thinking）
         extra_body = kwargs.get("extra_body")
@@ -190,8 +189,7 @@ class ModelClient:
             "max_tokens": self.max_tokens,
             "stream": True,
         }
-        if "openai.com" in (self.base_url or ""):
-            request_params["stream_options"] = {"include_usage": True}
+        request_params["stream_options"] = {"include_usage": True}
         if tools:
             request_params["tools"] = tools
             request_params["tool_choice"] = tool_choice

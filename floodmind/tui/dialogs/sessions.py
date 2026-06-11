@@ -52,14 +52,14 @@ class SessionsDialog(ModalScreen[str]):
     #sessions-title {
         width: 56;
         padding: 1 2 0 2;
-        background: $surface;
-        border: solid $accent;
+        background: #1a1a2e;
+        border: solid #7c6fae;
         border-bottom: none;
     }
     #sessions-list {
         width: 56;
         max-height: 16;
-        border: solid $accent;
+        border: solid #7c6fae;
         border-top: none;
         border-bottom: none;
     }
@@ -67,8 +67,8 @@ class SessionsDialog(ModalScreen[str]):
         width: 56;
         align-horizontal: right;
         padding: 0 2 1 2;
-        background: $surface;
-        border: solid $accent;
+        background: #1a1a2e;
+        border: solid #7c6fae;
         border-top: none;
     }
     """

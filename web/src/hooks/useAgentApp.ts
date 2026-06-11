@@ -47,6 +47,7 @@ import type {
   UploadedFileItem,
   WorkflowPlan,
   ActionDetail,
+  TodoState,
 } from "@/types/app";
 
 const log = createLogger("App");
@@ -91,11 +92,17 @@ export function useAgentApp() {
   const [uploadedFiles, setUploadedFiles] = useState<UploadedFileItem[]>([]);
   const [toolActivities, setToolActivities] = useState<ToolActivity[]>([]);
   const [workflow, setWorkflow] = useState<WorkflowPlan | null>(null);
+  const [todos, setTodos] = useState<TodoState>({ items: [] });
+  const [sessionTokenUsage, setSessionTokenUsage] = useState({
+    prompt_tokens: 0,
+    completion_tokens: 0,
+    total_tokens: 0,
+  });
   const [selectedPreview, setSelectedPreview] = useState<FilePreview | null>(null);
   const [inputValue, setInputValue] = useState("");
   const [isStreaming, setIsStreaming] = useState(false);
   const [availableModels, setAvailableModels] = useState<ModelOption[]>([]);
-  const [config, setConfig] = useState<SessionConfig>({ model_key: "deepseek_v4_flash", enable_search: true, enable_rag: true, enable_reasoning: true });
+  const [config, setConfig] = useState<SessionConfig>({ model_key: "deepseek_v4_flash", enable_search: true, enable_reasoning: true });
   const [runtimeState, setRuntimeState] = useState<SessionRuntimeState>({ isPaused: false });
   const [isReconnecting, setIsReconnecting] = useState(false);
   const readerRef = useRef<ReadableStreamDefaultReader<Uint8Array> | null>(null);
@@ -159,6 +166,7 @@ export function useAgentApp() {
         setSelectedPreview(null);
         setToolActivities([]);
         setWorkflow(null);
+        setTodos({ items: [] });
 
         await initAgent(sessionId, configRef.current);
         if (!active) return;
@@ -240,6 +248,19 @@ export function useAgentApp() {
                         updateAssistant,
                         pushToolActivity,
                         setWorkflow,
+                        setTodos,
+                        setTokenUsage: (usage) => {
+                          setMessages((prev) => prev.map((msg) =>
+                            msg.id === assistantMessage.id
+                              ? { ...msg, tokenUsage: usage }
+                              : msg
+                          ));
+                          setSessionTokenUsage((prev) => ({
+                            prompt_tokens: prev.prompt_tokens + usage.prompt_tokens,
+                            completion_tokens: prev.completion_tokens + usage.completion_tokens,
+                            total_tokens: prev.total_tokens + usage.total_tokens,
+                          }));
+                        },
                       });
                     } catch (parseErr) {
                       log.warn("Resume stream JSON parse error", trimmed.slice(0, 200), parseErr);
@@ -357,7 +378,16 @@ export function useAgentApp() {
                   if (!trimmed) continue;
                   try {
                     const data = JSON.parse(trimmed) as Record<string, any>;
-                    applyStreamEvent(data, { updateAssistant, pushToolActivity, setWorkflow });
+                    applyStreamEvent(data, { updateAssistant, pushToolActivity, setWorkflow, setTodos,
+                      setTokenUsage: (usage) => {
+                        setMessages((prev) => prev.map((msg) => (msg.id === inProgressId ? { ...msg, tokenUsage: usage } : msg)));
+                        setSessionTokenUsage((prev) => ({
+                          prompt_tokens: prev.prompt_tokens + usage.prompt_tokens,
+                          completion_tokens: prev.completion_tokens + usage.completion_tokens,
+                          total_tokens: prev.total_tokens + usage.total_tokens,
+                        }));
+                      }
+                    });
                   } catch { /* skip parse errors */ }
                 }
               }
@@ -510,6 +540,19 @@ export function useAgentApp() {
               updateAssistant,
               pushToolActivity,
               setWorkflow,
+              setTodos,
+              setTokenUsage: (usage) => {
+                setMessages((prev) => prev.map((msg) =>
+                  msg.id === assistantMessage.id
+                    ? { ...msg, tokenUsage: usage }
+                    : msg
+                ));
+                setSessionTokenUsage((prev) => ({
+                  prompt_tokens: prev.prompt_tokens + usage.prompt_tokens,
+                  completion_tokens: prev.completion_tokens + usage.completion_tokens,
+                  total_tokens: prev.total_tokens + usage.total_tokens,
+                }));
+              },
             });
           } catch (parseErr) {
             log.warn("SSE JSON parse error, line=", trimmed.slice(0, 200), parseErr);
@@ -553,7 +596,14 @@ export function useAgentApp() {
                 if (!trimmed) continue;
                 try {
                   const data = JSON.parse(trimmed) as Record<string, any>;
-                  applyStreamEvent(data, { updateAssistant: resumeUpdateAssistant, pushToolActivity, setWorkflow });
+                  applyStreamEvent(data, { updateAssistant: resumeUpdateAssistant, pushToolActivity, setWorkflow, setTodos, setTokenUsage: (usage) => {
+                    setMessages((prev) => prev.map((msg) => msg.id === assistantMessage.id ? { ...msg, tokenUsage: usage } : msg));
+                    setSessionTokenUsage((prev) => ({
+                      prompt_tokens: prev.prompt_tokens + usage.prompt_tokens,
+                      completion_tokens: prev.completion_tokens + usage.completion_tokens,
+                      total_tokens: prev.total_tokens + usage.total_tokens,
+                    }));
+                  } });
                 } catch { /* skip parse errors */ }
               }
             }
@@ -626,6 +676,19 @@ export function useAgentApp() {
               updateAssistant,
               pushToolActivity,
               setWorkflow,
+              setTodos,
+              setTokenUsage: (usage) => {
+                setMessages((prev) => prev.map((msg) =>
+                  msg.id === assistantMessage.id
+                    ? { ...msg, tokenUsage: usage }
+                    : msg
+                ));
+                setSessionTokenUsage((prev) => ({
+                  prompt_tokens: prev.prompt_tokens + usage.prompt_tokens,
+                  completion_tokens: prev.completion_tokens + usage.completion_tokens,
+                  total_tokens: prev.total_tokens + usage.total_tokens,
+                }));
+              },
             });
           } catch { /* skip parse errors */ }
         }
@@ -657,7 +720,14 @@ export function useAgentApp() {
                 if (!trimmed) continue;
                 try {
                   const data = JSON.parse(trimmed) as Record<string, any>;
-                  applyStreamEvent(data, { updateAssistant: resumeUpdateAssistant, pushToolActivity, setWorkflow });
+                  applyStreamEvent(data, { updateAssistant: resumeUpdateAssistant, pushToolActivity, setWorkflow, setTodos, setTokenUsage: (usage) => {
+                    setMessages((prev) => prev.map((msg) => msg.id === assistantMessage.id ? { ...msg, tokenUsage: usage } : msg));
+                    setSessionTokenUsage((prev) => ({
+                      prompt_tokens: prev.prompt_tokens + usage.prompt_tokens,
+                      completion_tokens: prev.completion_tokens + usage.completion_tokens,
+                      total_tokens: prev.total_tokens + usage.total_tokens,
+                    }));
+                  } });
                 } catch { /* skip parse errors */ }
               }
             }
@@ -793,6 +863,8 @@ export function useAgentApp() {
     uploadedFiles,
     toolActivities,
     workflow,
+    todos,
+    sessionTokenUsage,
     selectedPreview,
     runtimeState,
     inputValue,

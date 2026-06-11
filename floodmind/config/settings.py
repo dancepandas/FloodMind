@@ -129,12 +129,6 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         "contextWindow": 32768,
         "enableChronosWarmup": False,
     },
-    "rag": {
-        "enabled": True,
-        "persistDir": "./data/vector_store",
-        "embeddingModel": "BAAI/bge-base-zh-v1.5",
-        "topK": 10,
-    },
     "task_experience": {
         "enabled": True,
         "autoCapture": True,
@@ -142,6 +136,10 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         "sealThreshold": 5,
         "archiveAfterDays": 90,
         "skillGenerationThreshold": 5,
+    },
+    "background_review": {
+        "enabled": True,
+        "min_message_count": 3,
     },
     "mcpServers": [],
 }
@@ -344,15 +342,6 @@ class AgentConfig:
         self.context_window = int(_cfg(cfg, "agent.contextWindow", "AGENT_CONTEXT_WINDOW", 32768))
 
 
-class RAGConfig:
-    def __init__(self, cfg: dict):
-        self.enabled = _cfg(cfg, "rag.enabled", "RAG_ENABLED", "true")
-        if isinstance(self.enabled, str):
-            self.enabled = self.enabled.lower() == "true"
-        self.persist_dir = _cfg(cfg, "rag.persistDir", "RAG_PERSIST_DIR", "./data/vector_store")
-        self.embedding_model = _cfg(cfg, "rag.embeddingModel", "RAG_EMBEDDING_MODEL", "BAAI/bge-base-zh-v1.5")
-        self.top_k = int(_cfg(cfg, "rag.topK", "RAG_TOP_K", 10))
-        self.small_doc_threshold = int(_cfg(cfg, "rag.small_doc_threshold", "RAG_SMALL_DOC_THRESHOLD", 10000))
 
 
 class TaskExperienceConfig:
@@ -372,6 +361,15 @@ class TaskExperienceConfig:
         self.dedup_similarity_threshold = float(_cfg(cfg, "task_experience.dedupSimilarityThreshold", "TASK_EXPERIENCE_DEDUP_THRESHOLD", 0.8))
         self.archive_after_days = int(_cfg(cfg, "task_experience.archiveAfterDays", "TASK_EXPERIENCE_ARCHIVE_AFTER_DAYS", 90))
         self.skill_generation_threshold = int(_cfg(cfg, "task_experience.skillGenerationThreshold", "TASK_EXPERIENCE_SKILL_GEN_THRESHOLD", 5))
+
+
+class BackgroundReviewConfig:
+    def __init__(self, cfg: dict):
+        raw = cfg.get("background_review", {})
+        if not isinstance(raw, dict):
+            raw = {}
+        self.enabled = raw.get("enabled", True)
+        self.min_message_count = int(raw.get("min_message_count", 3))
 
 
 class McpServerConfig:
@@ -406,8 +404,8 @@ class Settings:
         self.api = APIConfig(cfg)
         self.model = ModelConfig(cfg)
         self.agent = AgentConfig(cfg)
-        self.rag = RAGConfig(cfg)
         self.task_experience = TaskExperienceConfig(cfg)
+        self.background_review = BackgroundReviewConfig(cfg)
         self.mcp = McpServerConfig(cfg)
 
     @property

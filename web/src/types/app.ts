@@ -87,6 +87,11 @@ export interface ChatMessage {
   timestamp: string;
   artifacts?: GeneratedArtifact[];
   references?: ReferenceLink[];
+  tokenUsage?: {
+    prompt_tokens: number;
+    completion_tokens: number;
+    total_tokens: number;
+  };
 }
 
 export interface ToolActivity {
@@ -118,7 +123,6 @@ export interface WorkflowPlan {
 export interface SessionConfig {
   model_key: string;
   enable_search: boolean;
-  enable_rag: boolean;
   enable_reasoning: boolean;
 }
 
@@ -153,6 +157,19 @@ export interface PendingPermissionAsk {
 
 export interface SessionRuntimeState {
   isPaused: boolean;
+}
+
+export interface TodoItem {
+  id: string;
+  content: string;
+  status: "pending" | "in_progress" | "completed" | "cancelled";
+  priority: "high" | "normal" | "low";
+  created_at?: number;
+  updated_at?: number;
+}
+
+export interface TodoState {
+  items: TodoItem[];
 }
 
 export interface StreamSnapshot {

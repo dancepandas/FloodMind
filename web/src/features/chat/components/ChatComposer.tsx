@@ -112,10 +112,6 @@ export function ChatComposer({
     onConfigChange({ ...config, enable_search: !config.enable_search });
   }
 
-  function toggleRag() {
-    onConfigChange({ ...config, enable_rag: !config.enable_rag });
-  }
-
   const sendBtnStyle = isRunning
     ? { background: 'var(--amber-500)', color: 'white', boxShadow: '0 2px 10px rgba(245,158,11,0.3)' }
     : value.trim().length > 0 && !disabled
@@ -346,21 +342,6 @@ export function ChatComposer({
           >
             <Globe size={10} strokeWidth={1.8} />
             <span>搜索</span>
-          </button>
-
-          <button
-            onClick={toggleRag}
-            className="flex items-center gap-1 px-1.5 py-0.5 rounded-md border transition-all duration-200 text-[11px] cursor-pointer active:scale-[0.96]"
-            style={{
-              background: config.enable_rag ? 'var(--teal-50)' : 'transparent',
-              borderColor: config.enable_rag ? 'var(--teal-200)' : 'hsl(var(--border))',
-              color: config.enable_rag ? 'var(--teal-500)' : 'hsl(var(--muted-foreground))',
-              opacity: config.enable_rag ? 1 : 0.35,
-            }}
-            title="知识库检索"
-          >
-            <Database size={10} strokeWidth={1.8} />
-            <span>RAG</span>
           </button>
 
           <span className={`${isMobile ? 'hidden' : ''} ml-auto text-[9px] select-none tracking-wide`} style={{ color: 'hsl(var(--muted-foreground))', opacity: 0.22 }}>

@@ -1,38 +1,41 @@
 /*
- * FloodMind TUI — OpenCode dark palette
+ * FloodMind TUI — Semantic color variables (ThemeManager-driven)
+ *
+ * Variables map 1:1 with ThemeManager tokens in default.json.
+ * Edit ~/.floodmind/themes/default.json to customize colors.
  */
 
-$bg: #0a0a0a;
-$surface: #141414;
-$surface-light: #1e1e1e;
-$surface-element: #282828;
-$primary: #fab283;
-$secondary: #5c9cf5;
-$accent: #9d7cd8;
-$text: #eeeeee;
-$text-muted: #808080;
-$error: #e06c75;
-$warning: #f5a742;
-$success: #7fd88f;
-$info: #56b6c2;
-$border: #484848;
-$border-active: #606060;
-$border-subtle: #3c3c3c;
-$accent-dim: #9d7cd8 50%;
+$background: #0a0a0f;
+$backgroundPanel: #14141f;
+$surface: #1a1a2e;
+$border: #2d2d3d;
+$borderFocus: #3a5a8c;
+$text: #e0e0e0;
+$textMuted: #808090;
+$textDim: #505060;
+$primary: #5f87ff;
+$primaryMuted: #4a6fd4;
+$success: #4caf7d;
+$warning: #e5a443;
+$error: #e54d4d;
+$info: #5fb4ff;
+$accent: #7c6fae;
+$selected: #3a5a8c;
+$highlight: #5f87ff;
 
 * {
     scrollbar-size-vertical: 1;
-    scrollbar-color: $accent 30%;
-    scrollbar-color-hover: $accent 50%;
+    scrollbar-color: $primary 30%;
+    scrollbar-color-hover: $primary 50%;
 }
 
 Screen {
-    background: $bg;
+    background: $background;
 }
 
 Footer {
-    background: $surface;
-    color: $text-muted;
+    background: $backgroundPanel;
+    color: $textMuted;
 }
 
 Toast {
@@ -43,6 +46,7 @@ Toast {
 /* ── Home Screen ─────────────────────────── */
 HomeScreen {
     layout: vertical;
+    background: $background;
 }
 
 #home-center {
@@ -58,7 +62,7 @@ HomeScreen {
 }
 
 #home-tip {
-    color: $text-muted;
+    color: $textMuted;
     width: 75;
     max-width: 90%;
     content-align: center middle;
@@ -76,16 +80,16 @@ HomePromptInput {
 }
 
 HomePromptInput:focus {
-    border: solid $accent;
+    border: solid $primary;
 }
 
 WelcomeWidget {
     width: 60;
     max-width: 80%;
     padding: 1 2;
-    border: solid $border-subtle;
+    border: solid $border;
     background: $surface;
-    color: $text-muted;
+    color: $textMuted;
     content-align: center middle;
 }
 
@@ -93,8 +97,8 @@ WelcomeWidget {
 StatusBar {
     dock: bottom;
     height: 1;
-    background: $surface;
-    color: $text-muted;
+    background: $backgroundPanel;
+    color: $textMuted;
     padding: 0 1;
 }
 
@@ -112,6 +116,7 @@ StatusBar {
 ChatScreen {
     layout: horizontal;
     padding: 0;
+    background: $background;
 }
 
 #chat-main {
@@ -120,7 +125,7 @@ ChatScreen {
 }
 
 #chat-scroll {
-    background: $bg;
+    background: $background;
     height: 1fr;
 }
 
@@ -131,12 +136,12 @@ ChatPromptInput TextArea {
 }
 
 ChatPromptInput TextArea:focus {
-    border: solid $accent;
+    border: solid $primary;
 }
 
 #response-status {
     height: 1;
-    color: $text-muted;
+    color: $textMuted;
     padding: 0 1;
 }
 
@@ -151,7 +156,7 @@ UserMessage {
 AssistantMessage {
     margin: 1 0 0 0;
     border-left: solid $accent;
-    background: $bg;
+    background: $background;
     padding: 1 2;
 }
 
@@ -175,23 +180,23 @@ ToolCard.-completed {
 }
 
 #tool-output {
-    color: $text-muted;
+    color: $textMuted;
     padding-left: 2;
     max-height: 6;
 }
 
 #assistant-meta {
     height: 1;
-    color: $text-muted;
+    color: $textMuted;
     padding-left: 3;
 }
 
 /* ── Sidebar ─────────────────────────────── */
 SessionSidebar {
     width: 38;
-    background: $surface;
+    background: $backgroundPanel;
     padding: 1 2;
-    border-left: solid $border-subtle;
+    border-left: solid $border;
 }
 
 #sidebar-title {
@@ -200,14 +205,51 @@ SessionSidebar {
 }
 
 #sidebar-info {
-    color: $text-muted;
+    color: $textMuted;
 }
 
 #sidebar-footer {
     dock: bottom;
     height: auto;
-    color: $text-muted;
+    color: $textMuted;
     padding-top: 1;
+}
+
+/* ── MainScreen Layout ───────────────────── */
+MainScreen {
+    layout: vertical;
+    background: $background;
+}
+
+#main-layout {
+    width: 100%;
+    height: 100%;
+}
+
+#sidebar {
+    width: 25;
+    min-width: 20;
+    max-width: 35;
+    border-right: solid $border;
+    background: $surface;
+}
+
+#center-column {
+    width: 1fr;
+    height: 100%;
+}
+
+#chat {
+    height: 1fr;
+    background: $background;
+}
+
+#detail {
+    width: 30;
+    min-width: 25;
+    max-width: 45;
+    background: $background;
+    border-left: solid $border;
 }
 
 /* ── Dialogs ─────────────────────────────── */
@@ -232,7 +274,7 @@ DialogScreen {
     border: solid $primary;
     border-top: none;
     border-bottom: none;
-    background: $surface-light;
+    background: $backgroundPanel;
 }
 
 .dialog-btns {
@@ -253,7 +295,7 @@ OptionList {
 }
 
 OptionList:focus > .option-list--option.-highlight {
-    background: $surface-element;
+    background: $selected;
     color: $accent;
 }
 
@@ -270,7 +312,7 @@ CommandPalette {
 }
 
 #palette-search {
-    border: solid $accent;
+    border: solid $primary;
     background: $surface;
 }
 
@@ -278,10 +320,10 @@ CommandPalette {
     max-height: 20;
     border: solid $border;
     border-top: none;
-    background: $surface-light;
+    background: $backgroundPanel;
 }
 
 #palette-hint {
-    color: $text-muted;
+    color: $textMuted;
     padding: 0 2;
 }

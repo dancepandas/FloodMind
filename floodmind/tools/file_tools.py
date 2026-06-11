@@ -32,7 +32,7 @@ from floodmind.tools.base_tools import (
     _finalize_tool_output,
     _check_retry_guard_before_exec,
     _parse_json_if_needed,
-    _SESSION_CONTEXT,
+    SESSION_CONTEXT,
 )
 
 logger = logging.getLogger(__name__)
@@ -55,7 +55,7 @@ def _get_search_root(path: str) -> Path:
         resolved = resolve_tool_path(path.strip(), access="read").resolved
         if resolved.exists() and resolved.is_dir():
             return resolved
-    output_dir = _SESSION_CONTEXT.get("output_dir")
+    output_dir = SESSION_CONTEXT.get("output_dir")
     if output_dir:
         p = Path(output_dir)
         if p.exists():

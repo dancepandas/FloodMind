@@ -40,7 +40,6 @@ interface InitResponse {
   model_key: string;
   model_name: string;
   enable_search: boolean;
-  enable_rag: boolean;
   enable_reasoning: boolean;
 }
 
@@ -68,7 +67,7 @@ export async function initAgent(sessionId: string, config: SessionConfig): Promi
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ session_id: sessionId, ...config }),
   });
-  log.info("initAgent →", result.model_key, result.model_name, { search: result.enable_search, rag: result.enable_rag, reasoning: result.enable_reasoning });
+  log.info("initAgent →", result.model_key, result.model_name, { search: result.enable_search, reasoning: result.enable_reasoning });
   return result;
 }
 

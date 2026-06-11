@@ -1,21 +1,24 @@
-"""FloodMind TUI — SessionSidebar (OpenCode-style)."""
+"""FloodMind TUI — SessionSidebar (OpenCode-style).
+
+使用 ThemeManager 语义颜色系统。
+"""
 
 from rich.text import Text
 from textual.widgets import Static
 from textual.containers import VerticalScroll
 
 from floodmind.config.settings import settings
-from floodmind.tui.theme import C
+from floodmind.tui.theme import get_color
 
 
 class SessionSidebar(VerticalScroll):
 
-    CSS = """
+    DEFAULT_CSS = """
     SessionSidebar {
         width: 38;
-        background: #141414;
+        background: #14141f;
         padding: 1 2;
-        border-left: solid #3c3c3c;
+        border-left: solid #2d2d3d;
     }
     """
 
@@ -44,16 +47,16 @@ class SessionSidebar(VerticalScroll):
             pass
 
         title_text = Text()
-        title_text.append(self._title or "Untitled", style=f"bold {C['text']}")
+        title_text.append(self._title or "Untitled", style=f"bold {get_color('text')}")
 
         model_text = Text()
-        model_text.append("Model: ", style=C["text_muted"])
-        model_text.append(self._model, style=C["text"])
+        model_text.append("Model: ", style=get_color("textMuted"))
+        model_text.append(self._model, style=get_color("text"))
 
         version_text = Text()
-        version_text.append("● ", style=C["success"])
-        version_text.append("FloodMind ", style=f"bold {C['text']}")
-        version_text.append("v1.0.0", style=C["text_muted"])
+        version_text.append("● ", style=get_color("success"))
+        version_text.append("FloodMind ", style=f"bold {get_color('text')}")
+        version_text.append("v1.0.0", style=get_color("textMuted"))
 
         # 使用唯一 ID 避免重复
         import uuid

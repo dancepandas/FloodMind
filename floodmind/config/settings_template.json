@@ -47,11 +47,14 @@
     "contextWindow": 32768,
     "enableChronosWarmup": false
   },
-  "rag": {
-    "enabled": true,
-    "persistDir": "./data/vector_store",
-    "embeddingModel": "BAAI/bge-base-zh-v1.5",
-    "topK": 10
-  },
-  "mcpServers": []
+  "mcpServers": [
+    {
+      "name": "knowledge",
+      "transport": "stdio",
+      "command": "python",
+      "args": ["~/.floodmind/mcp/knowledge/server.py"],
+      "env": {},
+      "_comment": "MCP 知识库 Server，替换内置 KnowledgeSearch/KnowledgeAdd"
+    }
+  ]
 }

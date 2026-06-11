@@ -54,14 +54,14 @@ class ModelsDialog(ModalScreen[str]):
     #models-title {
         width: 50;
         padding: 1 2 0 2;
-        background: $surface;
-        border: solid $accent;
+        background: #1a1a2e;
+        border: solid #7c6fae;
         border-bottom: none;
     }
     #models-list {
         width: 50;
         max-height: 16;
-        border: solid $accent;
+        border: solid #7c6fae;
         border-top: none;
         border-bottom: none;
     }
@@ -69,8 +69,8 @@ class ModelsDialog(ModalScreen[str]):
         width: 50;
         align-horizontal: right;
         padding: 0 2 1 2;
-        background: $surface;
-        border: solid $accent;
+        background: #1a1a2e;
+        border: solid #7c6fae;
         border-top: none;
     }
     """
