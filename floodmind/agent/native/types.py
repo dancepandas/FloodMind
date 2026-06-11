@@ -95,6 +95,7 @@ class AgentLoopState:
     round_count: int = 0
     replan_count: int = 0
     terminal_status: str = "running"
+    todos: List[Dict[str, Any]] = field(default_factory=list)
 
 
 @dataclass
@@ -234,3 +235,36 @@ class ExecutionPlan:
             updated_at=data.get("updated_at", ""),
             terminal_status=data.get("terminal_status", "running"),
         )
+
+
+# ── Part 类型定义（对齐 OpenCode MessageV2.Part 体系）────────────────
+
+@dataclass
+class StepStartPart:
+    """LLM Step 开始（对应 OpenCode StepStartPart）"""
+    type: str = "step_start"
+    id: str = ""
+    snapshot: Optional[str] = None
+    timestamp: float = 0.0
+
+
+@dataclass
+class StepFinishPart:
+    """LLM Step 结束（对应 OpenCode StepFinishPart）"""
+    type: str = "step_finish"
+    id: str = ""
+    reason: str = ""
+    cost: float = 0.0
+    tokens: Dict[str, int] = field(default_factory=dict)
+    snapshot: Optional[str] = None
+    timestamp: float = 0.0
+
+
+@dataclass
+class PatchPart:
+    """文件变更记录（对应 OpenCode PatchPart）"""
+    type: str = "patch"
+    id: str = ""
+    hash: str = ""
+    files: List[str] = field(default_factory=list)
+    timestamp: float = 0.0

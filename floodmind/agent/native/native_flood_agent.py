@@ -98,16 +98,13 @@ class NativeFloodAgent:
         from floodmind.profile.soul import load_soul_md, DEFAULT_FLOODMIND_IDENTITY
         from floodmind.profile.guidance import (
             WORK_METHOD_GUIDANCE,
+            TODO_GUIDANCE,
             SCHEDULED_TASK_GUIDANCE,
-            KNOWLEDGE_GUIDANCE,
             PREFERENCE_GUIDANCE,
             TOOL_EXECUTION_GUIDANCE,
-            PARALLEL_AGENT_GUIDANCE,
             WORKFLOW_GUIDANCE,
-            WORK_PRINCIPLES_GUIDANCE,
             ARTIFACT_JUDGMENT_GUIDANCE,
             OUTPUT_FORMAT_GUIDANCE,
-            AOJIANG_STATION_GUIDANCE,
         )
 
         soul = load_soul_md() or DEFAULT_FLOODMIND_IDENTITY
@@ -119,27 +116,20 @@ class NativeFloodAgent:
         conditional_guidance = []
         if any(n in tool_names for n in ("CreateScheduledTask", "create_scheduled_task")):
             conditional_guidance.append(SCHEDULED_TASK_GUIDANCE)
-        if any("mcp:knowledge:" in n for n in tool_names):
-            conditional_guidance.append(KNOWLEDGE_GUIDANCE)
         if any(n in tool_names for n in ("UpdateProjectInstructions",)):
             conditional_guidance.append(PREFERENCE_GUIDANCE)
 
         guidance_parts = (
-            [WORK_METHOD_GUIDANCE]
+            [TODO_GUIDANCE]
+            + [WORK_METHOD_GUIDANCE]
             + conditional_guidance
             + [
                 TOOL_EXECUTION_GUIDANCE,
-                PARALLEL_AGENT_GUIDANCE,
                 WORKFLOW_GUIDANCE,
-                WORK_PRINCIPLES_GUIDANCE,
                 ARTIFACT_JUDGMENT_GUIDANCE,
                 OUTPUT_FORMAT_GUIDANCE,
             ]
         )
-
-        aojiang_skill = "aojiang-hydro" in skill_catalog.lower()
-        if aojiang_skill:
-            guidance_parts.insert(0, AOJIANG_STATION_GUIDANCE)
 
         parts = [
             soul,
@@ -187,8 +177,6 @@ class NativeFloodAgent:
 7. `Bash`
 8. `WebSearch`（主动搜索补充内容，使结果更充实）
 9. `WebFetch`（获取网页详细内容）
-10. `mcp:metahuman:mh_knowledge_query`（检索知识库补充专业内容）
-11. `mcp:knowledge:kb_upload_document`（将文档上传到知识库）
 
 ## 可使用skills
 {skill_catalog}
@@ -304,12 +292,13 @@ class NativeFloodAgent:
     def _init_tools(self) -> None:
         from floodmind.tools import (
             get_skill, exec_bash,
-            knowledge_search, add_knowledge,
             web_search, fetch_webpage, add_memory, search_memory,
             update_project_instructions,
             create_scheduled_task, list_scheduled_tasks, cancel_scheduled_task,
-            set_rag_config, set_memory_instance, reset_retry_guard,
+            set_memory_instance, reset_retry_guard,
+            todo_write, todo_list,
         )
+        from floodmind.tools.todo_tools import set_todo_event_bus
         from floodmind.tools.agent_tool import ToolRegistry as _GlobalToolRegistry
         from floodmind.memory.task_experience import get_task_experience_capture
         from floodmind.agent.runtime.contracts.permissions import PermissionBehavior, PermissionRule, ToolPermissionPolicy
@@ -324,13 +313,6 @@ class NativeFloodAgent:
             set_memory_instance(self.memory)
             if self.memory._llm is None:
                 self.memory.set_llm(self.llm_service)
-
-        set_rag_config(
-            enabled=_settings.rag.enabled,
-            persist_dir=_settings.rag.persist_dir,
-            embedding_model=_settings.rag.embedding_model,
-            top_k=_settings.rag.top_k,
-        )
 
         path_service = PathService()
         set_path_service(path_service)
@@ -367,6 +349,10 @@ class NativeFloodAgent:
         if self._enable_search:
             all_tools.append(web_search)
             all_tools.append(fetch_webpage)
+
+        # ── Todo 任务管理工具 ────────────────────────────
+        all_tools.extend([todo_write, todo_list])
+        set_todo_event_bus(self._event_bus)
 
         self._skill_catalog = "\n".join(
             f"- {s.name}: {s.description}"
@@ -509,6 +495,36 @@ class NativeFloodAgent:
             ask_service=ask_service,
             set_session_context_fn=self._set_session_context,
         )
+
+        # ── Plugin 系统集成 ──
+        self._load_plugins()
+
+    def _load_plugins(self) -> None:
+        """加载并注册 Plugin 提供的工具和 hooks。"""
+        try:
+            from floodmind.plugin import PluginLoader
+            loader = PluginLoader()
+            plugins = loader.discover()
+            if not plugins:
+                return
+            for plugin in plugins:
+                # 注册工具
+                for tool in plugin.get_tools():
+                    self._orchestrator_registry.register(tool)
+                    logger.info("Plugin '%s' registered tool: %s", plugin.name, tool.name)
+                # 注册 hooks
+                for event_type, handler in plugin.get_hooks().items():
+                    self._event_bus.add_listener(
+                        lambda e, et=event_type, h=handler: h(e) if e.get("type") == et else None
+                    )
+                # Agent 初始化回调
+                try:
+                    plugin.on_agent_init(self)
+                except Exception as e:
+                    logger.warning("Plugin '%s' on_agent_init error: %s", plugin.name, e)
+            logger.info("Loaded %d plugin(s)", len(plugins))
+        except Exception as e:
+            logger.warning("Plugin loading failed (non-fatal): %s", e)
 
     def _init_model_client(self) -> None:
         if self.llm_service is not None:
@@ -1368,7 +1384,8 @@ class NativeFloodAgent:
                     experience_context = self._build_experience_context()
                     history_text = ""
                     if hasattr(self.memory, "get_chat_history_for_system_prompt"):
-                        context_chars = len(self._orchestrator_executor.system_prompt or "")
+                        _sp = getattr(self._orchestrator_executor, "system_prompts", None)
+                        context_chars = len(_sp[0]) if _sp else 0
                         cw = settings.agent.context_window
                         history_text = self.memory.get_chat_history_for_system_prompt(
                             total_context_chars=context_chars,
@@ -1430,7 +1447,6 @@ class NativeFloodAgent:
                     self._current_run_context = None
                     if saved_extra is not None:
                         self._orchestrator_executor.extra_body = saved_extra
-                    self._event_bus.clear_queue()
                     try:
                         from floodmind.agent.runtime.services.ask_service import get_ask_service
                         get_ask_service().clear_emit_fn(session_id=self.session_id)
@@ -1453,6 +1469,8 @@ class NativeFloodAgent:
                     continue
 
                 event_type = event.get("type", "")
+                if event_type == "todo_updated":
+                    logger.info("[STREAM] yielding todo_updated event, todos=%d", len(event.get("todos", [])))
                 if event_type == "__done__":
                     break
                 if event_type == "llm_token_error":
@@ -1468,6 +1486,20 @@ class NativeFloodAgent:
             agent_result: Optional[AgentResult] = result_holder.get("result")
             full_answer = agent_result.final_output if agent_result else ""
             full_reasoning = agent_result.reasoning if agent_result else ""
+
+            # ──文件/image 生成事件──
+            if agent_result and agent_result.artifacts:
+                import os as _os
+                for artifact_path in agent_result.artifacts:
+                    try:
+                        fname = _os.path.basename(artifact_path)
+                        ext = _os.path.splitext(fname)[1].lower()
+                        if ext in ('.png','.jpg','.jpeg','.gif','.webp','.bmp'):
+                            self._event_bus.emit_image_generated(fname, artifact_path)
+                        else:
+                            self._event_bus.emit_file_generated(fname, artifact_path)
+                    except Exception:
+                        pass
             full_tool_calls = []
             if agent_result and agent_result.tool_results:
                 for tr in agent_result.tool_results:
@@ -1540,6 +1572,8 @@ class NativeFloodAgent:
                 logger.warning("NativeFloodAgent 流式执行超时")
             else:
                 logger.info("NativeFloodAgent 流式执行成功")
+
+            self._event_bus.clear_queue()
 
         except Exception as e:
             logger.error("NativeFloodAgent 流式执行失败: %s", e)

@@ -7,7 +7,6 @@ Native Agent Runtime - NativeAgentExecutor
 
 import json
 import logging
-import os
 import time
 from typing import Any, Callable, Dict, List, Optional
 
@@ -20,6 +19,7 @@ from floodmind.agent.runtime.contracts.tools import ToolCall, ToolResult
 from floodmind.agent.native.event_bus import EventBus
 from floodmind.agent.native.message_builder import MessageBuilder
 from floodmind.agent.native.model_client import ModelClient
+from floodmind.agent.native.retry import is_retryable_error
 
 logger = logging.getLogger(__name__)
 
@@ -81,6 +81,7 @@ class NativeAgentExecutor:
         self._tools_schema = schema
 
     MAX_CONSECUTIVE_TOOL_FAILURES = 5
+    DOOM_LOOP_THRESHOLD = 3  # 连续相同工具+相同参数次数阈值
 
     def run(
         self,
@@ -98,6 +99,8 @@ class NativeAgentExecutor:
         plan_created = False
         _consecutive_failures: Dict[str, int] = {}
         _force_break = False
+        # DOOM LOOP 检测：追踪最近 N 次工具调用的 (tool_name, input_signature)
+        _recent_calls: List[tuple] = []
 
         effective_abort = abort_check or context.abort_check
 
@@ -112,46 +115,107 @@ class NativeAgentExecutor:
 
             current_answer = ""
             tool_calls: List[ToolCall] = []
+            _step_tokens = {"prompt_tokens": 0, "completion_tokens": 0}
 
             tools_param = self._tools_schema if self._tools_schema else None
 
             logger.info("[EXEC] calling LLM stream, iteration=%d, messages=%d, tools=%d", iteration, len(messages), len(tools_param) if tools_param else 0)
 
-            for event in self.model_client.stream_chat(
-                messages=messages,
-                tools=tools_param,
-                extra_body=self.extra_body or None,
-                abort_check=effective_abort,
-            ):
-                if event.type == "reasoning":
-                    reasoning += event.content
-                    self.event_bus.emit_reasoning(event.content)
-                elif event.type == "token":
-                    current_answer += event.content
-                    self.event_bus.emit_token(event.content)
-                elif event.type == "tool_call_done":
-                    tool_calls.append(event.tool_call)
-                elif event.type == "error":
-                    self.event_bus.emit_error(event.content)
-                    return AgentResult(
-                        final_output=f"模型调用错误: {event.content}",
-                        reasoning=reasoning,
-                        tool_results=all_tool_results,
-                        artifacts=all_artifacts,
+            # Step 开始事件（前端可用显示当前迭代和模型）
+            self.event_bus.emit_llm_step_start(
+                model_name=getattr(self.model_client, 'model_name', ''),
+                iteration=iteration,
+            )
+
+            # ── LLM 流消费（带自动重试）──
+            _retry_remaining = 3
+            while True:
+                try:
+                    for event in self.model_client.stream_chat(
+                        messages=messages,
+                        tools=tools_param,
+                        extra_body=self.extra_body or None,
+                        abort_check=effective_abort,
+                    ):
+                        if event.type == "reasoning":
+                            reasoning += event.content
+                            self.event_bus.emit_reasoning(event.content)
+                        elif event.type == "token":
+                            current_answer += event.content
+                            self.event_bus.emit_token(event.content)
+                        elif event.type == "tool_call_done":
+                            tool_calls.append(event.tool_call)
+                        elif event.type == "error":
+                            self.event_bus.emit_error(event.content)
+                            self.event_bus.emit_llm_step_end(reason="error")
+                            return AgentResult(
+                                final_output=f"模型调用错误: {event.content}",
+                                reasoning=reasoning,
+                                tool_results=all_tool_results,
+                                artifacts=all_artifacts,
+                            )
+                        elif event.type == "timeout":
+                            self.event_bus.emit_error(event.content)
+                            self.event_bus.emit_llm_step_end(reason="timeout")
+                            return AgentResult(
+                                final_output=event.content,
+                                reasoning=reasoning,
+                                tool_results=all_tool_results,
+                                artifacts=all_artifacts,
+                                is_timeout=True,
+                            )
+                        elif event.type == "done":
+                            pass
+                        elif event.type == "usage":
+                            try:
+                                payload = json.loads(event.content) if event.content else {}
+                            except (json.JSONDecodeError, TypeError):
+                                payload = {}
+                            _step_tokens["prompt_tokens"] = payload.get("prompt_tokens", 0)
+                            _step_tokens["completion_tokens"] = payload.get("completion_tokens", 0)
+                            logger.info("[EXEC] usage event: prompt=%s, completion=%s, total=%s",
+                                        payload.get("prompt_tokens"), payload.get("completion_tokens"), payload.get("total_tokens"))
+                            self.event_bus.emit_token_usage(
+                                prompt_tokens=payload.get("prompt_tokens", 0),
+                                completion_tokens=payload.get("completion_tokens", 0),
+                                total_tokens=payload.get("total_tokens", 0),
+                            )
+                    break  # stream completed successfully
+
+                except Exception as e:
+                    if _retry_remaining <= 0 or not is_retryable_error(e):
+                        self.event_bus.emit_error(str(e)[:500])
+                        self.event_bus.emit_llm_step_end(reason="error")
+                        return AgentResult(
+                            final_output=f"模型调用失败: {str(e)[:300]}",
+                            reasoning=reasoning,
+                            tool_results=all_tool_results,
+                            artifacts=all_artifacts,
+                        )
+                    _retry_remaining -= 1
+                    delay = min(2.0 * (2 ** (2 - _retry_remaining)), 30.0)
+                    logger.warning(
+                        "[EXEC] LLM stream error, retrying in %.1fs (%d left): %s",
+                        delay, _retry_remaining + 1, str(e)[:200],
                     )
-                elif event.type == "timeout":
-                    self.event_bus.emit_error(event.content)
-                    return AgentResult(
-                        final_output=event.content,
-                        reasoning=reasoning,
-                        tool_results=all_tool_results,
-                        artifacts=all_artifacts,
-                        is_timeout=True,
-                    )
-                elif event.type == "done":
-                    pass
+                    self.event_bus.emit({
+                        "type": "retry_attempt",
+                        "attempt": 3 - _retry_remaining,
+                        "error": str(e)[:200],
+                    })
+                    # Reset partial state on retry
+                    current_answer = ""
+                    tool_calls = []
+                    time.sleep(delay)
 
             logger.info("[EXEC] LLM stream done, iteration=%d, answer_len=%d, tool_calls=%d", iteration, len(current_answer), len(tool_calls))
+
+            # Step 结束事件
+            self.event_bus.emit_llm_step_end(
+                reason="tool_calls" if tool_calls else "stop",
+                tokens=_step_tokens,
+            )
+
             if tool_calls:
                 for tc in tool_calls:
                     raw_note = ""
@@ -194,11 +258,51 @@ class NativeAgentExecutor:
                     continue
 
                 tool_input_str = json.dumps(call.arguments, ensure_ascii=False) if call.arguments else ""
+
+                # ── DOOM LOOP 检测 ──
+                # 检查最近 DOOM_LOOP_THRESHOLD 次同工具非 pending 调用
+                # 是否使用了完全相同的参数。与连续失败计数互补：
+                # - 连续失败检测：同一工具连续报错（不管参数是否相同）
+                # - DOOM LOOP 检测：同一工具连续用相同参数调用（不管成败）
+                input_sig = self._build_input_signature(call)
+                recent_same_tool = [
+                    (n, s) for n, s in _recent_calls
+                    if n == call.name
+                ]
+                if len(recent_same_tool) >= self.DOOM_LOOP_THRESHOLD:
+                    last_n = recent_same_tool[-self.DOOM_LOOP_THRESHOLD:]
+                    if all(s == input_sig for _, s in last_n):
+                        doom_msg = (
+                            f"工具 {call.name} 已连续 {self.DOOM_LOOP_THRESHOLD} 次"
+                            f"使用相同参数调用，疑似死循环，强制终止。"
+                        )
+                        logger.warning("[EXEC] DOOM LOOP: %s, sig=%s", doom_msg, input_sig[:200])
+                        self.event_bus.emit_tool_result(
+                            tool_name=call.name,
+                            status="error",
+                            content=doom_msg,
+                            tool_input=tool_input_str,
+                            call_id=call.id,
+                        )
+                        messages.append(self.message_builder.build_tool_result_message(
+                            call.id, doom_msg
+                        ))
+                        if not final_answer:
+                            final_answer = doom_msg
+                        _force_break = True
+                        for leftover in tool_calls[idx + 1:]:
+                            messages.append(self.message_builder.build_tool_result_message(
+                                leftover.id, f"跳过: 已因 {call.name} 死循环而中断"
+                            ))
+                        break
+
                 self.event_bus.emit_tool_status(call.name, "running", tool_input=tool_input_str, call_id=call.id)
                 logger.info("[EXEC] executing tool: name=%s, call_id=%s, input_len=%d", call.name, call.id, len(tool_input_str))
                 result = self.tool_executor.execute(call, context, registry=self._tool_registry)
                 logger.info("[EXEC] tool done: name=%s, status=%s, result_len=%d", call.name, result.status, len(result.content) if result.content else 0)
                 all_tool_results.append(result)
+                # 记录到 DOOM LOOP 追踪（不管成败都记录）
+                _recent_calls.append((call.name, input_sig))
 
                 # 连续失败检测
                 if result.status == "error" or (result.content and "错误" in result.content[:50]):
@@ -265,6 +369,16 @@ class NativeAgentExecutor:
             tool_results=all_tool_results,
             artifacts=all_artifacts,
         )
+
+    @staticmethod
+    def _build_input_signature(call: ToolCall) -> str:
+        """构建工具调用参数签名（用于 DOOM LOOP 检测）。
+
+        参数 JSON 按 key 排序以保证相同语义的输入产生相同签名。
+        """
+        if call.arguments:
+            return json.dumps(call.arguments, sort_keys=True, ensure_ascii=False)
+        return "{}"
 
     def _build_initial_messages(
         self,

@@ -17,6 +17,7 @@ class EventBus:
         self._listeners: List[Callable[[dict], None]] = []
         self._queue: Optional[queue.Queue] = None
         self._lock = threading.RLock()
+        self._persist_callback: Optional[Callable[[dict], None]] = None
 
     def set_queue(self, q: queue.Queue) -> None:
         with self._lock:
@@ -25,6 +26,11 @@ class EventBus:
     def clear_queue(self) -> None:
         with self._lock:
             self._queue = None
+
+    def set_persist_callback(self, cb: Optional[Callable[[dict], None]]) -> None:
+        """Set a callback invoked on every emit() for event persistence (SyncEvent)."""
+        with self._lock:
+            self._persist_callback = cb
 
     def add_listener(self, listener: Callable[[dict], None]) -> None:
         with self._lock:
@@ -46,6 +52,13 @@ class EventBus:
             if self._queue is not None:
                 self._queue.put(event)
             listeners = list(self._listeners)
+            persist = self._persist_callback
+        # Persist to sync log (outside lock to avoid DB contention in callback)
+        if persist:
+            try:
+                persist(event)
+            except Exception as e:
+                logger.warning("EventBus persist callback error: %s", e)
         for listener in listeners:
             try:
                 listener(event)
@@ -152,6 +165,41 @@ class EventBus:
     def emit_context_compress_done(self, summary: str) -> None:
         """发送上下文压缩完成事件，附带结构化摘要"""
         self.emit({"type": "context_compress_done", "content": summary})
+
+    def emit_todo_updated(self, todos: List[dict]) -> None:
+        """发送 Todo 列表更新事件"""
+        logger.info("[EventBus] emit_todo_updated, items=%d, queue_set=%s", len(todos), self._queue is not None)
+        self.emit({"type": "todo_updated", "todos": todos})
+
+    def emit_token_usage(self, prompt_tokens: int = 0, completion_tokens: int = 0, total_tokens: int = 0) -> None:
+        """发送 token 用量统计事件"""
+        self.emit({
+            "type": "token_usage",
+            "prompt_tokens": prompt_tokens,
+            "completion_tokens": completion_tokens,
+            "total_tokens": total_tokens,
+        })
+
+    # ── Step 生命周期事件 ─────────────────
+
+    def emit_llm_step_start(self, model_name: str = "", iteration: int = 0) -> None:
+        """LLM 调用开始事件。前端可显示当前使用的模型和迭代序号。"""
+        event: Dict[str, Any] = {
+            "type": "llm_step_start",
+            "iteration": iteration,
+        }
+        if model_name:
+            event["model"] = model_name
+        self.emit(event)
+
+    def emit_llm_step_end(self, reason: str = "stop", tokens: Optional[Dict[str, int]] = None) -> None:
+        """LLM 调用结束事件。reason: 'stop'|'tool_calls'|'length'|'content_filter'"""
+        event: Dict[str, Any] = {
+            "type": "llm_step_end",
+            "finish_reason": reason,
+            "tokens": tokens or {},
+        }
+        self.emit(event)
 
 
 class StepEventBus:
@@ -264,3 +312,25 @@ class StepEventBus:
 
     def emit_context_compress_done(self, summary: str) -> None:
         self.emit({"type": "context_compress_done", "content": summary})
+
+    def emit_token_usage(self, prompt_tokens: int = 0, completion_tokens: int = 0, total_tokens: int = 0) -> None:
+        self.emit({
+            "type": "token_usage",
+            "prompt_tokens": prompt_tokens,
+            "completion_tokens": completion_tokens,
+            "total_tokens": total_tokens,
+        })
+
+    def emit_llm_step_start(self, model_name: str = "", iteration: int = 0) -> None:
+        event: Dict[str, Any] = {"type": "llm_step_start", "iteration": iteration}
+        if model_name:
+            event["model"] = model_name
+        self.emit(event)
+
+    def emit_llm_step_end(self, reason: str = "stop", tokens: Optional[Dict[str, int]] = None) -> None:
+        event: Dict[str, Any] = {
+            "type": "llm_step_end",
+            "finish_reason": reason,
+            "tokens": tokens or {},
+        }
+        self.emit(event)
