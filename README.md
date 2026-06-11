@@ -5,7 +5,7 @@
 FloodMind 是一个面向洪水预报业务的智能体协同处理系统。基于自研 Native Agent Runtime，利用大语言模型的规划与推理能力，结合水文模型、时序预测、RAG 知识检索和文档自动生成，实现从自然语言需求到预报产出的全流程自动化。
 
 <p align="center">
-  <img src="figure/floodmind-icon.svg" width="80" alt="FloodMind">
+  <img src="figure/floodmind-icon.png" width="80" alt="FloodMind">
 </p>
 
 ---
