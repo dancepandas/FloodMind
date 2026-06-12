@@ -10,15 +10,17 @@ FloodMind 是基于大语言模型的智能洪水预报 Agent 系统。本文档
 
 1. [架构概述](#1-架构概述)
 2. [环境搭建](#2-环境搭建)
-3. [Python API 集成](#3-python-api-集成)
-4. [HTTP API 集成](#4-http-api-集成)
-5. [自定义 Skill 开发](#5-自定义-skill-开发)
-6. [系统提示词与身份定制](#6-系统提示词与身份定制)
-7. [模型与 Provider 扩展](#7-模型与-provider-扩展)
-8. [构建自定义 Web 界面](#8-构建自定义-web-界面)
-9. [会话管理与记忆系统](#9-会话管理与记忆系统)
-10. [TUI 界面扩展](#10-tui-界面扩展)
-11. [项目结构参考](#11-项目结构参考)
+3. [SDK 嵌入式 Agent](#30-sdk-嵌入式-agent) ← 新增：轻量级 SDK
+4. [Python API 集成](#3-python-api-集成)
+5. [HTTP API 集成](#4-http-api-集成)
+6. [自定义 Skill 开发](#5-自定义-skill-开发)
+7. [系统提示词与身份定制](#6-系统提示词与身份定制)
+8. [模型与 Provider 扩展](#7-模型与-provider-扩展)
+9. [构建自定义 Web 界面](#8-构建自定义-web-界面)
+10. [会话管理与记忆系统](#9-会话管理与记忆系统)
+11. [TUI 界面扩展](#10-tui-界面扩展)
+12. [项目结构参考](#11-项目结构参考)
+13. [Plugin 系统开发](#12-plugin-系统开发)
 
 ---
 
@@ -146,6 +148,100 @@ WebSearch 搜索配置独立存储在 `~/.floodmind/search.json`：
 }
 ```
 ```
+
+---
+
+## 3.0 SDK 嵌入式 Agent
+
+将 FloodMind 嵌入到已有 Python 系统中。不需要 settings.json，纯代码配置即可使用。
+
+```python
+from floodmind import Agent, ModelClient, build_agent_tool
+
+# 1. 创建 LLM 客户端（任意 OpenAI 兼容接口）
+llm = ModelClient(
+    api_key="sk-xxx",
+    base_url="https://dashscope.aliyuncs.com/compatible-mode/v1",
+    model_name="deepseek-v4-flash",
+)
+
+# 2. 将系统模块封装为工具
+def query_station(station: str) -> str:
+    """查询监测站实时数据"""
+    return f"{station} 水位 32.5m, 流量 120m³/s"
+
+tools = [
+    build_agent_tool(
+        func=query_station,
+        name="QueryStation",
+        description="查询监测站实时数据",
+        is_readonly=True,
+    ),
+]
+
+# 3. 创建 Agent（bare 模式，不加载内置工具/权限/MCP）
+agent = Agent(
+    llm=llm,
+    tools=tools,
+    system_prompt="你是水文预报助手，帮用户查询监测数据并运行预报模型。",
+    session_id="my-system-001",
+)
+
+# 4. 非流式调用
+result = agent.run("查一下霍口水库水位")
+print(result)
+
+# 5. 流式调用 — 对接自建前端
+for event in agent.stream("查一下霍口水库水位"):
+    if event["type"] == "answer_delta":
+        print(event["content"], end="", flush=True)   # 文本增量
+    elif event["type"] == "action_start":
+        print(f"\n[调用工具] {event['tool_name']}")    # 工具状态
+    elif event["type"] == "action_end":
+        print(f"\n[工具完成] {event['tool_name']}")
+    elif event["type"] == "final_text":
+        print(f"\n[最终结果] {event['content']}")
+```
+
+### 流式事件协议
+
+`agent.stream()` 产出结构化 dict，自建前端直接消费：
+
+| event.type | 含义 | 前端处理 |
+|------------|------|----------|
+| `answer_delta` | 回答文本增量 | 追加到聊天框 |
+| `thought_delta` | 思考过程增量 | 折叠展示 |
+| `action_start` | 工具调用开始 | 显示 loading 状态 |
+| `action_end` | 工具调用结束 | 显示工具结果 |
+| `final_text` | 最终完整回答 | 替换/确认最终文本 |
+| `error` | 错误 | 显示错误提示 |
+
+### 编程式 Skill 注册
+
+不需要 SKILL.md 文件，直接用代码注册：
+
+```python
+from floodmind import Skill, register_skill
+
+skill = Skill(
+    name="water-forecast",
+    description="TRIGGER when: 用户要求进行水位预报时",
+    prompt="## 水位预报流程\n1. 读取监测数据\n2. 运行新安江模型\n3. 输出预报结果",
+)
+register_skill(skill)
+```
+
+### Agent 构造参数
+
+| 参数 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| `llm` | `ModelClient` | 是 | LLM 客户端 |
+| `tools` | `list[AgentTool\|ToolSpec]` | 否 | 自定义工具列表 |
+| `system_prompt` | `str` | 否 | 自定义系统提示词 |
+| `memory` | `DualMemory` | 否 | 记忆系统（不传则自动创建） |
+| `session_id` | `str` | 否 | 会话 ID（默认 `"sdk-agent"`） |
+| `enable_search` | `bool` | 否 | 启用 WebSearch 工具 |
+| `enable_reasoning` | `bool` | 否 | 启用推理模式 |
 
 ---
 

@@ -154,20 +154,74 @@ floodmind run "分析水库水位数据" -m deepseek-v4-flash
 
 FloodMind 提供了多种集成方式，可嵌入到第三方系统或构建自定义界面。
 
-### Python API
+### Python SDK（嵌入式 Agent）
+
+将 Agent 嵌入到任意 Python 系统，自定义工具、提示词和前端：
 
 ```python
-from floodmind.agent import create_flood_agent
+from floodmind import Agent, ModelClient, build_agent_tool
+
+# 1. 创建 LLM 客户端（任意 OpenAI 兼容接口）
+llm = ModelClient(
+    api_key="sk-xxx",
+    base_url="https://dashscope.aliyuncs.com/compatible-mode/v1",
+    model_name="deepseek-v4-flash",
+)
+
+# 2. 将系统模块封装为工具
+def query_station(station: str) -> str:
+    """查询监测站实时数据"""
+    return f"{station} 水位 32.5m, 流量 120m³/s"
+
+def run_model(station: str, model_type: str = "xinanjiang") -> str:
+    """运行水文预报模型"""
+    return f"预报结果: 洪峰流量 350m³/s, 到达时间 +6h"
+
+tools = [
+    build_agent_tool(func=query_station, name="QueryStation", description="查询监测站实时数据"),
+    build_agent_tool(func=run_model, name="RunModel", description="运行水文预报模型"),
+]
+
+# 3. 创建 Agent
+agent = Agent(
+    llm=llm,
+    tools=tools,
+    system_prompt="你是水文预报助手，帮用户查询监测数据并运行预报模型。",
+)
+
+# 4. 非流式调用 — 拿结果展示
+result = agent.run("查一下霍口水库水位，然后跑一下新安江模型")
+print(result)
+
+# 5. 流式调用 — 推送给自建前端
+for event in agent.stream("查一下霍口水库水位"):
+    if event["type"] == "answer_delta":
+        # 文本增量 → 前端渲染
+        print(event["content"], end="", flush=True)
+    elif event["type"] == "action_start":
+        # 工具调用状态 → 前端展示
+        print(f"\n[调用工具] {event['tool_name']}")
+    elif event["type"] == "final_text":
+        # 最终完整回答
+        print(f"\n[完成] {event['content']}")
+```
+
+### Python API（完整模式）
+
+使用 FloodMind 内置全套工具（文件读写、Web 搜索、记忆系统等）：
+
+```python
 from floodmind.agent.native.model_client import ModelClient
 from floodmind.memory import DualMemory
+from floodmind.agent.native.native_flood_agent import NativeFloodAgent
 
 llm = ModelClient.from_settings()
-memory = DualMemory(max_short_term=20, context_window=32768)
-agent = create_flood_agent(llm_service=llm, memory=memory)
+memory = DualMemory(session_id="my-session", max_short_term=20, context_window=32768)
+agent = NativeFloodAgent(llm_service=llm, memory=memory, session_id="my-session")
 
 # 流式对话
 for chunk in agent.stream("分析水位数据"):
-    print(chunk["content"], end="")
+    print(chunk.get("content", ""), end="")
 
 # 单次执行
 result = agent.run("生成水文报告")
