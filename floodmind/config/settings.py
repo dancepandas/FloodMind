@@ -141,7 +141,6 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         "enabled": True,
         "min_message_count": 3,
     },
-    "mcpServers": [],
 }
 
 
@@ -372,22 +371,79 @@ class BackgroundReviewConfig:
         self.min_message_count = int(raw.get("min_message_count", 3))
 
 
+# ── MCP 配置 (独立文件 mcp.json) ─────────────────────────
+
+def _mcp_config_path() -> Path:
+    return _config_dir() / "mcp.json"
+
+
+def load_mcp_config() -> Dict[str, Any]:
+    """加载 MCP 配置：mcp.json + 环境变量覆盖。
+
+    首次启动时自动从 settings.json 的 mcpServers 字段迁移。
+    """
+    mcp_path = _mcp_config_path()
+
+    # 加载 mcp.json
+    if mcp_path.exists():
+        mcp_cfg = _load_json_config(mcp_path)
+    else:
+        mcp_cfg = {}
+
+    # 首次迁移：从 settings.json 的 mcpServers 字段迁移到 mcp.json
+    if not mcp_cfg.get("servers") and mcp_path == _config_dir() / "mcp.json":
+        user_cfg = _load_json_config(_config_path())
+        legacy = user_cfg.get("mcpServers", user_cfg.get("mcp_servers", []))
+        if legacy and isinstance(legacy, list):
+            mcp_cfg = {"servers": legacy}
+            # 从 settings.json 中移除旧字段
+            if "mcpServers" in user_cfg or "mcp_servers" in user_cfg:
+                user_cfg.pop("mcpServers", None)
+                user_cfg.pop("mcp_servers", None)
+                save_config(user_cfg)
+                _logger.info("已将 mcpServers 从 settings.json 迁移到 mcp.json")
+            # 写入 mcp.json
+            try:
+                _config_dir().mkdir(parents=True, exist_ok=True)
+                with open(mcp_path, "w", encoding="utf-8") as f:
+                    json.dump(mcp_cfg, f, ensure_ascii=False, indent=2)
+            except Exception as e:
+                _logger.warning("写入 mcp.json 失败: %s", e)
+
+    if not mcp_cfg:
+        mcp_cfg = {"servers": []}
+
+    # 环境变量覆盖
+    env_raw = os.getenv("MCP_SERVERS", "")
+    if env_raw.strip():
+        try:
+            parsed = json.loads(env_raw)
+            if isinstance(parsed, list):
+                mcp_cfg["servers"] = parsed
+        except Exception:
+            pass
+
+    return mcp_cfg
+
+
+def save_mcp_config(mcp_cfg: Dict[str, Any]) -> None:
+    """保存 MCP 配置到 mcp.json。"""
+    config_dir = _config_dir()
+    config_dir.mkdir(parents=True, exist_ok=True)
+    mcp_path = _mcp_config_path()
+    with open(mcp_path, "w", encoding="utf-8") as f:
+        json.dump(mcp_cfg, f, ensure_ascii=False, indent=2)
+    _logger.info("MCP 配置已保存: %s", mcp_path)
+
+
 class McpServerConfig:
-    def __init__(self, cfg: dict):
-        raw = cfg.get("mcpServers", cfg.get("mcp_servers", []))
+    def __init__(self):
+        mcp_cfg = load_mcp_config()
+        raw = mcp_cfg.get("servers", [])
         if isinstance(raw, list):
             self.servers: List[Dict[str, Any]] = raw
         else:
-            env_raw = os.getenv("MCP_SERVERS", "")
-            import json as _json
-            if env_raw.strip():
-                try:
-                    parsed = _json.loads(env_raw)
-                    self.servers = parsed if isinstance(parsed, list) else []
-                except Exception:
-                    self.servers = []
-            else:
-                self.servers = []
+            self.servers = []
 
 
 class APIConfig:
@@ -406,7 +462,7 @@ class Settings:
         self.agent = AgentConfig(cfg)
         self.task_experience = TaskExperienceConfig(cfg)
         self.background_review = BackgroundReviewConfig(cfg)
-        self.mcp = McpServerConfig(cfg)
+        self.mcp = McpServerConfig()
 
     @property
     def qwen(self):
