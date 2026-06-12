@@ -205,6 +205,9 @@ class NativeFloodAgent:
         enable_search: bool = False,
         enable_reasoning: bool = False,
         agent_type: str = "build",
+        bare: bool = False,
+        tools: Optional[list] = None,
+        system_prompt: Optional[str] = None,
         **kwargs,
     ):
         self.llm_service = llm_service
@@ -213,6 +216,7 @@ class NativeFloodAgent:
         self._enable_search = enable_search
         self._enable_reasoning = enable_reasoning
         self._agent_type = agent_type
+        self._bare = bare
 
         from floodmind.agent.agent_registry import get_agent
         self._agent_info = get_agent(agent_type) or get_agent("build")
@@ -243,6 +247,13 @@ class NativeFloodAgent:
         self._cached_experience_context: str = ""
         self._cached_experience_version: int = -1
 
+        # ── bare 模式：精简初始化（嵌入 SDK 用） ──
+        if bare:
+            self._init_bare(tools or [], system_prompt)
+            logger.info("NativeFloodAgent (bare) 初始化成功")
+            return
+
+        # ── 完整模式（原有路径） ──
         self._init_tools()
         self._init_model_client()
         self._init_executors()
@@ -253,6 +264,52 @@ class NativeFloodAgent:
 
     _chronos_warmup_done = False
     _chronos_warmup_lock = threading.Lock()
+
+    def _init_bare(self, tools: list, system_prompt: Optional[str]) -> None:
+        """bare 模式精简初始化：只注册用户提供的工具，跳过内置工具/权限/MCP/Plugin。"""
+        # 注册用户工具（支持 AgentTool 和 ToolSpec 两种格式）
+        self._orchestrator_registry.register_tools(tools)
+        self._specialist_registry.register_tools(tools)
+
+        # 构建 skill catalog（bare 模式下通常为空）
+        self._skill_catalog = ""
+
+        # 工具描述
+        tool_descriptions = self._build_tool_descriptions(self._orchestrator_registry)
+
+        # 提示词：用户自定义 or 最小默认
+        prompt = system_prompt or "你是一个智能助手，使用可用工具帮助用户完成任务。"
+
+        # 初始化 model client
+        self._init_model_client()
+
+        # 初始化 tool executor（bare 模式：默认允许所有调用）
+        from floodmind.agent.runtime.services.tool_execution_service import ToolExecutionService
+        self._tool_executor = ToolExecutionService()
+
+        # 构建 executor
+        self._orchestrator_executor = NativeAgentExecutor(
+            model_client=self._model_client,
+            tool_executor=self._tool_executor,
+            event_bus=self._event_bus,
+            message_builder=self._message_builder,
+            max_iterations=50,
+            extra_body=self._orchestrator_extra_body,
+            system_prompts=[prompt + "\n\n## 可用工具\n" + tool_descriptions],
+            tools_schema=self._orchestrator_registry.tools_schema(),
+            tool_registry=self._orchestrator_registry,
+        )
+
+        self._specialist_executor = NativeAgentExecutor(
+            model_client=self._model_client,
+            tool_executor=self._tool_executor,
+            event_bus=self._event_bus,
+            message_builder=self._message_builder,
+            max_iterations=50,
+            system_prompts=[prompt],
+            tools_schema=self._specialist_registry.tools_schema(),
+            tool_registry=self._specialist_registry,
+        )
 
     @staticmethod
     def _build_tool_descriptions(registry) -> str:

@@ -19,7 +19,7 @@
 import logging
 from pathlib import Path
 
-from floodmind.skills.base import Skill, discover_skills, discover_skills_from_roots, generate_skill_catalog
+from floodmind.skills.base import Skill, discover_skills, discover_skills_from_roots, generate_skill_catalog, register_skill
 from floodmind.tools import set_skill_registry
 
 logger = logging.getLogger(__name__)
@@ -44,6 +44,7 @@ __all__ = [
     "SKILL_REGISTRY",
     "SKILL_CATALOG",
     "refresh_skill_registry",
+    "register_skill",
 ]
 
 
