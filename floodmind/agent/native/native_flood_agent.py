@@ -280,8 +280,13 @@ class NativeFloodAgent:
         # 提示词：用户自定义 or 最小默认
         prompt = system_prompt or "你是一个智能助手，使用可用工具帮助用户完成任务。"
 
-        # 初始化 model client
-        self._init_model_client()
+        # 初始化 model client：如果传入的已是 ModelClient 实例则直接复用
+        if isinstance(self.llm_service, ModelClient):
+            self._model_client = self.llm_service
+            if self.llm_service.enable_thinking:
+                self._orchestrator_extra_body = {"enable_thinking": True}
+        else:
+            self._init_model_client()
 
         # 初始化 tool executor（bare 模式：默认允许所有调用）
         from floodmind.agent.runtime.services.tool_execution_service import ToolExecutionService
