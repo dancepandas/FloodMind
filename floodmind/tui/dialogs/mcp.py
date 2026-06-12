@@ -8,7 +8,7 @@ from textual.widgets import Static, Header, Button, OptionList
 from textual.containers import Horizontal
 from textual.binding import Binding
 
-from floodmind.config.settings import get_config, save_config
+from floodmind.config.settings import load_mcp_config, save_mcp_config
 
 
 class McpDialog(ModalScreen[bool]):
@@ -27,12 +27,18 @@ class McpDialog(ModalScreen[bool]):
     def on_mount(self) -> None:
         self._refresh_list()
 
+    def _get_servers(self) -> list:
+        return load_mcp_config().get("servers", [])
+
+    def _save_servers(self, servers: list) -> None:
+        save_mcp_config({"servers": servers})
+
     def _refresh_list(self) -> None:
         ol = self.query_one("#mcp-list", OptionList)
         ol.clear_options()
-        servers = get_config().get("mcp_servers", [])
+        servers = self._get_servers()
         if not servers:
-            ol.add_option(("No MCP servers configured. Add in ~/.floodmind/settings.json", ""))
+            ol.add_option(("No MCP servers configured. Add in ~/.floodmind/mcp.json", ""))
             return
         for i, s in enumerate(servers):
             on = "✓" if s.get("enabled", True) else "✗"
@@ -46,7 +52,7 @@ class McpDialog(ModalScreen[bool]):
         if str(event.button.label).startswith("Close"):
             self.dismiss(True)
         elif str(event.button.label).startswith("Toggle"):
-            servers = get_config().get("mcp_servers", [])
+            servers = self._get_servers()
             ol = self.query_one("#mcp-list", OptionList)
             if ol.highlighted is not None:
                 opt = ol.get_option_at_index(ol.highlighted)
@@ -54,21 +60,16 @@ class McpDialog(ModalScreen[bool]):
                     idx = int(opt.id)
                     if 0 <= idx < len(servers):
                         servers[idx]["enabled"] = not servers[idx].get("enabled", True)
-                        cfg = get_config()
-                        cfg["mcp_servers"] = servers
-                        save_config(cfg)
+                        self._save_servers(servers)
                         self._refresh_list()
 
     def on_option_list_option_selected(self, event: OptionList.OptionSelected) -> None:
-        # Toggle on Enter key
-        servers = get_config().get("mcp_servers", [])
+        servers = self._get_servers()
         if event.option_id and event.option_id.isdigit():
             idx = int(event.option_id)
             if 0 <= idx < len(servers):
                 servers[idx]["enabled"] = not servers[idx].get("enabled", True)
-                cfg = get_config()
-                cfg["mcp_servers"] = servers
-                save_config(cfg)
+                self._save_servers(servers)
                 self._refresh_list()
 
     def action_close(self) -> None:

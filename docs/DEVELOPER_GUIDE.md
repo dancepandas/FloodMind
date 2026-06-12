@@ -84,11 +84,20 @@ pip install "floodmind[all]"        # 全部依赖（含 GPU）
 
 ### 配置
 
-配置文件 `~/.floodmind/settings.json`。首次启动自动创建模板。
+配置文件位于 `~/.floodmind/` 目录下，按职责分为独立文件：
 
-最小配置示例（DashScope）：
+| 文件 | 说明 |
+|------|------|
+| `settings.json` | 主配置（模型、Provider、Agent 参数） |
+| `mcp.json` | MCP Server 连接配置（独立管理） |
+| `search.json` | WebSearch 搜索引擎配置（API Key、URL、Provider） |
+| `SOUL.md` | 智能体身份定义 |
+| `AGENTS.md` | 全局行为规则 |
+
+首次启动自动创建模板。最小配置示例（DashScope）：
 
 ```json
+// ~/.floodmind/settings.json
 {
   "provider": {
     "dashscope": {
@@ -107,6 +116,35 @@ pip install "floodmind[all]"        # 全部依赖（含 GPU）
     "model": "deepseek-v4-flash"
   }
 }
+```
+
+MCP Server 配置独立存储在 `~/.floodmind/mcp.json`：
+
+```json
+// ~/.floodmind/mcp.json
+{
+  "servers": [
+    {
+      "name": "knowledge",
+      "transport": "stdio",
+      "command": "python",
+      "args": ["~/.floodmind/mcp/knowledge/server.py"],
+      "enabled": true
+    }
+  ]
+}
+```
+
+WebSearch 搜索配置独立存储在 `~/.floodmind/search.json`：
+
+```json
+// ~/.floodmind/search.json
+{
+  "engine": "baidu_qianfan",
+  "url": "https://qianfan.baidubce.com/v2/ai_search/web_search",
+  "api_key": "your_key_here"
+}
+```
 ```
 
 ---
@@ -560,7 +598,9 @@ floodmind web
 
 ```
 <FLOODMIND_HOME>/
-├── settings.json     # 主配置
+├── settings.json     # 主配置（模型、Provider、Agent 参数）
+├── mcp.json          # MCP Server 连接配置（独立）
+├── search.json       # WebSearch 搜索引擎配置（独立）
 ├── SOUL.md           # 身份定义
 ├── AGENTS.md         # 全局指令
 ├── sessions/         # 会话数据
@@ -804,7 +844,8 @@ FloodMind/
 │   │   ├── mcp_client.py             #   MCP 客户端
 │   │   └── scheduled_task_runtime.py #   定时任务
 │   ├── config/                       # 配置
-│   │   ├── settings.py               #   settings.json 读取与模型
+│   │   ├── settings.py               #   主配置模型（settings.json + MCP 独立加载）
+│   │   ├── search_config.py          #   WebSearch 搜索配置（独立 search.json）
 │   │   ├── model_presets.py          #   model preset 解析
 │   │   └── provider_registry.py      #   Provider 注册与管理
 │   ├── profile/                      # 身份与提示词定制

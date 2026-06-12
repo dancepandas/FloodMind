@@ -718,11 +718,24 @@ def _impl_web_search(
     if not query:
         return _finalize_tool_output("web_search", "错误：搜索关键词不能为空", query=query, count=count, freshness=freshness, search_types=search_types, site=site)
     
-    api_key = os.getenv("BAIDU_API_KEY")
+    api_key = os.getenv("BAIDU_API_KEY") or os.getenv("FLOODMIND_SEARCH_API_KEY")
+    search_url = "https://qianfan.baidubce.com/v2/ai_search/web_search"
+
+    # 优先从 search.json 配置读取
+    try:
+        from floodmind.config.search_config import get_search_config
+        search_cfg = get_search_config()
+        if search_cfg.get("api_key"):
+            api_key = search_cfg["api_key"]
+        if search_cfg.get("url"):
+            search_url = search_cfg["url"]
+    except Exception:
+        pass
+
     if not api_key:
         return _finalize_tool_output(
             "web_search",
-            "错误：未配置 BAIDU_API_KEY 环境变量，请在 .env 文件中配置",
+            "错误：未配置搜索 API Key。请编辑 ~/.floodmind/search.json 或设置 BAIDU_API_KEY 环境变量",
             query=query,
             count=count,
             freshness=freshness,
@@ -813,7 +826,7 @@ def _impl_web_search(
         request_body["search_filter"] = search_filter
     
     try:
-        url = "https://qianfan.baidubce.com/v2/ai_search/web_search"
+        url = search_url
         headers = {
             "Authorization": f"Bearer {api_key}",
             "Content-Type": "application/json"
