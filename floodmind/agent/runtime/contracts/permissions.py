@@ -8,7 +8,7 @@ PermissionService / AskService / ToolExecutionService 只依赖此模块。
 from enum import Enum
 from typing import Literal, Optional, Any
 
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 
 
 class PermissionBehavior(str, Enum):
@@ -44,14 +44,13 @@ class ToolFeedback(BaseModel):
 
 
 class PermissionRequest(BaseModel):
+    model_config = ConfigDict(arbitrary_types_allowed=True)
+
     session_id: str = ""
     call_id: str = ""
     tool_name: str = ""
     tool_input: dict = {}
     permission_policy: Optional["ToolPermissionPolicy"] = None
-
-    class Config:
-        arbitrary_types_allowed = True
 
     _check_permissions_fn: Any = None
 

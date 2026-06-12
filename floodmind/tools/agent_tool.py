@@ -14,7 +14,7 @@ import traceback
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Type, Union
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 from floodmind.agent.runtime.contracts.permissions import (
     InterruptBehavior,
@@ -81,7 +81,7 @@ class AgentTool(BaseModel):
     check_permissions_fn: Optional[Callable] = Field(default=None, description="权限检查函数", exclude=True)
     permission_policy: Optional[ToolPermissionPolicy] = Field(default=None, description="权限策略")
 
-    model_config = {"arbitrary_types_allowed": True}
+    model_config = ConfigDict(arbitrary_types_allowed=True)
 
     def run(self, **kwargs) -> ToolResult:
         """执行工具"""
