@@ -42,6 +42,7 @@ from floodmind.tools.agent_tool import (
     resolve_tool_path,
 )
 from floodmind.agent.runtime.contracts.permissions import ToolPermissionPolicy
+from floodmind.skills.registry import get_skill_registry
 from floodmind.agent.runtime.services.process_sandbox import get_process_sandbox
 from floodmind.tools.session_context import (
     SESSION_CONTEXT,
@@ -320,31 +321,15 @@ class CancelScheduledTaskInput(BaseModel):
     task_id: str = Field(description="[必填] 要取消的定时任务 ID")
 
 
-_SKILL_REGISTRY: List[Any] = []
 # session 索引位置：网页版仍是 data/sessions/.session_index.json。
 # 桌面版经 workspace.session_root 解析；这里保留 _SESSION_ROOT 作为兼容回退常量。
 _SESSION_ROOT = _PROJECT_ROOT / "data" / "sessions"
 _REUSABLE_SCRIPT_EXTENSIONS = {".py"}
 
 
-def set_skill_registry(skills: List[Any]):
-    """设置技能注册表（由 skills/__init__.py 调用）。
-
-    同时清空 GetSkill 的 body 缓存（_get_skill_cached 的 lru_cache），
-    使运行期 refresh_skill_registry() 后能拿到最新技能正文，而非过期缓存。
-    """
-    global _SKILL_REGISTRY
-    _SKILL_REGISTRY = skills
-    # _get_skill_cached 在本文件后文定义；运行期调用时模块已加载，名称可解析。
-    _get_skill_cached.cache_clear()
-
-
 def _find_skill(skill_name: str) -> Optional[Any]:
-    """查找技能"""
-    for skill in _SKILL_REGISTRY:
-        if skill.name == skill_name:
-            return skill
-    return None
+    """查找技能（委托唯一权威源 SkillRegistry 单例）。"""
+    return get_skill_registry().get_skill(skill_name)
 
 
 def _session_root_path() -> Path:
@@ -413,7 +398,7 @@ def _get_skill_cached(skill_name: str) -> str:
     skill = _find_skill(skill_name)
 
     if not skill:
-        available = [s.name for s in _SKILL_REGISTRY]
+        available = [s.name for s in get_skill_registry().all_skills()]
         return _finalize_tool_output(
             "get_skill",
             f"未找到技能 '{skill_name}'。可用技能：{available}",
@@ -488,6 +473,10 @@ def _get_skill_cached(skill_name: str) -> str:
         ])
 
     return _finalize_tool_output("get_skill", "\n".join(lines), skill_name=skill_name)
+
+
+# refresh/register/set_disabled 后清 GetSkill 正文缓存，避免 stale（替代旧 set_skill_registry）
+get_skill_registry().add_refresh_callback(_get_skill_cached.cache_clear)
 
 
 
@@ -1749,7 +1738,6 @@ __all__ = [
     'list_scheduled_tasks',
     'cancel_scheduled_task',
     'reset_retry_guard',
-    'set_skill_registry',
     'set_memory_instance',
     'set_session_context',
     'get_current_session_output_dir',

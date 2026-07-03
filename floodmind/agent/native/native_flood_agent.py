@@ -427,7 +427,7 @@ class NativeFloodAgent:
         from floodmind.agent.runtime.services.ask_service import get_ask_service, set_ask_service
         from floodmind.agent.runtime.services.path_service import PathService, set_path_service
         from floodmind.agent.runtime.services.tool_execution_service import ToolExecutionService
-        from floodmind.skills import SKILL_REGISTRY
+        from floodmind.skills.registry import get_skill_registry
         from floodmind.config.settings import settings as _settings
 
         if self.memory is not None:
@@ -522,12 +522,15 @@ class NativeFloodAgent:
             all_tools.append(web_search)
             all_tools.append(fetch_webpage)
 
-        self._skill_catalog = "\n".join(
-            f"- {s.name}: {s.description}"
-            + (f" (v{s.version})" if s.version and s.version != "1.0" else "")
-            + (f" [provides: {', '.join(s.provides_tools)}]" if s.provides_tools else "")
-            for s in SKILL_REGISTRY
-        ) + "\n- GetSkill: 按需获取任意技能的完整参数说明"
+        self._skill_catalog = get_skill_registry().catalog()
+
+        # 注册经验→Skill 自动生成回调：auto-gen 写盘后触发 refresh_skills（热插拔闭环）。
+        # 在 _init_tools 注册（而非 refresh_skills 内部），避免旧代码 chicken-and-egg 死循环。
+        try:
+            import floodmind.memory.task_experience as _te
+            _te._on_skill_generated = self.refresh_skills
+        except Exception:
+            logger.debug("task_experience skill 生成回调注册跳过", exc_info=True)
 
         self._orchestrator_registry.register_tools(all_tools)
         # 子代理工具白名单：排除依赖主代理 memory 实例的工具（子代理 clean slate 无 memory，
@@ -1025,24 +1028,16 @@ class NativeFloodAgent:
         self._specialist_executor.system_prompts = spec_prompts
 
     def refresh_skills(self) -> None:
-        """刷新 skill 注册表并重建 Agent 的 system prompt"""
-        from floodmind.skills import refresh_skill_registry, SKILL_REGISTRY as _reg
-        refresh_skill_registry()
-        new_catalog = "\n".join(
-            f"- {s.name}: {s.description}"
-            + (f" (v{s.version})" if s.version and s.version != "1.0" else "")
-            + (f" [provides: {', '.join(s.provides_tools)}]" if s.provides_tools else "")
-            for s in _reg
-        ) + "\n- GetSkill: 按需获取任意技能的完整参数说明"
-        self._skill_catalog = new_catalog
+        """刷新 skill 注册表（唯一权威源 SkillRegistry）并重建 Agent 的 system prompt。
+
+        修旧 bug：原 ``from import SKILL_REGISTRY as _reg`` 在 refresh 前快照 → catalog
+        用旧列表重建（stale-binding）。现直读单例 catalog（与 _init_tools 同格式，单一 catalog）。
+        """
+        from floodmind.skills.registry import get_skill_registry
+        get_skill_registry().refresh()
+        self._skill_catalog = get_skill_registry().catalog()
         self._rebuild_system_prompts()
         logger.info("NativeFloodAgent 技能已刷新: catalog=%d chars", len(self._skill_catalog))
-        # 注册 B3 经验→Skill 生成回调
-        try:
-            import floodmind.memory.task_experience as _te
-            _te._on_skill_generated = self.refresh_skills
-        except Exception:
-            pass
 
     def _handle_load_mcp_server(self, name: str = "", transport: str = "sse", url: str = "", command: str = "", args: Any = "", env: Any = "") -> str:
         """运行时动态接入 MCP Server 的工具处理函数"""

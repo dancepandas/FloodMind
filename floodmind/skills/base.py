@@ -287,13 +287,9 @@ def register_skill(skill: Skill) -> None:
     用法:
         from floodmind.skills import register_skill, Skill
         register_skill(Skill(name="my-skill", description="...", prompt="..."))
+
+    委托到唯一权威源 ``SkillRegistry``（去重：同名替换）。懒导入避免 base↔registry 环。
     """
-    from floodmind.skills import SKILL_REGISTRY
-    # 去重：同名则替换
-    for i, s in enumerate(SKILL_REGISTRY):
-        if s.name == skill.name:
-            SKILL_REGISTRY[i] = skill
-            logger.info("替换 Skill: %s", skill.name)
-            return
-    SKILL_REGISTRY.append(skill)
-    logger.info("注册 Skill: %s", skill.name)
+    from floodmind.skills.registry import get_skill_registry
+    get_skill_registry().register_skill(skill)
+

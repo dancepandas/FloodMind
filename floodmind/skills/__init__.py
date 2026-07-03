@@ -1,58 +1,52 @@
 """
-技能注册表 - 自动发现版本
+技能注册表 - 单一发现源版本（skill 体系统一）
 
-采用 OpenClaw / Claude Code 风格：
-- 自动扫描 skills/ 目录下的所有 SKILL.md
-- 无需手动注册，只需创建技能文件夹
-- 支持渐进式披露（元数据 -> 指令 -> 资源）
+按 OpenClaw / Claude Code 风格自动扫描 SKILL.md，但收敛为**唯一权威源**：
+``SkillRegistry`` 单例（``floodmind/skills/registry.py``）。GetSkill / refresh_skills /
+CRUD 工具 / curator 全部经 ``get_skill_registry()``。
 
-新增技能只需：
-1. 在 skills/ 下创建 <skill-name>/ 文件夹
-2. 创建 SKILL.md（填写 frontmatter + 使用说明，name 必填，description 强烈建议填写）
-3. 可选：创建 scripts/ 目录放置脚本
-4. 可选：创建 references/ 目录放置参考文档
-5. 可选：创建 assets/ 目录放置模板、图标等资源文件
-
-无需修改任何代码！
+新增技能只需在发现根（默认 ``floodmind/skills/`` 内置、``<repo>/skills/`` 项目、
+``<repo>/.claude/skills/`` CC 兼容）下创建 ``<name>/SKILL.md``，无需改代码。
 """
 
 import logging
-from pathlib import Path
+from typing import List
 
 from floodmind.skills.base import Skill, discover_skills, discover_skills_from_roots, generate_skill_catalog, register_skill
-from floodmind.tools import set_skill_registry
+from floodmind.skills.registry import SkillRegistry, default_roots, get_skill_registry
 
 logger = logging.getLogger(__name__)
 
-_HERE = Path(__file__).parent
-_EXTRA_SKILLS_DIRS = [
-    Path.cwd() / "skills",
-    Path.cwd() / ".claude" / "skills",
-]
 
-SKILL_REGISTRY: list[Skill] = discover_skills_from_roots([_HERE] + _EXTRA_SKILLS_DIRS)
+def refresh_skill_registry() -> List[Skill]:
+    """重新扫描发现根，刷新单例（唯一权威源）。返回最新技能列表。"""
+    return get_skill_registry().refresh()
 
-set_skill_registry(SKILL_REGISTRY)
 
-SKILL_CATALOG: str = generate_skill_catalog(SKILL_REGISTRY)
+def __getattr__(name):
+    """向后兼容 + live 视图：``SKILL_REGISTRY`` / ``SKILL_CATALOG`` 每次访问取单例最新值。
+
+    旧代码 ``from floodmind.skills import SKILL_REGISTRY`` 拿到的是单例的当前快照，
+    ``register_skill`` / ``refresh`` 后再次访问即见新（修复旧 ``from import`` 快照在
+    refresh 后 stale 的问题）。
+    """
+    if name == "SKILL_REGISTRY":
+        return get_skill_registry().all_skills()
+    if name == "SKILL_CATALOG":
+        return get_skill_registry().catalog()
+    raise AttributeError(f"module 'floodmind.skills' has no attribute {name!r}")
+
 
 __all__ = [
     "Skill",
+    "SkillRegistry",
     "discover_skills",
     "discover_skills_from_roots",
     "generate_skill_catalog",
+    "get_skill_registry",
+    "default_roots",
     "SKILL_REGISTRY",
     "SKILL_CATALOG",
     "refresh_skill_registry",
     "register_skill",
 ]
-
-
-def refresh_skill_registry() -> list[Skill]:
-    """重新扫描 skills/ 和 .claude/skills/ 目录，更新全局注册表"""
-    global SKILL_REGISTRY, SKILL_CATALOG
-    SKILL_REGISTRY = discover_skills_from_roots([_HERE] + _EXTRA_SKILLS_DIRS)
-    set_skill_registry(SKILL_REGISTRY)
-    SKILL_CATALOG = generate_skill_catalog(SKILL_REGISTRY)
-    logger.info(f"Skill 注册表已刷新: {len(SKILL_REGISTRY)} 个技能")
-    return SKILL_REGISTRY
