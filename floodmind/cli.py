@@ -499,7 +499,7 @@ def show():
 @click.argument("key")
 @click.argument("value")
 def config_set(key, value):
-    """设置配置项 (写入 ~/.config/floodmind/config.json)"""
+    """设置配置项 (写入 ~/.floodmind/settings.json)"""
     from floodmind.config.settings import get_config, save_config, _config_path
 
     cfg = get_config()
