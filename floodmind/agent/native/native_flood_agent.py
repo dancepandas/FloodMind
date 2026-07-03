@@ -35,6 +35,7 @@ from floodmind.agent.native.executor import NativeAgentExecutor
 from floodmind.agent.native.message_builder import MessageBuilder
 from floodmind.agent.native.model_client import ModelClient
 from floodmind.agent.native.tool_runtime import native_from_agent_tool
+from floodmind.tools.agent_tool import AgentTool
 
 from floodmind.config.settings import settings
 from floodmind.agent.runtime.services.checkpoint_service import CheckpointService
@@ -70,8 +71,13 @@ class _InstanceToolRegistry:
     def __init__(self):
         self._tools: Dict[str, ToolSpec] = {}
 
-    def register(self, tool: ToolSpec) -> None:
-        self._tools[tool.name] = tool
+    def register(self, tool) -> None:
+        # 统一归一化入口：接受 ToolSpec | AgentTool。AgentTool 经桥转 ToolSpec 后
+        # 存储。register / register_tools 行为一致，所有调用方（系统工具、plugin、
+        # MCP）都过同一转换点，消除"直 register 绕过转换"导致的类型不一致（曾使
+        # plugin AgentTool 在 tools_schema() 调 to_openai_tool 时崩）。
+        spec = tool if isinstance(tool, ToolSpec) else native_from_agent_tool(tool)
+        self._tools[spec.name] = spec
 
     def get(self, name: str) -> Optional[ToolSpec]:
         return self._tools.get(name)
@@ -84,8 +90,7 @@ class _InstanceToolRegistry:
 
     def register_tools(self, tools: list) -> None:
         for tool in tools:
-            spec = native_from_agent_tool(tool)
-            self.register(spec)
+            self.register(tool)
 
 
 class NativeFloodAgent:
@@ -539,7 +544,7 @@ class NativeFloodAgent:
                 logger.warning("MCP 外部工具加载失败: %s", e)
 
         # LoadMcpServer: 运行时动态接入 MCP Server
-        self._orchestrator_registry.register(ToolSpec(
+        self._orchestrator_registry.register(AgentTool(
             name="LoadMcpServer",
             description="运行时动态接入外部 MCP Server，将其工具注册到当前 Agent。接入后即可直接调用 mcp:<server>:<tool> 格式的工具。",
             parameters={
@@ -561,7 +566,7 @@ class NativeFloodAgent:
             permission_policy=ToolPermissionPolicy(policy_type="network"),
         ))
 
-        self._orchestrator_registry.register(ToolSpec(
+        self._orchestrator_registry.register(AgentTool(
             name="create_plan",
             description="复杂任务建议先规划。创建结构化执行计划，明确用户意图、预期交付物和执行步骤。简单任务无需调用。",
             parameters={
@@ -599,7 +604,7 @@ class NativeFloodAgent:
             permission_policy=ToolPermissionPolicy(policy_type="readonly"),
         ))
 
-        self._orchestrator_registry.register(ToolSpec(
+        self._orchestrator_registry.register(AgentTool(
             name="update_plan",
             description=(
                 "动态调整执行计划。action=add_step 时传 step（含 step_id/title/purpose/needs/subtasks 等）；"
@@ -664,7 +669,7 @@ class NativeFloodAgent:
         ))
 
         # 阶段E：exit_plan_mode（仅主代理，policy="ask"，提交计划等用户审批）
-        self._orchestrator_registry.register(ToolSpec(
+        self._orchestrator_registry.register(AgentTool(
             name="exit_plan_mode",
             description="提交最终执行计划并请求用户审批。规划模式下调用此工具，将计划呈现给用户确认。获批后进入执行模式，解禁写/执行/委派工具。参数 plan_summary 应包含计划摘要。",
             parameters={
@@ -681,7 +686,7 @@ class NativeFloodAgent:
             permission_policy=ToolPermissionPolicy(policy_type="ask", reason="提交执行计划需用户审批"),
         ))
 
-        self._orchestrator_registry.register(ToolSpec(
+        self._orchestrator_registry.register(AgentTool(
             name="SubAgent",
             description="启动子代理辅助完成子任务。适用于：耗时脚本运行、独立子任务、需要并行处理的搜索等。注意：需要丰富上下文的写作/报告任务应自己做，不要委派。若已明确要复用某个 skill，同时传入 skill_name。可选 workdir 指定子代理工作目录（桌面版用于并行写不同子目录）；不传则子代理在独立 sandbox 内工作。",
             parameters={
@@ -700,7 +705,7 @@ class NativeFloodAgent:
             permission_policy=ToolPermissionPolicy(policy_type="internal", reason="编排层内部委派，实际权限由 specialist 内部工具逐次检查"),
         ))
 
-        self._orchestrator_registry.register(ToolSpec(
+        self._orchestrator_registry.register(AgentTool(
             name="ParallelTask",
             description="并行启动多个子代理。各任务必须互不依赖（不读写同一文件、不依赖彼此的输出）。有依赖关系的步骤仍用 Task 串行委派。",
             parameters={
