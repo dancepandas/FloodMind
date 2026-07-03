@@ -376,6 +376,56 @@ class McpClientPool:
                     pass
             self._connections.clear()
 
+    # ── 生命周期查询/卸载（为 agent 自维护 MCP 打基础） ──────────
+
+    def list_servers(self) -> List[Dict[str, Any]]:
+        """列举已连接的 MCP server（name/transport/tools/connected）。
+
+        agent 自维护入口：让 FloodMind 能问"我连了哪些 MCP"。
+        """
+        with self._lock:
+            conns = list(self._connections.values())
+        return [
+            {
+                "name": c.name,
+                "transport": c.transport,
+                "tools": len(c.list_tools()),
+                "connected": c.is_connected,
+            }
+            for c in conns
+        ]
+
+    def get_server_info(self, name: str) -> Optional[Dict[str, Any]]:
+        """单个 server 详情（含工具名列表）；未连接返回 None。"""
+        with self._lock:
+            c = self._connections.get(name)
+        if c is None:
+            return None
+        return {
+            "name": c.name,
+            "transport": c.transport,
+            "tools": [t.get("name", "") for t in c.list_tools()],
+            "connected": c.is_connected,
+        }
+
+    def disconnect_server(self, name: str) -> bool:
+        """断开单个 MCP server（运行时热插拔卸载）。返回是否确有断开。
+
+        **只断连接，不清理 registry 工具**——调用方需自行
+        ``registry.unregister_prefix('mcp:{name}:')``（agent 有多个 registry，
+        池不应知道它们，与 connect_server 同样的解耦原则）。
+        """
+        with self._lock:
+            c = self._connections.pop(name, None)
+        if c is None:
+            return False
+        try:
+            c.disconnect()
+        except Exception:
+            logger.warning("MCP %s 断开异常", name, exc_info=True)
+        logger.info("MCP 断开: server=%s", name)
+        return True
+
 
 # ── 全局单例 ──────────────────────────────────────────────
 

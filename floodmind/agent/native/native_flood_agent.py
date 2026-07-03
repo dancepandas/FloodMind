@@ -70,6 +70,7 @@ class _InstanceToolRegistry:
 
     def __init__(self):
         self._tools: Dict[str, ToolSpec] = {}
+        self._lock = threading.Lock()
 
     def register(self, tool) -> None:
         # 统一归一化入口：接受 ToolSpec | AgentTool。AgentTool 经桥转 ToolSpec 后
@@ -77,20 +78,37 @@ class _InstanceToolRegistry:
         # MCP）都过同一转换点，消除"直 register 绕过转换"导致的类型不一致（曾使
         # plugin AgentTool 在 tools_schema() 调 to_openai_tool 时崩）。
         spec = tool if isinstance(tool, ToolSpec) else native_from_agent_tool(tool)
-        self._tools[spec.name] = spec
+        with self._lock:
+            self._tools[spec.name] = spec
 
     def get(self, name: str) -> Optional[ToolSpec]:
-        return self._tools.get(name)
+        with self._lock:
+            return self._tools.get(name)
 
     def all(self) -> List[ToolSpec]:
-        return list(self._tools.values())
+        with self._lock:
+            return list(self._tools.values())
 
     def tools_schema(self) -> List[dict]:
-        return [t.to_openai_tool() for t in self._tools.values()]
+        with self._lock:
+            tools = list(self._tools.values())
+        return [t.to_openai_tool() for t in tools]
 
     def register_tools(self, tools: list) -> None:
         for tool in tools:
             self.register(tool)
+
+    def unregister_prefix(self, prefix: str) -> int:
+        """移除所有名字以 prefix 开头的工具（如 ``mcp:server:``），返回移除数。
+
+        用于 MCP server 断开后的工具清理（disconnect_server 只断连接，工具清理由
+        调用方按前缀做，因 agent 有多个 registry）。先收集名字再删，避免迭代中变更。
+        """
+        with self._lock:
+            names = [n for n in self._tools if n.startswith(prefix)]
+            for n in names:
+                del self._tools[n]
+        return len(names)
 
 
 class NativeFloodAgent:
