@@ -2257,22 +2257,6 @@ class NativeFloodAgent:
                 full_answer += event.get("content", "")
         return full_answer or "抱歉，处理您的请求时未能生成回答。"
 
-    def resume(
-        self,
-        session_id: Optional[str] = None,
-        checkpoint_id: Optional[str] = None,
-        user_input: str = "",
-    ):
-        """从 checkpoint 恢复流式执行。"""
-        target_session_id = session_id or self.session_id
-        if not target_session_id:
-            raise ValueError("resume 需要提供 session_id")
-        yield from self.stream(
-            user_input=user_input,
-            resume_session_id=target_session_id,
-            resume_checkpoint_id=checkpoint_id,
-        )
-
     def pause(self, session_id: Optional[str] = None) -> bool:
         """暂停：统一为“中止当前流 + 丢弃未完成轮”。
 
@@ -2286,9 +2270,6 @@ class NativeFloodAgent:
 
     def chat(self, message: str) -> str:
         return self.run(message)
-
-    def chat_stream(self, message: str):
-        yield from self.stream(message)
 
     def get_memory_summary(self) -> Dict[str, Any]:
         if hasattr(self.memory, "to_dict"):
