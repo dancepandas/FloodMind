@@ -8,44 +8,35 @@ import logging
 from typing import Any, Optional
 
 from floodmind.agent.runtime.contracts.tools import ToolSpec
+from floodmind.tools.agent_tool import AgentTool
 
 logger = logging.getLogger(__name__)
 
 
 def native_from_agent_tool(tool: Any) -> ToolSpec:
-    """将现有 AgentTool 适配为 Native ToolSpec。"""
-    parameters = {}
-    if hasattr(tool, "args_schema") and tool.args_schema is not None:
-        try:
-            parameters = tool.args_schema.model_json_schema()
-        except Exception:
-            parameters = {"type": "object", "properties": {}}
-    else:
-        parameters = {"type": "object", "properties": {}}
+    """将工具定义归一化为运行时 ``ToolSpec``（薄包装）。
 
-    func = getattr(tool, "func", None) or getattr(tool, "_run", None)
-    if func is None:
-        def _no_impl(**kwargs):
-            return f"工具 {tool.name} 无实现"
-        func = _no_impl
-
-    permission_policy = getattr(tool, "permission_policy", None)
-    args_schema = getattr(tool, "args_schema", None)
-
-    return ToolSpec(
-        name=tool.name,
-        description=tool.description or "",
-        parameters=parameters,
-        func=func,
+    - 已是 ``ToolSpec``：原样返回。
+    - ``AgentTool``：委托其权威的 ``AgentTool.to_tool_spec()``。
+    - 其它 tool-like 对象：包成 ``AgentTool`` 再投影，确保转换逻辑只在一处
+     （``AgentTool.to_tool_spec``），无散落 getattr。
+    """
+    if isinstance(tool, ToolSpec):
+        return tool
+    if isinstance(tool, AgentTool):
+        return tool.to_tool_spec()
+    return AgentTool(
+        name=getattr(tool, "name", "unknown"),
+        description=getattr(tool, "description", "") or "",
+        func=getattr(tool, "func", None) or getattr(tool, "_run", None),
+        args_schema=getattr(tool, "args_schema", None),
+        parameters=getattr(tool, "parameters", None),
         is_readonly=getattr(tool, "is_readonly", True),
         is_destructive=getattr(tool, "is_destructive", False),
         is_concurrency_safe=getattr(tool, "is_concurrency_safe", True),
-        interrupt_behavior=getattr(tool, "interrupt_behavior", "cancel"),
-        permission_policy=permission_policy,
+        permission_policy=getattr(tool, "permission_policy", None),
         check_permissions_fn=getattr(tool, "check_permissions_fn", None),
-        validate_input_fn=getattr(tool, "validate_input_fn", None),
-        args_schema=args_schema,
-    )
+    ).to_tool_spec()
 
 
 # Keep alias for backward compatibility

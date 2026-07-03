@@ -47,7 +47,6 @@ class ToolSpec:
     is_readonly: bool = True
     is_destructive: bool = False
     is_concurrency_safe: bool = True
-    interrupt_behavior: str = "cancel"
     permission_policy: Optional[ToolPermissionPolicy] = None
     check_permissions_fn: Optional[Callable[[dict], Any]] = None
     validate_input_fn: Optional[Callable[[dict], Any]] = None

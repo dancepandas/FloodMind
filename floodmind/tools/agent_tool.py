@@ -20,6 +20,7 @@ from floodmind.agent.runtime.contracts.permissions import (
     ValidationResult,
 )
 from floodmind.agent.runtime.contracts.paths import PathResolveResult
+from floodmind.agent.runtime.contracts.tools import ToolSpec
 from floodmind.agent.runtime.services.path_service import get_path_service
 from floodmind.agent.runtime.services.permission_service import (
     PermissionService,
@@ -52,6 +53,42 @@ class ToolResult:
         }
 
 
+def _sanitize_parameters(schema: Any) -> Dict[str, Any]:
+    """Strip pydantic schema noise before sending ``parameters`` to the model.
+
+    ``model_json_schema()`` leaks class names via ``title`` and wraps Optional
+    fields in ``anyOf: [{type: T}, {type: null}]`` — both pure noise to the model
+    (and the class-name leak is the long-standing hygiene issue). We drop titles
+    and collapse Optional ``anyOf`` to its non-null type. ``$defs``/``$ref``
+    (nested-model references) are left intact: dereferencing risks correctness,
+    and tool arg schemas are virtually always flat.
+    """
+    if not isinstance(schema, dict):
+        return {"type": "object", "properties": {}}
+
+    def _clean(node: Any) -> Any:
+        if isinstance(node, dict):
+            any_of = node.get("anyOf")
+            if isinstance(any_of, list) and any(
+                isinstance(b, dict) and b.get("type") == "null" for b in any_of
+            ):
+                non_null = [b for b in any_of if not (isinstance(b, dict) and b.get("type") == "null")]
+                if len(non_null) == 1:
+                    merged = dict(node)
+                    merged.pop("anyOf")
+                    merged.update(non_null[0])
+                    node = merged
+                elif len(non_null) >= 2:
+                    node = {**node, "anyOf": non_null}
+            node.pop("title", None)
+            return {k: _clean(v) for k, v in node.items()}
+        if isinstance(node, list):
+            return [_clean(v) for v in node]
+        return node
+
+    return _clean(schema)
+
+
 class AgentTool(BaseModel):
     """Agent 工具基类
 
@@ -63,6 +100,10 @@ class AgentTool(BaseModel):
     description: str = Field(description="工具描述")
     func: Optional[Callable] = Field(default=None, description="工具执行函数", exclude=True)
     args_schema: Optional[Type[BaseModel]] = Field(default=None, description="参数 schema")
+    parameters: Optional[Dict[str, Any]] = Field(
+        default=None,
+        description="原始 JSON Schema（与 args_schema 互斥的 raw 编写模式；供无 pydantic 模型的系统工具等使用）",
+    )
 
     # 行为标记（is_readonly/is_destructive/is_concurrency_safe 经
     # tool_runtime.native_from_agent_tool 透传到运行时 ToolSpec，供 PermissionService 策略判定）
@@ -72,6 +113,7 @@ class AgentTool(BaseModel):
 
     # 权限
     check_permissions_fn: Optional[Callable] = Field(default=None, description="权限检查函数", exclude=True)
+    validate_input_fn: Optional[Callable] = Field(default=None, description="输入校验函数", exclude=True)
     permission_policy: Optional[ToolPermissionPolicy] = Field(default=None, description="权限策略")
 
     model_config = ConfigDict(arbitrary_types_allowed=True)
@@ -97,16 +139,54 @@ class AgentTool(BaseModel):
             logger.error(error_msg)
             return ToolResult(output=None, success=False, error=str(e))
 
+    def to_tool_spec(self) -> ToolSpec:
+        """投影到运行时 ``ToolSpec`` —— AgentTool→ToolSpec 的唯一权威转换点。
+
+        schema 生成优先级：raw ``parameters`` > ``args_schema``（pydantic，剥冗余）
+        > 空 object schema。运行时桥（``native_from_agent_tool``）统一委托到此。
+        """
+        if self.parameters is not None:
+            parameters = self.parameters
+        elif self.args_schema is not None:
+            try:
+                parameters = _sanitize_parameters(self.args_schema.model_json_schema())
+            except Exception:
+                parameters = {"type": "object", "properties": {}}
+        else:
+            parameters = {"type": "object", "properties": {}}
+
+        func = self.func
+        if func is None:
+            def _no_impl(**kwargs):
+                return f"工具 {self.name} 无实现"
+            func = _no_impl
+
+        return ToolSpec(
+            name=self.name,
+            description=self.description or "",
+            parameters=parameters,
+            func=func,
+            is_readonly=self.is_readonly,
+            is_destructive=self.is_destructive,
+            is_concurrency_safe=self.is_concurrency_safe,
+            permission_policy=self.permission_policy,
+            check_permissions_fn=self.check_permissions_fn,
+            validate_input_fn=self.validate_input_fn,
+            args_schema=self.args_schema,
+        )
+
 
 def build_agent_tool(
     func: Callable,
     name: Optional[str] = None,
     description: Optional[str] = None,
     args_schema: Optional[Type[BaseModel]] = None,
+    parameters: Optional[Dict[str, Any]] = None,
     is_readonly: bool = True,
     is_destructive: bool = False,
     is_concurrency_safe: bool = True,
     check_permissions_fn: Optional[Callable] = None,
+    validate_input_fn: Optional[Callable] = None,
     permission_policy: Optional[ToolPermissionPolicy] = None,
 ) -> AgentTool:
     """从函数构建 AgentTool"""
@@ -118,10 +198,12 @@ def build_agent_tool(
         description=tool_description,
         func=func,
         args_schema=args_schema,
+        parameters=parameters,
         is_readonly=is_readonly,
         is_destructive=is_destructive,
         is_concurrency_safe=is_concurrency_safe,
         check_permissions_fn=check_permissions_fn,
+        validate_input_fn=validate_input_fn,
         permission_policy=permission_policy,
     )
 

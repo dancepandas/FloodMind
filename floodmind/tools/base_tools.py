@@ -2,7 +2,7 @@
 基础工具模块
 
 提供Agent执行技能所需的核心工具，所有工具统一使用 build_agent_tool 构建，
-具备完整的行为元数据（readonly/destructive/concurrency_safe/interrupt_behavior）。
+具备完整的行为元数据（readonly/destructive/concurrency_safe）。
 
 工具分类：
 - 只读工具: GetSkill, MemorySearch, WebSearch, WebFetch
