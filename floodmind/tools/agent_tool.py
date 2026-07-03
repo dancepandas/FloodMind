@@ -6,7 +6,6 @@ Agent 工具定义
 """
 
 import logging
-import traceback
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Type
 
@@ -30,27 +29,6 @@ from floodmind.agent.runtime.services.permission_service import (
 from floodmind.agent.runtime.services._runtime_root import PROJECT_ROOT as _PROJECT_ROOT
 
 logger = logging.getLogger(__name__)
-
-
-class ToolResult:
-    """工具执行结果"""
-
-    def __init__(self, output: Any, success: bool = True, error: Optional[str] = None):
-        self.output = output
-        self.success = success
-        self.error = error
-
-    def __str__(self) -> str:
-        if self.success:
-            return str(self.output)
-        return f"Error: {self.error}"
-
-    def to_dict(self) -> Dict[str, Any]:
-        return {
-            "output": str(self.output),
-            "success": self.success,
-            "error": self.error,
-        }
 
 
 def _sanitize_parameters(schema: Any) -> Dict[str, Any]:
@@ -117,27 +95,6 @@ class AgentTool(BaseModel):
     permission_policy: Optional[ToolPermissionPolicy] = Field(default=None, description="权限策略")
 
     model_config = ConfigDict(arbitrary_types_allowed=True)
-
-    def run(self, **kwargs) -> ToolResult:
-        """执行工具"""
-        if self.func is None:
-            return ToolResult(output=None, success=False, error=f"工具 {self.name} 没有执行函数")
-
-        try:
-            if self.args_schema:
-                validated = self.args_schema(**kwargs)
-                result = self.func(**validated.model_dump())
-            else:
-                result = self.func(**kwargs)
-
-            if isinstance(result, ToolResult):
-                return result
-            return ToolResult(output=result)
-
-        except Exception as e:
-            error_msg = f"工具 {self.name} 执行失败: {e}\n{traceback.format_exc()}"
-            logger.error(error_msg)
-            return ToolResult(output=None, success=False, error=str(e))
 
     def to_tool_spec(self) -> ToolSpec:
         """投影到运行时 ``ToolSpec`` —— AgentTool→ToolSpec 的唯一权威转换点。

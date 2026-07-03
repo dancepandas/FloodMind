@@ -941,6 +941,8 @@ class NativeFloodAgent:
             return _func
 
         count = 0
+        # MCP 工具：业界标准协议运行时接入，不经 AgentTool 编写层
+        # （inputSchema 已是终点 JSON Schema、工具为不透明代理），保持直造 ToolSpec。
         for mt in conn.list_tools():
             mcp_tool_name = f"mcp:{server_name}:{mt.get('name', '')}"
             input_schema = mt.get("inputSchema", {})

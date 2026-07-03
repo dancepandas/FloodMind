@@ -35,38 +35,38 @@ class TestMemoryTools:
         set_session_context("", output_dir="")
 
     def test_core_memory_append_and_read(self):
-        result = core_memory_append.run(category="user_preferences", fact="喜欢先出计划")
-        assert "已记录" in result.output
+        result = core_memory_append.func(category="user_preferences", fact="喜欢先出计划")
+        assert "已记录" in result
 
-        result = core_memory_read.run()
-        assert "喜欢先出计划" in result.output
-        assert "user_preferences" in result.output
+        result = core_memory_read.func()
+        assert "喜欢先出计划" in result
+        assert "user_preferences" in result
 
         # 重复追加不应重复
-        result = core_memory_append.run(category="user_preferences", fact="喜欢先出计划")
-        assert "已存在" in result.output
+        result = core_memory_append.func(category="user_preferences", fact="喜欢先出计划")
+        assert "已存在" in result
 
-        result = core_memory_read.run(category="user_preferences")
+        result = core_memory_read.func(category="user_preferences")
         # 只应有一条
-        assert result.output.count("喜欢先出计划") == 1
+        assert result.count("喜欢先出计划") == 1
 
     def test_core_memory_read_category_empty(self):
-        result = core_memory_read.run(category="nonexistent")
-        assert "没有记录" in result.output
+        result = core_memory_read.func(category="nonexistent")
+        assert "没有记录" in result
 
     def test_conversation_search(self):
         memory = MagicMock()
         memory.search_history.return_value = "第1轮: 用户问了一个问题\n回答: 这是答案"
         set_memory_instance(memory)
 
-        result = conversation_search.run(query="问题")
-        assert "第1轮" in result.output
+        result = conversation_search.func(query="问题")
+        assert "第1轮" in result
         memory.search_history.assert_called_once_with("问题", 3)
 
     def test_conversation_search_no_memory(self):
         set_memory_instance(None)
-        result = conversation_search.run(query="问题")
-        assert "记忆系统未初始化" in result.output
+        result = conversation_search.func(query="问题")
+        assert "记忆系统未初始化" in result
 
     def test_journal_search_and_get_full_result(self, monkeypatch):
         monkeypatch.chdir(self.tmp)
@@ -88,19 +88,19 @@ class TestMemoryTools:
         )
 
         # 用 journal_search 查找
-        result = journal_search.run(query="配置文件")
-        assert "Turn 0" in result.output
-        assert "Read" in result.output
-        assert entry.full_ref in result.output
+        result = journal_search.func(query="配置文件")
+        assert "Turn 0" in result
+        assert "Read" in result
+        assert entry.full_ref in result
 
         # 用 journal_get_full_result 读取完整结果
-        result = journal_get_full_result.run(ref_id=entry.full_ref)
-        assert "完整工具结果" in result.output
-        assert long_content in result.output
+        result = journal_get_full_result.func(ref_id=entry.full_ref)
+        assert "完整工具结果" in result
+        assert long_content in result
 
     def test_journal_get_full_result_not_found(self):
-        result = journal_get_full_result.run(ref_id="not-exist")
-        assert "未找到归档结果" in result.output
+        result = journal_get_full_result.func(ref_id="not-exist")
+        assert "未找到归档结果" in result
 
     def test_session_id_helper(self):
         assert _get_session_id() == "test-session"
