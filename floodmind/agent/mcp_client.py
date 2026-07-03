@@ -19,9 +19,12 @@ import threading
 import time
 import uuid
 from queue import Queue, Empty
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 import httpx
+
+from floodmind.agent.runtime.contracts.permissions import ToolPermissionPolicy
+from floodmind.agent.runtime.contracts.tools import ToolSpec
 
 logger = logging.getLogger(__name__)
 
@@ -256,6 +259,46 @@ class McpClientConnection:
         return self._initialized
 
 
+# ── MCP 工具 → ToolSpec 构造（唯一权威点） ────────────────
+
+def build_mcp_tool_specs(
+    conn: "McpClientConnection",
+    server_name: str,
+    call_tool_fn: Callable[[str, dict], str],
+) -> List[ToolSpec]:
+    """为一个 MCP server 已发现的工具构造运行时 ``ToolSpec``。
+
+    **MCP 工具构造的唯一入口**：init 批量接入与运行时热插拔（LoadMcpServer）都走这里。
+    MCP 是业界标准协议、运行时接入：``inputSchema`` 已是终点 JSON Schema、工具为不透明
+    代理，故直造 ``ToolSpec``、不经 AgentTool 编写层。``call_tool_fn`` 是唯一可变项
+    （通常为 ``pool.call_tool``），把连接后端与工具构造解耦。
+    """
+    def _make_func(tool_name: str):
+        full_name = f"mcp:{server_name}:{tool_name}"
+        def _func(**kwargs):
+            return call_tool_fn(full_name, kwargs)
+        return _func
+
+    specs: List[ToolSpec] = []
+    for mt in conn.list_tools():
+        input_schema = mt.get("inputSchema", {})
+        specs.append(ToolSpec(
+            name=f"mcp:{server_name}:{mt.get('name', '')}",
+            description=f"[MCP:{server_name}] {mt.get('description', '')}",
+            parameters={
+                "type": "object",
+                "properties": input_schema.get("properties", {}),
+                "required": input_schema.get("required", []),
+            },
+            func=_make_func(mt.get("name", "")),
+            is_readonly=False,
+            is_destructive=True,
+            is_concurrency_safe=True,
+            permission_policy=ToolPermissionPolicy(policy_type="network"),
+        ))
+    return specs
+
+
 # ── MCP 连接池 ─────────────────────────────────────────────
 
 class McpClientPool:
@@ -265,21 +308,44 @@ class McpClientPool:
         self._connections: Dict[str, McpClientConnection] = {}
         self._lock = threading.Lock()
 
+    def connect_server(self, server_config: dict) -> "McpClientConnection":
+        """连接单个 MCP Server（运行时热插拔入口），存入池并返回连接。
+
+        **不注册工具**——调用方用 ``build_mcp_tool_specs`` 构造 ToolSpec 后注册到自己的
+        registry（agent 有 orchestrator/specialist 多个 registry，池不应知道它们）。
+        把"连接"与"注册"解耦，是 MCP 接入唯一明确路径的根基。
+        """
+        transport = server_config.get("transport", "sse")
+        cfg = {k: v for k, v in server_config.items() if k not in ("name", "transport")}
+        explicit_name = server_config.get("name")
+        if explicit_name:
+            name = explicit_name
+        else:
+            # 省略 name 时在锁内生成 fallback，避免并发未命名连接撞 mcp-dynamic-N
+            with self._lock:
+                name = f"mcp-dynamic-{len(self._connections)}"
+        conn = McpClientConnection(name=name, transport=transport, **cfg)
+        conn.connect()
+        with self._lock:
+            self._connections[name] = conn
+        logger.info("MCP 接入: server=%s transport=%s tools=%d", name, transport, len(conn.list_tools()))
+        return conn
+
     def connect_all(self, servers: List[dict]) -> int:
-        """连接所有配置的 MCP Server，返回成功数"""
+        """连接所有配置的 MCP Server（init 批量），返回成功数。"""
         success = 0
         for cfg in servers:
-            name = cfg.get("name", f"mcp-{len(self._connections)}")
-            transport = cfg.get("transport", "sse")
             try:
-                conn = McpClientConnection(name=name, transport=transport, **{k: v for k, v in cfg.items() if k not in ("name", "transport")})
-                conn.connect()
-                with self._lock:
-                    self._connections[name] = conn
+                self.connect_server(cfg)
                 success += 1
             except Exception as e:
-                logger.warning("MCP %s 连接失败: %s", name, e)
+                logger.warning("MCP %s 连接失败: %s", cfg.get("name", "?"), e)
         return success
+
+    def connections(self) -> Dict[str, "McpClientConnection"]:
+        """当前已连接 server 的快照（name -> connection）。"""
+        with self._lock:
+            return dict(self._connections)
 
     def get_all_tools(self) -> List[dict]:
         tools: List[dict] = []
@@ -300,60 +366,6 @@ class McpClientPool:
         if not conn:
             return f"MCP Server '{server_name}' 未连接"
         return conn.call_tool(tool_name, arguments)
-
-    def connect_and_register(self, server_config: dict, registry) -> int:
-        """运行时连接单个 MCP Server 并立即注册工具到 registry
-
-        Args:
-            server_config: {"name": "...", "transport": "sse|stdio", "url": "...", ...}
-            registry: _InstanceToolRegistry 实例，调用 registry.register() 注册
-
-        Returns: 注册的工具数量
-        """
-        from floodmind.agent.runtime.contracts.tools import ToolSpec
-        from floodmind.agent.runtime.contracts.permissions import ToolPermissionPolicy
-
-        name = server_config.get("name", f"mcp-dynamic-{len(self._connections)}")
-        transport = server_config.get("transport", "sse")
-        cfg = {k: v for k, v in server_config.items() if k not in ("name", "transport")}
-
-        conn = McpClientConnection(name=name, transport=transport, **cfg)
-        conn.connect()
-
-        with self._lock:
-            self._connections[name] = conn
-
-        count = 0
-        # MCP 工具调用闭包：捕获名藏入函数体（防参数名碰撞），**kwargs 与内置工具同协议
-        def _make_mcp_func(sn: str, tn: str):
-            full_name = f"mcp:{sn}:{tn}"
-            def _func(**kwargs):
-                return self.call_tool(full_name, kwargs)
-            return _func
-
-        # MCP 工具：业界标准协议运行时接入，不经 AgentTool 编写层
-        # （inputSchema 已是终点 JSON Schema、工具为不透明代理），保持直造 ToolSpec。
-        for mt in conn.list_tools():
-            mcp_tool_name = f"mcp:{name}:{mt.get('name', '')}"
-            input_schema = mt.get("inputSchema", {})
-            registry.register(ToolSpec(
-                name=mcp_tool_name,
-                description=f"[MCP:{name}] {mt.get('description', '')}",
-                parameters={
-                    "type": "object",
-                    "properties": input_schema.get("properties", {}),
-                    "required": input_schema.get("required", []),
-                },
-                func=_make_mcp_func(name, mt.get('name', '')),
-                is_readonly=False,
-                is_destructive=True,
-                is_concurrency_safe=True,
-                permission_policy=ToolPermissionPolicy(policy_type="network"),
-            ))
-            count += 1
-
-        logger.info("MCP 动态接入: server=%s, tools=%d", name, count)
-        return count
 
     def disconnect_all(self) -> None:
         with self._lock:

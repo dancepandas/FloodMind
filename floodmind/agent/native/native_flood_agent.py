@@ -527,19 +527,24 @@ class NativeFloodAgent:
         self._specialist_registry.register_tools(specialist_tools)
 
         # ── MCP 外部工具接入 ────────────────────────────
+        # 统一接入路径：connect_all → build_mcp_tool_specs → 注册到 orchestrator + specialist。
+        # MCP 工具不经 AgentTool 编写层（业界标准协议运行时接入），直造 ToolSpec。
         _mcp_servers = _settings.mcp.servers if hasattr(_settings, 'mcp') else []
         self._mcp_pool = None
         self._mcp_pool_lock = threading.Lock()
         if _mcp_servers:
             try:
-                from floodmind.agent.mcp_client import get_mcp_client_pool
+                from floodmind.agent.mcp_client import get_mcp_client_pool, build_mcp_tool_specs
                 self._mcp_pool = get_mcp_client_pool()
                 connected = self._mcp_pool.connect_all(_mcp_servers)
                 if connected > 0:
                     mcp_tools_registered = 0
-                    for server_name, conn in self._mcp_pool._connections.items():
-                        mcp_tools_registered += self._register_mcp_tools(server_name, conn, self._orchestrator_registry)
-                    logger.info("MCP: %d 个外部工具已注册", mcp_tools_registered)
+                    for server_name, conn in self._mcp_pool.connections().items():
+                        for spec in build_mcp_tool_specs(conn, server_name, self._mcp_pool.call_tool):
+                            self._orchestrator_registry.register(spec)
+                            self._specialist_registry.register(spec)
+                            mcp_tools_registered += 1
+                    logger.info("MCP: %d 个外部工具已注册（orchestrator + specialist）", mcp_tools_registered)
             except Exception as e:
                 logger.warning("MCP 外部工具加载失败: %s", e)
 
@@ -929,40 +934,6 @@ class NativeFloodAgent:
             context_window=context_window,
         )
 
-    def _register_mcp_tools(self, server_name: str, conn, registry) -> int:
-        """将 MCP Server 的工具注册到指定 registry，返回注册数量"""
-        # MCP 工具调用闭包：捕获 server/tool 名藏入函数体（不暴露为参数，避免与工具
-        # 自身参数名碰撞）；参数走 **kwargs，与内置工具经 tool.func(**validated_args)
-        # 调用的协议完全一致。
-        def _make_mcp_func(sn: str, tn: str):
-            full_name = f"mcp:{sn}:{tn}"
-            def _func(**kwargs):
-                return self._mcp_pool.call_tool(full_name, kwargs) if self._mcp_pool else "MCP 连接已断开"
-            return _func
-
-        count = 0
-        # MCP 工具：业界标准协议运行时接入，不经 AgentTool 编写层
-        # （inputSchema 已是终点 JSON Schema、工具为不透明代理），保持直造 ToolSpec。
-        for mt in conn.list_tools():
-            mcp_tool_name = f"mcp:{server_name}:{mt.get('name', '')}"
-            input_schema = mt.get("inputSchema", {})
-            registry.register(ToolSpec(
-                name=mcp_tool_name,
-                description=f"[MCP:{server_name}] {mt.get('description', '')}",
-                parameters={
-                    "type": "object",
-                    "properties": input_schema.get("properties", {}),
-                    "required": input_schema.get("required", []),
-                },
-                func=_make_mcp_func(server_name, mt.get('name', '')),
-                is_readonly=False,
-                is_destructive=True,
-                is_concurrency_safe=True,
-                permission_policy=ToolPermissionPolicy(policy_type="network"),
-            ))
-            count += 1
-        return count
-
     def _rebuild_system_prompts(self) -> None:
         """当 skill catalog / tool 列表刷新时，只需重建 STATIC_GLOBAL 部分
         （PROJECT 和 SESSION 部分是稳定的）。"""
@@ -1049,21 +1020,21 @@ class NativeFloodAgent:
         }
 
         try:
-            from floodmind.agent.mcp_client import get_mcp_client_pool
+            from floodmind.agent.mcp_client import get_mcp_client_pool, build_mcp_tool_specs
             with self._mcp_pool_lock:
                 pool = self._mcp_pool or get_mcp_client_pool()
                 if self._mcp_pool is None:
                     self._mcp_pool = pool
 
-            count = pool.connect_and_register(server_config, self._orchestrator_registry)
+            # 统一接入路径：connect_server（仅连接，不注册）→ build_mcp_tool_specs → 注册到双 registry。
+            # 与 init 同路径，消除原 connect_and_register(orchestrator) + _register_mcp_tools(specialist) 双写。
+            conn = pool.connect_server(server_config)
+            specs = build_mcp_tool_specs(conn, name, pool.call_tool)
+            for spec in specs:
+                self._orchestrator_registry.register(spec)
+                self._specialist_registry.register(spec)
 
-            # 同步注册到 specialist registry（持锁迭代）
-            with pool._lock:
-                conn = pool._connections.get(name)
-            if conn:
-                self._register_mcp_tools(name, conn, self._specialist_registry)
-
-            return f"MCP Server '{name}' 已接入，{count} 个工具已注册。使用 mcp:{name}:<tool_name> 调用。"
+            return f"MCP Server '{name}' 已接入，{len(specs)} 个工具已注册。使用 mcp:{name}:<tool_name> 调用。"
 
         except Exception as e:
             logger.error("LoadMcpServer 失败: %s", e)
