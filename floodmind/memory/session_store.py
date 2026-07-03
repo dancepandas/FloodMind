@@ -2,15 +2,16 @@
 SQLite 会话存储（精简角色）。
 
 **注意**：对话历史的权威源是 ``chat_history.json``（``memory._turns``），不是本库。
-本 SQLite 库当前的生产职责单一：``sync_events`` 表 —— SSE 流式事件回放日志
+本 SQLite 库的生产职责单一：``sync_events`` 表 —— SSE 流式事件回放日志
 （``append_sync_event`` / ``get_sync_events`` / ``get_last_event_index``，由 web_server 调用）。
 
-历史关系表（sessions / messages / parts / tool_states / revert_points / checkpoints）
-是早期 OpenCode 风格设计的遗留 —— 对应的 CRUD 函数与 cli 会话命令已移除，
-表结构暂留以保持老库前向兼容，将在后续（D-1c 步骤4）整体退役。
+历史关系表（sessions/messages/parts/tool_states/revert_points/checkpoints）与 FTS5
+全文检索已整体退役。``sync_events.session_id`` 不带外键 —— web 会话由 session_manager
+（文件系统）管理、不在本库，外键会导致每次 append 对 web session 抛 IntegrityError
+（曾静默吞掉，使 SSE 事件持久化/流式恢复失效）。
 
-FTS5 全文检索（search_index 虚表 + 触发器）已移除 —— 无生产调用方；
-跨会话检索改为扫 chat_history.json 实现。
+老库升级由 ``_migrate_legacy_schema`` 幂等处理：删 FTS5、数据保全地重建 sync_events 去
+外键；暗关系表在老库上保留为无害孤儿（避免删除用户历史 cli-fork 数据），新库只建 sync_events。
 """
 
 import json
@@ -40,86 +41,13 @@ def _db_path() -> Path:
 # ---------------------------------------------------------------------------
 
 SCHEMA_SQL = """
-CREATE TABLE IF NOT EXISTS sessions (
-    id          TEXT PRIMARY KEY,
-    title       TEXT NOT NULL DEFAULT '',
-    parent_id   TEXT,
-    mode        TEXT NOT NULL DEFAULT 'primary',
-    status      TEXT NOT NULL DEFAULT 'idle',
-    created_at  TEXT NOT NULL,
-    updated_at  TEXT NOT NULL
-);
-
-CREATE TABLE IF NOT EXISTS messages (
-    id          TEXT PRIMARY KEY,
-    session_id  TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
-    role        TEXT NOT NULL CHECK(role IN ('user','assistant','system')),
-    agent       TEXT NOT NULL DEFAULT '',
-    mode        TEXT NOT NULL DEFAULT '',
-    parent_id   TEXT,
-    created_at  TEXT NOT NULL,
-    completed_at TEXT,
-    error       TEXT,
-    tokens_input    INTEGER DEFAULT 0,
-    tokens_output   INTEGER DEFAULT 0,
-    tokens_reasoning INTEGER DEFAULT 0,
-    tokens_cache_read  INTEGER DEFAULT 0,
-    tokens_cache_write INTEGER DEFAULT 0
-);
-
-CREATE TABLE IF NOT EXISTS parts (
-    id          TEXT PRIMARY KEY,
-    message_id  TEXT NOT NULL REFERENCES messages(id) ON DELETE CASCADE,
-    session_id  TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
-    sort_order  INTEGER NOT NULL DEFAULT 0,
-    type        TEXT NOT NULL CHECK(type IN ('text','tool','reasoning','file','compaction','error','step_start','step_finish','patch','retry')),
-    text        TEXT NOT NULL DEFAULT '',
-    metadata    TEXT NOT NULL DEFAULT '{}'
-);
-
-CREATE TABLE IF NOT EXISTS tool_states (
-    part_id     TEXT PRIMARY KEY REFERENCES parts(id) ON DELETE CASCADE,
-    session_id  TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
-    status      TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending','running','completed','error')),
-    tool_name   TEXT NOT NULL DEFAULT '',
-    call_id     TEXT NOT NULL DEFAULT '',
-    input_json  TEXT NOT NULL DEFAULT '{}',
-    output_text TEXT NOT NULL DEFAULT '',
-    title       TEXT NOT NULL DEFAULT '',
-    error       TEXT NOT NULL DEFAULT '',
-    started_at  TEXT,
-    completed_at TEXT
-);
-
-CREATE TABLE IF NOT EXISTS revert_points (
-    session_id  TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
-    message_id  TEXT NOT NULL,
-    reverted_at TEXT NOT NULL
-);
-
-CREATE INDEX IF NOT EXISTS idx_messages_session ON messages(session_id, created_at);
-CREATE INDEX IF NOT EXISTS idx_messages_parent  ON messages(session_id, parent_id);
-CREATE INDEX IF NOT EXISTS idx_parts_message    ON parts(message_id, sort_order);
-CREATE INDEX IF NOT EXISTS idx_parts_session    ON parts(session_id);
-CREATE INDEX IF NOT EXISTS idx_tool_states_session ON tool_states(session_id);
-
-CREATE TABLE IF NOT EXISTS checkpoints (
-    id              INTEGER PRIMARY KEY AUTOINCREMENT,
-    session_id      TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
-    step            INTEGER NOT NULL DEFAULT 0,
-    agent_name      TEXT NOT NULL DEFAULT 'build',
-    plan_json       TEXT NOT NULL DEFAULT '{}',
-    messages_json   TEXT NOT NULL DEFAULT '[]',
-    events_json     TEXT NOT NULL DEFAULT '[]',
-    artifact_snapshot TEXT NOT NULL DEFAULT '',
-    created_at      REAL NOT NULL DEFAULT (strftime('%s', 'now'))
-);
-CREATE INDEX IF NOT EXISTS idx_checkpoints_session ON checkpoints(session_id, step);
-
--- SyncEvent table: persistent event log for state replay / resume
+-- SyncEvent table: persistent event log for SSE state replay / resume.
+-- session_id intentionally has NO foreign key — web sessions live in the
+-- filesystem (session_manager), not in this DB, so an FK would reject every
+-- append (IntegrityError). See _migrate_legacy_schema for the legacy-FK cleanup.
 CREATE TABLE IF NOT EXISTS sync_events (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
-    session_id  TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+    session_id  TEXT NOT NULL,
     event_index INTEGER NOT NULL DEFAULT 0,
     event_type  TEXT NOT NULL DEFAULT '',
     event_data  TEXT NOT NULL DEFAULT '{}',
@@ -128,83 +56,61 @@ CREATE TABLE IF NOT EXISTS sync_events (
 CREATE INDEX IF NOT EXISTS idx_sync_events_session ON sync_events(session_id, event_index);
 """
 
-# ── Part type extension migration ────────────────────────────────
 
-def _migrate_parts_type_constraint(conn: sqlite3.Connection) -> None:
-    try:
-        info = conn.execute(
-            "SELECT sql FROM sqlite_master WHERE type='table' AND name='parts'"
-        ).fetchone()
-        if info and "step_start" in info["sql"]:
-            return  # Already migrated
-    except Exception:
-        pass
+def _migrate_legacy_schema(conn: sqlite3.Connection) -> None:
+    """Clean up legacy schema remnants idempotently (runs on each new connection).
 
-    logger.info("Migrating parts table CHECK constraint for new part types...")
-    # Drop leftover from failed migration
-    conn.execute("DROP TABLE IF EXISTS parts_old")
-    conn.executescript("""
-        ALTER TABLE parts RENAME TO parts_old;
-        CREATE TABLE parts (
-            id          TEXT PRIMARY KEY,
-            message_id  TEXT NOT NULL REFERENCES messages(id) ON DELETE CASCADE,
-            session_id  TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
-            sort_order  INTEGER NOT NULL DEFAULT 0,
-            type        TEXT NOT NULL CHECK(type IN ('text','tool','reasoning','file','compaction','error','step_start','step_finish','patch','retry')),
-            text        TEXT NOT NULL DEFAULT '',
-            metadata    TEXT NOT NULL DEFAULT '{}'
-        );
-        INSERT INTO parts SELECT * FROM parts_old;
-        DROP TABLE parts_old;
-        CREATE INDEX IF NOT EXISTS idx_parts_message ON parts(message_id, sort_order);
-        CREATE INDEX IF NOT EXISTS idx_parts_session ON parts(session_id);
-    """)
-    conn.commit()
-    logger.info("Parts table migration complete")
+    On older database files, removes:
+    1. FTS5 search_index virtual table + its parts->search_index sync triggers.
+    2. The sync_events -> sessions foreign key: recreate sync_events WITHOUT the
+       FK, preserving every row. This fixes a latent bug where appending events
+       for web sessions (which are not in the dark sessions table) raised
+       IntegrityError and was silently swallowed, breaking SSE event persistence
+       and stream resume.
+    3. Retired relational tables (sessions/messages/parts/tool_states/
+       revert_points/checkpoints) are NOT dropped here — they may still hold
+       historical data from the removed cli session commands; leaving them as
+       harmless orphans avoids data loss. Fresh DBs never create them.
 
-
-def _migrate_sessions_schema(conn: sqlite3.Connection) -> None:
-    """Add cost, model, permission columns to sessions/messages tables (incremental, idempotent)."""
-    existing = {row[1] for row in conn.execute("PRAGMA table_info(sessions)").fetchall()}
-    additions = [
-        ("tokens_cache_read", "INTEGER DEFAULT 0"),
-        ("tokens_cache_write", "INTEGER DEFAULT 0"),
-        ("cost", "REAL DEFAULT 0.0"),
-        ("model_info", "TEXT DEFAULT '{}'"),
-        ("permission_rules", "TEXT DEFAULT '[]'"),
-        ("version", "TEXT DEFAULT '1.0.0'"),
-    ]
-    for col_name, col_def in additions:
-        if col_name not in existing:
-            conn.execute(f"ALTER TABLE sessions ADD COLUMN {col_name} {col_def}")
-            logger.info("Added column sessions.%s", col_name)
-    msg_existing = {row[1] for row in conn.execute("PRAGMA table_info(messages)").fetchall()}
-    msg_additions = [
-        ("cost", "REAL DEFAULT 0.0"),
-        ("provider_info", "TEXT DEFAULT '{}'"),
-    ]
-    for col_name, col_def in msg_additions:
-        if col_name not in msg_existing:
-            conn.execute(f"ALTER TABLE messages ADD COLUMN {col_name} {col_def}")
-            logger.info("Added column messages.%s", col_name)
-    conn.commit()
-
-
-def _drop_legacy_fts(conn: sqlite3.Connection) -> None:
-    """Remove leftover FTS5 search_index table + sync triggers from older schemas.
-
-    FTS5 full-text search has been retired (zero production callers; MemorySearch uses
-    DualMemory.search_history over chat_history.json). Legacy database files may still
-    carry the search_index virtual table and the parts→search_index triggers, which
-    would otherwise keep firing on writes to the dead index. Drop them idempotently so
-    neither fresh nor legacy DBs retain dead FTS5 machinery.
+    On a fresh database this is a no-op (nothing to clean). The FK removal
+    (step 2) runs inside an explicit transaction so concurrent readers never see
+    an intermediate state (no `sync_events` table).
     """
+    # 1. Drop FTS5 triggers + search_index virtual table.
     conn.executescript("""
         DROP TRIGGER IF EXISTS trg_parts_insert_fts;
         DROP TRIGGER IF EXISTS trg_parts_delete_fts;
         DROP TRIGGER IF EXISTS trg_parts_update_fts;
         DROP TABLE IF EXISTS search_index;
     """)
+
+    # 2. If sync_events still carries the legacy FK to sessions, rebuild it
+    #    without the FK (data-preserving, atomic).
+    row = conn.execute(
+        "SELECT sql FROM sqlite_master WHERE type='table' AND name='sync_events'"
+    ).fetchone()
+    if row and "REFERENCES sessions" in row["sql"]:
+        conn.executescript("""
+            BEGIN;
+            DROP INDEX IF EXISTS idx_sync_events_session;
+            ALTER TABLE sync_events RENAME TO sync_events_old;
+            CREATE TABLE sync_events (
+                id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                session_id  TEXT NOT NULL,
+                event_index INTEGER NOT NULL DEFAULT 0,
+                event_type  TEXT NOT NULL DEFAULT '',
+                event_data  TEXT NOT NULL DEFAULT '{}',
+                created_at  TEXT NOT NULL
+            );
+            INSERT INTO sync_events (id, session_id, event_index, event_type, event_data, created_at)
+                SELECT id, session_id, event_index, event_type, event_data, created_at
+                FROM sync_events_old;
+            DROP TABLE sync_events_old;
+            CREATE INDEX IF NOT EXISTS idx_sync_events_session ON sync_events(session_id, event_index);
+            COMMIT;
+        """)
+        logger.info("sync_events: dropped legacy FK to sessions (IntegrityError bug fix)")
+
     conn.commit()
 
 
@@ -220,31 +126,36 @@ _local = threading.local()
 
 
 def _get_conn(path: Optional[str] = None) -> sqlite3.Connection:
-    """Get a per-thread SQLite connection."""
+    """Get a per-thread SQLite connection.
+
+    isolation_level=None puts the connection in autocommit mode so the legacy
+    migration can drive explicit BEGIN/COMMIT transactions (needed for the
+    atomic sync_events FK rebuild). Single-statement LIVE ops (append/get) are
+    unaffected — append still persists immediately.
+    """
     target = path or str(_db_path())
     key = f"conn_{target}"
     conn = getattr(_local, key, None)
     if conn is None:
         _db_dir().mkdir(parents=True, exist_ok=True)
-        conn = sqlite3.connect(target, check_same_thread=False)
+        conn = sqlite3.connect(target, check_same_thread=False, isolation_level=None)
         conn.execute("PRAGMA journal_mode=WAL")
         conn.execute("PRAGMA foreign_keys=ON")
         conn.row_factory = sqlite3.Row
         conn.executescript(SCHEMA_SQL)
-        conn.commit()
-        # Run migrations (idempotent, pass conn to avoid recursion)
         try:
-            _migrate_parts_type_constraint(conn)
+            _migrate_legacy_schema(conn)
         except Exception:
-            logger.warning("parts migration failed, skipping", exc_info=True)
-        try:
-            _migrate_sessions_schema(conn)
-        except Exception:
-            logger.warning("sessions schema migration failed, skipping", exc_info=True)
-        try:
-            _drop_legacy_fts(conn)
-        except Exception:
-            logger.debug("legacy FTS cleanup skipped", exc_info=True)
+            # Roll back any transaction left open by a failed migration step.
+            # In autocommit mode executescript does not auto-rollback, and a
+            # cached connection stuck in an open transaction would silently drop
+            # every subsequent append_sync_event write — the exact silent-data-
+            # -loss class this refactor eliminated.
+            try:
+                conn.rollback()
+            except Exception:
+                pass
+            logger.warning("legacy schema migration failed, skipping", exc_info=True)
         setattr(_local, key, conn)
     return conn
 
@@ -258,7 +169,6 @@ def append_sync_event(session_id: str, event_index: int, event_type: str, event_
         "INSERT INTO sync_events (session_id, event_index, event_type, event_data, created_at) VALUES (?,?,?,?,?)",
         (session_id, event_index, event_type, json.dumps(event_data, ensure_ascii=False), _now()),
     )
-    conn.commit()
 
 
 def get_sync_events(session_id: str, after_index: int = 0, limit: int = 200) -> List[Dict[str, Any]]:

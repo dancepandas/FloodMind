@@ -1550,7 +1550,11 @@ def chat():
                 from floodmind.memory.session_store import append_sync_event
                 append_sync_event(session_id, _event_index_tracker["idx"], etype, event)
             except Exception:
-                pass
+                # Surface persistence failures (disk full, DB locked, corruption)
+                # rather than silently swallowing them — a bare `pass` here is
+                # what hid the sync_events FK IntegrityError for so long.
+                logger.warning("sync_event persist failed (session=%s idx=%s)",
+                               session_id, _event_index_tracker["idx"], exc_info=True)
 
         if hasattr(agent, '_event_bus'):
             agent._event_bus.set_persist_callback(_persist_event)

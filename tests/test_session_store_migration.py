@@ -1,126 +1,63 @@
-"""Regression tests for session_store schema migrations and legacy DB upgrade.
+"""Regression tests for session_store schema + the D-1c storage slim-down.
 
-Covers the FTS5-removal upgrade path: a legacy sessions.db (old parts CHECK
-constraint + FTS5 search_index virtual table + sync triggers + LIVE sync_events
-data) must upgrade cleanly through the _get_conn migration sequence with zero
-data loss and no leftover FTS5 objects.
+Covers the most safety-critical change in the refactor: the live ``sync_events``
+table. Verifies that:
 
-These tests directly verify that removing the redundant DROP TRIGGER from
-_migrate_parts_type_constraint (FTS5 cleanup is now solely owned by
-_drop_legacy_fts) leaves the legacy upgrade path correct.
+1. Legacy databases (old relational tables + FTS5 + a sync_events table whose
+   session_id has a foreign key to sessions) upgrade cleanly: FTS5 is dropped,
+   sync_events keeps all its rows, and its foreign key is removed.
+2. After upgrade, ``append_sync_event`` for a session NOT present in any
+   sessions table no longer raises IntegrityError. This is the regression for a
+   real bug: web sessions are managed by session_manager (filesystem), not this
+   DB, so the legacy FK rejected every event append — silently swallowed by
+   web_server, which broke SSE event persistence and stream resume.
+3. Fresh databases contain only the live sync_events table.
+4. The legacy migration is idempotent.
 """
 import sqlite3
 
 from floodmind.memory import session_store
 
 
-# Legacy parts CHECK constraint — predates step_start/step_finish/patch/retry part types.
-# Its absence is what triggers _migrate_parts_type_constraint on upgrade.
+# A legacy schema: retired relational tables + FTS5 + a sync_events table whose
+# session_id REFERENCES sessions(id) (the FK that caused the append bug).
 _LEGACY_SCHEMA = """
 CREATE TABLE sessions (
-    id          TEXT PRIMARY KEY,
-    title       TEXT NOT NULL DEFAULT '',
-    parent_id   TEXT,
-    mode        TEXT NOT NULL DEFAULT 'primary',
-    status      TEXT NOT NULL DEFAULT 'idle',
-    created_at  TEXT NOT NULL,
-    updated_at  TEXT NOT NULL
+    id TEXT PRIMARY KEY, title TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL, updated_at TEXT NOT NULL
 );
 CREATE TABLE messages (
-    id          TEXT PRIMARY KEY,
-    session_id  TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
-    role        TEXT NOT NULL,
-    agent       TEXT NOT NULL DEFAULT '',
-    mode        TEXT NOT NULL DEFAULT '',
-    parent_id   TEXT,
-    created_at  TEXT NOT NULL,
-    completed_at TEXT,
-    error       TEXT,
-    tokens_input INTEGER DEFAULT 0,
-    tokens_output INTEGER DEFAULT 0,
-    tokens_reasoning INTEGER DEFAULT 0,
-    tokens_cache_read INTEGER DEFAULT 0,
-    tokens_cache_write INTEGER DEFAULT 0
-);
-CREATE TABLE parts (
-    id          TEXT PRIMARY KEY,
-    message_id  TEXT NOT NULL REFERENCES messages(id) ON DELETE CASCADE,
-    session_id  TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
-    sort_order  INTEGER NOT NULL DEFAULT 0,
-    type        TEXT NOT NULL CHECK(type IN ('text','tool','reasoning','file','compaction','error')),
-    text        TEXT NOT NULL DEFAULT '',
-    metadata    TEXT NOT NULL DEFAULT '{}'
-);
-CREATE TABLE tool_states (
-    part_id     TEXT PRIMARY KEY REFERENCES parts(id) ON DELETE CASCADE,
-    session_id  TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
-    status      TEXT NOT NULL DEFAULT 'pending',
-    tool_name   TEXT NOT NULL DEFAULT '',
-    call_id     TEXT NOT NULL DEFAULT '',
-    input_json  TEXT NOT NULL DEFAULT '{}',
-    output_text TEXT NOT NULL DEFAULT '',
-    title       TEXT NOT NULL DEFAULT '',
-    error       TEXT NOT NULL DEFAULT '',
-    started_at  TEXT,
-    completed_at TEXT
-);
-CREATE TABLE revert_points (
-    session_id  TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
-    message_id  TEXT NOT NULL,
-    reverted_at TEXT NOT NULL
-);
-CREATE TABLE checkpoints (
-    id              INTEGER PRIMARY KEY AUTOINCREMENT,
-    session_id      TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
-    step            INTEGER NOT NULL DEFAULT 0,
-    agent_name      TEXT NOT NULL DEFAULT 'build',
-    plan_json       TEXT NOT NULL DEFAULT '{}',
-    messages_json   TEXT NOT NULL DEFAULT '[]',
-    events_json     TEXT NOT NULL DEFAULT '[]',
-    artifact_snapshot TEXT NOT NULL DEFAULT '',
-    created_at      REAL NOT NULL
+    id TEXT PRIMARY KEY, session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+    role TEXT NOT NULL, created_at TEXT NOT NULL
 );
 CREATE TABLE sync_events (
-    id          INTEGER PRIMARY KEY AUTOINCREMENT,
-    session_id  TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
     event_index INTEGER NOT NULL DEFAULT 0,
-    event_type  TEXT NOT NULL DEFAULT '',
-    event_data  TEXT NOT NULL DEFAULT '{}',
-    created_at  TEXT NOT NULL
+    event_type TEXT NOT NULL DEFAULT '',
+    event_data TEXT NOT NULL DEFAULT '{}',
+    created_at TEXT NOT NULL
 );
 CREATE VIRTUAL TABLE search_index USING fts5(text, part_id UNINDEXED, session_id UNINDEXED);
-CREATE TRIGGER trg_parts_insert_fts AFTER INSERT ON parts
-WHEN NEW.type IN ('text','tool','reasoning','error') AND NEW.text != ''
+CREATE TRIGGER trg_parts_insert_fts AFTER INSERT ON sessions
 BEGIN
-    INSERT INTO search_index (text, part_id, session_id) VALUES (NEW.text, NEW.id, NEW.session_id);
-END;
-CREATE TRIGGER trg_parts_delete_fts AFTER DELETE ON parts
-BEGIN
-    DELETE FROM search_index WHERE part_id = OLD.id;
+    INSERT INTO search_index (text, part_id, session_id) VALUES (NEW.title, NEW.id, NEW.id);
 END;
 """
 
 
 def _build_legacy_db(path: str) -> None:
-    """Create a legacy sessions.db (old parts CHECK + FTS5 + sync_events data)."""
+    """Create a legacy sessions.db (relational tables + FTS5 + sync_events with FK + data)."""
     conn = sqlite3.connect(path)
     conn.executescript(_LEGACY_SCHEMA)
     conn.execute(
         "INSERT INTO sessions (id, title, created_at, updated_at) "
-        "VALUES ('ses_legacy', 'legacy', '2024-01-01T00:00:00', '2024-01-01T00:00:00')"
+        "VALUES ('ses_legacy', 'legacy', '2024-01-01', '2024-01-01')"
     )
-    conn.execute(
-        "INSERT INTO messages (id, session_id, role, created_at) "
-        "VALUES ('msg_1', 'ses_legacy', 'user', '2024-01-01T00:00:00')"
-    )
-    conn.execute(
-        "INSERT INTO parts (id, message_id, session_id, sort_order, type, text, metadata) "
-        "VALUES ('prt_1', 'msg_1', 'ses_legacy', 0, 'text', 'analyze flood data', '{}')"
-    )
+    # Note: sync_events rows for 'ses_legacy' satisfy the legacy FK (ses_legacy exists above).
     for i in range(5):
         conn.execute(
             "INSERT INTO sync_events (session_id, event_index, event_type, event_data, created_at) "
-            "VALUES ('ses_legacy', ?, 'token', '{\"v\": 1}', '2024-01-01T00:00:00')",
+            "VALUES ('ses_legacy', ?, 'token', '{\"v\": 1}', '2024-01-01')",
             (i,),
         )
     conn.commit()
@@ -128,16 +65,13 @@ def _build_legacy_db(path: str) -> None:
 
 
 def _upgrade(path: str) -> sqlite3.Connection:
-    """Replicate _get_conn's migration sequence on a fresh, caller-owned connection."""
-    conn = sqlite3.connect(path, check_same_thread=False)
+    """Replicate _get_conn's setup on a fresh, caller-owned connection (no caching)."""
+    conn = sqlite3.connect(path, check_same_thread=False, isolation_level=None)
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA foreign_keys=ON")
     conn.row_factory = sqlite3.Row
     conn.executescript(session_store.SCHEMA_SQL)
-    conn.commit()
-    session_store._migrate_parts_type_constraint(conn)
-    session_store._migrate_sessions_schema(conn)
-    session_store._drop_legacy_fts(conn)
+    session_store._migrate_legacy_schema(conn)
     return conn
 
 
@@ -147,8 +81,18 @@ def _names(conn: sqlite3.Connection, kind: str):
     ).fetchall()]
 
 
-def test_legacy_db_upgrades_fts5_removed_sync_events_intact(tmp_path):
-    """Legacy DB upgrades: FTS5 objects gone, parts CHECK migrated, sync_events intact."""
+def _sync_events_sql(conn: sqlite3.Connection) -> str:
+    return conn.execute(
+        "SELECT sql FROM sqlite_master WHERE type='table' AND name='sync_events'"
+    ).fetchone()[0]
+
+
+# ---------------------------------------------------------------------------
+# Legacy upgrade
+# ---------------------------------------------------------------------------
+
+def test_legacy_db_upgrades_fts5_dropped_fk_removed_data_intact(tmp_path):
+    """Legacy DB upgrades: FTS5 gone, sync_events FK removed, rows preserved."""
     path = str(tmp_path / "sessions.db")
     _build_legacy_db(path)
 
@@ -157,17 +101,14 @@ def test_legacy_db_upgrades_fts5_removed_sync_events_intact(tmp_path):
         tables = _names(conn, "table")
         triggers = _names(conn, "trigger")
 
-        # FTS5 fully removed — no search_index, no parts→search_index triggers
-        assert "search_index" not in tables, f"search_index lingered: {tables}"
-        assert not any(t.startswith("trg_parts") for t in triggers), f"triggers lingered: {triggers}"
+        # FTS5 fully removed
+        assert "search_index" not in tables
+        assert not any(t.startswith("trg_parts") for t in triggers), triggers
 
-        # parts migrated to new CHECK (now includes step_start)
-        parts_sql = conn.execute(
-            "SELECT sql FROM sqlite_master WHERE type='table' AND name='parts'"
-        ).fetchone()[0]
-        assert "step_start" in parts_sql
+        # sync_events foreign key removed
+        assert "REFERENCES sessions" not in _sync_events_sql(conn)
 
-        # LIVE sync_events data preserved through the upgrade (zero loss)
+        # LIVE sync_events data preserved through the rebuild (zero loss)
         count = conn.execute(
             "SELECT COUNT(*) FROM sync_events WHERE session_id = 'ses_legacy'"
         ).fetchone()[0]
@@ -176,27 +117,116 @@ def test_legacy_db_upgrades_fts5_removed_sync_events_intact(tmp_path):
         conn.close()
 
 
-def test_fresh_db_has_no_fts5(tmp_path):
-    """A brand-new DB never creates FTS5 objects, but does create the live sync_events table."""
+def test_append_after_upgrade_no_fk_violation(tmp_path):
+    """Regression: appending an event for a session not in any sessions table
+    must NOT raise IntegrityError after the FK is removed.
+
+    This is the bug that silently broke SSE event persistence: web sessions live
+    in the filesystem, so their ids were never in the dark sessions table, and
+    the legacy FK rejected every append.
+    """
     path = str(tmp_path / "sessions.db")
+    _build_legacy_db(path)
     conn = _upgrade(path)
     try:
-        tables = _names(conn, "table")
-        triggers = _names(conn, "trigger")
-        assert "search_index" not in tables
-        assert not any(t.startswith("trg_parts") for t in triggers)
-        assert "sync_events" in tables  # the one live table
+        # 'web_session_x' was never inserted into sessions — under the legacy FK
+        # this INSERT raised IntegrityError. After migration it must succeed.
+        conn.execute(
+            "INSERT INTO sync_events (session_id, event_index, event_type, event_data, created_at) "
+            "VALUES ('web_session_x', 0, 'token', '{\"v\":1}', '2024-01-01')"
+        )
+        n = conn.execute(
+            "SELECT COUNT(*) FROM sync_events WHERE session_id = 'web_session_x'"
+        ).fetchone()[0]
+        assert n == 1
     finally:
         conn.close()
 
 
-def test_drop_legacy_fts_idempotent(tmp_path):
-    """_drop_legacy_fts is safe to call repeatedly on an FTS5-free DB (no-op, no error)."""
+def test_fresh_db_has_only_sync_events(tmp_path):
+    """A brand-new DB creates only the live sync_events table — no dark tables, no FTS5."""
+    path = str(tmp_path / "sessions.db")
+    conn = _upgrade(path)
+    try:
+        # sqlite_sequence is an internal SQLite bookkeeping table auto-created by
+        # AUTOINCREMENT — not a business table, so exclude it.
+        tables = {t for t in _names(conn, "table") if t != "sqlite_sequence"}
+        assert tables == {"sync_events"}, tables
+        assert not any(t.startswith("trg_parts") for t in _names(conn, "trigger"))
+    finally:
+        conn.close()
+
+
+def test_migrate_legacy_schema_idempotent(tmp_path):
+    """_migrate_legacy_schema is safe to call repeatedly (no-op once clean)."""
     path = str(tmp_path / "sessions.db")
     conn = _upgrade(path)
     try:
         for _ in range(3):
-            session_store._drop_legacy_fts(conn)  # must not raise
+            session_store._migrate_legacy_schema(conn)  # must not raise
+        assert "REFERENCES sessions" not in _sync_events_sql(conn)
         assert "search_index" not in _names(conn, "table")
     finally:
         conn.close()
+
+
+def test_legacy_db_without_sync_events_upgrades(tmp_path):
+    """An older DB that predates sync_events must upgrade cleanly: sync_events
+    gets created (no FK), FTS5 dropped, no error."""
+    path = str(tmp_path / "sessions.db")
+    raw = sqlite3.connect(path)
+    raw.executescript("""
+        CREATE TABLE sessions (id TEXT PRIMARY KEY, title TEXT);
+        CREATE TABLE messages (id TEXT PRIMARY KEY, session_id TEXT);
+        CREATE VIRTUAL TABLE search_index USING fts5(text);
+    """)
+    raw.commit()
+    raw.close()
+
+    conn = _upgrade(path)
+    try:
+        tables = {t for t in _names(conn, "table") if t != "sqlite_sequence"}
+        assert "sync_events" in tables          # created by SCHEMA_SQL
+        assert "search_index" not in tables      # FTS5 dropped
+        assert "REFERENCES sessions" not in _sync_events_sql(conn)
+    finally:
+        conn.close()
+
+
+def test_migration_failure_does_not_poison_connection(tmp_path, monkeypatch):
+    """Regression for a silent-data-loss bug introduced and fixed in step 4.
+
+    If the legacy migration raises while a transaction is open (e.g. 'database
+    is locked' mid-rebuild), the connection cached by _get_conn must NOT remain
+    stuck in that open transaction. Otherwise every subsequent append_sync_event
+    INSERT would run uncommitted inside it and silently vanish — the exact
+    failure class this refactor eliminated. _get_conn must roll back on failure.
+    """
+    path = tmp_path / "sessions.db"
+    monkeypatch.setattr(session_store, "_db_path", lambda: path)
+
+    def boom(conn):
+        # Open a transaction then fail mid-migration, mirroring a real failure
+        # during the BEGIN...COMMIT FK rebuild.
+        conn.execute("BEGIN")
+        raise RuntimeError("simulated mid-migration failure")
+
+    monkeypatch.setattr(session_store, "_migrate_legacy_schema", boom)
+
+    # SCHEMA runs (sync_events created, autocommitted), then the migration fails
+    # mid-transaction. _get_conn must roll back before caching the connection.
+    session_store._get_conn(str(path))
+
+    session_store.append_sync_event("ses_x", 0, "token", {"v": 1})
+
+    # An independent raw connection must see the committed row. If the cached
+    # connection were poisoned by an open transaction, this row would be trapped
+    # uncommitted and the count would be 0.
+    verify = sqlite3.connect(str(path))
+    try:
+        n = verify.execute(
+            "SELECT COUNT(*) FROM sync_events WHERE session_id = 'ses_x'"
+        ).fetchone()[0]
+        assert n == 1, "append_sync_event was silently lost — cached connection poisoned"
+    finally:
+        verify.close()
