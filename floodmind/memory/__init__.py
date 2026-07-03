@@ -21,8 +21,8 @@ from floodmind.memory.task_experience import (
 from floodmind.memory.session_store import (
     create_session, get_session, list_sessions, rename_session, delete_session,
     add_message, complete_message, get_messages, get_last_assistant_message,
-    fork_session, revert_session, unrevert_session, get_revert_point,
-    compact_session, export_session_markdown, migrate_from_json,
+    fork_session, revert_session,
+    compact_session, export_session_markdown,
 )
 
 __all__ = [
@@ -32,6 +32,6 @@ __all__ = [
     'get_task_experience_store', 'get_task_experience_capture',
     'create_session', 'get_session', 'list_sessions', 'rename_session', 'delete_session',
     'add_message', 'complete_message', 'get_messages', 'get_last_assistant_message',
-    'fork_session', 'revert_session', 'unrevert_session', 'get_revert_point',
-    'compact_session', 'export_session_markdown', 'migrate_from_json',
+    'fork_session', 'revert_session',
+    'compact_session', 'export_session_markdown',
 ]

@@ -581,27 +581,6 @@ def _insert_part(conn: sqlite3.Connection, session_id: str, message_id: str, ord
     return pid
 
 
-def update_tool_state(part_id: str, session_id: str, **kwargs) -> None:
-    """Update tool state fields."""
-    allowed = {"status", "tool_name", "call_id", "input_json", "output_text", "title", "error", "started_at", "completed_at"}
-    sets = {}
-    params = []
-    for k, v in kwargs.items():
-        if k in allowed:
-            col = k if k != "input_json" else "input_json"
-            if k == "input_json" and isinstance(v, dict):
-                v = json.dumps(v)
-            sets[col] = v
-            params.append(v)
-    if not sets:
-        return
-    params.append(part_id)
-    set_clause = ", ".join(f"{k} = ?" for k in sets)
-    conn = _get_conn()
-    conn.execute(f"UPDATE tool_states SET {set_clause} WHERE part_id = ?", params)
-    conn.commit()
-
-
 # ---------------------------------------------------------------------------
 # Fork
 # ---------------------------------------------------------------------------
@@ -682,28 +661,6 @@ def revert_session(session_id: str, message_id: str) -> None:
     touch_session(session_id)
     conn.commit()
     logger.info("Reverted session %s to message %s", session_id, message_id)
-
-
-def unrevert_session(session_id: str) -> Optional[str]:
-    """Remove the revert point. Returns the previously reverted message ID."""
-    conn = _get_conn()
-    row = conn.execute(
-        "SELECT message_id FROM revert_points WHERE session_id = ?", (session_id,)
-    ).fetchone()
-    if row:
-        conn.execute("DELETE FROM revert_points WHERE session_id = ?", (session_id,))
-        touch_session(session_id)
-        conn.commit()
-        return row["message_id"]
-    return None
-
-
-def get_revert_point(session_id: str) -> Optional[Dict[str, Any]]:
-    conn = _get_conn()
-    row = conn.execute(
-        "SELECT * FROM revert_points WHERE session_id = ?", (session_id,)
-    ).fetchone()
-    return dict(row) if row else None
 
 
 # ---------------------------------------------------------------------------
@@ -814,102 +771,6 @@ def export_session_markdown(session_id: str) -> str:
         lines.append("")
 
     return "\n".join(lines)
-
-
-# ---------------------------------------------------------------------------
-# Migration from old JSON format
-# ---------------------------------------------------------------------------
-
-def migrate_from_json(sessions_dir: str = "./data/sessions") -> int:
-    """
-    Migrate existing JSON session files to SQLite.
-    Returns the number of sessions migrated.
-    """
-    import json as _json
-
-    base = Path(sessions_dir)
-    if not base.exists():
-        return 0
-
-    migrated = 0
-    for session_dir in base.iterdir():
-        if not session_dir.is_dir() or session_dir.name.startswith("."):
-            continue
-
-        sid = session_dir.name
-
-        # Try to read session.json
-        session_file = session_dir / "session.json"
-        title = ""
-        if session_file.exists():
-            try:
-                data = _json.loads(session_file.read_text(encoding="utf-8"))
-                title = data.get("title", "")
-            except Exception:
-                pass
-
-        # Create session in SQLite
-        existing = get_session(sid)
-        if existing:
-            continue
-
-        create_session(session_id=sid, title=title)
-
-        # Migrate message files
-        msg_files = sorted(
-            [f for f in session_dir.glob("msg_*.json")],
-            key=lambda x: x.stat().st_mtime,
-        )
-        for mf in msg_files:
-            try:
-                msg = _json.loads(mf.read_text(encoding="utf-8"))
-                add_message(
-                    session_id=sid,
-                    role=msg.get("role", "user"),
-                    agent=msg.get("agent", ""),
-                    created_at=msg.get("timestamp", _now()),
-                    parts=[{"type": "text", "text": msg.get("content", "")}],
-                )
-            except Exception:
-                pass
-
-        # Migrate chat_history.json to parts
-        history_file = session_dir / "memory" / "chat_history.json"
-        if history_file.exists():
-            try:
-                hist = _json.loads(history_file.read_text(encoding="utf-8"))
-                for turn in hist.get("turns", []):
-                    # Add user message
-                    if turn.get("user_input"):
-                        add_message(sid, "user", parts=[{"type": "text", "text": turn["user_input"]}],
-                                    created_at=turn.get("timestamp", _now()))
-                    # Add assistant with parts
-                    parts = []
-                    if turn.get("reasoning"):
-                        parts.append({"type": "reasoning", "text": turn["reasoning"]})
-                    for tc in turn.get("tool_calls", []):
-                        parts.append({
-                            "type": "tool",
-                            "tool_name": tc.get("tool_name", ""),
-                            "tool_state": {
-                                "status": "completed",
-                                "tool_name": tc.get("tool_name", ""),
-                                "output_text": tc.get("tool_output", ""),
-                            },
-                        })
-                    if turn.get("final_answer"):
-                        parts.append({"type": "text", "text": turn["final_answer"]})
-                    if parts:
-                        add_message(sid, "assistant", parts=parts,
-                                    created_at=turn.get("timestamp", _now()))
-            except Exception:
-                pass
-
-        migrated += 1
-        logger.info("Migrated session %s to SQLite", sid)
-
-    logger.info("Migration complete: %d sessions", migrated)
-    return migrated
 
 
 # ---------------------------------------------------------------------------
