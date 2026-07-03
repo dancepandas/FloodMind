@@ -2273,36 +2273,6 @@ def get_session(session_id: str):
         }), 500
 
 
-@app.route('/api/sessions/<session_id>/messages', methods=['GET'])
-def get_session_messages_page(session_id: str):
-    """Cursor-based 分页获取会话消息。
-
-    Query params:
-        limit  — 每页数量（默认 50）
-        cursor — 上页返回的游标（首页不传）
-    """
-    try:
-        from floodmind.memory.session_store import get_messages_page
-        session_id = _require_session_id(session_id)
-        limit = request.args.get('limit', 50, type=int)
-        cursor = request.args.get('cursor', None, type=str)
-
-        result = get_messages_page(session_id, limit=limit, before_cursor=cursor or None)
-
-        return jsonify({
-            'status': 'success',
-            'messages': _sanitize_deep(result['items']),
-            'more': result['more'],
-            'cursor': result['cursor'],
-        })
-    except Exception as e:
-        logger.error(f"分页获取消息失败: {e}")
-        return jsonify({
-            'status': 'error',
-            'message': sanitize_output(str(e)) or '服务器内部错误'
-        }), 500
-
-
 @app.route('/api/sessions/<session_id>', methods=['DELETE'])
 def delete_session_route(session_id: str):
     """删除会话"""
