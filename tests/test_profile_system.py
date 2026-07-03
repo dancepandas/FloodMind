@@ -59,16 +59,16 @@ def test_1_imports():
             WORK_METHOD_GUIDANCE, SCHEDULED_TASK_GUIDANCE,
             PREFERENCE_GUIDANCE, TOOL_EXECUTION_GUIDANCE,
             WORKFLOW_GUIDANCE, ARTIFACT_JUDGMENT_GUIDANCE,
-            OUTPUT_FORMAT_GUIDANCE, TODO_GUIDANCE,
+            OUTPUT_FORMAT_GUIDANCE,
         )
-        check("guidance.py all 8 constants", True)
+        check("guidance.py all 7 constants", True)
     except ImportError as e:
-        check("guidance.py all 8 constants", False, str(e))
+        check("guidance.py all 7 constants", False, str(e))
 
     try:
         from floodmind.config.settings import (
             get_floodmind_home, get_active_profile, set_active_profile,
-            _config_dir, _config_path, _deep_merge,
+            _config_path, _deep_merge,
         )
         check("settings.py new functions", True)
     except ImportError as e:
@@ -129,7 +129,6 @@ def test_3_guidance():
         ("WORKFLOW_GUIDANCE", "工作流"),
         ("ARTIFACT_JUDGMENT_GUIDANCE", "产物判定"),
         ("OUTPUT_FORMAT_GUIDANCE", "输出规范"),
-        ("TODO_GUIDANCE", "任务规划"),
     ]
 
     for attr_name, keyword in constants:

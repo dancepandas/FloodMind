@@ -7,10 +7,26 @@ ToolSpec / ToolCall / ToolResult 统一由 agent.runtime.contracts.tools 定义�
 """
 
 from dataclasses import dataclass, field
-from datetime import datetime
-from typing import Any, Callable, Dict, List, Literal, Optional
+from datetime import datetime, timezone
+from typing import Any, Callable, Dict, List, Literal, Optional, Tuple, TypedDict
+
+from pydantic import BaseModel, ConfigDict, Field
 
 from floodmind.agent.runtime.contracts.tools import ToolCall, ToolResult, ToolSpec
+
+
+# ── Agent 执行状态枚举 ─────────────────────────────────────────
+
+AgentLoopStatus = Literal[
+    "created",
+    "awaiting_llm",
+    "awaiting_tool",
+    "awaiting_permission",
+    "context_compress",
+    "paused",
+    "failed",
+    "completed",
+]
 
 
 @dataclass
@@ -35,6 +51,14 @@ class RunContext:
     enable_search: bool = False
     enable_rag: bool = False
     abort_check: Optional[Callable[[], bool]] = None
+    # 子代理专用：主代理委派时指定的工作目录（桌面版并行写 user_dir 子目录的关键接缝）。
+    # 主代理不设；子代理默认 cwd 优先用它，其次 sandbox workspace_dir。
+    delegate_cwd: str = ""
+    # agent 身份（阶段D）：主代理="main"，子代理="sub"。决定权限分层。
+    agent_tier: str = "main"
+    # 运行模式（阶段E）：planning=只读硬门，execution=执行。
+    # 由 executor 从 AgentLoopState.mode 注入；子代理恒 execution。
+    mode: str = "execution"
 
 
 @dataclass
@@ -54,6 +78,12 @@ class ModelEvent:
     raw: Optional[dict] = None
 
 
+class TokenUsage(BaseModel):
+    prompt_tokens: int = 0
+    completion_tokens: int = 0
+    total_tokens: int = 0
+
+
 @dataclass
 class AgentResult:
     final_output: str
@@ -63,60 +93,109 @@ class AgentResult:
     is_timeout: bool = False
 
 
-@dataclass
-class PlanStep:
+class PlanStepSubtask(TypedDict, total=False):
+    """执行步骤内部的细粒度子任务。"""
+
     id: str
+    content: str
+    status: Literal["pending", "in_progress", "completed", "cancelled"]
+    priority: Literal["high", "normal", "low"]
+
+
+class PlanStepDict(TypedDict, total=False):
+    """ExecutionPlan.steps 中单个步骤的字典结构提示。"""
+
+    step_id: str
     title: str
-    detail: str = ""
-    status: Literal["pending", "running", "completed", "error", "skipped"] = "pending"
-    tool_name: str = ""
-    artifact_ids: List[str] = field(default_factory=list)
-    error: str = ""
+    executor: str
+    skill_name: str
+    purpose: str
+    status: Literal["pending", "running", "completed", "error", "skipped"]
+    expected_deliverables: List[Dict[str, str]]
+    output_artifacts: List[str]
+    output_summary: str
+    error_message: str
+    attempt_count: int
+    needs: List[str]
+    subtasks: List[PlanStepSubtask]
 
 
-@dataclass
-class AgentLoopState:
-    run_id: str
+class AgentLoopState(BaseModel):
+    """Agent 主循环状态机状态。
+
+    使用 Pydantic BaseModel 以支持 checkpoint 序列化/反序列化。
+    所有运行时状态集中于此，NativeAgentExecutor 据此驱动状态转移。
+    """
+
+    model_config = ConfigDict(extra="allow", arbitrary_types_allowed=True)
+
+    session_id: str = ""
+    run_id: str = ""
+    checkpoint_id: str = ""
+    status: AgentLoopStatus = "created"
     iteration: int = 0
-    plan: Optional['ExecutionPlan'] = None
-    current_step_id: str = ""
-    completed_steps: List[str] = field(default_factory=list)
-    failed_steps: List[str] = field(default_factory=list)
-    tool_results: List[ToolResult] = field(default_factory=list)
-    artifact_registry: Dict[str, dict] = field(default_factory=dict)
-    execution_journal: List[dict] = field(default_factory=list)
-    needs_replan: bool = False
-    validation_errors: List[str] = field(default_factory=list)
+    max_iterations: int = 10000
+
+    # 对话与执行上下文
+    messages: List[Dict[str, Any]] = Field(default_factory=list)
+    plan: Optional["ExecutionPlan"] = None
+    tool_results: List[ToolResult] = Field(default_factory=list)
+    artifacts: List[str] = Field(default_factory=list)
+
+    # 运行中间状态
+    reasoning: str = ""
+    final_output: str = ""
+    current_answer: str = ""
+    # 当前 LLM 调用轮的 reasoning 切片（本轮产物，写 memory 用；跨轮在 reasoning_before 处切片）
+    round_reasoning: str = ""
+    # 已并入 state.messages 的用户消息数（用于检测运行中追加的排队指令）
+    consumed_user_message_count: int = 0
+    pending_tool_calls: List[ToolCall] = Field(default_factory=list)
+    pending_ask_id: Optional[str] = None
+
+    # 防御机制状态
+    doom_loop_tracker: List[Tuple[str, str]] = Field(default_factory=list)
+    consecutive_failures: Dict[str, int] = Field(default_factory=dict)
+
+    # 输入与元信息
     original_input: str = ""
     user_message: str = ""
-    final_output: str = ""
-    latest_payload: Optional[Dict[str, Any]] = None
-    artifacts: List[str] = field(default_factory=list)
-    round_count: int = 0
-    replan_count: int = 0
-    terminal_status: str = "running"
-    todos: List[Dict[str, Any]] = field(default_factory=list)
+    token_usage: TokenUsage = Field(default_factory=TokenUsage)
+
+    # 兼容旧字段（保留，但逐步迁移到新字段）
+    artifact_registry: Dict[str, dict] = Field(default_factory=dict)
+    execution_journal: List[dict] = Field(default_factory=list)
+    # 阶段E：规划/执行模式。planning=只读硬门，execution=执行（默认）。
+    # 仅主代理持 mode；子代理恒 execution。
+    mode: str = "execution"
+
+    # 时间戳
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+
+    def mark_updated(self) -> None:
+        self.updated_at = datetime.now(timezone.utc)
 
 
-@dataclass
-class ArtifactRecord:
+class ArtifactRecord(BaseModel):
     file_name: str
     file_path: str
     kind: Literal["file", "image"]
     source_tool: str
     verified: bool = False
-    metadata: dict = field(default_factory=dict)
+    metadata: Dict[str, Any] = Field(default_factory=dict)
 
 
-@dataclass
-class ExecutionPlan:
+class ExecutionPlan(BaseModel):
     plan_id: str = ""
     user_message: str = ""
-    goal_deliverables: List[Dict[str, str]] = field(default_factory=list)
-    steps: List[Dict[str, Any]] = field(default_factory=list)
+    goal_deliverables: List[Dict[str, str]] = Field(default_factory=list)
+    steps: List[Dict[str, Any]] = Field(default_factory=list)
     created_at: str = ""
     updated_at: str = ""
     terminal_status: str = "running"
+
+    model_config = ConfigDict(extra="allow")
 
     def find_step(self, step_id: str) -> Optional[Dict[str, Any]]:
         for s in self.steps:
@@ -206,10 +285,11 @@ class ExecutionPlan:
         """按拓扑层级分批：每批内的步骤可并行执行"""
         order = self.topological_sort()
         if not order:
-            return [[s.get("step_id", "") for s in self.steps]]
+            if self.steps:
+                raise ValueError("执行计划存在依赖环或无效依赖，无法分批执行")
+            return []
 
         all_ids = set(order)
-        # 构建 steps 查找表
         step_map = {s.get("step_id", ""): s for s in self.steps}
 
         depth: Dict[str, int] = {}
@@ -226,15 +306,7 @@ class ExecutionPlan:
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> "ExecutionPlan":
-        return cls(
-            plan_id=data.get("plan_id", ""),
-            user_message=data.get("user_message", ""),
-            goal_deliverables=data.get("goal_deliverables", []),
-            steps=data.get("steps", []),
-            created_at=data.get("created_at", ""),
-            updated_at=data.get("updated_at", ""),
-            terminal_status=data.get("terminal_status", "running"),
-        )
+        return cls.model_validate(data)
 
 
 # ── Part 类型定义（对齐 OpenCode MessageV2.Part 体系）────────────────

@@ -65,7 +65,12 @@ class AskService:
             else:
                 self._emit_fn = None
 
-    def request(self, ask: PermissionAskRequest) -> bool:
+    def start_ask(self, ask: PermissionAskRequest) -> Optional[str]:
+        """启动一个非阻塞 ASK，发射 permission_ask 事件，返回 ask_id。
+
+        调用方需要自行通过 get_response(ask_id) 或 wait_response(ask_id) 获取结果。
+        如果 emit_fn 未设置，返回 None 表示无法发起 ASK。
+        """
         ask_id = f"ask-{uuid.uuid4().hex[:12]}"
         pending = _PendingAsk(ask_id, ask.session_id, ask.call_id, ask.tool_name, ask.reason, ask.tool_input)
 
@@ -79,7 +84,7 @@ class AskService:
             logger.warning("AskService: emit_fn 未设置，自动拒绝 ASK %s", ask_id)
             with self._lock:
                 self._pending.pop(ask_id, None)
-            return False
+            return None
 
         try:
             if ask.call_id:
@@ -103,31 +108,77 @@ class AskService:
             logger.error("AskService: emit_fn 调用失败 ask_id=%s: %s", ask_id, e)
             with self._lock:
                 self._pending.pop(ask_id, None)
-            return False
+            return None
 
         if self._timeout is None:
             logger.info("AskService: ASK %s 已发射，等待用户响应", ask_id)
         else:
             logger.info("AskService: ASK %s 已发射，等待用户响应（超时 %ds）", ask_id, int(self._timeout))
 
-        pending.event.wait(timeout=self._timeout)
+        return ask_id
+
+    def get_response(self, ask_id: str) -> Optional[bool]:
+        """获取 ask_id 对应的用户响应。
+
+        Returns:
+            True: 用户允许
+            False: 用户拒绝或超时
+            None: 尚未响应
+        """
+        with self._lock:
+            pending = self._pending.get(ask_id)
+            if pending is None:
+                return False
+            return pending.result
+
+    def wait_response(self, ask_id: str, timeout: Optional[float] = None) -> bool:
+        """阻塞等待 ask_id 对应的用户响应。
+
+        Args:
+            ask_id: ASK ID
+            timeout: 等待超时秒数，None 表示使用默认超时
+
+        Returns:
+            True: 用户允许；False: 用户拒绝或超时
+        """
+        with self._lock:
+            pending = self._pending.get(ask_id)
+            if pending is None:
+                logger.warning("AskService: wait_response 收到未知 ask_id %s", ask_id)
+                return False
+
+        wait_timeout = timeout if timeout is not None else self._timeout
+        pending.event.wait(timeout=wait_timeout)
 
         with self._lock:
             self._pending.pop(ask_id, None)
 
-        if self._timeout is not None and pending.result is None:
+        if wait_timeout is not None and pending.result is None:
             logger.warning("AskService: ASK %s 超时，自动拒绝", ask_id)
             return False
 
-        approved = pending.result
+        return bool(pending.result)
 
-        emit_fn({
-            "type": "permission_resolved",
-            "session_id": ask.session_id,
-            "call_id": ask.call_id,
-            "ask_id": ask_id,
-            "approved": approved,
-        })
+    def request(self, ask: PermissionAskRequest) -> bool:
+        """兼容旧接口：启动 ASK 并阻塞等待响应。"""
+        ask_id = self.start_ask(ask)
+        if ask_id is None:
+            return False
+        approved = self.wait_response(ask_id)
+
+        # 发射 permission_resolved 事件
+        with self._lock:
+            pending = self._pending.get(ask_id)
+            emit_fn = self._emit_fns.get(ask.session_id) or self._emit_fn if pending else None
+
+        if emit_fn and pending:
+            emit_fn({
+                "type": "permission_resolved",
+                "session_id": pending.session_id,
+                "call_id": pending.call_id,
+                "ask_id": ask_id,
+                "approved": approved,
+            })
 
         logger.info("AskService: ASK %s 用户响应: %s", ask_id, "允许" if approved else "拒绝")
         return approved
@@ -150,6 +201,11 @@ class AskService:
             pending.result = response.approved
             pending.event.set()
             return True
+
+    def is_pending(self, ask_id: str) -> bool:
+        """判断 ask_id 是否仍在等待响应（用于崩溃恢复时区分"丢失"与"用户拒绝"）。"""
+        with self._lock:
+            return ask_id in self._pending
 
     def pending(self, session_id: str = "") -> List[PermissionAskSnapshot]:
         with self._lock:

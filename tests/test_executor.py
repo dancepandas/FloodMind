@@ -229,3 +229,180 @@ class TestNativeAgentExecutor:
         # Consecutive failure (5) fires: stops before max_iterations
         assert tool_executor.execute.call_count < 10
         assert tool_executor.execute.call_count == 5
+
+
+class TestExecutorPlaceholderStates:
+    def _make_context(self):
+        return RunContext(
+            session_id="test-session",
+            user_text="hello",
+            output_dir="/tmp/test-out",
+            upload_dir="/tmp/test-up",
+        )
+
+    def _make_executor(self, tool_executor=None, context_compressor=None, context_window=32000):
+        mc = MagicMock(spec=ModelClient)
+        mc.stream_chat.return_value = []
+        return NativeAgentExecutor(
+            model_client=mc,
+            tool_executor=tool_executor or MagicMock(),
+            event_bus=EventBus(),
+            message_builder=MessageBuilder(),
+            max_iterations=5,
+            system_prompt="test",
+            tools_schema=[],
+            context_compressor=context_compressor,
+            context_window=context_window,
+        )
+
+    def _make_state(self, status):
+        from floodmind.agent.native.types import AgentLoopState
+        return AgentLoopState(
+            session_id="test-session",
+            run_id="run-1",
+            status=status,
+        )
+
+    def test_context_compress_reduces_messages(self):
+        from floodmind.agent.native.context_compressor import ContextCompressor
+        from floodmind.agent.native.types import AgentLoopState
+
+        llm = MagicMock()
+        llm.invoke.return_value = MagicMock(content="summary")
+        compressor = ContextCompressor(model_client=llm, head_keep=1, tail_keep=1, trigger_threshold=0.5)
+        executor = self._make_executor(context_compressor=compressor, context_window=100)
+        state = AgentLoopState(
+            session_id="test-session",
+            run_id="run-1",
+            status="context_compress",
+            messages=[
+                {"role": "system", "content": "sys"},
+                {"role": "user", "content": "x" * 200},
+                {"role": "assistant", "content": "y" * 200},
+                {"role": "user", "content": "a" * 200},
+                {"role": "assistant", "content": "b" * 200},
+                {"role": "user", "content": "z" * 200},
+            ],
+        )
+        original_len = len(state.messages)
+        new_state = executor._on_context_compress(state, self._make_context())
+        assert new_state.status == "awaiting_llm"
+        assert len(new_state.messages) < original_len
+
+    def test_awaiting_llm_triggers_compression(self):
+        from floodmind.agent.native.context_compressor import ContextCompressor
+        from floodmind.agent.native.types import AgentLoopState
+
+        llm = MagicMock()
+        llm.invoke.return_value = MagicMock(content="summary")
+        compressor = ContextCompressor(model_client=llm, head_keep=1, tail_keep=1, trigger_threshold=0.5)
+        executor = self._make_executor(context_compressor=compressor, context_window=100)
+        state = AgentLoopState(
+            session_id="test-session",
+            run_id="run-1",
+            status="awaiting_llm",
+            messages=[
+                {"role": "system", "content": "sys"},
+                {"role": "user", "content": "x" * 200},
+                {"role": "assistant", "content": "y" * 200},
+                {"role": "user", "content": "a" * 200},
+                {"role": "assistant", "content": "b" * 200},
+                {"role": "user", "content": "z" * 200},
+            ],
+        )
+        new_state = executor._on_awaiting_llm(state, self._make_context())
+        assert new_state.status == "context_compress"
+
+
+class TestAwaitingPermissionRecovery:
+    def _make_context(self):
+        return RunContext(
+            session_id="test-session",
+            user_text="hello",
+            output_dir="/tmp/test-out",
+            upload_dir="/tmp/test-up",
+        )
+
+    def _make_executor(self, tool_executor=None, context_compressor=None, context_window=32000):
+        mc = MagicMock(spec=ModelClient)
+        mc.stream_chat.return_value = []
+        return NativeAgentExecutor(
+            model_client=mc,
+            tool_executor=tool_executor or MagicMock(),
+            event_bus=EventBus(),
+            message_builder=MessageBuilder(),
+            max_iterations=5,
+            system_prompt="test",
+            tools_schema=[],
+            context_compressor=context_compressor,
+            context_window=context_window,
+        )
+
+    def test_real_denial_does_not_reissue(self):
+        from floodmind.agent.native.types import AgentLoopState
+        from floodmind.agent.runtime.contracts.permissions import PermissionAskRequest, PermissionAskResponse
+        from floodmind.agent.runtime.services.ask_service import AskService, set_ask_service
+
+        ask_svc = AskService()
+        set_ask_service(ask_svc)
+        ask_svc.set_emit_fn(lambda e: None, session_id="test-session")
+
+        ask_id = ask_svc.start_ask(PermissionAskRequest(
+            session_id="test-session",
+            call_id="c1",
+            tool_name="Write",
+            reason="写文件",
+            tool_input={"path": "x.txt"},
+        ))
+        ask_svc.respond(PermissionAskResponse(session_id="test-session", ask_id=ask_id, approved=False))
+
+        tool_executor = MagicMock()
+        executor = self._make_executor(tool_executor=tool_executor)
+
+        state = AgentLoopState(
+            session_id="test-session",
+            run_id="run-1",
+            status="awaiting_permission",
+            pending_ask_id=ask_id,
+            pending_tool_calls=[ToolCall(id="c1", name="Write", arguments={"path": "x.txt"})],
+        )
+        new_state = executor._on_awaiting_permission(state, self._make_context())
+
+        assert new_state.status == "awaiting_llm"
+        assert new_state.pending_ask_id is None
+        assert new_state.pending_tool_calls == []
+        tool_executor.execute.assert_not_called()
+
+    def test_lost_ask_id_reissues_ask(self):
+        from floodmind.agent.native.types import AgentLoopState
+        from floodmind.agent.runtime.contracts.tools import ToolResult as NativeToolResult
+        from floodmind.agent.runtime.services.ask_service import AskService, set_ask_service
+
+        ask_svc = AskService()
+        set_ask_service(ask_svc)
+        ask_svc.set_emit_fn(lambda e: None, session_id="test-session")
+
+        tool_executor = MagicMock()
+        awaiting_result = NativeToolResult(
+            tool_call_id="c1",
+            name="Write",
+            content="等待用户确认",
+            status="awaiting_permission",
+            metadata={"ask_id": "ask-new"},
+        )
+        tool_executor.execute.return_value = awaiting_result
+
+        executor = self._make_executor(tool_executor=tool_executor)
+
+        state = AgentLoopState(
+            session_id="test-session",
+            run_id="run-1",
+            status="awaiting_permission",
+            pending_ask_id="ask-lost",
+            pending_tool_calls=[ToolCall(id="c1", name="Write", arguments={"path": "x.txt"})],
+        )
+        new_state = executor._on_awaiting_permission(state, self._make_context())
+
+        assert new_state.status == "awaiting_permission"
+        assert new_state.pending_ask_id == "ask-new"
+        tool_executor.execute.assert_called_once()

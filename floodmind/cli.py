@@ -187,9 +187,11 @@ def chat(model, reasoning, use_tui, use_web, verbose):
 @main.command()
 @click.argument("task")
 @click.option("--model", "-m", help="模型名称")
+@click.option("--resume", "resume_session_id", help="从指定 session 的 checkpoint 恢复")
+@click.option("--checkpoint", "resume_checkpoint_id", help="指定 checkpoint ID（配合 --resume）")
 @click.option("--verbose", "-v", is_flag=True, help="显示详细日志")
-def run(task, model, verbose):
-    """执行单次任务"""
+def run(task, model, resume_session_id, resume_checkpoint_id, verbose):
+    """执行单次任务，支持从 checkpoint 恢复"""
     _setup_logging(verbose=verbose)
     os.environ.setdefault("DASHSCOPE_API_KEY", os.getenv("FLOODMIND_API_KEY", ""))
     _validate_api_key()
@@ -207,7 +209,7 @@ def run(task, model, verbose):
         max_tokens=settings.model.max_tokens,
     )
     import uuid
-    sid = f"cli-run-{uuid.uuid4().hex[:8]}"
+    sid = resume_session_id or f"cli-run-{uuid.uuid4().hex[:8]}"
     memory = DualMemory(
         session_id=sid,
         max_short_term=settings.agent.max_history,
@@ -216,8 +218,59 @@ def run(task, model, verbose):
     )
     agent = create_flood_agent(llm_service=llm, memory=memory, session_id=sid)
 
-    result = agent.run(task)
+    result = agent.run_with_resume(
+        task,
+        resume_session_id=resume_session_id,
+        resume_checkpoint_id=resume_checkpoint_id,
+    )
     print(result)
+
+
+@main.command("list-checkpoints")
+@click.argument("session_id")
+def list_checkpoints(session_id):
+    """列出某 session 的所有 checkpoint"""
+    _setup_logging()
+    from floodmind.agent.runtime.services.checkpoint_service import CheckpointService
+    svc = CheckpointService()
+    summaries = svc.list(session_id)
+    if not summaries:
+        click.echo(f"会话 {session_id} 没有 checkpoint")
+        return
+    click.echo(f"会话 {session_id} 的 checkpoint ({len(summaries)} 个):")
+    for s in summaries:
+        click.echo(
+            f"  {s.checkpoint_id} | status={s.status} | iteration={s.iteration} | "
+            f"time={s.created_at.isoformat()} | files_snapshot={s.has_files_snapshot}"
+        )
+
+
+@main.command("pause")
+@click.argument("session_id")
+def pause_session(session_id):
+    """暂停指定 session 的执行"""
+    _setup_logging()
+    from floodmind.agent import create_flood_agent
+    from floodmind.agent.runtime.services.checkpoint_service import CheckpointService
+    from floodmind.agent.native.types import AgentLoopState
+
+    # 尝试通过 agent.pause 暂停当前运行
+    agent = create_flood_agent(session_id=session_id)
+    if agent.pause(session_id):
+        click.echo(f"已请求暂停 session {session_id}，将在下一个状态边界生效")
+        return
+
+    # 未在运行：直接修改最新 checkpoint
+    svc = CheckpointService()
+    try:
+        state = svc.load(session_id, state_class=AgentLoopState)
+        if state.status not in {"completed", "failed"}:
+            state.status = "paused"
+            svc.save(state)
+            click.echo(f"已暂停 session {session_id} 的最新 checkpoint")
+            return
+    except Exception as e:
+        click.echo(f"暂停失败: {e}")
 
 
 # ── serve ───────────────────────────────────────────────────
@@ -259,11 +312,11 @@ version: 1.0
 @click.option("--dir", "-d", default=".", help="目标目录")
 def init(dir):
     """在当前目录初始化 FloodMind 配置"""
-    from floodmind.config.settings import _config_dir, _config_path, _load_json_config, _template_path, save_config
+    from floodmind.config.settings import _config_path, _load_json_config, _template_path, get_floodmind_home, save_config
 
     target = Path(dir).resolve()
 
-    config_dir = _config_dir()
+    config_dir = get_floodmind_home()
     config_path = _config_path()
     if not config_path.exists():
         config_dir.mkdir(parents=True, exist_ok=True)
@@ -607,8 +660,8 @@ def _run_chat_legacy(model=None, reasoning=None) -> int:
         if user_input.strip().lower() == "memory":
             summary = agent.get_memory_summary()
             click.echo(f"\n记忆摘要:")
-            click.echo(f"  最大历史: {summary['max_history']}轮")
-            click.echo(f"  当前消息数: {summary['message_count']}")
+            click.echo(f"  对话轮数: {summary.get('turn_count', 0)}")
+            click.echo(f"  长期事实: {summary.get('long_term_count', 0)}")
             continue
 
         click.echo("\n助手: ", nl=False)

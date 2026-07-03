@@ -2,6 +2,15 @@
 
 原则：工具描述由 ToolRegistry 负责，系统提示词只负责行为指导。"""
 
+# ── 记忆工具 ──
+
+MEMORY_GUIDANCE = """## 记忆工具使用原则
+- 不要假设你记得所有历史细节；需要时主动调用 ConversationSearch / JournalSearch
+- 执行新任务前，先调用 ExperienceSearch 查找相关历史经验，避免重复踩坑
+- 遇到跨轮次重要的用户偏好、项目约束、任务状态时，调用 CoreMemoryAppend 固化
+- 如果 journal 中的摘要不够详细，调用 JournalGetFullResult 获取完整工具结果
+- CoreMemoryRead 可在开始新任务前调用，回顾已记录的关键事实"""
+
 # ── 工作方式 ──
 
 WORK_METHOD_GUIDANCE = """## 工作方式
@@ -21,14 +30,20 @@ TOOL_EXECUTION_GUIDANCE = """## 工具使用
 - Write + Bash 执行非 Python 脚本
 - 执行前检查依赖"""
 
-# ── 任务规划 ──
+# ── 任务规划 / 工作流 ──
 
-TODO_GUIDANCE = """## 任务规划
-- 3 步以上的任务必须在执行前用 TodoWrite 创建任务列表
-- 每次 TodoWrite 传完整列表（全量替换，不是增量）
-- 状态: pending / in_progress / completed / cancelled
-- 优先级: high / normal / low
-- TodoList 查看当前进度"""
+WORKFLOW_GUIDANCE = """## 任务规划与工作流
+1. 明确最终交付物、当前阶段、缺什么
+2. 3 步以上的任务必须在执行前用 create_plan 创建执行计划；计划步骤包含 step_id、title、purpose、expected_deliverables、needs（依赖）
+3. 基于已有成果继续时，禁止重跑已完成的步骤
+4. 选择执行方式（自己做 / Task / ParallelTask / create_plan）
+5. 承诺了文件产物的，结束后检查文件是否存在
+6. 执行中发现规划不足（缺步骤/某步无需再做/需要拆分），用 update_plan 增删改步骤，不要重发整个 create_plan
+7. 自己（非委派）完成某个步骤后，可用 update_plan 标记该步 completed；否则系统会在产出文件时乐观推进
+8. 如需记录某步骤下的具体动作，可在 create_plan/update_plan 的 step 中写入 subtasks 字段
+9. 最终总结：已完成什么、生成的文件、还需什么
+
+注意：TodoWrite / TodoList 已移除，不要再使用。"""
 
 # ── 定时任务 ──
 
@@ -43,15 +58,6 @@ PREFERENCE_GUIDANCE = """## 用户偏好
 - 长期偏好先确认作用域
 - 本次对话 → MemoryAdd；所有对话 → UpdateProjectInstructions
 - UpdateProjectInstructions 前必须展示内容等待确认"""
-
-# ── 工作流 ──
-
-WORKFLOW_GUIDANCE = """## 工作流
-1. 明确最终交付物、当前阶段、缺什么
-2. 基于已有成果继续时，禁止重跑已完成的步骤
-3. 选择执行方式（自己做 / Task / ParallelTask / create_plan）
-4. 承诺了文件产物的，结束后检查文件是否存在
-5. 最终总结：已完成什么、生成的文件、还需什么"""
 
 # ── 产物判定 ──
 

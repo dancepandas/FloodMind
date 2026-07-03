@@ -51,6 +51,11 @@ class PermissionRequest(BaseModel):
     tool_name: str = ""
     tool_input: dict = {}
     permission_policy: Optional["ToolPermissionPolicy"] = None
+    # 阶段D：agent 身份。"main"=主代理（权限宽），"sub"=子代理（主代理权限的严格子集）。
+    # 子代理禁用 network/交互 exec/ask 类工具，ASK 降级 DENY，全局 allow 不翻盘。
+    agent_tier: str = "main"
+    # 阶段E：运行模式。"planning"=规划（只读硬门），"execution"=执行（默认）。
+    mode: str = "execution"
 
     _check_permissions_fn: Any = None
 
@@ -82,10 +87,11 @@ class PermissionRule(BaseModel):
     name: str = ""
     tool_name: Optional[str] = None
     pattern: Optional[str] = None
+    session_id_pattern: Optional[str] = None
     behavior: PermissionBehavior = PermissionBehavior.DENY
     reason: str = ""
 
-    def matches(self, tool_name: str, tool_input: dict) -> bool:
+    def matches(self, tool_name: str, tool_input: dict, session_id: str = "") -> bool:
         if self.tool_name and self.tool_name != tool_name:
             return False
         if self.pattern:
@@ -96,6 +102,10 @@ class PermissionRule(BaseModel):
             except (TypeError, ValueError):
                 text = str(tool_input)
             if not _re.search(self.pattern, text):
+                return False
+        if self.session_id_pattern and session_id:
+            import re as _re
+            if not _re.search(self.session_id_pattern, session_id):
                 return False
         return True
 

@@ -9,7 +9,7 @@ import {
 } from "@/features/chat/lib/message-blocks";
 import { createLogger } from "@/lib/logger";
 import { uuid } from "@/lib/utils";
-import type { ChatMessage, GeneratedArtifact, ReferenceLink, ToolActivity, WorkflowPlan, TodoState } from "@/types/app";
+import type { ChatMessage, GeneratedArtifact, PlanStepSubtask, ReferenceLink, ToolActivity, WorkflowPlan } from "@/types/app";
 
 const log = createLogger("Stream");
 
@@ -17,6 +17,23 @@ function normalizeWorkflowStatus(raw: string): "pending" | "running" | "complete
   if (raw === "completed" || raw === "running" || raw === "pending" || raw === "error") return raw;
   if (raw === "done") return "completed";
   return "pending";
+}
+
+// 子任务状态枚举与步骤不同：用 in_progress（非 running），需独立 normalizer。
+function normalizeSubtaskStatus(raw: string): PlanStepSubtask["status"] {
+  if (raw === "pending" || raw === "in_progress" || raw === "completed" || raw === "cancelled") return raw;
+  if (raw === "running") return "in_progress"; // 防御性归一
+  if (raw === "done") return "completed";
+  return "pending";
+}
+
+function mapSubtasks(raw: any[] | undefined): PlanStepSubtask[] {
+  return (raw || []).map((s) => ({
+    id: String(s?.id ?? ""),
+    content: String(s?.content ?? ""),
+    status: normalizeSubtaskStatus(String(s?.status ?? "")),
+    priority: ["high", "normal", "low"].includes(s?.priority) ? s.priority : "normal",
+  }));
 }
 
 function parseKnowledgeReferences(content: string): ReferenceLink[] {
@@ -62,16 +79,16 @@ function parseWebReferences(content: string): ReferenceLink[] {
   return refs;
 }
 
-interface StreamHandlers {
+export interface StreamHandlers {
   updateAssistant: (updater: (message: ChatMessage) => ChatMessage) => void;
   pushToolActivity: (toolName: string, content: string, status: ToolActivity["status"]) => void;
   setWorkflow: (updater: WorkflowPlan | ((prev: WorkflowPlan | null) => WorkflowPlan | null)) => void;
-  setTodos: (updater: TodoState | ((prev: TodoState) => TodoState)) => void;
+  setIsContextCompressing?: (compressing: boolean) => void;
   setTokenUsage?: (usage: { prompt_tokens: number; completion_tokens: number; total_tokens: number }) => void;
 }
 
 export function applyStreamEvent(data: Record<string, any>, handlers: StreamHandlers) {
-  const { updateAssistant, pushToolActivity, setWorkflow, setTodos, setTokenUsage } = handlers;
+  const { updateAssistant, pushToolActivity, setWorkflow, setIsContextCompressing, setTokenUsage } = handlers;
   const eventType = data.type || "(no type)";
 
   if (data.type === "error") {
@@ -138,28 +155,25 @@ export function applyStreamEvent(data: Record<string, any>, handlers: StreamHand
 
   if (data.type === "context_compress_start") {
     log.info(`[context_compress_start]`);
+    setIsContextCompressing?.(true);
     updateAssistant((message) => appendThoughtBlock(message, data.content || "正在压缩历史对话...", false));
     return;
   }
 
   if (data.type === "context_compress_done") {
     log.info(`[context_compress_done] len=${(data.content || "").length}`);
+    setIsContextCompressing?.(false);
     updateAssistant((message) => appendActionBlock(message, "context_compress", "done", data.content || "", undefined, "context_compress"));
     return;
   }
 
-  if (data.type === "thought_delta" || data.type === "reasoning") {
-    // Sub-agent thoughts (with step_key) should not leak into main display
+  // 思考过程增量。后端 web_server 已将 reasoning/thought_delta 统一归一为 thought_delta，
+  // 前端只认这一种思考事件——避免"多套思考逻辑"（reasoning 累加 / thought_summary 归档重建）。
+  // Sub-agent thoughts (with step_key) should not leak into main display
+  if (data.type === "thought_delta") {
     if (data.step_key) return;
     log.debug(`[${eventType}] len=${(data.content || "").length}`);
     updateAssistant((message) => appendThoughtBlock(message, data.content || "", true));
-    return;
-  }
-
-  if (data.type === "thought_summary") {
-    if (data.step_key) return;
-    log.debug(`[${eventType}] len=${(data.content || "").length}`);
-    updateAssistant((message) => appendThoughtBlock(message, data.content || "", false));
     return;
   }
 
@@ -185,6 +199,7 @@ export function applyStreamEvent(data: Record<string, any>, handlers: StreamHand
         outcome: step.outcome || "",
         expected_deliverables: step.expected_deliverables || [],
         output_artifacts: step.output_artifacts || [],
+        subtasks: mapSubtasks(step.subtasks),
       })),
     });
     return;
@@ -209,6 +224,7 @@ export function applyStreamEvent(data: Record<string, any>, handlers: StreamHand
           outcome: data.outcome || "",
           expected_deliverables: [],
           output_artifacts: [],
+          subtasks: mapSubtasks(data.subtasks),
         });
       } else {
         steps[idx] = {
@@ -216,6 +232,8 @@ export function applyStreamEvent(data: Record<string, any>, handlers: StreamHand
           status: normalizedStatus,
           ...(data.title ? { title: data.title, label: data.title } : {}),
           ...(data.outcome ? { outcome: data.outcome } : {}),
+          // 仅当事件真带 subtasks 时覆盖；后端缺省不下发，避免清空既有子任务
+          ...(data.subtasks ? { subtasks: mapSubtasks(data.subtasks) } : {}),
         };
       }
       return { title: prev?.title || "调度计划", steps };
@@ -245,15 +263,16 @@ if (data.type === "action_start" || data.type === "tool_status") {
     const askReason = data.reason || "";
     const askSessionId = data.session_id || "";
     const callId = data.call_id || (askId ? `ask-${askId}` : "");
-    log.info(`[${eventType}] permission_ask ask_id="${askId}" tool="${toolName}" call_id="${callId}" reason="${askReason}"`);
+    const toolInput = (data.tool_input as Record<string, unknown>) ?? undefined;
+    log.info(`[${eventType}] permission_ask ask_id="${askId}" tool="${toolName}" call_id="${callId}" reason="${askReason}" has_tool_input=${!!toolInput}`);
     pushToolActivity(toolName, askReason, "pending_confirmation");
     if (callId) {
       updateAssistant((message) =>
-        updateActionBlockStatus(message, callId, "pending_confirmation", askReason, { askId, askReason, sessionId: askSessionId })
+        updateActionBlockStatus(message, callId, "pending_confirmation", askReason, { askId, askReason, sessionId: askSessionId, toolInput })
       );
     } else {
       updateAssistant((message) =>
-        appendActionBlock(message, toolName, "pending_confirmation", askReason, undefined, "", askId, askReason, askSessionId)
+        appendActionBlock(message, toolName, "pending_confirmation", askReason, undefined, "", askId, askReason, askSessionId, undefined, toolInput)
       );
     }
     return;
@@ -344,26 +363,6 @@ if (data.type === "action_start" || data.type === "tool_status") {
   if (data.type === "stream_end") {
     log.info(`[${eventType}] stream complete`);
     updateAssistant((message) => finalizeThoughtBlocks(message));
-    return;
-  }
-
-  if (data.type === "todo_updated") {
-    const items = (data.todos || []) as Array<Record<string, any>>;
-    log.info(`[${eventType}] todos=${items.length}`);
-    setTodos({
-      items: items.map((t) => ({
-        id: String(t.id || ""),
-        content: String(t.content || ""),
-        status: ["pending", "in_progress", "completed", "cancelled"].includes(t.status)
-          ? t.status
-          : "pending",
-        priority: ["high", "normal", "low"].includes(t.priority)
-          ? t.priority
-          : "normal",
-        created_at: t.created_at,
-        updated_at: t.updated_at,
-      })),
-    });
     return;
   }
 

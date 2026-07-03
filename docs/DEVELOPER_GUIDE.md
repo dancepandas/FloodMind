@@ -205,16 +205,38 @@ for event in agent.stream("查一下霍口水库水位"):
 
 ### 流式事件协议
 
-`agent.stream()` 产出结构化 dict，自建前端直接消费：
+`agent.stream()` 产出结构化 dict，`on_event` 回调同样收到。按类别：
+
+**回答 / 思考**
 
 | event.type | 含义 | 前端处理 |
 |------------|------|----------|
 | `answer_delta` | 回答文本增量 | 追加到聊天框 |
-| `thought_delta` | 思考过程增量 | 折叠展示 |
-| `action_start` | 工具调用开始 | 显示 loading 状态 |
-| `action_end` | 工具调用结束 | 显示工具结果 |
+| `thought_delta` | 思考过程增量（启用 reasoning 时） | 折叠展示 |
 | `final_text` | 最终完整回答 | 替换/确认最终文本 |
-| `error` | 错误 | 显示错误提示 |
+
+**工具 / 计划**
+
+| event.type | 含义 | 前端处理 |
+|------------|------|----------|
+| `action_start` | 工具调用开始（`tool_name`,`status`,`call_id?`） | 显示 loading |
+| `action_end` | 工具调用结束（`tool_name`,`content`） | 显示工具结果 |
+| `workflow_plan` | 执行计划（`title`,`steps`） | 渲染计划面板 |
+| `workflow_step` | 步骤进度（`step_key`,`status`,`subtasks?`） | 更新步骤状态 |
+
+**生命周期 / 系统**
+
+| event.type | 含义 | 前端处理 |
+|------------|------|----------|
+| `llm_step_start` / `llm_step_end` | LLM 调用边界（`iteration`,`tokens`） | 模型/轮次指示 |
+| `retry_attempt` | 模型重试（`attempt`） | 重试提示 |
+| `context_compress_start` / `_done` | 上下文压缩 | 压缩状态 |
+| `token_usage` | token 用量（`prompt_tokens`,`completion_tokens`,`total_tokens`） | 累计/展示 |
+| `file_generated` / `image_generated` | 产物（`filename`,`download_url?`） | 产物卡片 |
+| `heartbeat` | 心跳 | 忽略 |
+| `error` / `llm_token_error` | 错误 | 错误提示 |
+
+> bare 模式下部分事件（如 `permission_ask`）默认不触发。
 
 ### 编程式 Skill 注册
 
@@ -242,6 +264,42 @@ register_skill(skill)
 | `session_id` | `str` | 否 | 会话 ID（默认 `"sdk-agent"`） |
 | `enable_search` | `bool` | 否 | 启用 WebSearch 工具 |
 | `enable_reasoning` | `bool` | 否 | 启用推理模式 |
+| `on_event` | `Callable[[dict], None]` | 否 | 流式事件回调，run/stream 期间每个事件调用一次；回调异常被吞不中断 |
+| `permission_handler` | `Callable[[str, dict], bool]` | 否 | 工具调用前同步审批钩子，返回 False 拒绝该次调用（bare 模式默认全放行） |
+| `max_iterations` | `int` | 否 | Agent 循环最大轮数（默认 50） |
+
+### 结果访问
+
+执行后可通过只读属性获取本次调用的副产物（每次 run/stream 自动重置）：
+
+| 属性 | 类型 | 说明 |
+|------|------|------|
+| `agent.last_usage` | `dict` | 本次 token 用量（`prompt_tokens`/`completion_tokens`/`total_tokens` 累加） |
+| `agent.artifacts` | `list[dict]` | 本次收集的 `file_generated`/`image_generated` 事件 |
+| `agent.raw` | `NativeFloodAgent` | 底层实例（高级用法） |
+
+> **产物限制**：bare 模式不启用文件系统自动监控，`agent.artifacts` 仅收集工具执行中显式产出的产物事件。自定义工具需自行产出文件并在返回结果中声明，才能被识别。
+
+```python
+# 进阶：事件回调 + 权限钩子 + 迭代上限 + 结果访问
+def on_event(event):
+    if event["type"] == "token_usage":
+        print(f"累计 token: {event['total_tokens']}")
+
+def approve(tool_name, tool_input):
+    return tool_name != "DropTable"  # 拒绝危险工具
+
+agent = Agent(
+    llm=llm,
+    tools=tools,
+    on_event=on_event,           # 每个流事件自动推送
+    permission_handler=approve,  # 工具调用前审批
+    max_iterations=20,
+)
+agent.run("查霍口水库水位")
+print(agent.last_usage)   # {"prompt_tokens":..,"completion_tokens":..,"total_tokens":..}
+print(agent.artifacts)    # 本次产物事件列表
+```
 
 ---
 
@@ -275,19 +333,20 @@ agent = create_flood_agent(
 for chunk in agent.stream("分析敖江流域霍口水库的流量数据"):
     chunk_type = chunk.get("type", "")
     content = chunk.get("content", "")
-    if chunk_type == "token":
+    if chunk_type == "answer_delta":
         print(content, end="", flush=True)
-    elif chunk_type == "reasoning":
+    elif chunk_type == "thought_delta":
         print(f"\n[思考] {content}")
-    elif chunk_type == "tool_start":
+    elif chunk_type == "action_start":
         print(f"\n[调用工具] {chunk.get('tool_name', '')}")
+    elif chunk_type == "action_end":
+        print(f"\n[工具完成] {chunk.get('tool_name', '')}")
     elif chunk_type == "error":
         print(f"\n[错误] {content}")
 
-# 5. 单次执行（非流式）
+# 5. 单次执行（非流式，返回最终回答字符串）
 result = agent.run("生成敖江流域水文预报报告")
-print(result.final_output)
-print("产物文件:", result.artifacts)
+print(result)
 ```
 
 ### 3.2 指定模型
@@ -391,11 +450,11 @@ Content-Type: application/json
 **响应（SSE 流）：**
 
 ```
-data: {"type":"reasoning","content":"让我先查看数据..."}
-data: {"type":"token","content":"根据数据"}
-data: {"type":"token","content":"分析..."}
-data: {"type":"artifact","content":{"path":"/outputs/report.docx","label":"分析报告"}}
-data: {"type":"done","content":""}
+data: {"type":"thought_delta","content":"让我先查看数据..."}
+data: {"type":"answer_delta","content":"根据数据"}
+data: {"type":"answer_delta","content":"分析..."}
+data: {"type":"file_generated","filename":"report.docx","download_url":"/outputs/report.docx"}
+data: {"type":"stream_end","content":""}
 ```
 
 ### 4.3 Python 客户端示例
@@ -418,11 +477,11 @@ def chat(session_id, message):
                 event = json.loads(line[6:])
                 event_type = event.get("type")
                 content = event.get("content", "")
-                if event_type == "token":
+                if event_type == "answer_delta":
                     print(content, end="", flush=True)
-                elif event_type == "reasoning":
+                elif event_type == "thought_delta":
                     print(f"\n[思考] {content}")
-                elif event_type == "done":
+                elif event_type == "stream_end":
                     print()
                 elif event_type == "error":
                     print(f"\n[错误] {content}")
@@ -809,7 +868,7 @@ while (true) {
   const { done, value } = await reader.read();
   if (done) break;
   const text = decoder.decode(value);
-  // 解析 SSE 格式的 token 流
+  // 解析 SSE 事件流
   const lines = text.split('\n');
   for (const line of lines) {
     if (line.startsWith('data: ')) {

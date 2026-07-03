@@ -412,10 +412,14 @@ class SessionManager:
         if history_file.exists():
             try:
                 data = json.loads(history_file.read_text(encoding="utf-8"))
-                # 新格式：turns
+                # 新格式：turns（扁平 role/content 或旧 per-turn）
                 if "turns" in data:
                     for turn in data["turns"]:
-                        content = turn.get("user_input", "")
+                        # 扁平 user 条目
+                        if turn.get("role") == "user":
+                            content = turn.get("content", "")
+                        else:
+                            content = turn.get("user_input", "")  # 旧 per-turn 格式
                         if content:
                             return self._extract_title_from_user_input(content)
                 # 旧格式：messages
@@ -475,16 +479,8 @@ class SessionManager:
     def get_session_messages(self, session_id: str) -> List[Dict[str, str]]:
         """获取会话的对话历史（用于前端恢复）"""
         session_id = validate_session_id(session_id)
-        agent = self.get_agent(session_id)
-        if agent and hasattr(agent, 'memory') and hasattr(agent.memory, 'get_chat_history_for_frontend'):
-            try:
-                live_messages = agent.memory.get_chat_history_for_frontend()
-                if live_messages:
-                    return live_messages
-            except Exception as e:
-                logger.warning(f"读取活动会话内存失败，回退到磁盘历史: {e}")
 
-        # 新路径：会话目录下 memory/chat_history.json
+        # 会话目录下 memory/chat_history.json（DualMemory._turns 持久化）
         history_file = self.get_memory_dir(session_id) / "chat_history.json"
         if not history_file.exists():
             # 兼容旧路径：memory/chat_history/chat_{session_id}_*.json
@@ -511,20 +507,63 @@ class SessionManager:
 
     @staticmethod
     def _turns_to_frontend(turns: List[Dict[str, Any]]) -> List[Dict[str, str]]:
-        """将新格式轮次转为前端消息列表
+        """将对话历史转为前端消息列表。
 
-        每轮合并为一条 FloodMind 消息，包含 reasoning、tool_calls、final_answer，
-        前端 fromServerMessage 会据此构建 thought/action/answer blocks 并自动折叠。
+        支持两种 _turns 格式：
+        - 扁平条目（role/content）：当前架构，一次 LLM 调用一条 assistant 条目。
+          同一用户轮的多条 assistant 条目合并为一条 FloodMind 消息（保留原 per-turn UX）。
+        - 旧 per-turn 字典（user_input/final_answer）：迁移前的格式，按原逻辑渲染。
+        前端 fromServerMessage 据此构建 thought/action/answer blocks 并自动折叠。
         """
-        result = []
+        if not turns:
+            return []
+        # 旧格式（无 role 键）：per-turn 字典
+        if "role" not in turns[0]:
+            return SessionManager._legacy_turns_to_frontend(turns)
+
+        # 扁平条目：按用户轮聚合 assistant 条目
+        result: List[Dict[str, Any]] = []
+        pending_ai: Optional[Dict[str, Any]] = None
+
+        def _flush() -> None:
+            nonlocal pending_ai
+            if pending_ai and (pending_ai.get("reasoning") or pending_ai.get("tool_calls") or pending_ai.get("content")):
+                result.append(pending_ai)
+            pending_ai = None
+
+        for e in turns:
+            role = e.get("role")
+            if role == "user":
+                _flush()
+                content = e.get("content", "")
+                if content:
+                    result.append({"role": "human", "content": content})
+            elif role == "assistant":
+                if pending_ai is None:
+                    pending_ai = {"role": "FloodMind", "content": "", "reasoning": "", "tool_calls": []}
+                reasoning = e.get("reasoning", "")
+                if reasoning:
+                    pending_ai["reasoning"] = (
+                        pending_ai["reasoning"] + "\n" + reasoning
+                    ) if pending_ai["reasoning"] else reasoning
+                for tc in (e.get("tool_calls") or []):
+                    pending_ai["tool_calls"].append({
+                        "tool_name": tc.get("tool_name", tc.get("name", "unknown")),
+                        "tool_output": tc.get("tool_output", tc.get("result", "")),
+                    })
+                content = e.get("content", "")
+                if content:
+                    pending_ai["content"] = content  # 最后一条非空 assistant 内容（= 终态回答）
+        _flush()
+        return result
+
+    @staticmethod
+    def _legacy_turns_to_frontend(turns: List[Dict[str, Any]]) -> List[Dict[str, str]]:
+        """旧 per-turn 格式（user_input/final_answer）转前端消息列表。"""
+        result: List[Dict[str, Any]] = []
         for turn in turns:
-            # 用户消息
             if turn.get("user_input"):
-                result.append({
-                    "role": "human",
-                    "content": turn["user_input"],
-                })
-            # 合并本轮所有 AI 内容为一条消息
+                result.append({"role": "human", "content": turn["user_input"]})
             ai_parts: Dict[str, Any] = {"role": "FloodMind", "content": ""}
             if turn.get("reasoning"):
                 ai_parts["reasoning"] = turn["reasoning"]
@@ -539,7 +578,6 @@ class SessionManager:
                 ]
             if turn.get("final_answer"):
                 ai_parts["content"] = turn["final_answer"]
-            # 只有有内容才添加
             if ai_parts.get("reasoning") or ai_parts.get("tool_calls") or ai_parts.get("content"):
                 result.append(ai_parts)
         return result
@@ -790,9 +828,7 @@ class SessionManager:
                 "total_sessions": total_sessions,
                 "active_agents": active_agents,
                 "max_sessions": self.config["max_active_sessions"],
-                "data_dir": str(self.data_dir),
                 "total_size_mb": round(total_size / 1024 / 1024, 2),
-                "config": self.config,
             }
     
     def save_all(self):

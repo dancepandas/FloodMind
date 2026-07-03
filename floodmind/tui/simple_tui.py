@@ -307,12 +307,6 @@ class SimpleTUI(App):
         elif t == "retry_attempt":
             self._add_system(f"Retry #{event.get('attempt', 0)}")
 
-        elif t == "todo_updated":
-            todos = event.get("todos", [])
-            done = sum(1 for x in todos if x.get("status") == "completed")
-            if todos:
-                self._add_system(f"Todo: {done}/{len(todos)}")
-
         elif t == "workflow_plan":
             steps = event.get("steps", [])
             if steps:

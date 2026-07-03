@@ -9,6 +9,7 @@ export interface ActionDetail {
   askId?: string;
   askReason?: string;
   sessionId?: string;
+  toolInput?: Record<string, unknown>;
   delegation?: {
     task: string;
     skill_name?: string;
@@ -76,22 +77,23 @@ export interface ReferenceLink {
   source?: string;
 }
 
+export interface TokenUsage {
+  prompt_tokens: number;
+  completion_tokens: number;
+  total_tokens: number;
+}
+
 export interface ChatMessage {
   id: string;
   role: "human" | "FloodMind" | "system";
   content: string;
-  reasoning?: string;
-  rawReasoning?: string;
   isComplete?: boolean;
   blocks: MessageBlock[];
   timestamp: string;
   artifacts?: GeneratedArtifact[];
   references?: ReferenceLink[];
-  tokenUsage?: {
-    prompt_tokens: number;
-    completion_tokens: number;
-    total_tokens: number;
-  };
+  tokenUsage?: TokenUsage;
+  attachments?: UploadedFileItem[];
 }
 
 export interface ToolActivity {
@@ -113,6 +115,14 @@ export interface WorkflowStepItem {
   outcome?: string;
   expected_deliverables?: { type: string; format?: string; description?: string }[];
   output_artifacts?: string[];
+  subtasks?: PlanStepSubtask[];
+}
+
+export interface PlanStepSubtask {
+  id: string;
+  content: string;
+  status: "pending" | "in_progress" | "completed" | "cancelled";
+  priority: "high" | "normal" | "low";
 }
 
 export interface WorkflowPlan {
@@ -153,30 +163,17 @@ export interface PendingPermissionAsk {
   toolName: string;
   askReason: string;
   sessionId: string;
+  toolInput?: Record<string, unknown>;
 }
 
 export interface SessionRuntimeState {
   isPaused: boolean;
 }
 
-export interface TodoItem {
-  id: string;
-  content: string;
-  status: "pending" | "in_progress" | "completed" | "cancelled";
-  priority: "high" | "normal" | "low";
-  created_at?: number;
-  updated_at?: number;
-}
-
-export interface TodoState {
-  items: TodoItem[];
-}
-
 export interface StreamSnapshot {
   message_id: string;
   content?: string;
   reasoning?: string;
-  raw_reasoning?: string;
   is_streaming?: boolean;
   artifacts?: GeneratedArtifact[];
   workflow?: WorkflowPlan;
@@ -209,3 +206,55 @@ export interface ScheduledTask {
   created_at?: string;
   updated_at?: string;
 }
+
+export interface CheckpointSummary {
+  checkpoint_id: string;
+  status: string;
+  iteration: number;
+  created_at: string;
+  has_files_snapshot: boolean;
+}
+
+export interface CheckpointManifest {
+  checkpoint_id: string;
+  session_id: string;
+  run_id: string;
+  parent_checkpoint_id?: string;
+  status: string;
+  iteration: number;
+  created_at: string;
+  state_file: string;
+  files_snapshot_dir?: string;
+  files_snapshot_base_dirs: string[];
+  metadata: Record<string, unknown>;
+}
+
+export interface TraceSpan {
+  span_id: string;
+  parent_id?: string;
+  trace_id: string;
+  type: string;
+  name: string;
+  start_time: string;
+  end_time?: string;
+  duration_ms?: number;
+  input: Record<string, unknown>;
+  output: Record<string, unknown>;
+  status: string;
+  metadata: Record<string, unknown>;
+}
+
+export interface TraceEvent {
+  event_id: string;
+  trace_id: string;
+  type: string;
+  name: string;
+  timestamp: string;
+  input: Record<string, unknown>;
+  output: Record<string, unknown>;
+  status: string;
+  metadata: Record<string, unknown>;
+}
+
+export type TraceItem = TraceSpan | TraceEvent;
+

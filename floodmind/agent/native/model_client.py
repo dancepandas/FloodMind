@@ -138,7 +138,6 @@ class ModelClient:
             "temperature": temperature if temperature is not None else self.temperature,
             "max_tokens": max_tokens if max_tokens is not None else self.max_tokens,
         }
-        request_params["stream_options"] = {"include_usage": True}
 
         # 支持 extra_body（如 enable_thinking）
         extra_body = kwargs.get("extra_body")

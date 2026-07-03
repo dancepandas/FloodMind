@@ -13,6 +13,7 @@ import base64
 import logging
 import re
 import threading
+import contextvars
 import hashlib
 from typing import Dict, Any, Optional, List
 from datetime import datetime
@@ -29,11 +30,21 @@ load_dotenv()
 from floodmind.config.settings import settings
 from floodmind.agent.native.model_client import ModelClient
 from floodmind.config.model_presets import get_preset, get_default_model_key, get_models_list, resolve_api_key, resolve_base_url
-from floodmind.memory import SimpleMemory, DualMemory, SessionManager
+from floodmind.memory import DualMemory, SessionManager
 from floodmind.memory.session_manager import validate_session_id
 from floodmind.agent.native import create_flood_agent
 from floodmind.agent.scheduled_task_runtime import get_scheduled_task_runtime
 from floodmind.tools import set_memory_instance, set_session_context
+from floodmind.agent.runtime.services.workspace_service import build_workspace, set_workspace
+from floodmind.agent.runtime.adapters.flask_checkpoint_api import (
+    handle_list_checkpoints,
+    handle_get_checkpoint_manifest,
+    handle_rollback_checkpoint,
+)
+from floodmind.agent.runtime.adapters.flask_tracing_api import (
+    handle_list_trace_events,
+    handle_get_trace_file_path,
+)
 
 # 配置日志
 logs_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'logs')
@@ -118,7 +129,6 @@ session_manager = SessionManager({
 })
 
 # 会话级状态存储（供 REST API 查询）
-_session_todos: Dict[str, List[Dict[str, Any]]] = {}
 _session_token_usage: Dict[str, Dict[str, int]] = {}
 
 session_files: Dict[str, Dict[str, dict]] = {}
@@ -563,7 +573,10 @@ def _buffered_yield(buf: list, payload: dict, resume_event: Optional[threading.E
 def _serialize_snapshot(snapshot: Optional[dict]) -> Optional[dict]:
     if not snapshot:
         return None
-    return {k: v for k, v in snapshot.items() if k not in ('event_buffer', 'resume_event', 'buffer_lock')}
+    # 剥离内部运行时对象（event_buffer/resume_event/buffer_lock）与未脱敏原始推理（raw_reasoning）
+    data = {k: v for k, v in snapshot.items() if k not in ('event_buffer', 'resume_event', 'buffer_lock', 'raw_reasoning')}
+    # 出口统一脱敏：覆盖 content/reasoning/workflow/tool_results 中的绝对路径与内部 id
+    return _sanitize_payload(data)
 
 
 def ensure_session_state(session_id: str) -> dict[str, Any]:
@@ -762,41 +775,13 @@ def resolve_artifact_references(session_id: str, artifact_paths: list[str], fina
     return resolved
 
 
-def filter_system_info(content: str) -> str:
-    """过滤消息中的系统路径和环境信息"""
-    import re
-    
-    if not content:
-        return content
-    
-    filtered = content
-    
-    patterns_to_remove = [
-        r'\[会话环境信息\][\s\S]*?(?=\n\n|\Z)',
-        r'\[已上传的文件\][\s\S]*?(?=\n\n|\Z)',
-        r'已成功生成[^，。！？\n]*[，：]\s*文件保存于[^\n]*',
-    ]
-    
-    for pattern in patterns_to_remove:
-        filtered = re.sub(pattern, '', filtered, flags=re.IGNORECASE)
-    
-    path_pattern = r'[A-Za-z]:\\[^\s<>\n]+\.(?:csv|xlsx|xls|json|txt|docx|doc|pdf|png|jpg|jpeg|gif)'
-    filtered = re.sub(path_pattern, lambda m: '[' + m.group(0).split('\\')[-1] + ']', filtered)
-    
-    filtered = re.sub(r'\n{3,}', '\n\n', filtered)
-    filtered = filtered.strip()
-    
-    return filtered
-
-
 def create_agent_for_session(session_id: str, enable_search: bool = False, enable_rag: Optional[bool] = None, enable_reasoning: bool = True, model_key: Optional[str] = None):
     """为会话创建 Agent 实例（Native Runtime）"""
     session_id = _require_session_id(session_id)
     logger.info(f"创建新的智能体实例: {session_id}, runtime={settings.agent.runtime}")
     # 清理会话级状态，避免旧数据污染
-    _session_todos.pop(session_id, None)
     _session_token_usage.pop(session_id, None)
-    
+
     if enable_rag is None:
         enable_rag = False  # RAG now via MCP, see settings mcpServers
 
@@ -834,11 +819,15 @@ def create_agent_for_session(session_id: str, enable_search: bool = False, enabl
     agent._session_enable_rag = enable_rag
     agent._session_enable_reasoning = enable_reasoning
 
+    # 注入 Workspace：网页版不传 user_dir，build_workspace 回退到 session_root/<sid>/outputs，
+    # 与 session_manager.get_output_dir 等价 → 网页版零回归。
+    ws = build_workspace(session_id, session_root=session_manager.sessions_dir)
+    set_workspace(ws)
     set_session_context(
         session_id=session_id,
-        output_dir=str(session_manager.get_output_dir(session_id)),
+        output_dir=str(ws.user_dir),
     )
-    
+
     return agent
 
 
@@ -846,10 +835,12 @@ def get_or_create_agent(session_id: str):
     """获取或创建会话智能体"""
     session_id = _require_session_id(session_id)
     session_manager.touch_session(session_id)
-    
+
+    ws = build_workspace(session_id, session_root=session_manager.sessions_dir)
+    set_workspace(ws)
     set_session_context(
         session_id=session_id,
-        output_dir=str(session_manager.get_output_dir(session_id)),
+        output_dir=str(ws.user_dir),
     )
     
     with session_states_lock:
@@ -925,36 +916,165 @@ def parse_stream_chunk(chunk: str) -> Dict[str, Any]:
         return {"type": "content", "content": chunk}
 
 
+def _path_to_basename(match) -> str:
+    """绝对路径脱敏：仅保留 basename，避免泄露服务端目录结构。"""
+    full = match.group(0)
+    parts = re.split(r'[\\/]', full)
+    return parts[-1] if parts and parts[-1] else ''
+
+
 def sanitize_output(text: str) -> str:
-    """过滤输出中的内部路径和敏感信息"""
+    """过滤输出中的内部路径和敏感信息（公网生产脱敏）。
+
+    三类处理：
+    1. 绝对路径 → basename（保留文件名，脱敏目录）
+    2. 内部标识符（session/sub-session/ckpt/run id）→ 占位符
+    3. 其他敏感模式（技能说明头、data/sessions 相对路径等）→ 移除
+    """
     import re
-    
+
     if not text:
         return text
-    
+
+    # 1) 绝对路径 → basename
+    result = re.sub(r'[A-Za-z]:\\[^\s\'"]+', _path_to_basename, text)
+    result = re.sub(r'/(?:app|home|Users|opt|var|tmp|root)/[^\s\'"]+', _path_to_basename, result)
+
+    # 2) 内部标识符 → 占位符（sub-session 必须在 session 之前替换，避免部分匹配）
+    result = re.sub(r'sub-session-[0-9a-zA-Z-]+', '<subagent>', result)
+    result = re.sub(r'ckpt-[a-f0-9]{8,}', '<checkpoint>', result)
+    result = re.sub(r'run-[0-9]{10,}', '<run>', result)
+    result = re.sub(r'session-[0-9]+-[a-z0-9]+', '<session>', result, flags=re.IGNORECASE)
+
+    # 3) 其他敏感模式 → 移除
     patterns_to_remove = [
-        r'D:\\[^\s\n]+\\FloodAgent[^\s\n]*',
-        r'C:\\[^\s\n]+\\[^\s\n]*',
-        r'/app/[^\s\n]*',
-        r'/home/[^\s\n]+/[^\s\n]*',
-        r'session-[0-9]+-[a-z0-9]+',
-        r'Invoking:\s*`[^`]+`',
-        r"Invoking:\s*`GetSkill`\s*with\s*`[^`]+`",
-        r"Invoking:\s*`Bash`\s*with\s*`[^`]+`",
-        r"Invoking:\s*`KnowledgeSearch`\s*with\s*`[^`]+`",
+        r"Invoking:\s*`[^`]+`",
         r'=== 技能【[^】]+】完整说明 ===',
-        r'\\data\\sessions\\[^\s\n]+',
-        r'\\skills\\[^\s\n]+',
+        r'[\\/]?data[\\/]sessions[^\s\n]*',
+        r'[\\/]?skills[\\/][^\s\n]+',
+        # 消息上下文注入块 / 生成文件落盘提示（原 filter_system_info 职责，统一收敛到此处）
+        r'\[会话环境信息\][\s\S]*?(?=\n\n|\Z)',
+        r'\[已上传的文件\][\s\S]*?(?=\n\n|\Z)',
+        r'已成功生成[^，。！？\n]*[，：]\s*文件保存于[^\n]*',
     ]
-    
-    result = text
     for pattern in patterns_to_remove:
         result = re.sub(pattern, '', result, flags=re.IGNORECASE)
-    
+
     result = re.sub(r'\n\s*\n\s*\n', '\n\n', result)
-    result = result.strip()
-    
-    return result
+    return result.strip()
+
+
+# SSE payload 中需要脱敏的“展示性文本”字段白名单。
+# 仅对这些字段的字符串值做 sanitize_output；结构字段（step_key/call_id/status/type 等）
+# 绝不触碰——否则会破坏前端用 step_key 关联步骤、用 call_id 配对事件的能力。
+_SSE_SANITIZE_FIELDS = frozenset({
+    'content', 'detail', 'outcome', 'title', 'label',
+    'summary', 'task', 'reasoning', 'message', 'skill_name', 'stage_label', 'reason',
+})
+# tool_input 单列：工具参数结构不定（file_path/command/target 等任意键），
+# 其任意字符串值都可能含路径，故对所有 str 值整体脱敏，不走按字段名的白名单
+_SSE_FULL_SANITIZE_KEYS = frozenset({'tool_input'})
+
+
+def _sanitize_tool_input(val):
+    """递归对工具参数的所有字符串值脱敏（参数键名不可枚举，统一处理）。"""
+    if isinstance(val, str):
+        return sanitize_output(val)
+    if isinstance(val, dict):
+        return {k: _sanitize_tool_input(v) for k, v in val.items()}
+    if isinstance(val, list):
+        return [_sanitize_tool_input(i) for i in val]
+    return val
+
+
+def _sanitize_payload(obj):
+    """递归遍历 SSE 事件 payload，对白名单展示字段做脱敏。
+
+    统一出口过滤：所有 emit() 出去的 dict、snapshot 序列化、事件回放都经此处理，
+    避免逐点补 sanitize 漏掉新增事件类型，也覆盖 workflow steps、delegation 等嵌套结构。
+    对已 sanitize 过的文本幂等（再跑无害）。
+    """
+    if isinstance(obj, dict):
+        return {
+            k: (_sanitize_tool_input(v) if k in _SSE_FULL_SANITIZE_KEYS
+                else (sanitize_output(v) if k in _SSE_SANITIZE_FIELDS and isinstance(v, str)
+                      else _sanitize_payload(v)))
+            for k, v in obj.items()
+        }
+    if isinstance(obj, list):
+        return [_sanitize_payload(i) for i in obj]
+    return obj
+
+
+def _sanitize_event_row(row):
+    """对持久化事件行的 event_data 做脱敏（断线重连/事件回放出口统一过滤）。
+
+    持久化层保留原始数据供内部 trace；仅在 API 出口脱敏，避免泄露绝对路径/内部 id。
+    """
+    if not isinstance(row, dict):
+        return row
+    out = dict(row)
+    raw = out.get('event_data')
+    if isinstance(raw, str):
+        try:
+            out['event_data'] = json.dumps(_sanitize_payload(json.loads(raw)), ensure_ascii=False)
+        except Exception:
+            pass
+    return out
+
+
+# _sanitize_deep 中不应脱敏的结构字段（标识符 / 索引 / 枚举）——
+# 前后端关联依赖这些键，原样保留；其余字符串值全量脱敏
+_SANITIZE_DEEP_SKIP_KEYS = frozenset({
+    'session_id', 'id', 'message_id', 'part_id', 'cursor',
+    'tool_call_id', 'call_id', 'checkpoint_id', 'event_index', 'event_type',
+    'task_id', 'parent_checkpoint_id', 'run_id',
+})
+
+
+def _sanitize_deep(obj):
+    """递归对所有字符串值做脱敏（不限字段名），但跳过结构标识符字段。
+
+    用于消息历史等“纯展示”出口——所有非标识符 str 都过 sanitize_output（无路径文本幂等无害）；
+    session_id/id/cursor/call_id 等标识符原样保留（前端关联依赖，且部分形如 session-N-xxx
+    会误中 sanitize_output 的 id 正则，必须跳过）。
+    """
+    if isinstance(obj, str):
+        return sanitize_output(obj)
+    if isinstance(obj, dict):
+        return {
+            k: (v if k in _SANITIZE_DEEP_SKIP_KEYS else _sanitize_deep(v))
+            for k, v in obj.items()
+        }
+    if isinstance(obj, list):
+        return [_sanitize_deep(i) for i in obj]
+    return obj
+
+
+def _server_error_json(exc, status: int = 500):
+    """对外错误响应：异常消息经脱敏（剥离绝对路径 / 内部 id），保留可读语义。
+
+    用于所有 except 块的最终 return，避免 str(e) 原样外泄服务器绝对路径。
+    """
+    return jsonify({'error': sanitize_output(str(exc)) or '服务器内部错误'}), status
+
+
+def _debug_endpoints_enabled() -> bool:
+    """调试端点（logs/traces）仅在显式开启 FLOODMIND_DEBUG 时可用，公网生产默认禁用。"""
+    return os.environ.get('FLOODMIND_DEBUG', '').lower() in ('1', 'true', 'yes', 'on')
+
+
+def debug_only(func):
+    """调试端点守卫装饰器：未开启 FLOODMIND_DEBUG 时返回 403。"""
+    from functools import wraps
+
+    @wraps(func)
+    def wrapper(*args, **kwargs):
+        if not _debug_endpoints_enabled():
+            return jsonify({'error': '调试端点已禁用'}), 403
+        return func(*args, **kwargs)
+
+    return wrapper
 
 
 def sanitize_tool_output(tool_name: str, content: str) -> Optional[str]:
@@ -1081,7 +1201,7 @@ def upload_file():
         
     except Exception as e:
         logger.error(f"文件上传失败: {e}")
-        return jsonify({'status': 'error', 'message': str(e)}), 500
+        return jsonify({'status': 'error', 'message': sanitize_output(str(e)) or '服务器内部错误'}), 500
 
 
 @app.route('/api/files/<file_id>', methods=['DELETE'])
@@ -1109,7 +1229,7 @@ def delete_file(file_id: str):
         
     except Exception as e:
         logger.error(f"文件删除失败: {e}")
-        return jsonify({'status': 'error', 'message': str(e)}), 500
+        return jsonify({'status': 'error', 'message': sanitize_output(str(e)) or '服务器内部错误'}), 500
 
 
 @app.route('/api/files', methods=['GET'])
@@ -1124,7 +1244,7 @@ def list_files():
         
     except Exception as e:
         logger.error(f"获取文件列表失败: {e}")
-        return jsonify({'status': 'error', 'message': str(e)}), 500
+        return jsonify({'status': 'error', 'message': sanitize_output(str(e)) or '服务器内部错误'}), 500
 
 
 @app.route('/api/files/<file_id>/preview', methods=['GET'])
@@ -1142,7 +1262,7 @@ def preview_uploaded_file(file_id: str):
         return jsonify({'status': 'success', 'preview': preview})
     except Exception as e:
         logger.error(f"预览上传文件失败: {e}", exc_info=True)
-        return jsonify({'status': 'error', 'message': str(e)}), 500
+        return jsonify({'status': 'error', 'message': sanitize_output(str(e)) or '服务器内部错误'}), 500
 
 
 @app.route('/api/files/<file_id>/download', methods=['GET'])
@@ -1188,60 +1308,7 @@ def download_uploaded_file(file_id: str):
         )
     except Exception as e:
         logger.error(f"下载上传文件失败: {e}", exc_info=True)
-        return jsonify({'error': str(e)}), 500
-
-
-@app.route('/api/download/<path:file_path>')
-def download_file(file_path: str):
-    """下载文件"""
-    try:
-        from urllib.parse import unquote
-        file_path = unquote(file_path)
-        
-        logger.info("请求下载文件")
-        
-        abs_path = None
-        
-        if file_path.startswith('/app/data/sessions/'):
-            abs_path = file_path
-        elif file_path.startswith('sessions/'):
-            abs_path = os.path.join(DATA_DIR, file_path)
-        elif '/' in file_path and not file_path.startswith('/'):
-            parts = file_path.split('/')
-            if len(parts) >= 3 and parts[0].startswith('session-'):
-                abs_path = os.path.join(DATA_DIR, 'sessions', file_path)
-
-        if abs_path is None:
-            abs_path = os.path.abspath(file_path)
-        
-        sessions_dir = os.path.join(DATA_DIR, "sessions")
-        sessions_dir_abs = os.path.abspath(sessions_dir)
-        
-        if not _is_within_dir(abs_path, sessions_dir_abs):
-            logger.warning(f"非法文件路径访问: {abs_path}, 允许的目录: {sessions_dir_abs}")
-            return jsonify({'error': f'非法文件路径'}), 403
-        
-        if not os.path.exists(abs_path):
-            logger.warning(f"文件不存在: {abs_path}")
-            return jsonify({'error': f'文件不存在'}), 404
-        
-        if not os.access(abs_path, os.R_OK):
-            logger.warning(f"无读取权限: {abs_path}")
-            return jsonify({'error': f'无读取权限'}), 403
-        
-        filename = os.path.basename(abs_path)
-        
-        logger.info(f"下载文件成功: {abs_path}")
-        
-        return send_file(
-            abs_path,
-            as_attachment=True,
-            download_name=filename
-        )
-        
-    except Exception as e:
-        logger.error(f"文件下载失败: {e}", exc_info=True)
-        return jsonify({'error': str(e)}), 500
+        return _server_error_json(e)
 
 
 @app.route('/api/sessions/<session_id>/outputs/<path:filename>')
@@ -1294,10 +1361,11 @@ def get_session_output_file(session_id: str, filename: str):
         
     except Exception as e:
         logger.error(f"[OUTPUT_FILE] 获取输出文件失败: {e}", exc_info=True)
-        return jsonify({'error': str(e)}), 500
+        return _server_error_json(e)
 
 
 @app.route('/api/logs')
+@debug_only
 def download_logs():
     """打包下载 logs/ 目录下所有日志文件"""
     try:
@@ -1328,7 +1396,7 @@ def download_logs():
         )
     except Exception as e:
         logger.error(f"下载日志失败: {e}", exc_info=True)
-        return jsonify({'error': str(e)}), 500
+        return _server_error_json(e)
 
 
 @app.route('/api/sessions/<session_id>/outputs/download')
@@ -1369,7 +1437,7 @@ def download_session_outputs(session_id: str):
         )
     except Exception as e:
         logger.error(f"下载会话输出失败: {e}", exc_info=True)
-        return jsonify({'error': str(e)}), 500
+        return _server_error_json(e)
 
 
 # ============================================
@@ -1417,7 +1485,7 @@ def init_agent():
         logger.error(f"初始化失败: {e}")
         return jsonify({
             'status': 'error',
-            'message': str(e)
+            'message': sanitize_output(str(e)) or '服务器内部错误'
         }), 500
 
 
@@ -1442,21 +1510,24 @@ def chat():
         if not message:
             return jsonify({'error': '消息不能为空'}), 400
 
+        # 统一输入模型：发送 = 把指令 append 到 memory（唯一历史源）。
+        # - agent 空闲：起 stream
+        # - agent 运行中：排队（运行中的 stream 会在下一次 LLM 调用注入此指令）
         with session_streaming_lock:
-            if session_streaming_flags.get(session_id):
-                return jsonify({'error': '当前会话正在处理中，请稍后再试'}), 429
-            session_streaming_flags[session_id] = True
+            is_queued = session_streaming_flags.get(session_id, False)
+            if not is_queued:
+                session_streaming_flags[session_id] = True
 
         session_manager.get_or_create_session(session_id, agent_factory=None)
         session_manager.increment_message_count(session_id)
         session_info = session_manager.get_session_info(session_id)
         if session_info and session_info.message_count == 1 and not session_info.title:
             schedule_session_title_generation(session_id, message, model_key=state.get('model_key', ''))
-        
-        with session_abort_flags_lock:
-            session_abort_flags[session_id] = False
 
-        state['is_paused'] = False
+        # 仅新流路径需要重置 abort 标志；排队路径不打扰运行中的流
+        if not is_queued:
+            with session_abort_flags_lock:
+                session_abort_flags[session_id] = False
 
         if enable_reasoning != state.get('enable_reasoning', True):
             state['enable_reasoning'] = enable_reasoning
@@ -1500,6 +1571,19 @@ def chat():
                 file_context += "用户提到'已上传的文件'或'上传的文件'时，请使用上述路径。\n"
         
         enhanced_message = file_context + "\n\n" + message if file_context else message
+
+        # 排队路径：agent 运行中发送的指令 → append 到 memory，运行中的 stream 在下一次
+        # LLM 调用注入。返回 202（非 SSE），前端据此仅把消息上屏，不另开流。
+        if is_queued:
+            try:
+                if hasattr(agent, 'memory') and agent.memory is not None and hasattr(agent.memory, 'add_user_message'):
+                    agent.memory.add_user_message(enhanced_message)
+                    logger.info("[chat] 排队消息（运行中）: session=%s, msg=%s", session_id, message[:50])
+                else:
+                    logger.warning("[chat] 排队失败：agent.memory 不可用 session=%s", session_id)
+            except Exception as e:
+                logger.warning("[chat] 排队消息写入 memory 失败: %s", e)
+            return jsonify({'status': 'queued', 'message': '消息已排队，将在当前任务完成后处理'}), 202
 
         # 构建图片附件列表
         from floodmind.agent.native.types import Attachment
@@ -1555,6 +1639,10 @@ def chat():
             ht.start()
 
             def emit(payload: dict):
+                # 统一 SSE 出口脱敏：递归处理展示字段，剥离服务器绝对路径 / 内部 id，
+                # 结构字段（step_key/call_id/status）保持原样
+                if isinstance(payload, dict):
+                    payload = _sanitize_payload(payload)
                 return _buffered_yield(event_buffer, payload, resume_event, buffer_lock)
 
             try:
@@ -1563,7 +1651,7 @@ def chat():
                         is_aborted = session_abort_flags.get(session_id, False)
                     if is_aborted:
                         finish_stream_snapshot(session_id)
-                        emit({'type': 'error', 'content': '会话已被用户暂停'})
+                        emit({'type': 'stream_paused', 'content': '会话已被用户暂停'})
                         emit({'type': 'stream_end'})
                         return
                     
@@ -1746,12 +1834,7 @@ def chat():
                         emit(event)
                         continue
 
-                    # ── Todo / Token / 其他未明确处理的类型 — 直接透传到前端 ──
-                    if chunk.get("type") == "todo_updated":
-                        touch_stream_snapshot(session_id)
-                        _session_todos[session_id] = chunk.get("todos", [])
-                        emit(chunk)
-                        continue
+                    # ── Token / 其他未明确处理的类型 — 直接透传到前端 ──
                     if chunk.get("type") == "token_usage":
                         touch_stream_snapshot(session_id)
                         prev = _session_token_usage.get(session_id, {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0})
@@ -1832,7 +1915,7 @@ def chat():
                 finish_stream_snapshot(session_id)
                 error_msg = {
                     'type': 'error',
-                    'content': f'处理请求时出错: {str(e)}'
+                    'content': '处理请求时出错，请查看服务器日志'
                 }
                 emit(error_msg)
                 emit({'type': 'stream_end'})
@@ -1841,6 +1924,11 @@ def chat():
                 if snapshot.get('is_streaming'):
                     finish_stream_snapshot(session_id)
                     logger.info("_run_agent_pump interrupted, force-finished stream snapshot")
+                # 双重保险：pump 线程是“agent 是否在跑”的权威 owner。
+                # 即使 SSE generator 的 finally 未执行（client 断连/WSGI 不驱动到完成），
+                # 也清掉 streaming 标志，避免该会话之后所有 /api/chat 永远返回 202 排队。
+                with session_streaming_lock:
+                    session_streaming_flags.pop(session_id, None)
 
         def generate():
             """Buffer-following reader: yield from event_buffer."""
@@ -1851,9 +1939,15 @@ def chat():
             resume_event = snapshot['resume_event']
             buffer_lock = snapshot.get('buffer_lock', threading.Lock())
 
+            # 关键：pump_thread 必须继承请求线程的 contextvar 上下文。
+            # threading.Thread 默认不传播 contextvars（实测确认），会导致 set_workspace /
+            # set_session_context 在请求线程设的值在 agent 运行线程里丢失——workspace 抽象
+            # （含 overwrite_protection、desktop user_dir）会静默失效。用 copy_context().run
+            # 把当前上下文快照带入子线程，一次性修复所有 contextvar 的跨线程传播。
+            pump_ctx = contextvars.copy_context()
             pump_thread = threading.Thread(
-                target=_run_agent_pump,
-                args=(snapshot, event_buffer, resume_event, approved_artifact_paths, streamed_text_parts, attachments),
+                target=pump_ctx.run,
+                args=(_run_agent_pump, snapshot, event_buffer, resume_event, approved_artifact_paths, streamed_text_parts, attachments),
                 daemon=True,
                 name=f"agent-pump-{session_id[:8]}",
             )
@@ -1903,7 +1997,7 @@ def chat():
         if session_id:
             with session_streaming_lock:
                 session_streaming_flags.pop(session_id, None)
-        return jsonify({'error': str(e)}), 500
+        return _server_error_json(e)
 
 
 @app.route('/api/stream/resume', methods=['GET'])
@@ -1916,18 +2010,21 @@ def stream_resume():
     snapshot = state.get('stream_snapshot')
 
     def replay_and_continue():
-        # 优先从 sync_events 表回放持久化事件
+        # 优先从 sync_events 表回放持久化事件（单条容错：某条损坏只跳过该条，不丢整批）
         try:
             from floodmind.memory.session_store import get_sync_events
             persisted = get_sync_events(session_id, after_index=after_index, limit=500)
-            if persisted:
-                for evt in persisted:
-                    yield stream_json_line(json.loads(evt['event_data']))
-                after_replay = persisted[-1]['event_index']
-            else:
-                after_replay = after_index
         except Exception:
-            after_replay = after_index
+            persisted = None
+        after_replay = after_index
+        if persisted:
+            for evt in persisted:
+                try:
+                    yield stream_json_line(_sanitize_payload(json.loads(evt['event_data'])))
+                except Exception:
+                    logger.warning(f"[resume] 跳过损坏事件 index={evt.get('event_index')}")
+                # 无论该条是否损坏都推进游标，保持与原 persisted[-1] 语义一致，避免错位
+                after_replay = evt['event_index']
 
         # 回退到内存 event_buffer 继续实时流
         event_buffer = snapshot.get('event_buffer', []) if snapshot else []
@@ -1993,13 +2090,13 @@ def get_session_events(session_id: str):
 
         return jsonify({
             'status': 'success',
-            'events': events,
+            'events': [_sanitize_event_row(e) for e in events],
             'last_index': last_index,
             'has_more': len(events) >= limit,
         })
     except Exception as e:
         logger.error(f"获取事件失败: {e}")
-        return jsonify({'status': 'error', 'message': str(e)}), 500
+        return jsonify({'status': 'error', 'message': sanitize_output(str(e)) or '服务器内部错误'}), 500
 
 
 @app.route('/api/session/config', methods=['POST'])
@@ -2022,7 +2119,7 @@ def clear_memory():
         logger.error(f"清空记忆失败: {e}")
         return jsonify({
             'status': 'error',
-            'message': str(e)
+            'message': sanitize_output(str(e)) or '服务器内部错误'
         }), 500
 
 
@@ -2047,7 +2144,7 @@ def list_sessions():
         logger.error(f"获取会话列表失败: {e}")
         return jsonify({
             'status': 'error',
-            'message': str(e)
+            'message': sanitize_output(str(e)) or '服务器内部错误'
         }), 500
 
 
@@ -2074,7 +2171,7 @@ def save_current_session():
         logger.error(f"保存会话失败: {e}")
         return jsonify({
             'status': 'error',
-            'message': str(e)
+            'message': sanitize_output(str(e)) or '服务器内部错误'
         }), 500
 
 
@@ -2095,7 +2192,7 @@ def trigger_cleanup():
         logger.error(f"清理失败: {e}")
         return jsonify({
             'status': 'error',
-            'message': str(e)
+            'message': sanitize_output(str(e)) or '服务器内部错误'
         }), 500
 
 
@@ -2111,7 +2208,7 @@ def get_session_stats():
         logger.error(f"获取统计失败: {e}")
         return jsonify({
             'status': 'error',
-            'message': str(e)
+            'message': sanitize_output(str(e)) or '服务器内部错误'
         }), 500
 
 
@@ -2134,21 +2231,25 @@ def get_session(session_id: str):
         for msg in messages:
             filtered_msg = {
                 'role': msg.get('role', ''),
-                'content': filter_system_info(msg.get('content', ''))
+                'content': msg.get('content', '')
             }
             if msg.get('reasoning'):
-                filtered_msg['reasoning'] = filter_system_info(msg.get('reasoning', ''))
+                filtered_msg['reasoning'] = msg.get('reasoning', '')
             if msg.get('tool_calls'):
                 filtered_msg['tool_calls'] = [
                     {
                         'tool_name': item.get('tool_name', ''),
-                        'tool_input': filter_system_info(str(item.get('tool_input', ''))),
-                        'tool_output': filter_system_info(str(item.get('tool_output', ''))),
+                        'call_id': item.get('call_id') or item.get('tool_call_id', ''),
+                        'tool_input': item.get('tool_input', ''),
+                        'tool_output': item.get('tool_output', ''),
                     }
                     for item in msg.get('tool_calls', [])
                     if isinstance(item, dict)
                 ]
             filtered_messages.append(filtered_msg)
+        # 消息历史出口统一脱敏（与 SSE 同源）：覆盖 content/reasoning/tool_input/tool_output
+        # 中的绝对路径与内部 id，替代旧的 filter_system_info（仅匹配固定扩展名，覆盖不足）
+        filtered_messages = _sanitize_deep(filtered_messages)
         
         # 只在流式输出进行中返回 in_progress，已完成的不返回（避免与 messages 重复）
         snapshot = ensure_session_state(session_id).get('stream_snapshot')
@@ -2168,7 +2269,7 @@ def get_session(session_id: str):
         logger.error(f"获取会话详情失败: {e}")
         return jsonify({
             'status': 'error',
-            'message': str(e)
+            'message': sanitize_output(str(e)) or '服务器内部错误'
         }), 500
 
 
@@ -2190,7 +2291,7 @@ def get_session_messages_page(session_id: str):
 
         return jsonify({
             'status': 'success',
-            'messages': result['items'],
+            'messages': _sanitize_deep(result['items']),
             'more': result['more'],
             'cursor': result['cursor'],
         })
@@ -2198,7 +2299,7 @@ def get_session_messages_page(session_id: str):
         logger.error(f"分页获取消息失败: {e}")
         return jsonify({
             'status': 'error',
-            'message': str(e)
+            'message': sanitize_output(str(e)) or '服务器内部错误'
         }), 500
 
 
@@ -2223,7 +2324,6 @@ def delete_session_route(session_id: str):
             session_abort_flags.pop(session_id, None)
         with session_streaming_lock:
             session_streaming_flags.pop(session_id, None)
-        _session_todos.pop(session_id, None)
         _session_token_usage.pop(session_id, None)
 
         logger.info(f"已删除会话: {session_id}")
@@ -2236,7 +2336,7 @@ def delete_session_route(session_id: str):
         logger.error(f"删除会话失败: {e}")
         return jsonify({
             'status': 'error',
-            'message': str(e)
+            'message': sanitize_output(str(e)) or '服务器内部错误'
         }), 500
 
 
@@ -2268,7 +2368,7 @@ def list_models():
         })
     except Exception as e:
         logger.error(f"获取模型列表失败: {e}")
-        return jsonify({'status': 'error', 'message': str(e)}), 500
+        return jsonify({'status': 'error', 'message': sanitize_output(str(e)) or '服务器内部错误'}), 500
 
 
 @app.route('/api/config', methods=['GET'])
@@ -2302,11 +2402,11 @@ def list_scheduled_task_api():
         return jsonify({
             'status': 'success',
             'count': len(tasks),
-            'tasks': tasks,
+            'tasks': _sanitize_deep(tasks),
         })
     except Exception as e:
         logger.error(f"查询定时任务失败: {e}", exc_info=True)
-        return jsonify({'status': 'error', 'message': str(e)}), 500
+        return jsonify({'status': 'error', 'message': sanitize_output(str(e)) or '服务器内部错误'}), 500
 
 
 @app.route('/api/scheduled-tasks/<task_id>', methods=['GET'])
@@ -2316,10 +2416,10 @@ def get_scheduled_task_api(task_id: str):
         task = get_scheduled_task_runtime().get_task(task_id)
         if not task:
             return jsonify({'status': 'error', 'message': '定时任务不存在'}), 404
-        return jsonify({'status': 'success', 'task': task})
+        return jsonify({'status': 'success', 'task': _sanitize_deep(task)})
     except Exception as e:
         logger.error(f"查询定时任务详情失败: {e}", exc_info=True)
-        return jsonify({'status': 'error', 'message': str(e)}), 500
+        return jsonify({'status': 'error', 'message': sanitize_output(str(e)) or '服务器内部错误'}), 500
 
 
 @app.route('/api/scheduled-tasks/<task_id>', methods=['PATCH'])
@@ -2329,10 +2429,10 @@ def update_scheduled_task_api(task_id: str):
         data = request.get_json() or {}
         updates = {key: data[key] for key in ('command', 'enabled', 'run_time', 'scheduled_at', 'repeat', 'status') if key in data}
         task = get_scheduled_task_runtime().update_task(task_id, **updates)
-        return jsonify({'status': 'success', 'task': task})
+        return jsonify({'status': 'success', 'task': _sanitize_deep(task)})
     except Exception as e:
         logger.error(f"修改定时任务失败: {e}", exc_info=True)
-        return jsonify({'status': 'error', 'message': str(e)}), 400
+        return jsonify({'status': 'error', 'message': sanitize_output(str(e)) or '服务器内部错误'}), 400
 
 
 @app.route('/api/scheduled-tasks/<task_id>', methods=['DELETE'])
@@ -2340,10 +2440,10 @@ def delete_scheduled_task_api(task_id: str):
     """删除定时任务。"""
     try:
         task = get_scheduled_task_runtime().delete_task(task_id)
-        return jsonify({'status': 'success', 'task': task})
+        return jsonify({'status': 'success', 'task': _sanitize_deep(task)})
     except Exception as e:
         logger.error(f"删除定时任务失败: {e}", exc_info=True)
-        return jsonify({'status': 'error', 'message': str(e)}), 400
+        return jsonify({'status': 'error', 'message': sanitize_output(str(e)) or '服务器内部错误'}), 400
 
 
 @app.route('/api/scheduled-tasks/<task_id>/artifacts', methods=['GET'])
@@ -2361,7 +2461,7 @@ def list_scheduled_task_artifacts_api(task_id: str):
         })
     except Exception as e:
         logger.error(f"查询定时任务产物失败: {e}", exc_info=True)
-        return jsonify({'status': 'error', 'message': str(e)}), 500
+        return jsonify({'status': 'error', 'message': sanitize_output(str(e)) or '服务器内部错误'}), 500
 
 
 @app.route('/api/memory/stats', methods=['GET'])
@@ -2375,7 +2475,7 @@ def get_memory_stats():
             stats = agent.get_memory_summary()
             return jsonify({
                 'status': 'success',
-                'stats': stats
+                'stats': _sanitize_deep(stats) if isinstance(stats, dict) else stats
             })
         else:
             return jsonify({
@@ -2388,23 +2488,8 @@ def get_memory_stats():
         logger.error(f"获取记忆统计失败: {e}")
         return jsonify({
             'status': 'error',
-            'message': str(e)
+            'message': sanitize_output(str(e)) or '服务器内部错误'
         }), 500
-
-
-@app.route('/api/todos', methods=['GET'])
-def get_todos_api():
-    """获取当前会话的 Todo 任务列表。"""
-    try:
-        session_id = _require_session_id(request.args.get('session_id', 'default'))
-        todos = _session_todos.get(session_id, [])
-        return jsonify({
-            'status': 'success',
-            'todos': todos,
-        })
-    except Exception as e:
-        logger.error(f"获取 Todo 列表失败: {e}")
-        return jsonify({'status': 'error', 'message': str(e)}), 500
 
 
 @app.route('/api/token-usage', methods=['GET'])
@@ -2419,7 +2504,7 @@ def get_token_usage_api():
         })
     except Exception as e:
         logger.error(f"获取 Token 用量失败: {e}")
-        return jsonify({'status': 'error', 'message': str(e)}), 500
+        return jsonify({'status': 'error', 'message': sanitize_output(str(e)) or '服务器内部错误'}), 500
 
 
 @app.route('/api/memory/heartbeat', methods=['POST'])
@@ -2435,7 +2520,7 @@ def trigger_heartbeat():
                 result = agent.memory.force_heartbeat()
                 return jsonify({
                     'status': 'success',
-                    'message': result
+                    'message': sanitize_output(result) if isinstance(result, str) else result
                 })
             else:
                 return jsonify({
@@ -2451,7 +2536,7 @@ def trigger_heartbeat():
         logger.error(f"触发心跳失败: {e}")
         return jsonify({
             'status': 'error',
-            'message': str(e)
+            'message': sanitize_output(str(e)) or '服务器内部错误'
         }), 500
 
 
@@ -2492,7 +2577,7 @@ def search_long_term_memory():
         logger.error(f"搜索长期记忆失败: {e}")
         return jsonify({
             'status': 'error',
-            'message': str(e)
+            'message': sanitize_output(str(e)) or '服务器内部错误'
         }), 500
 
 
@@ -2533,7 +2618,7 @@ def add_long_term_memory():
         logger.error(f"添加长期记忆失败: {e}")
         return jsonify({
             'status': 'error',
-            'message': str(e)
+            'message': sanitize_output(str(e)) or '服务器内部错误'
         }), 500
 
 
@@ -2547,7 +2632,7 @@ def permission_respond():
         return jsonify(result), status_code
     except Exception as e:
         logger.error(f"权限确认响应失败: {e}")
-        return jsonify({'status': 'error', 'message': str(e)}), 500
+        return jsonify({'status': 'error', 'message': sanitize_output(str(e)) or '服务器内部错误'}), 500
 
 
 @app.route('/api/permission/pending', methods=['GET'])
@@ -2559,20 +2644,24 @@ def permission_pending():
         result, status_code = handle_permission_pending(session_id)
         return jsonify(result), status_code
     except Exception as e:
-        return jsonify({'status': 'error', 'message': str(e)}), 500
+        return jsonify({'status': 'error', 'message': sanitize_output(str(e)) or '服务器内部错误'}), 500
 
 
 @app.route('/api/session/pause', methods=['POST'])
 def pause_session():
-    """暂停会话"""
+    """暂停 = 中止单一信号：停当前流，未完成轮丢弃（不落 history）。
+
+    session_abort_flags 经 stream() 的 abort_check 流入 executor，
+    在 LLM 流 / 工具边界终止并丢弃当前轮。已完成轮已在 memory，下次发送天然续上。
+    """
     try:
         data = request.get_json() or {}
         session_id = _require_session_id(data.get('session_id', 'default'))
-        
+
         with session_abort_flags_lock:
             session_abort_flags[session_id] = True
-        ensure_session_state(session_id)['is_paused'] = True
 
+        # 取消 pending 权限询问（暂停时一并取消，避免卡在 awaiting_permission）
         try:
             from floodmind.agent.runtime.adapters.flask_permission_api import handle_permission_cancel_session
             cancelled = handle_permission_cancel_session(session_id)
@@ -2580,9 +2669,9 @@ def pause_session():
                 logger.info(f"暂停会话 {session_id}: 已取消 {cancelled} 个 pending ASK")
         except Exception:
             pass
-        
-        logger.info(f"会话已暂停: {session_id}")
-        
+
+        logger.info(f"会话已暂停（abort）: {session_id}")
+
         return jsonify({
             'status': 'success',
             'message': '会话已暂停'
@@ -2591,23 +2680,24 @@ def pause_session():
         logger.error(f"暂停会话失败: {e}")
         return jsonify({
             'status': 'error',
-            'message': str(e)
+            'message': sanitize_output(str(e)) or '服务器内部错误'
         }), 500
 
 
 @app.route('/api/session/resume', methods=['POST'])
 def resume_session():
-    """恢复会话"""
+    """恢复会话（兼容接口）。
+
+    新模型下“恢复”= 用户再次发送（走 /api/chat，从 memory 起步）。暂停已终止流，
+    无需恢复。本接口仅清 abort 标志，保持前端调用兼容。
+    """
     try:
         data = request.get_json() or {}
         session_id = _require_session_id(data.get('session_id', 'default'))
-        
+
         with session_abort_flags_lock:
             session_abort_flags[session_id] = False
-        ensure_session_state(session_id)['is_paused'] = False
-        
-        logger.info(f"会话已恢复: {session_id}")
-        
+
         return jsonify({
             'status': 'success',
             'message': '会话已恢复'
@@ -2616,7 +2706,7 @@ def resume_session():
         logger.error(f"恢复会话失败: {e}")
         return jsonify({
             'status': 'error',
-            'message': str(e)
+            'message': sanitize_output(str(e)) or '服务器内部错误'
         }), 500
 
 
@@ -2640,7 +2730,7 @@ def get_session_status():
         logger.error(f"获取会话状态失败: {e}")
         return jsonify({
             'status': 'error',
-            'message': str(e)
+            'message': sanitize_output(str(e)) or '服务器内部错误'
         }), 500
 
 
@@ -2730,8 +2820,65 @@ def update_session_config():
         logger.error(f"更新会话配置失败: {e}")
         return jsonify({
             'status': 'error',
-            'message': str(e)
+            'message': sanitize_output(str(e)) or '服务器内部错误'
         }), 500
+
+
+# ============================================
+# Checkpoint / Tracing API
+# ============================================
+
+def _checkpoints_base_dir() -> str:
+    return os.path.join(DATA_DIR, 'sessions')
+
+
+@app.route('/api/sessions/<session_id>/checkpoints', methods=['GET'])
+def list_checkpoints_api(session_id: str):
+    """列出某会话的所有 checkpoint。"""
+    result, status_code = handle_list_checkpoints(session_id, _checkpoints_base_dir())
+    return jsonify(result), status_code
+
+
+@app.route('/api/sessions/<session_id>/checkpoints/<checkpoint_id>', methods=['GET'])
+def get_checkpoint_manifest_api(session_id: str, checkpoint_id: str):
+    """获取指定 checkpoint 的 manifest。"""
+    result, status_code = handle_get_checkpoint_manifest(session_id, checkpoint_id, _checkpoints_base_dir())
+    return jsonify(result), status_code
+
+
+@app.route('/api/sessions/<session_id>/checkpoints/<checkpoint_id>/rollback', methods=['POST'])
+def rollback_checkpoint_api(session_id: str, checkpoint_id: str):
+    """将文件快照回滚到指定 checkpoint。"""
+    result, status_code = handle_rollback_checkpoint(session_id, checkpoint_id, _checkpoints_base_dir())
+    return jsonify(result), status_code
+
+
+@app.route('/api/sessions/<session_id>/traces', methods=['GET'])
+@debug_only
+def list_trace_events_api(session_id: str):
+    """读取某会话的追踪事件（trace.jsonl）。"""
+    limit = request.args.get('limit', 200, type=int)
+    result, status_code = handle_list_trace_events(session_id, _checkpoints_base_dir(), limit=limit)
+    return jsonify(result), status_code
+
+
+@app.route('/api/sessions/<session_id>/traces/download', methods=['GET'])
+@debug_only
+def download_trace_api(session_id: str):
+    """下载某会话的 trace.jsonl 文件。"""
+    try:
+        path = handle_get_trace_file_path(session_id, _checkpoints_base_dir())
+        if not path.exists():
+            return jsonify({'status': 'error', 'message': 'trace 文件不存在'}), 404
+        return send_file(
+            str(path),
+            mimetype='application/x-ndjson',
+            as_attachment=True,
+            download_name=f'{session_id}_trace.jsonl',
+        )
+    except Exception as e:
+        logger.error(f"下载 trace 文件失败: {e}", exc_info=True)
+        return jsonify({'status': 'error', 'message': sanitize_output(str(e)) or '服务器内部错误'}), 500
 
 
 # ============================================

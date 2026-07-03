@@ -372,3 +372,105 @@ class TestAgentOptions:
     def test_enable_reasoning(self, llm):
         agent = Agent(llm=llm, enable_reasoning=True)
         assert agent.raw._enable_reasoning is True
+
+
+# ---------------------------------------------------------------------------
+# 9. SDK 能力增强：on_event / last_usage / artifacts / permission / max_iter
+# ---------------------------------------------------------------------------
+
+class TestSdkEnhancements:
+    def test_on_event_called_on_stream(self, llm):
+        received = []
+        agent = Agent(llm=llm, on_event=lambda e: received.append(e))
+        with patch.object(ModelClient, "stream_chat", _stream_text("Hello")):
+            list(agent.stream("hi"))
+        assert len(received) > 0
+        assert any(e["type"] in ("answer_delta", "final_text") for e in received)
+
+    def test_on_event_called_on_run(self, llm):
+        received = []
+        agent = Agent(llm=llm, on_event=lambda e: received.append(e))
+        with patch.object(ModelClient, "stream_chat", _stream_text()):
+            result = agent.run("hi")
+        assert "Mock response" in result
+        assert len(received) > 0
+
+    def test_on_event_exception_does_not_break_stream(self, llm):
+        def bad_handler(event):
+            raise RuntimeError("boom")
+        agent = Agent(llm=llm, on_event=bad_handler)
+        with patch.object(ModelClient, "stream_chat", _stream_text("Hello")):
+            events = list(agent.stream("hi"))
+        assert len(events) > 0  # 回调异常不中断流
+
+    def test_last_usage_accumulated(self, llm):
+        from floodmind.agent.native.native_flood_agent import NativeFloodAgent
+        agent = Agent(llm=llm)
+        fake = iter([
+            {"type": "token_usage", "prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15},
+            {"type": "token_usage", "prompt_tokens": 20, "completion_tokens": 5, "total_tokens": 25},
+            {"type": "final_text", "content": "done"},
+        ])
+        with patch.object(NativeFloodAgent, "stream", lambda self, msg: fake):
+            list(agent.stream("hi"))
+        usage = agent.last_usage
+        assert usage["prompt_tokens"] == 30
+        assert usage["completion_tokens"] == 10
+        assert usage["total_tokens"] == 40
+
+    def test_artifacts_collected(self, llm):
+        from floodmind.agent.native.native_flood_agent import NativeFloodAgent
+        agent = Agent(llm=llm)
+        fake = iter([
+            {"type": "file_generated", "filename": "out.csv", "download_url": "/x/out.csv"},
+            {"type": "image_generated", "filename": "plot.png", "image_url": "/x/plot.png"},
+            {"type": "final_text", "content": "done"},
+        ])
+        with patch.object(NativeFloodAgent, "stream", lambda self, msg: fake):
+            list(agent.stream("hi"))
+        assert len(agent.artifacts) == 2
+        assert agent.artifacts[0]["filename"] == "out.csv"
+        assert agent.artifacts[1]["filename"] == "plot.png"
+
+    def test_results_reset_each_call(self, llm):
+        from floodmind.agent.native.native_flood_agent import NativeFloodAgent
+        agent = Agent(llm=llm)
+        first = iter([{"type": "token_usage", "prompt_tokens": 100, "completion_tokens": 0, "total_tokens": 100}, {"type": "final_text", "content": "a"}])
+        second = iter([{"type": "token_usage", "prompt_tokens": 5, "completion_tokens": 0, "total_tokens": 5}, {"type": "final_text", "content": "b"}])
+        with patch.object(NativeFloodAgent, "stream", lambda self, msg: first):
+            list(agent.stream("hi"))
+        assert agent.last_usage["prompt_tokens"] == 100
+        with patch.object(NativeFloodAgent, "stream", lambda self, msg: second):
+            list(agent.stream("hi"))
+        assert agent.last_usage["prompt_tokens"] == 5  # 每次调用重置，非跨调用累加
+
+    def test_permission_handler_passthrough(self, llm, sample_tools):
+        handler = lambda name, inp: True
+        agent = Agent(llm=llm, tools=sample_tools, permission_handler=handler)
+        assert agent.raw._tool_executor._permission_handler is handler
+
+    def test_permission_handler_denies_tool(self, llm):
+        from floodmind.agent.native.types import ToolCall
+        called = {"count": 0}
+
+        def echo(text=""):
+            called["count"] += 1
+            return f"Echo: {text}"
+
+        tool = build_agent_tool(func=echo, name="Echo", description="echo")
+        agent = Agent(llm=llm, tools=[tool], permission_handler=lambda name, inp: False, max_iterations=3)
+
+        def tool_then_text(self, messages, **kwargs):
+            yield ModelEvent(type="token", content="checking")
+            yield ModelEvent(type="tool_call_done", tool_call=ToolCall(id="tc1", name="Echo", arguments={"text": "hi"}))
+            yield ModelEvent(type="done")
+
+        with patch.object(ModelClient, "stream_chat", tool_then_text):
+            list(agent.stream("echo"))
+        assert called["count"] == 0  # permission_handler 拒绝 → 工具函数未执行
+
+    def test_max_iterations_passthrough(self, llm):
+        agent = Agent(llm=llm, max_iterations=7)
+        assert agent.raw._max_iterations == 7
+        assert agent.raw._orchestrator_executor.max_iterations == 7
+        assert agent.raw._specialist_executor.max_iterations == 7

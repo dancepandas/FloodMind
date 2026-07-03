@@ -8,6 +8,9 @@ import type {
   StreamSnapshot,
   UploadedFileItem,
   ModelsResponse,
+  CheckpointSummary,
+  CheckpointManifest,
+  TraceItem,
 } from "@/types/app";
 
 const log = createLogger("Agent");
@@ -116,7 +119,7 @@ export async function fetchFilePreview(sessionId: string, fileId: string): Promi
   return data.preview;
 }
 
-export async function uploadFile(sessionId: string, file: File): Promise<void> {
+export async function uploadFile(sessionId: string, file: File): Promise<UploadedFileItem> {
   log.info("uploadFile", { sessionId, filename: file.name, size: file.size });
   const formData = new FormData();
   formData.append("file", file);
@@ -130,7 +133,14 @@ export async function uploadFile(sessionId: string, file: File): Promise<void> {
     log.error("uploadFile → FAILED", response.status, text);
     throw new Error(text || "Upload failed");
   }
-  log.info("uploadFile → OK", file.name);
+  const data = await response.json();
+  const item: UploadedFileItem = {
+    id: data.file_id,
+    name: data.file_name || file.name,
+    size: typeof data.size === "number" ? data.size : file.size,
+  };
+  log.info("uploadFile → OK", file.name, item.id);
+  return item;
 }
 
 export async function fetchSessionStatus(sessionId: string): Promise<SessionStatusResponse> {
@@ -143,15 +153,6 @@ export async function fetchSessionStatus(sessionId: string): Promise<SessionStat
 export async function pauseSession(sessionId: string): Promise<void> {
   log.info("pauseSession", sessionId);
   await apiFetch<{ status: string }>("/api/session/pause", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ session_id: sessionId }),
-  });
-}
-
-export async function resumeSession(sessionId: string): Promise<void> {
-  log.info("resumeSession", sessionId);
-  await apiFetch<{ status: string }>("/api/session/resume", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ session_id: sessionId }),
@@ -236,3 +237,62 @@ export function downloadSessionOutputs(sessionId: string): void {
   log.info("downloadSessionOutputs", sessionId);
   window.open(buildApiUrl(`/api/sessions/${encodeURIComponent(sessionId)}/outputs/download`), "_blank");
 }
+
+// ── Checkpoint API ───────────────────────────────────────────────
+
+interface CheckpointsResponse {
+  status: string;
+  checkpoints: CheckpointSummary[];
+}
+
+interface CheckpointManifestResponse {
+  status: string;
+  manifest: CheckpointManifest;
+}
+
+interface CheckpointRollbackResponse {
+  status: string;
+  checkpoint_id: string;
+  restored_files: string[];
+}
+
+export async function fetchCheckpoints(sessionId: string): Promise<CheckpointSummary[]> {
+  log.info("fetchCheckpoints", sessionId);
+  const data = await apiFetch<CheckpointsResponse>(`/api/sessions/${encodeURIComponent(sessionId)}/checkpoints`);
+  return data.checkpoints || [];
+}
+
+export async function fetchCheckpointManifest(sessionId: string, checkpointId: string): Promise<CheckpointManifest> {
+  log.info("fetchCheckpointManifest", { sessionId, checkpointId });
+  const data = await apiFetch<CheckpointManifestResponse>(`/api/sessions/${encodeURIComponent(sessionId)}/checkpoints/${encodeURIComponent(checkpointId)}`);
+  return data.manifest;
+}
+
+export async function rollbackCheckpoint(sessionId: string, checkpointId: string): Promise<CheckpointRollbackResponse> {
+  log.info("rollbackCheckpoint", { sessionId, checkpointId });
+  const data = await apiFetch<CheckpointRollbackResponse>(`/api/sessions/${encodeURIComponent(sessionId)}/checkpoints/${encodeURIComponent(checkpointId)}/rollback`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+  });
+  return data;
+}
+
+// ── Tracing API ──────────────────────────────────────────────────
+
+interface TraceEventsResponse {
+  status: string;
+  session_id: string;
+  events: TraceItem[];
+}
+
+export async function fetchTraceEvents(sessionId: string, limit = 200): Promise<TraceItem[]> {
+  log.info("fetchTraceEvents", { sessionId, limit });
+  const data = await apiFetch<TraceEventsResponse>(`/api/sessions/${encodeURIComponent(sessionId)}/traces?limit=${limit}`);
+  return data.events || [];
+}
+
+export function downloadTraceFile(sessionId: string): void {
+  log.info("downloadTraceFile", sessionId);
+  window.open(buildApiUrl(`/api/sessions/${encodeURIComponent(sessionId)}/traces/download`), "_blank");
+}
+

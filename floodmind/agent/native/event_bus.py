@@ -32,6 +32,11 @@ class EventBus:
         with self._lock:
             self._persist_callback = cb
 
+    def get_persist_callback(self) -> Optional[Callable[[dict], None]]:
+        """Get the current persist callback (used for chaining, e.g. tracing)."""
+        with self._lock:
+            return self._persist_callback
+
     def add_listener(self, listener: Callable[[dict], None]) -> None:
         with self._lock:
             self._listeners.append(listener)
@@ -99,7 +104,7 @@ class EventBus:
             "steps": steps,
         })
 
-    def emit_workflow_step(self, step_key: str, status: str, title: str = "", detail: str = "", label: str = "", outcome: str = "") -> None:
+    def emit_workflow_step(self, step_key: str, status: str, title: str = "", detail: str = "", label: str = "", outcome: str = "", subtasks: Optional[List[dict]] = None) -> None:
         event: Dict[str, Any] = {
             "type": "workflow_step",
             "step_key": step_key,
@@ -113,6 +118,8 @@ class EventBus:
             event["label"] = label
         if outcome:
             event["outcome"] = outcome
+        if subtasks:
+            event["subtasks"] = subtasks
         self.emit(event)
 
     def emit_file_generated(self, file_name: str, download_url: str, size: int = 0) -> None:
@@ -166,11 +173,6 @@ class EventBus:
         """发送上下文压缩完成事件，附带结构化摘要"""
         self.emit({"type": "context_compress_done", "content": summary})
 
-    def emit_todo_updated(self, todos: List[dict]) -> None:
-        """发送 Todo 列表更新事件"""
-        logger.info("[EventBus] emit_todo_updated, items=%d, queue_set=%s", len(todos), self._queue is not None)
-        self.emit({"type": "todo_updated", "todos": todos})
-
     def emit_token_usage(self, prompt_tokens: int = 0, completion_tokens: int = 0, total_tokens: int = 0) -> None:
         """发送 token 用量统计事件"""
         self.emit({
@@ -203,15 +205,24 @@ class EventBus:
 
 
 class StepEventBus:
-    """EventBus 子通道：给所有事件附加 step_key，用于并行委派时区分不同步骤的事件"""
+    """EventBus 子通道：给所有事件附加 step_key，用于并行委派时区分不同步骤的事件。
 
-    def __init__(self, parent: EventBus, step_key: str):
+    trace_session_id 非空时，给每个事件注入 _trace_session，使 TracingService 能
+    区分并行子代理各自的事件（避免串台）。
+    """
+
+    def __init__(self, parent: EventBus, step_key: str, trace_session_id: str = ""):
         self._parent = parent
         self._step_key = step_key
+        self._trace_session_id = trace_session_id
 
     def emit(self, event: dict) -> None:
+        # 复制事件字典，避免修改调用方持有的原对象
+        event = dict(event)
         if "step_key" not in event:
             event["step_key"] = self._step_key
+        if self._trace_session_id and "_trace_session" not in event:
+            event["_trace_session"] = self._trace_session_id
         self._parent.emit(event)
 
     def emit_reasoning(self, content: str) -> None:
@@ -248,7 +259,7 @@ class StepEventBus:
             "steps": steps,
         })
 
-    def emit_workflow_step(self, step_key: str, status: str, title: str = "", detail: str = "", label: str = "", outcome: str = "") -> None:
+    def emit_workflow_step(self, step_key: str, status: str, title: str = "", detail: str = "", label: str = "", outcome: str = "", subtasks: Optional[List[dict]] = None) -> None:
         event: Dict[str, Any] = {
             "type": "workflow_step",
             "step_key": step_key,
@@ -262,6 +273,8 @@ class StepEventBus:
             event["label"] = label
         if outcome:
             event["outcome"] = outcome
+        if subtasks:
+            event["subtasks"] = subtasks
         self.emit(event)
 
     def emit_file_generated(self, file_name: str, download_url: str, size: int = 0) -> None:

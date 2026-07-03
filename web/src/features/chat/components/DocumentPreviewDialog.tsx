@@ -3,6 +3,7 @@ import { Download, FileSpreadsheet, FileText, FileType } from "lucide-react";
 import { Dialog, DialogContent, DialogTitle, DialogDescription, DialogHeader, DialogFooter } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
 import type { GeneratedArtifact } from "@/types/app";
+import { resolveMediaUrl } from "@/api/client";
 
 const PdfPreview = lazy(() => import("./previews/PdfPreview").then((m) => ({ default: m.PdfPreview })));
 const DocxPreview = lazy(() => import("./previews/DocxPreview").then((m) => ({ default: m.DocxPreview })));
@@ -33,8 +34,9 @@ function getFileIcon(filename: string) {
 
 function getPreviewUrl(downloadUrl: string | undefined): string {
   if (!downloadUrl) return "";
-  const sep = downloadUrl.includes("?") ? "&" : "?";
-  return `${downloadUrl}${sep}inline=true`;
+  const resolved = resolveMediaUrl(downloadUrl);
+  const sep = resolved.includes("?") ? "&" : "?";
+  return `${resolved}${sep}inline=true`;
 }
 
 function getDialogClass(ext: string): string {
@@ -81,7 +83,7 @@ export function DocumentPreviewDialog({ artifact, open, onOpenChange }: Document
 
         <DialogFooter className="px-4 py-3 border-t border-border flex-shrink-0">
           {artifact.download_url && (
-            <a href={artifact.download_url} download={artifact.filename}>
+            <a href={resolveMediaUrl(artifact.download_url)} download={artifact.filename}>
               <Button variant="outline" size="sm">
                 <Download size={14} className="mr-1.5" />
                 下载文件

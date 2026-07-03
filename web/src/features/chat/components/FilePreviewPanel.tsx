@@ -3,6 +3,7 @@ import { Download, X, FileText, FileImage, FileSpreadsheet, FileType, FileCode }
 import { CanvasTextViewer } from "./previews/CanvasTextViewer";
 import { CanvasTableRenderer } from "./previews/CanvasTableRenderer";
 import type { FilePreview } from "@/types/app";
+import { resolveMediaUrl } from "@/api/client";
 
 const PdfPreview = lazy(() => import("./previews/PdfPreview").then((m) => ({ default: m.PdfPreview })));
 const DocxPreview = lazy(() => import("./previews/DocxPreview").then((m) => ({ default: m.DocxPreview })));
@@ -54,8 +55,9 @@ function Loading() {
 
 function renderContent(preview: FilePreview) {
   const ext = getFileExt(preview.file_name);
-  const previewUrl = preview.download_url
-    ? preview.download_url + (preview.download_url.includes("?") ? "&" : "?") + "inline=true"
+  const resolvedDownloadUrl = preview.download_url ? resolveMediaUrl(preview.download_url) : "";
+  const previewUrl = resolvedDownloadUrl
+    ? resolvedDownloadUrl + (resolvedDownloadUrl.includes("?") ? "&" : "?") + "inline=true"
     : "";
 
   // Images — centered on dark background with subtle border
@@ -64,7 +66,7 @@ function renderContent(preview: FilePreview) {
       <div className="flex items-center justify-center h-full p-6" style={{ background: "#0f1117" }}>
         <div className="relative max-w-full max-h-full">
           <img
-            src={previewUrl || preview.download_url}
+            src={previewUrl || resolvedDownloadUrl}
             alt={preview.file_name}
             className="max-w-full max-h-full object-contain rounded-lg"
             style={{ boxShadow: "0 0 60px rgba(59,130,246,0.08), 0 4px 24px rgba(0,0,0,0.4)" }}
@@ -131,9 +133,9 @@ function renderContent(preview: FilePreview) {
       <div className="text-sm" style={{ color: "rgba(255,255,255,0.25)" }}>
         暂不支持预览此文件格式
       </div>
-      {preview.download_url && (
+      {resolvedDownloadUrl && (
         <a
-          href={preview.download_url}
+          href={resolvedDownloadUrl}
           download={preview.file_name}
           className="px-4 py-2 rounded-lg text-xs font-medium transition-all duration-200 hover:scale-105"
           style={{
@@ -213,7 +215,7 @@ export function FilePreviewPanel({ preview, onClose }: FilePreviewPanelProps) {
           {/* Actions */}
           <div className="flex items-center gap-1">
             {preview.download_url && (
-              <a href={preview.download_url} download={preview.file_name}>
+              <a href={resolveMediaUrl(preview.download_url)} download={preview.file_name}>
                 <button
                   className="w-8 h-8 rounded-lg flex items-center justify-center transition-all duration-150 hover:scale-105"
                   style={{ color: "rgba(255,255,255,0.3)" }}

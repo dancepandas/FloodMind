@@ -84,24 +84,57 @@ class PermissionService:
             ("exfil", re.compile(r'\b(send|upload|post)\s+[^\n]*(token|key|secret)', re.IGNORECASE)),
         ]
 
+    # ── 子代理禁用工具集（阶段D tier 层） ─────────────────────────
+    # 硬拒，不可被全局 allow 覆盖。子代理工具集是主代理的严格子集。
+    # 真正的禁网络靠 _SUB_DENIED_POLICY_TYPES={"network"}（MCP/内置网络工具注册时
+    # 都标 policy_type="network"）；这里仅保留稳定内建工具名作冗余防御，
+    # 不写死配置衍生的 mcp:<server>:<tool> 名字（配置改名即失配）。
+    _SUB_DENIED_TOOL_NAMES = frozenset({
+        "WebFetch",
+    })
+    _SUB_DENIED_POLICY_TYPES = frozenset({
+        "network",  # 所有 network 类工具（子代理不能联网/爬虫）
+    })
+    _SUB_ALLOWED_POLICY_TYPES = frozenset({
+        "readonly", "read_path", "write", "exec", "internal",
+    })
+    # 子代理禁止的 AGENTS.md 写入 etc. —— 通过 tool_name 匹配
+    _SUB_DENIED_GLOBAL_STATE_TOOLS = frozenset({
+        "UpdateProjectInstructions",  # 写 AGENTS.md
+    })
+
     def check(self, request: PermissionRequest) -> PermissionDecision:
         tool_policy_result = self._check_tool_policy(request)
 
         if tool_policy_result.behavior == PermissionBehavior.DENY:
             return tool_policy_result
 
+        # ── 阶段D tier 层：子代理权限收缩（不可被全局 allow 翻盘） ──
+        is_sub = getattr(request, "agent_tier", "main") == "sub"
+        if is_sub:
+            decision = self._check_sub_agent_tier(request, tool_policy_result)
+            if decision is not None:
+                return decision
+
+        # ── 阶段E mode 层：规划模式硬门 ──
+        if getattr(request, "mode", "execution") == "planning":
+            decision = self._check_planning_mode_gate(request, tool_policy_result)
+            if decision is not None:
+                return decision
+
         if tool_policy_result.behavior == PermissionBehavior.ASK:
             return self._handle_ask(request, tool_policy_result.reason)
 
         for rule in self._deny_rules:
-            if rule.matches(request.tool_name, request.tool_input):
+            if rule.matches(request.tool_name, request.tool_input, request.session_id):
                 return PermissionDecision(
                     behavior=rule.behavior,
                     reason=rule.reason or f"全局拒绝规则 '{rule.name}' 命中",
                 )
 
+        # 全局 allow 规则对子代理被禁工具不生效（tier 层已提前返回）
         for rule in self._allow_rules:
-            if rule.matches(request.tool_name, request.tool_input):
+            if rule.matches(request.tool_name, request.tool_input, request.session_id):
                 return PermissionDecision(
                     behavior=PermissionBehavior.ALLOW,
                     reason=rule.reason or f"全局允许规则 '{rule.name}' 命中",
@@ -109,7 +142,80 @@ class PermissionService:
 
         return tool_policy_result
 
-    def check_tool_policy(self, policy: ToolPermissionPolicy, tool_input: Dict[str, Any], tool_name: str = "") -> PermissionDecision:
+    def _check_sub_agent_tier(self, request: PermissionRequest, policy_result: PermissionDecision) -> Optional[PermissionDecision]:
+        """子代理权限收缩。返回 None 表示放行继续；返回决策即硬拒。
+
+        规则（优先级从高到低）：
+        1. 子代理禁用工具名 → 硬拒
+        2. 子代理禁用 policy_type → 硬拒
+        3. ASK 降级 → 子代理无权问用户，DENY
+        4. 白名单放行：只允许 _SUB_ALLOWED_POLICY_TYPES 中的工具
+        """
+        tool_name = request.tool_name
+
+        # 全局态改写工具
+        if tool_name in self._SUB_DENIED_GLOBAL_STATE_TOOLS:
+            return PermissionDecision(
+                behavior=PermissionBehavior.DENY,
+                reason=f"子代理不允许修改全局状态: {tool_name}",
+            )
+        # 禁用工具名
+        if tool_name in self._SUB_DENIED_TOOL_NAMES:
+            return PermissionDecision(
+                behavior=PermissionBehavior.DENY,
+                reason=f"子代理不允许使用: {tool_name}",
+            )
+        # 禁用 policy_type
+        policy = request.permission_policy
+        if policy is not None and policy.policy_type in self._SUB_DENIED_POLICY_TYPES:
+            return PermissionDecision(
+                behavior=PermissionBehavior.DENY,
+                reason=f"子代理不允许 {policy.policy_type} 类工具",
+            )
+        # ASK 降级
+        if policy_result.behavior == PermissionBehavior.ASK:
+            return PermissionDecision(
+                behavior=PermissionBehavior.DENY,
+                reason="子代理无权发起用户确认",
+            )
+        # 白名单准入
+        if policy is not None and policy.policy_type not in self._SUB_ALLOWED_POLICY_TYPES:
+            return PermissionDecision(
+                behavior=PermissionBehavior.DENY,
+                reason=f"子代理不允许 {policy.policy_type} 类工具",
+            )
+        return None  # 放行，继续主流程
+
+    # ── 阶段E mode 层：规划模式硬门 ────────────────────────────────
+    # 规划模式下拒绝所有 write/exec/state_write 及 is_destructive 工具。
+    # 放行 readonly/read_path/ask(=exit_plan_mode)/非破坏性 internal。
+    # 仅主代理持 mode，子代理恒 execution（由 _resolve_mode 保证）。
+
+    _PLANNING_DENIED_POLICY_TYPES = frozenset({"write", "exec", "state_write"})
+
+    def _check_planning_mode_gate(
+        self, request: PermissionRequest, policy_result: PermissionDecision
+    ) -> Optional[PermissionDecision]:
+        policy = request.permission_policy
+        policy_type = policy.policy_type if policy else ""
+
+        # 直接拒绝的 policy_type
+        if policy_type in self._PLANNING_DENIED_POLICY_TYPES:
+            return PermissionDecision(
+                behavior=PermissionBehavior.DENY,
+                reason="规划模式下禁止写/执行/状态修改操作，请先 exit_plan_mode 获取审批",
+            )
+        # 拒绝只读标记以外的破坏性工具（SubAgent/ParallelTask 等 is_destructive=True）
+        # 注意：ToolSpec.is_destructive 不直接可访问，通过 policy_type 间接判断。
+        # internal 类型中 SubAgent/ParallelTask 是编排级，规划阶段也需拒绝。
+        if policy_type == "internal" and request.tool_name in ("SubAgent", "ParallelTask"):
+            return PermissionDecision(
+                behavior=PermissionBehavior.DENY,
+                reason="规划模式下禁止委派子代理，请先 exit_plan_mode 获取审批",
+            )
+        return None  # 放行
+
+    def check_tool_policy(self, policy: ToolPermissionPolicy, tool_input: Dict[str, Any], tool_name: str = "", session_id: str = "") -> PermissionDecision:
         normalized = self._normalize_tool_input(tool_input)
 
         if policy.policy_type == "readonly":
@@ -119,16 +225,16 @@ class PermissionService:
             return PermissionDecision(behavior=PermissionBehavior.ASK, reason=policy.reason)
 
         if policy.policy_type == "write":
-            return self._check_write_policy(normalized, policy.path_field)
+            return self._check_write_policy(normalized, policy.path_field, session_id)
 
         if policy.policy_type == "exec":
-            return self._check_exec_policy(normalized, policy.command_field, policy.path_fields)
+            return self._check_exec_policy(normalized, policy.command_field, policy.path_fields, session_id)
 
         if policy.policy_type == "skill_script":
             return self._check_skill_script_policy(normalized)
 
         if policy.policy_type == "read_path":
-            return self._check_read_path_policy(normalized, policy.path_field)
+            return self._check_read_path_policy(normalized, policy.path_field, session_id)
 
         if policy.policy_type == "internal":
             if tool_name in ("SubAgent", "ParallelTask"):
@@ -182,7 +288,7 @@ class PermissionService:
     def _check_tool_policy(self, request: PermissionRequest) -> PermissionDecision:
         policy = request.permission_policy
         if policy is not None:
-            policy_result = self.check_tool_policy(policy, request.tool_input, request.tool_name)
+            policy_result = self.check_tool_policy(policy, request.tool_input, request.tool_name, request.session_id)
             if policy_result.behavior == PermissionBehavior.DENY:
                 return policy_result
             if policy_result.behavior == PermissionBehavior.ASK:
@@ -231,7 +337,7 @@ class PermissionService:
             return PermissionDecision(behavior=PermissionBehavior.ALLOW, reason="用户确认允许")
         return PermissionDecision(behavior=PermissionBehavior.DENY, reason="用户拒绝")
 
-    def _check_write_policy(self, normalized: Dict[str, Any], path_field: str) -> PermissionDecision:
+    def _check_write_policy(self, normalized: Dict[str, Any], path_field: str, session_id: str = "") -> PermissionDecision:
         raw_path = str(normalized.get(path_field, "")).strip()
         if not raw_path:
             return PermissionDecision(behavior=PermissionBehavior.ALLOW)
@@ -240,7 +346,7 @@ class PermissionService:
             from floodmind.agent.runtime.services.path_service import get_path_service
             self._path_service = get_path_service()
 
-        result = self._path_service.resolve_simple(raw_path, access="write")
+        result = self._path_service.resolve_simple(raw_path, access="write", session_id=session_id)
         if result.source == "no_context_rejected":
             return PermissionDecision(
                 behavior=PermissionBehavior.DENY,
@@ -253,7 +359,7 @@ class PermissionService:
             )
         return PermissionDecision(behavior=PermissionBehavior.ALLOW)
 
-    def _check_exec_policy(self, normalized: Dict[str, Any], command_field: str, path_fields: List[str]) -> PermissionDecision:
+    def _check_exec_policy(self, normalized: Dict[str, Any], command_field: str, path_fields: List[str], session_id: str = "") -> PermissionDecision:
         command = str(normalized.get(command_field, "")).strip() if command_field else ""
         if command:
             danger = self.check_dangerous_command(command)
@@ -267,7 +373,7 @@ class PermissionService:
         for pf in path_fields:
             raw_path = str(normalized.get(pf, "")).strip()
             if raw_path:
-                result = self._path_service.resolve_simple(raw_path, access="exec")
+                result = self._path_service.resolve_simple(raw_path, access="exec", session_id=session_id)
                 if not result.allowed:
                     return PermissionDecision(behavior=PermissionBehavior.DENY, reason=result.reason)
         return PermissionDecision(behavior=PermissionBehavior.ALLOW)
@@ -308,7 +414,7 @@ class PermissionService:
             )
         return PermissionDecision(behavior=PermissionBehavior.ALLOW)
 
-    def _check_read_path_policy(self, normalized: Dict[str, Any], path_field: str) -> PermissionDecision:
+    def _check_read_path_policy(self, normalized: Dict[str, Any], path_field: str, session_id: str = "") -> PermissionDecision:
         raw_path = str(normalized.get(path_field, "")).strip()
         if not raw_path:
             return PermissionDecision(behavior=PermissionBehavior.ALLOW)
@@ -317,7 +423,7 @@ class PermissionService:
             from floodmind.agent.runtime.services.path_service import get_path_service
             self._path_service = get_path_service()
 
-        result = self._path_service.resolve_simple(raw_path, access="read")
+        result = self._path_service.resolve_simple(raw_path, access="read", session_id=session_id)
         if not result.allowed:
             return PermissionDecision(behavior=PermissionBehavior.DENY, reason=result.reason)
         return PermissionDecision(behavior=PermissionBehavior.ALLOW)
@@ -385,32 +491,3 @@ def set_permission_service(svc: PermissionService) -> None:
     global _global_permission_service
     _global_permission_service = svc
     logger.info("PermissionService 已接入执行路径")
-
-
-_STATIC_ALLOW_POLICIES = {"readonly", "state_write", "network"}
-
-def evaluate_static_tool_policy(
-    policy: Optional["ToolPermissionPolicy"],
-    tool_name: str,
-) -> Optional[PermissionDecision]:
-    """纯静态策略评估，不依赖 PermissionService / PathService / AskService。
-
-    返回 None 表示该策略需要 service 才能判断（write/exec/read_path/skill_script/ask/internal），
-    调用方应 fallback 到 PermissionService 或 DENY。
-    返回 PermissionDecision 表示已确定结果。
-    """
-    if policy is None:
-        return PermissionDecision(
-            behavior=PermissionBehavior.DENY,
-            reason=f"工具 {tool_name} 未声明权限策略，默认拒绝",
-        )
-    if policy.policy_type in _STATIC_ALLOW_POLICIES:
-        return PermissionDecision(behavior=PermissionBehavior.ALLOW)
-    if policy.policy_type == "internal":
-        if tool_name in ("SubAgent", "ParallelTask"):
-            return PermissionDecision(behavior=PermissionBehavior.ALLOW)
-        return PermissionDecision(
-            behavior=PermissionBehavior.DENY,
-            reason=f"internal 策略仅允许系统内建工具，工具 {tool_name or '未知'} 不在白名单",
-        )
-    return None

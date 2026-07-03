@@ -34,10 +34,9 @@ from floodmind.tools.base_tools import (
     _parse_json_if_needed,
     SESSION_CONTEXT,
 )
+from floodmind.agent.runtime.services._runtime_root import PROJECT_ROOT as _PROJECT_ROOT
 
 logger = logging.getLogger(__name__)
-
-_PROJECT_ROOT = Path.cwd()
 
 _BINARY_EXTENSIONS = frozenset({
     ".xlsx", ".xls", ".xlsm",

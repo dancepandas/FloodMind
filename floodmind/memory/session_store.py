@@ -171,11 +171,6 @@ CREATE INDEX IF NOT EXISTS idx_sync_events_session ON sync_events(session_id, ev
 # ── Part type extension migration ────────────────────────────────
 
 def _migrate_parts_type_constraint(conn: sqlite3.Connection) -> None:
-    """Rebuild parts table to extend CHECK type constraint (SQLite limitation).
-
-    Adds: step_start, step_finish, patch, retry types.
-    Executes at schema init time, idempotent.
-    """
     try:
         info = conn.execute(
             "SELECT sql FROM sqlite_master WHERE type='table' AND name='parts'"
@@ -186,6 +181,8 @@ def _migrate_parts_type_constraint(conn: sqlite3.Connection) -> None:
         pass
 
     logger.info("Migrating parts table CHECK constraint for new part types...")
+    # Drop leftover from failed migration
+    conn.execute("DROP TABLE IF EXISTS parts_old")
     conn.executescript("""
         DROP TRIGGER IF EXISTS trg_parts_insert_fts;
         DROP TRIGGER IF EXISTS trg_parts_delete_fts;
@@ -285,8 +282,14 @@ def _get_conn(path: Optional[str] = None) -> sqlite3.Connection:
         conn.executescript(SCHEMA_SQL)
         conn.commit()
         # Run migrations (idempotent, pass conn to avoid recursion)
-        _migrate_parts_type_constraint(conn)
-        _migrate_sessions_schema(conn)
+        try:
+            _migrate_parts_type_constraint(conn)
+        except Exception:
+            logger.warning("parts migration failed, skipping", exc_info=True)
+        try:
+            _migrate_sessions_schema(conn)
+        except Exception:
+            logger.warning("sessions schema migration failed, skipping", exc_info=True)
         setattr(_local, key, conn)
     return conn
 

@@ -1,8 +1,9 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useState, type CSSProperties } from "react";
 import { AlarmClock, Eye, RefreshCw, Trash2 } from "lucide-react";
 import { deleteScheduledTask, fetchScheduledTasks } from "@/api/agent";
 import type { ScheduledTask } from "@/types/app";
 import { ScheduledTaskResultDialog } from "./ScheduledTaskResultDialog";
+import { ErrorMessage } from "@/features/chat/components/ErrorMessage";
 
 export function ScheduledTasksPanel() {
   const [tasks, setTasks] = useState<ScheduledTask[]>([]);
@@ -44,13 +45,14 @@ export function ScheduledTasksPanel() {
     <div className="flex-1 min-h-0 flex flex-col">
       <div className="shrink-0 px-5 pt-5 pb-2">
         <div className="flex items-center justify-between gap-2">
-          <div className="flex items-center gap-2 text-foreground font-medium text-[13px] tracking-tight">
-            <AlarmClock size={16} className="text-muted-foreground/60" strokeWidth={1.8} />
+          <div className="flex items-center gap-2 font-medium text-[13px] tracking-tight" style={{ color: 'var(--text-primary)' }}>
+            <AlarmClock size={16} style={{ color: 'var(--sand)' }} strokeWidth={1.8} />
             <h3>定时任务</h3>
           </div>
           <button
             onClick={refreshTasks}
-            className="text-muted-foreground/50 hover:text-primary transition-colors duration-150 disabled:opacity-40"
+            className="transition-colors duration-150 disabled:opacity-40"
+            style={{ color: 'var(--text-tertiary)' }}
             disabled={loading}
             title="刷新定时任务"
           >
@@ -60,14 +62,20 @@ export function ScheduledTasksPanel() {
       </div>
 
       <div className="flex-1 min-h-0 overflow-y-auto px-5 pb-4">
-        <div className="mb-3 rounded-lg border border-primary/10 bg-primary/[0.03] px-3 py-2 text-[11px] leading-relaxed text-muted-foreground/70">
+        <div
+          className="mb-3 rounded-xl px-3 py-2 text-[11px] leading-relaxed"
+          style={{ background: 'var(--surface-2)', border: '1px solid var(--border)', color: 'var(--text-secondary)' }}
+        >
           在聊天框描述即可创建，例如：每天早上8点运行荆州水文模型并生成Excel报告。
         </div>
 
-        {error ? <div className="mb-2 rounded-lg border border-destructive/15 bg-destructive/[0.04] px-3 py-2 text-xs text-destructive">{error}</div> : null}
+        {error ? <ErrorMessage title="获取失败" message={error} /> : null}
 
         {tasks.length === 0 ? (
-          <div className="text-sm text-muted-foreground/60 rounded-xl border border-dashed border-border/60 px-3 py-4 text-center">
+          <div
+            className="text-sm text-center px-3 py-4 rounded-xl border border-dashed"
+            style={{ color: 'var(--text-tertiary)', borderColor: 'var(--border)' }}
+          >
             暂无定时任务
           </div>
         ) : (
@@ -91,21 +99,29 @@ export function ScheduledTasksPanel() {
 function TaskCard({ task, onDelete, onViewResult }: { task: ScheduledTask; onDelete: (taskId: string) => void; onViewResult: (task: ScheduledTask) => void }) {
   const hasResult = !!task.last_result || !!task.last_error || (task.artifacts || []).length > 0;
   return (
-    <div className="rounded-xl border border-border/50 bg-background hover:border-border/80 transition-colors duration-200 overflow-hidden shadow-[0_1px_3px_-1px_rgba(0,0,0,0.03)]">
+    <div
+      className="rounded-xl overflow-hidden transition-colors duration-200"
+      style={{
+        background: 'var(--surface)',
+        border: '1px solid var(--border)',
+        boxShadow: '0 1px 3px -1px rgba(15,23,42,0.03)',
+      }}
+    >
       <div className="p-3">
         <div className="flex items-start justify-between gap-2">
           <div className="min-w-0 flex-1">
             <div className="flex items-center gap-2 mb-1 flex-wrap">
               <StatusBadge task={task} />
-              <span className="text-[11px] text-muted-foreground/50">{task.repeat === "daily" ? "每天重复" : "一次性"}</span>
+              <span className="text-[11px]" style={{ color: 'var(--text-tertiary)' }}>{task.repeat === "daily" ? "每天重复" : "一次性"}</span>
             </div>
-            <div className="text-[13px] font-medium text-foreground break-words leading-snug">{task.command}</div>
+            <div className="text-[13px] font-medium break-words leading-snug" style={{ color: 'var(--text-primary)' }}>{task.command}</div>
           </div>
           <div className="flex items-center gap-0.5 shrink-0">
             {hasResult && (
               <button
                 onClick={() => onViewResult(task)}
-                className="text-muted-foreground/50 hover:text-primary transition-colors duration-150 p-1 rounded-md hover:bg-primary/5"
+                className="p-1 rounded-md transition-colors duration-150"
+                style={{ color: 'var(--text-tertiary)' }}
                 title="查看结果"
               >
                 <Eye size={14} />
@@ -113,7 +129,8 @@ function TaskCard({ task, onDelete, onViewResult }: { task: ScheduledTask; onDel
             )}
             <button
               onClick={() => onDelete(task.id)}
-              className="text-muted-foreground/40 hover:text-destructive transition-colors duration-150 p-1 rounded-md hover:bg-destructive/5"
+              className="p-1 rounded-md transition-colors duration-150"
+              style={{ color: 'var(--text-tertiary)' }}
               title="删除任务"
             >
               <Trash2 size={13} />
@@ -121,7 +138,7 @@ function TaskCard({ task, onDelete, onViewResult }: { task: ScheduledTask; onDel
           </div>
         </div>
 
-        <div className="mt-2.5 grid grid-cols-1 gap-1 text-[11px] text-muted-foreground/60">
+        <div className="mt-2.5 grid grid-cols-1 gap-1 text-[11px]" style={{ color: 'var(--text-tertiary)' }}>
           <InfoLine label="所属会话" value={task.session_id.length > 12 ? task.session_id.slice(0, 12) + "…" : task.session_id} />
           <InfoLine label="下次执行" value={formatDateTime(task.next_run_at)} />
           <InfoLine label="最近执行" value={formatDateTime(task.last_run_at) || "尚未执行"} />
@@ -142,15 +159,25 @@ function StatusBadge({ task }: { task: ScheduledTask }) {
     disabled: "已停用",
     missed: "已跳过",
   };
-  const tone = status === "running" ? "bg-primary/8 text-primary" : status === "failed" || status === "missed" ? "bg-destructive/6 text-destructive" : status === "completed" ? "bg-emerald-500/8 text-emerald-700" : "bg-muted text-muted-foreground/60";
-  return <span className={`rounded-md px-1.5 py-0.5 text-[10px] font-semibold ${tone}`}>{labelMap[status] || status}</span>;
+  const tones: Record<string, CSSProperties> = {
+    running: { background: 'rgba(14,165,233,0.10)', color: 'var(--wave)' },
+    failed: { background: 'rgba(244,63,94,0.08)', color: 'var(--alert)' },
+    missed: { background: 'rgba(244,63,94,0.08)', color: 'var(--alert)' },
+    completed: { background: 'rgba(20,184,166,0.10)', color: 'var(--reef)' },
+  };
+  const tone = tones[status] || { background: 'var(--surface-2)', color: 'var(--text-tertiary)' };
+  return (
+    <span className="rounded-md px-1.5 py-0.5 text-[10px] font-semibold" style={tone}>
+      {labelMap[status] || status}
+    </span>
+  );
 }
 
 function InfoLine({ label, value, danger = false }: { label: string; value: string; danger?: boolean }) {
   return (
     <div className="flex gap-2">
-      <span className="shrink-0 text-muted-foreground/40">{label}</span>
-      <span className={`min-w-0 break-words ${danger ? "text-destructive/80" : "text-muted-foreground/70"}`}>{value}</span>
+      <span className="shrink-0" style={{ color: 'var(--text-tertiary)', opacity: 0.7 }}>{label}</span>
+      <span className="min-w-0 break-words" style={{ color: danger ? 'var(--alert)' : 'var(--text-secondary)' }}>{value}</span>
     </div>
   );
 }

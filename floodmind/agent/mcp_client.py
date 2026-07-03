@@ -324,6 +324,13 @@ class McpClientPool:
             self._connections[name] = conn
 
         count = 0
+        # MCP 工具调用闭包：捕获名藏入函数体（防参数名碰撞），**kwargs 与内置工具同协议
+        def _make_mcp_func(sn: str, tn: str):
+            full_name = f"mcp:{sn}:{tn}"
+            def _func(**kwargs):
+                return self.call_tool(full_name, kwargs)
+            return _func
+
         for mt in conn.list_tools():
             mcp_tool_name = f"mcp:{name}:{mt.get('name', '')}"
             input_schema = mt.get("inputSchema", {})
@@ -335,7 +342,7 @@ class McpClientPool:
                     "properties": input_schema.get("properties", {}),
                     "required": input_schema.get("required", []),
                 },
-                func=lambda args, sn=name, tn=mt.get('name', ''): self.call_tool(f"mcp:{sn}:{tn}", args),
+                func=_make_mcp_func(name, mt.get('name', '')),
                 is_readonly=False,
                 is_destructive=True,
                 is_concurrency_safe=True,

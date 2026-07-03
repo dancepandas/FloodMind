@@ -8,6 +8,8 @@ ToolExecutionService 只依赖此模块 + permissions + paths。
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Literal, Optional, Type
 
+from pydantic import BaseModel, ConfigDict, Field
+
 from floodmind.agent.runtime.contracts.permissions import (
     InterruptBehavior,
     ToolPermissionPolicy,
@@ -16,20 +18,24 @@ from floodmind.agent.runtime.contracts.permissions import (
 from floodmind.agent.runtime.contracts.paths import PathResolveResult
 
 
-@dataclass
-class ToolCall:
+class ToolCall(BaseModel):
     id: str
     name: str
     arguments: dict
 
+    # 允许运行时附加原始参数字符串（用于调试/错误提示）
+    model_config = ConfigDict(extra="allow")
 
-@dataclass
-class ToolResult:
+
+class ToolResult(BaseModel):
     tool_call_id: str
     name: str
     content: str
-    status: Literal["completed", "error"]
-    artifacts: List[str] = field(default_factory=list)
+    status: Literal["completed", "error", "awaiting_permission"]
+    artifacts: List[str] = Field(default_factory=list)
+    metadata: Dict[str, Any] = Field(default_factory=dict)
+
+    model_config = ConfigDict(extra="allow")
 
 
 @dataclass
@@ -56,7 +62,7 @@ class ToolSpec:
             if svc is not None:
                 return svc.check_tool_policy(self.permission_policy, tool_input)
         from floodmind.agent.runtime.contracts.permissions import PermissionDecision, PermissionBehavior
-        return PermissionDecision(behavior=PermissionBehavior.DENY, reason=f"工具 {self.name} 未声明权限策略，默认拒绝")
+        return PermissionDecision(behavior=PermissionBehavior.ALLOW)
 
     def validate_input(self, tool_input: dict) -> Any:
         if self.validate_input_fn is not None:
