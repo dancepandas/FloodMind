@@ -1,21 +1,15 @@
 """
-SQLite-based session store.
+SQLite 会话存储（精简角色）。
 
-Replaces JSON file persistence with a proper relational store.
-Schema inspired by OpenCode's session system.
+**注意**：对话历史的权威源是 ``chat_history.json``（``memory._turns``），不是本库。
+本 SQLite 库当前的生产职责单一：``sync_events`` 表 —— SSE 流式事件回放日志
+（``append_sync_event`` / ``get_sync_events`` / ``get_last_event_index``，由 web_server 调用）。
 
-Tables:
-  sessions     — session metadata (title, parent, status, timestamps)
-  messages     — each user/assistant message in a session
-  parts        — individual message parts (text, tool, reasoning, file)
-  tool_states  — tool execution state per part (pending/running/completed/error)
-  revert_points— marks message IDs where sessions were truncated
+历史关系表（sessions / messages / parts / tool_states / revert_points / checkpoints）
+是早期 OpenCode 风格设计的遗留，现仅由 cli 会话管理命令与测试使用，计划退役。
 
-Operations:
-  create / get / list / delete / rename
-  fork    — clone a session up to a given message
-  revert  — truncate messages after a point (marks revert for Redo)
-  compact — summarize older messages via LLM, inject as compaction part
+FTS5 全文检索（search_index 虚表 + 触发器）已移除 —— 无生产调用方；
+跨会话检索改为扫 chat_history.json 实现。
 """
 
 import json
@@ -126,36 +120,6 @@ CREATE TABLE IF NOT EXISTS checkpoints (
 );
 CREATE INDEX IF NOT EXISTS idx_checkpoints_session ON checkpoints(session_id, step);
 
--- FTS5 full-text search for session content
-CREATE VIRTUAL TABLE IF NOT EXISTS search_index USING fts5(
-    text,
-    part_id UNINDEXED,
-    session_id UNINDEXED
-);
-
-CREATE TRIGGER IF NOT EXISTS trg_parts_insert_fts
-AFTER INSERT ON parts
-WHEN NEW.type IN ('text', 'tool', 'reasoning', 'error') AND NEW.text != ''
-BEGIN
-    INSERT INTO search_index (text, part_id, session_id)
-    VALUES (NEW.text, NEW.id, NEW.session_id);
-END;
-
-CREATE TRIGGER IF NOT EXISTS trg_parts_delete_fts
-AFTER DELETE ON parts
-BEGIN
-    DELETE FROM search_index WHERE part_id = OLD.id;
-END;
-
-CREATE TRIGGER IF NOT EXISTS trg_parts_update_fts
-AFTER UPDATE ON parts
-BEGIN
-    DELETE FROM search_index WHERE part_id = OLD.id;
-    INSERT INTO search_index (text, part_id, session_id)
-    SELECT NEW.text, NEW.id, NEW.session_id
-    WHERE NEW.type IN ('text', 'tool', 'reasoning', 'error') AND NEW.text != '';
-END;
-
 -- SyncEvent table: persistent event log for state replay / resume
 CREATE TABLE IF NOT EXISTS sync_events (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -184,9 +148,6 @@ def _migrate_parts_type_constraint(conn: sqlite3.Connection) -> None:
     # Drop leftover from failed migration
     conn.execute("DROP TABLE IF EXISTS parts_old")
     conn.executescript("""
-        DROP TRIGGER IF EXISTS trg_parts_insert_fts;
-        DROP TRIGGER IF EXISTS trg_parts_delete_fts;
-        DROP TRIGGER IF EXISTS trg_parts_update_fts;
         ALTER TABLE parts RENAME TO parts_old;
         CREATE TABLE parts (
             id          TEXT PRIMARY KEY,
@@ -201,26 +162,6 @@ def _migrate_parts_type_constraint(conn: sqlite3.Connection) -> None:
         DROP TABLE parts_old;
         CREATE INDEX IF NOT EXISTS idx_parts_message ON parts(message_id, sort_order);
         CREATE INDEX IF NOT EXISTS idx_parts_session ON parts(session_id);
-        CREATE TRIGGER IF NOT EXISTS trg_parts_insert_fts
-        AFTER INSERT ON parts
-        WHEN NEW.type IN ('text', 'tool', 'reasoning', 'error') AND NEW.text != ''
-        BEGIN
-            INSERT INTO search_index (text, part_id, session_id)
-            VALUES (NEW.text, NEW.id, NEW.session_id);
-        END;
-        CREATE TRIGGER IF NOT EXISTS trg_parts_delete_fts
-        AFTER DELETE ON parts
-        BEGIN
-            DELETE FROM search_index WHERE part_id = OLD.id;
-        END;
-        CREATE TRIGGER IF NOT EXISTS trg_parts_update_fts
-        AFTER UPDATE ON parts
-        BEGIN
-            DELETE FROM search_index WHERE part_id = OLD.id;
-            INSERT INTO search_index (text, part_id, session_id)
-            SELECT NEW.text, NEW.id, NEW.session_id
-            WHERE NEW.type IN ('text', 'tool', 'reasoning', 'error') AND NEW.text != '';
-        END;
     """)
     conn.commit()
     logger.info("Parts table migration complete")
@@ -250,6 +191,24 @@ def _migrate_sessions_schema(conn: sqlite3.Connection) -> None:
         if col_name not in msg_existing:
             conn.execute(f"ALTER TABLE messages ADD COLUMN {col_name} {col_def}")
             logger.info("Added column messages.%s", col_name)
+    conn.commit()
+
+
+def _drop_legacy_fts(conn: sqlite3.Connection) -> None:
+    """Remove leftover FTS5 search_index table + sync triggers from older schemas.
+
+    FTS5 full-text search has been retired (zero production callers; MemorySearch uses
+    DualMemory.search_history over chat_history.json). Legacy database files may still
+    carry the search_index virtual table and the parts→search_index triggers, which
+    would otherwise keep firing on writes to the dead index. Drop them idempotently so
+    neither fresh nor legacy DBs retain dead FTS5 machinery.
+    """
+    conn.executescript("""
+        DROP TRIGGER IF EXISTS trg_parts_insert_fts;
+        DROP TRIGGER IF EXISTS trg_parts_delete_fts;
+        DROP TRIGGER IF EXISTS trg_parts_update_fts;
+        DROP TABLE IF EXISTS search_index;
+    """)
     conn.commit()
 
 
@@ -290,6 +249,10 @@ def _get_conn(path: Optional[str] = None) -> sqlite3.Connection:
             _migrate_sessions_schema(conn)
         except Exception:
             logger.warning("sessions schema migration failed, skipping", exc_info=True)
+        try:
+            _drop_legacy_fts(conn)
+        except Exception:
+            logger.debug("legacy FTS cleanup skipped", exc_info=True)
         setattr(_local, key, conn)
     return conn
 
@@ -773,30 +736,6 @@ def export_session_markdown(session_id: str) -> str:
     return "\n".join(lines)
 
 
-# ---------------------------------------------------------------------------
-# FTS5 Search
-# ---------------------------------------------------------------------------
-
-def search_sessions(query: str, limit: int = 10) -> List[Dict[str, Any]]:
-    """Full-text search across session message parts."""
-    if not query or not query.strip():
-        return []
-
-    conn = _get_conn()
-    rows = conn.execute(
-        """
-        SELECT si.session_id, s.title, si.text AS highlighted_text
-        FROM search_index si
-        JOIN sessions s ON si.session_id = s.id
-        WHERE search_index MATCH ?
-        ORDER BY rank
-        LIMIT ?
-        """,
-        (query.strip(), limit),
-    ).fetchall()
-    return [dict(r) for r in rows]
-
-
 # ── SyncEvent — persistent event log for state replay ────────────────
 
 def append_sync_event(session_id: str, event_index: int, event_type: str, event_data: dict) -> None:
@@ -831,18 +770,3 @@ def get_last_event_index(session_id: str) -> int:
         (session_id,),
     ).fetchone()
     return row[0] if row and row[0] is not None else 0
-
-
-def rebuild_search_index() -> int:
-    """Rebuild the FTS5 index from all eligible parts. Returns number of rows indexed."""
-    conn = _get_conn()
-    conn.execute("DELETE FROM search_index")
-    cursor = conn.execute(
-        """
-        INSERT INTO search_index (text, part_id, session_id)
-        SELECT text, id, session_id FROM parts
-        WHERE type IN ('text', 'tool', 'reasoning', 'error') AND text != ''
-        """
-    )
-    conn.commit()
-    return cursor.rowcount
