@@ -36,6 +36,7 @@ def native_from_agent_tool(tool: Any) -> ToolSpec:
         is_concurrency_safe=getattr(tool, "is_concurrency_safe", True),
         permission_policy=getattr(tool, "permission_policy", None),
         check_permissions_fn=getattr(tool, "check_permissions_fn", None),
+        validate_input_fn=getattr(tool, "validate_input_fn", None),
     ).to_tool_spec()
 
 
