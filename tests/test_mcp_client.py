@@ -6,7 +6,7 @@ registry unregister used to clean up a disconnected server's tools.
 """
 
 from floodmind.agent.mcp_client import McpClientPool, build_mcp_tool_specs
-from floodmind.agent.native.native_flood_agent import _InstanceToolRegistry
+from floodmind.agent.native.native_flood_agent import NativeFloodAgent, _InstanceToolRegistry
 from floodmind.agent.runtime.contracts.tools import ToolSpec
 
 
@@ -102,3 +102,57 @@ class TestRegistryUnregisterPrefix:
         reg.register(ToolSpec(name="Read", description="d", parameters={"type": "object"}, func=lambda **k: "ok"))
         assert reg.unregister_prefix("mcp:x:") == 0
         assert len(reg.all()) == 1
+
+
+class _McpMgmtHarness:
+    """Lightweight stand-in binding the real MCP management handlers to a pool + two
+    registries, so the handlers can be exercised without constructing a full agent."""
+
+    def __init__(self, pool):
+        self._mcp_pool = pool
+        self._orchestrator_registry = _InstanceToolRegistry()
+        self._specialist_registry = _InstanceToolRegistry()
+
+    _handle_list_mcp_servers = NativeFloodAgent._handle_list_mcp_servers
+    _handle_disconnect_mcp_server = NativeFloodAgent._handle_disconnect_mcp_server
+
+
+class TestMcpManagementHandlers:
+    def test_list_empty_pool(self):
+        h = _McpMgmtHarness(McpClientPool())
+        assert "未接入" in h._handle_list_mcp_servers()
+
+    def test_list_lists_connected_servers(self):
+        pool = McpClientPool()
+        pool._connections["a"] = FakeConn("a", [{"name": "t1"}])
+        h = _McpMgmtHarness(pool)
+        out = h._handle_list_mcp_servers()
+        assert "a" in out and "1 个工具" in out and "已连接" in out
+
+    def test_disconnect_missing_name_errors(self):
+        h = _McpMgmtHarness(McpClientPool())
+        assert "错误" in h._handle_disconnect_mcp_server(name="")
+
+    def test_disconnect_unknown_server_errors(self):
+        h = _McpMgmtHarness(McpClientPool())
+        assert "未找到" in h._handle_disconnect_mcp_server(name="nope")
+
+    def test_disconnect_removes_conn_and_tools_from_both_registries(self):
+        pool = McpClientPool()
+        conn = FakeConn("srv", [{"name": "t1"}, {"name": "t2"}])
+        pool._connections["srv"] = conn
+        h = _McpMgmtHarness(pool)
+        # simulate the connect-time registration: build specs → register to both registries
+        for spec in build_mcp_tool_specs(conn, "srv", pool.call_tool):
+            h._orchestrator_registry.register(spec)
+            h._specialist_registry.register(spec)
+        assert len(h._orchestrator_registry.all()) == 2
+        assert len(h._specialist_registry.all()) == 2
+
+        out = h._handle_disconnect_mcp_server(name="srv")
+        assert "已断开" in out
+        assert conn.disconnected is True
+        # tools cleaned from BOTH registries; pool no longer holds the server
+        assert h._orchestrator_registry.all() == []
+        assert h._specialist_registry.all() == []
+        assert pool.get_server_info("srv") is None

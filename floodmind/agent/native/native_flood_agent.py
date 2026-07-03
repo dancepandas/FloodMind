@@ -589,6 +589,36 @@ class NativeFloodAgent:
             permission_policy=ToolPermissionPolicy(policy_type="network"),
         ))
 
+        # MCP 自维护入口：列举 / 断开（接入走 LoadMcpServer）。仅 orchestrator 持有——
+        # MCP 连接管理是主代理职责，子代理只用工具、不重布线。
+        self._orchestrator_registry.register(AgentTool(
+            name="ListMcpServers",
+            description="列举当前已接入的 MCP server（名称、传输方式、工具数、连接状态）。FloodMind 自维护 MCP 时先用它盘点。",
+            parameters={"type": "object", "properties": {}, "required": []},
+            func=self._handle_list_mcp_servers,
+            is_readonly=True,
+            is_destructive=False,
+            is_concurrency_safe=True,
+            permission_policy=ToolPermissionPolicy(policy_type="readonly"),
+        ))
+
+        self._orchestrator_registry.register(AgentTool(
+            name="DisconnectMcpServer",
+            description="断开一个已接入的 MCP server，并从工具集移除其全部工具。传入 name（用 ListMcpServers 查名称）。用于运行时卸载不再需要的 MCP。",
+            parameters={
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string", "description": "要断开的 MCP server 名称"},
+                },
+                "required": ["name"],
+            },
+            func=self._handle_disconnect_mcp_server,
+            is_readonly=False,
+            is_destructive=True,
+            is_concurrency_safe=True,
+            permission_policy=ToolPermissionPolicy(policy_type="state_write"),
+        ))
+
         self._orchestrator_registry.register(AgentTool(
             name="create_plan",
             description="复杂任务建议先规划。创建结构化执行计划，明确用户意图、预期交付物和执行步骤。简单任务无需调用。",
@@ -1057,6 +1087,44 @@ class NativeFloodAgent:
         except Exception as e:
             logger.error("LoadMcpServer 失败: %s", e)
             return f"接入 MCP Server '{name}' 失败: {e}"
+
+    def _handle_list_mcp_servers(self) -> str:
+        """列出当前已接入的 MCP server（ListMcpServers 工具入口）。"""
+        pool = self._mcp_pool
+        if pool is None:
+            return "未接入任何 MCP server"
+        servers = pool.list_servers()
+        if not servers:
+            return "未接入任何 MCP server"
+        lines = ["已接入 MCP server:"]
+        for s in servers:
+            status = "已连接" if s["connected"] else "已断开"
+            lines.append(f"- {s['name']}（{s['transport']}，{s['tools']} 个工具，{status}）")
+        return "\n".join(lines)
+
+    def _handle_disconnect_mcp_server(self, name: str = "") -> str:
+        """断开一个 MCP server 并清理其工具（DisconnectMcpServer 工具入口）。
+
+        连接清理由 ``pool.disconnect_server`` 做，工具清理由双 registry 的
+        ``unregister_prefix('mcp:name:')`` 做——与接入路径对称（连接/注册解耦）。
+        """
+        if not name:
+            return "错误: 必须提供 name 参数"
+        pool = self._mcp_pool
+        if pool is None:
+            return f"错误: 未接入任何 MCP server，无法断开 '{name}'"
+        info = pool.get_server_info(name)
+        if info is None:
+            return f"错误: 未找到 MCP server '{name}'（用 ListMcpServers 查看已接入列表）"
+        tool_count = len(info["tools"])
+        if not pool.disconnect_server(name):
+            return f"错误: 断开 '{name}' 失败"
+        prefix = f"mcp:{name}:"
+        orch_removed = self._orchestrator_registry.unregister_prefix(prefix)
+        spec_removed = self._specialist_registry.unregister_prefix(prefix)
+        logger.info("MCP 断开清理: server=%s orchestrator=%d specialist=%d", name, orch_removed, spec_removed)
+        return (f"MCP Server '{name}' 已断开，移除 {tool_count} 个工具"
+                f"（orchestrator {orch_removed} + specialist {spec_removed}）。")
 
     def _normalize_plan_step(self, raw: Any, fallback_index: int) -> Dict[str, Any]:
         """把一个原始步骤定义归一化为标准的 plan step dict。"""
