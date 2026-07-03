@@ -328,9 +328,15 @@ _REUSABLE_SCRIPT_EXTENSIONS = {".py"}
 
 
 def set_skill_registry(skills: List[Any]):
-    """设置技能注册表（由 skills/__init__.py 调用）"""
+    """设置技能注册表（由 skills/__init__.py 调用）。
+
+    同时清空 GetSkill 的 body 缓存（_get_skill_cached 的 lru_cache），
+    使运行期 refresh_skill_registry() 后能拿到最新技能正文，而非过期缓存。
+    """
     global _SKILL_REGISTRY
     _SKILL_REGISTRY = skills
+    # _get_skill_cached 在本文件后文定义；运行期调用时模块已加载，名称可解析。
+    _get_skill_cached.cache_clear()
 
 
 def _find_skill(skill_name: str) -> Optional[Any]:
