@@ -1,6 +1,6 @@
 ---
 name: skill-creator
-description: 引导创建符合 FloodMind 规范、可被 SkillRegistry 自动发现的 Skill。当用户想把重复工作流封装成 skill、询问 skill 怎么写/放哪里、或想新建一个能力时使用。即便用户只是含糊地说"帮我做个能干 X 的东西"，只要本质是可复用的工作流封装，就用本 skill。
+description: 引导创建符合 FloodMind 规范、可被 SkillRegistry 自动发现的 Skill。当用户想把重复工作流封装成 skill、询问 skill 怎么写/放哪里、想新建一个能力、或提供了现成 Skill 目录需要安装时使用。也用于修改或归档已有 Skill。即便用户只是含糊地说"帮我做个能干 X 的东西"，只要本质是可复用的工作流封装，就用本 skill。
 ---
 
 # Skill Creator（FloodMind 元 skill）

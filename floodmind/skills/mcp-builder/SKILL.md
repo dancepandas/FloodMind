@@ -1,6 +1,6 @@
 ---
 name: mcp-builder
-description: 创建符合 FloodMind MCP 热插拔架构的 MCP Server。当用户想把外部服务/API 封装成 MCP 工具、需要 FloodMind 能动态接入和断开某 MCP、或想知道 MCP Server 怎么写/怎么接入时使用。
+description: 创建或接入符合 FloodMind MCP 热插拔架构的 MCP Server。当用户想把外部服务/API 封装成 MCP 工具、需要 FloodMind 能动态接入和断开某 MCP、提供了现成 MCP Server 代码需要安装、或需要运行时管理 MCP 连接（LoadMcpServer/ListMcpServers/DisconnectMcpServer）时使用。
 ---
 
 # MCP Server 开发与接入（FloodMind 版）
