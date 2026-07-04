@@ -87,6 +87,13 @@ CreateSkill(
 3. 放 `scripts/` / `references/` / `assets/`（按需）
 4. 调用 `RefreshSkills` 或重启 FloodMind
 
+### 路径 C：安装用户提供的现成 Skill
+
+如果用户给了一个已有的 Skill 目录（含 SKILL.md + scripts/ 等），直接复制到 skill 存放路径：
+1. `cp -r <来源目录> <项目根>/skills/<skill-name>`
+2. `RefreshSkills` 使其生效
+3. `GetSkill(name)` 验证能取到内容
+
 ---
 
 ## 三、SKILL.md 编写规范

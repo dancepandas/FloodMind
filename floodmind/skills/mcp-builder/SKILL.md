@@ -198,6 +198,13 @@ python my_server.py  # stdio 模式
 Agent 调 LoadMcpServer(name="my-api", transport="sse", url="http://localhost:9000/sse")
 ```
 
+**方式 C：安装用户提供的现成 MCP Server**
+
+如果用户给了一个已有的 MCP Server 目录（含 Python/Node 代码）：
+1. 放到合适路径（如 `<项目根>/mcp/<server-name>/`）
+2. 安装依赖：`pip install -r requirements.txt` 或 `npm install`
+3. 本地测试通过后，用方式 A（写 mcp.json）或方式 B（LoadMcpServer）接入
+
 ### 验证接入成功
 
 ```
