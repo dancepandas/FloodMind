@@ -77,7 +77,7 @@ class SkillCurator:
 
     使用方式：
         curator = SkillCurator()
-        curator.record_usage("aojiang-hydro", success=True)
+        curator.record_usage("my-skill", success=True)
         stats = curator.get_stats()
         stale = curator.find_stale_skills()
         curator.run_maintenance()

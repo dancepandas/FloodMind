@@ -105,7 +105,7 @@ class TestBackgroundReviewer:
                 "tree_path": ["水文", "预报"],
                 "task_description": "run model",
                 "domain_keywords": ["flood"],
-                "skill_used": "aojiang-hydro",
+                "skill_used": "example-skill",
                 "pitfalls": ["p1"],
                 "solutions": ["s1"],
                 "importance": 0.8,

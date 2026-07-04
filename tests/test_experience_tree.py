@@ -22,7 +22,7 @@ def sample_leaf():
         node_type="case",
         task_description="敖江流域霍口水库断面洪水预报",
         domain_keywords=["aojiang", "huokou", "forecast"],
-        skill_used="aojiang-hydro",
+        skill_used="example-skill",
         steps_summary="下载数据; 运行模型; 导出结果",
         pitfalls=["数据文件格式不统一"],
         solutions=["增加格式校验步骤"],

@@ -280,7 +280,7 @@ def _finalize_tool_output(tool_name: str, output: str, **signature_parts: Any) -
 
 class GetSkillInput(BaseModel):
     """获取技能说明的输入参数"""
-    skill_name: str = Field(description="[必填] 技能名称，如 'aojiang-hydro'、'docx'")
+    skill_name: str = Field(description="[必填] 技能名称，如 'chronos'、'docx'")
 
 
 
@@ -379,7 +379,7 @@ def _impl_get_skill(skill_name: str = "") -> str:
 get_skill = build_agent_tool(
     name="GetSkill",
     description=(
-        "获取技能的完整说明和执行方法。[必填] skill_name: 技能名称，如 'aojiang-hydro'、'docx'。"
+        "获取技能的完整说明和执行方法。[必填] skill_name: 技能名称，如 'chronos'、'docx'。"
         "返回内容包含：技能描述、使用说明、可用脚本（含完整路径）、参考文档。"
     ),
     args_schema=GetSkillInput,
