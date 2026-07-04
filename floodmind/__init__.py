@@ -30,6 +30,9 @@ def __getattr__(name):
         "register_skill": "floodmind.skills",
         "FloodmindPlugin": "floodmind.plugin.base",
         "NativeFloodAgent": "floodmind.agent.native.native_flood_agent",
+        "create_flood_agent": "floodmind.agent",
+        "get_mcp_client_pool": "floodmind.agent.mcp_client",
+        "build_mcp_tool_specs": "floodmind.agent.mcp_client",
     }
     if name in _exports:
         import importlib
@@ -50,4 +53,7 @@ __all__ = [
     "register_skill",
     "FloodmindPlugin",
     "NativeFloodAgent",
+    "create_flood_agent",
+    "get_mcp_client_pool",
+    "build_mcp_tool_specs",
 ]

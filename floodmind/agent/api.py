@@ -89,7 +89,7 @@ class Agent:
         if memory is None:
             from floodmind.memory.dual_memory import DualMemory
             sid = session_id or "sdk-agent"
-            memory = DualMemory(session_id=sid, max_short_term=20, context_window=32768)
+            memory = DualMemory(session_id=sid, context_window=32768)
 
         self._on_event = on_event
         self._last_usage: Dict[str, int] = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
