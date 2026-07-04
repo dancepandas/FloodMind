@@ -73,6 +73,8 @@ def init_agent():
 @models_bp.route('/api/models', methods=['GET'])
 def list_models():
     try:
+        from floodmind.config.model_presets import reload_presets
+        reload_presets()  # 刷新配置缓存，确保 settings.json 变更生效
         models = get_models_list()
         default_key = get_default_model_key()
         return jsonify({'status': 'success', 'default_model_key': default_key, 'models': models})
