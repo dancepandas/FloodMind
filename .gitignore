@@ -7,7 +7,6 @@
 /reference/
 /.env
 /.trae/
-/docs/
 /data/
 /.dockerignore
 /docker-compose.yml
