@@ -11,6 +11,7 @@ import logging
 import os
 import queue
 import re
+import shutil
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed, wait, FIRST_COMPLETED
@@ -36,6 +37,7 @@ from floodmind.agent.native.message_builder import MessageBuilder
 from floodmind.agent.native.model_client import ModelClient
 from floodmind.agent.native.tool_runtime import native_from_agent_tool
 from floodmind.tools.agent_tool import AgentTool
+from floodmind.skills.registry import get_skill_registry
 
 from floodmind.config.settings import settings
 from floodmind.agent.runtime.services.checkpoint_service import CheckpointService
@@ -622,6 +624,81 @@ class NativeFloodAgent:
             permission_policy=ToolPermissionPolicy(policy_type="state_write"),
         ))
 
+        # Skill 自维护 CRUD（仅 orchestrator——管理是主代理职责；GetSkill 读取在 base_tools 全 registry）。
+        self._orchestrator_registry.register(AgentTool(
+            name="ListSkills",
+            description="列出所有可用技能（name/version/category/source）。自维护 skill 前先盘点。",
+            parameters={"type": "object", "properties": {}, "required": []},
+            func=self._handle_list_skills,
+            is_readonly=True,
+            is_destructive=False,
+            is_concurrency_safe=True,
+            permission_policy=ToolPermissionPolicy(policy_type="readonly"),
+        ))
+        self._orchestrator_registry.register(AgentTool(
+            name="CreateSkill",
+            description="创建新技能。[必填] name 技能名、description 一句话描述、body SKILL.md 正文（使用说明/流程）。可选 version/category。写盘后自动加载（威胁扫描在加载时做）。",
+            parameters={
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string", "description": "技能名（唯一，kebab-case）"},
+                    "description": {"type": "string", "description": "一句话描述触发条件"},
+                    "body": {"type": "string", "description": "SKILL.md 正文：使用说明、流程、示例"},
+                    "version": {"type": "string", "description": "[可选] 版本，默认 1.0"},
+                    "category": {"type": "string", "description": "[可选] execution/knowledge，默认 execution"},
+                },
+                "required": ["name", "description", "body"],
+            },
+            func=self._handle_create_skill,
+            is_readonly=False,
+            is_destructive=False,
+            is_concurrency_safe=True,
+            permission_policy=ToolPermissionPolicy(policy_type="state_write"),
+        ))
+        self._orchestrator_registry.register(AgentTool(
+            name="UpdateSkill",
+            description="修改已有技能 SKILL.md。[必填] name、action(append/replace_body/replace_section/remove_section)。append/replace_body/replace_section 需 content；replace_section/remove_section 需 section_title。",
+            parameters={
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string", "description": "技能名"},
+                    "action": {"type": "string", "enum": ["append", "replace_body", "replace_section", "remove_section"], "description": "操作类型"},
+                    "content": {"type": "string", "description": "append/replace_body/replace_section 时写入的内容"},
+                    "section_title": {"type": "string", "description": "replace_section/remove_section 时的 ## 标题"},
+                },
+                "required": ["name", "action"],
+            },
+            func=self._handle_update_skill,
+            is_readonly=False,
+            is_destructive=False,
+            is_concurrency_safe=True,
+            permission_policy=ToolPermissionPolicy(policy_type="state_write"),
+        ))
+        self._orchestrator_registry.register(AgentTool(
+            name="RemoveSkill",
+            description="归档（移除）一个技能。落盘技能移到 .archived/（可恢复），编程式技能内存禁用。[必填] name。",
+            parameters={
+                "type": "object",
+                "properties": {"name": {"type": "string", "description": "要归档的技能名"}},
+                "required": ["name"],
+            },
+            func=self._handle_remove_skill,
+            is_readonly=False,
+            is_destructive=True,
+            is_concurrency_safe=True,
+            permission_policy=ToolPermissionPolicy(policy_type="state_write"),
+        ))
+        self._orchestrator_registry.register(AgentTool(
+            name="RefreshSkills",
+            description="重扫技能发现根、刷新技能目录并重建 system prompt。新增/编辑技能文件后调用使其生效。",
+            parameters={"type": "object", "properties": {}, "required": []},
+            func=self._handle_refresh_skills,
+            is_readonly=False,
+            is_destructive=False,
+            is_concurrency_safe=True,
+            permission_policy=ToolPermissionPolicy(policy_type="state_write"),
+        ))
+
         self._orchestrator_registry.register(AgentTool(
             name="create_plan",
             description="复杂任务建议先规划。创建结构化执行计划，明确用户意图、预期交付物和执行步骤。简单任务无需调用。",
@@ -1120,6 +1197,151 @@ class NativeFloodAgent:
         logger.info("MCP 断开清理: server=%s orchestrator=%d specialist=%d", name, orch_removed, spec_removed)
         return (f"MCP Server '{name}' 已断开，移除 {tool_count} 个工具"
                 f"（orchestrator {orch_removed} + specialist {spec_removed}）。")
+
+    # ── Skill 自维护 CRUD（agent 自己 create/list/update/remove skill） ──────
+    @staticmethod
+    def _validate_skill_name(name: str) -> Optional[str]:
+        """校验技能名（防路径穿越）：非空、无路径分隔符、不含 ..、不以 . 开头。返回错误信息或 None。"""
+        if not name or not name.strip():
+            return "name 不能为空"
+        n = name.strip()
+        if "/" in n or "\\" in n or ".." in n or n.startswith("."):
+            return f"name 含非法字符（路径分隔符或 ..）：{name}"
+        return None
+
+    @staticmethod
+    def _split_skill_md(text: str):
+        """SKILL.md → (frontmatter_text, body_text)。frontmatter 不含首尾 ``---``。"""
+        lines = text.split("\n")
+        if not lines or lines[0].strip() != "---":
+            return "", text
+        for i in range(1, len(lines)):
+            if lines[i].strip() == "---":
+                return "\n".join(lines[1:i]), "\n".join(lines[i + 1:]).lstrip("\n")
+        return "", text  # 残缺 frontmatter，整体当 body
+
+    @staticmethod
+    def _apply_skill_body_action(body: str, action: str, content: str, section_title: str) -> str:
+        """对 SKILL.md body 应用 append/replace_body/replace_section/remove_section。"""
+        if action == "replace_body":
+            return content.strip() + "\n"
+        if action == "append":
+            return body.rstrip() + "\n\n" + content.strip() + "\n"
+        # 按 ``## 标题`` 切节
+        sections, cur_title, cur_lines = [], "", []
+        for line in body.split("\n"):
+            if line.lstrip().startswith("## "):
+                if cur_title or cur_lines:
+                    sections.append((cur_title, cur_lines))
+                cur_title, cur_lines = line.lstrip()[3:].strip(), [line]
+            else:
+                cur_lines.append(line)
+        sections.append((cur_title, cur_lines))
+        out, matched = [], False
+        for title, lines in sections:
+            if title == section_title:
+                matched = True
+                if action == "replace_section":
+                    out.append(f"## {section_title}\n{content.strip()}\n")
+                # remove_section：丢弃
+            else:
+                out.append("\n".join(lines))
+        if action == "replace_section" and not matched:
+            out.append(f"## {section_title}\n{content.strip()}\n")  # 不存在则新建
+        return ("\n".join(out)).rstrip() + "\n"
+
+    def _resolve_skill_md_path(self, name: str) -> Path:
+        """技能 SKILL.md 路径：优先 writable_root（可写），其次该技能实际 skill_dir。"""
+        reg = get_skill_registry()
+        writable = reg.writable_root / name / "SKILL.md"
+        if writable.exists():
+            return writable
+        skill = reg.get_skill(name)
+        if skill and skill.skill_dir:
+            return skill.skill_dir / "SKILL.md"
+        return writable  # 默认落点（create 用）
+
+    def _handle_list_skills(self) -> str:
+        skills = get_skill_registry().list_skills()
+        if not skills:
+            return "当前没有可用技能。"
+        lines = ["可用技能（name | version | category | source）："]
+        for s in skills:
+            lines.append(f"- {s['name']} | v{s['version']} | {s['category']} | {s['source']}")
+        return "\n".join(lines)
+
+    def _handle_create_skill(self, name: str = "", description: str = "", body: str = "",
+                             version: str = "1.0", category: str = "execution") -> str:
+        """CreateSkill：写 SKILL.md 到 writable_root 并 refresh（威胁扫描在加载时做）。"""
+        if not name or not description:
+            return "错误：name 和 description 必填。"
+        err = self._validate_skill_name(name)
+        if err:
+            return f"错误：{err}"
+        reg = get_skill_registry()
+        path = reg.writable_root / name / "SKILL.md"
+        if path.exists() or reg.get_skill(name):
+            return f"错误：技能 '{name}' 已存在。用 UpdateSkill 修改，或先 RemoveSkill。"
+        content = (f"---\nname: {name}\ndescription: {description}\n"
+                   f"version: {version}\ncategory: {category}\n---\n\n{body.strip()}\n")
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(content, encoding="utf-8")
+        self.refresh_skills()
+        return f"技能 '{name}' 已创建并加载（{path}）。"
+
+    def _handle_update_skill(self, name: str = "", action: str = "append",
+                             content: str = "", section_title: str = "") -> str:
+        """UpdateSkill：append/replace_body/replace_section/remove_section 改 SKILL.md 并 refresh。"""
+        if not name:
+            return "错误：name 必填。"
+        err = self._validate_skill_name(name)
+        if err:
+            return f"错误：{err}"
+        if action not in ("append", "replace_body", "replace_section", "remove_section"):
+            return "错误：action 仅支持 append/replace_body/replace_section/remove_section。"
+        if action in ("append", "replace_body", "replace_section") and not content:
+            return f"错误：{action} 需要 content。"
+        if action in ("replace_section", "remove_section") and not section_title:
+            return "错误：replace_section/remove_section 需要 section_title。"
+        reg = get_skill_registry()
+        if not reg.get_skill(name):
+            return f"错误：未找到技能 '{name}'（用 ListSkills 查看）。"
+        path = self._resolve_skill_md_path(name)
+        if not path.exists():
+            return f"错误：技能 '{name}' 无 SKILL.md 可改（{path}）。"
+        fm, body = self._split_skill_md(path.read_text(encoding="utf-8"))
+        new_body = self._apply_skill_body_action(body, action, content, section_title)
+        path.write_text(f"---\n{fm}\n---\n\n{new_body}", encoding="utf-8")
+        self.refresh_skills()
+        return f"技能 '{name}' 已更新（{action}）并重新加载。"
+
+    def _handle_remove_skill(self, name: str = "") -> str:
+        """RemoveSkill：落盘技能归档（移到 .archived/，可恢复），编程式技能内存禁用。"""
+        if not name:
+            return "错误：name 必填。"
+        err = self._validate_skill_name(name)
+        if err:
+            return f"错误：{err}"
+        reg = get_skill_registry()
+        skill = reg.get_skill(name)
+        if not skill:
+            return f"错误：未找到技能 '{name}'。"
+        if not skill.skill_dir:
+            reg.set_disabled(name, True)
+            return f"编程式技能 '{name}' 已禁用（内存；重启后不保留）。"
+        archive = reg.writable_root / ".archived" / name
+        archive.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            shutil.move(str(skill.skill_dir), str(archive))
+        except Exception as e:
+            return f"错误：归档 '{name}' 失败：{e}"
+        self.refresh_skills()
+        return f"技能 '{name}' 已归档（可恢复：{archive}）。"
+
+    def _handle_refresh_skills(self) -> str:
+        """RefreshSkills：触发重扫 + prompt 重建。"""
+        self.refresh_skills()
+        return f"技能已刷新（catalog={len(self._skill_catalog)} chars）。"
 
     def _normalize_plan_step(self, raw: Any, fallback_index: int) -> Dict[str, Any]:
         """把一个原始步骤定义归一化为标准的 plan step dict。"""

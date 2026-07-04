@@ -33,8 +33,10 @@ def default_roots() -> List[Path]:
 class SkillRegistry:
     """skill 单一权威源：发现、catalog、lifecycle。线程安全。"""
 
-    def __init__(self, roots: Optional[List[Path]] = None):
+    def __init__(self, roots: Optional[List[Path]] = None, writable_root: Optional[Path] = None):
         self._roots: List[Path] = list(roots) if roots is not None else default_roots()
+        # 写入根：CreateSkill/UpdateSkill/RemoveSkill(auto-gen) 落盘到此（默认项目 skills 目录）
+        self._writable_root: Path = writable_root if writable_root is not None else (_PROJECT_ROOT / "skills")
         self._skills: List[Skill] = []
         self._disabled: set = set()
         self._catalog: str = ""
@@ -80,6 +82,11 @@ class SkillRegistry:
     @property
     def roots(self) -> List[Path]:
         return list(self._roots)
+
+    @property
+    def writable_root(self) -> Path:
+        """写入根：新 skill 落盘目录（CreateSkill/UpdateSkill/RemoveSkill/auto-gen）。"""
+        return self._writable_root
 
     def all_skills(self) -> List[Skill]:
         with self._lock:
