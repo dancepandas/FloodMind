@@ -186,6 +186,25 @@ class NativeFloodAgent:
         ]
         return "\n\n".join(parts)
 
+    @staticmethod
+    def _build_model_info() -> str:
+        """每次 LLM 调用前动态读取模型配置，文件不变则内容不变（KV cache 命中）。"""
+        from floodmind.config.model_presets import get_models_list, get_default_model_key, reload_presets
+        reload_presets()
+        all_models = get_models_list()
+        current_key = get_default_model_key()
+        current_label = next((m["label"] for m in all_models if m["key"] == current_key), current_key)
+        lines = [f"当前模型: {current_label} (key: {current_key})", "可选模型列表:"]
+        for m in all_models:
+            flags = []
+            if m.get("supports_reasoning"): flags.append("推理")
+            if m.get("supports_vision"): flags.append("视觉")
+            if m.get("supports_search"): flags.append("搜索")
+            flag_str = f" [{'/'.join(flags)}]" if flags else ""
+            default_mark = " (默认)" if m.get("is_default") else ""
+            lines.append(f"  - {m['label']} (key: {m['key']}){flag_str}{default_mark}")
+        return "\n".join(lines)
+
 
     SPECIALIST_STATIC_GLOBAL = """你是 FloodMind 子代理，负责完成主代理分配的独立子任务。
 
@@ -2336,6 +2355,20 @@ class NativeFloodAgent:
                         memory_messages.append({"role": "system", "content": experience_context})
                     if history_text:
                         memory_messages.append({"role": "system", "content": history_text})
+
+                    # ── 每次 LLM 调用前注入最新模型信息（配置变更即时生效，文件不变 KV cache 命中）──
+                    _base_prompts = list(self._orchestrator_executor.system_prompts)
+                    _mi = self._build_model_info()
+                    # 替换已有的模型信息段，或追加到末尾
+                    _replaced = False
+                    for _i, _p in enumerate(_base_prompts):
+                        if _p.startswith("## 模型配置"):
+                            _base_prompts[_i] = _mi
+                            _replaced = True
+                            break
+                    if not _replaced:
+                        _base_prompts.append(_mi)
+                    self._orchestrator_executor.system_prompts = _base_prompts
 
                     state.messages = self._orchestrator_executor._build_initial_messages(
                         context=context,
