@@ -11,7 +11,6 @@ import logging
 import os
 import queue
 import re
-import shutil
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed, wait, FIRST_COMPLETED
@@ -38,6 +37,7 @@ from floodmind.agent.native.model_client import ModelClient
 from floodmind.agent.native.tool_runtime import native_from_agent_tool
 from floodmind.tools.agent_tool import AgentTool
 from floodmind.skills.registry import get_skill_registry
+from floodmind.skills.skill_curator import get_skill_curator, run_maintenance_if_needed
 
 from floodmind.config.settings import settings
 from floodmind.agent.runtime.services.checkpoint_service import CheckpointService
@@ -533,6 +533,12 @@ class NativeFloodAgent:
             _te._on_skill_generated = self.refresh_skills
         except Exception:
             logger.debug("task_experience skill 生成回调注册跳过", exc_info=True)
+
+        # Skill curator 定期巡检：stale 标记 + 过期归档 + 重复检测（时间间隔标记文件防重入）
+        try:
+            run_maintenance_if_needed()
+        except Exception:
+            logger.debug("skill curator 巡检跳过", exc_info=True)
 
         self._orchestrator_registry.register_tools(all_tools)
         # 子代理工具白名单：排除依赖主代理 memory 实例的工具（子代理 clean slate 无 memory，
@@ -1316,7 +1322,7 @@ class NativeFloodAgent:
         return f"技能 '{name}' 已更新（{action}）并重新加载。"
 
     def _handle_remove_skill(self, name: str = "") -> str:
-        """RemoveSkill：落盘技能归档（移到 .archived/，可恢复），编程式技能内存禁用。"""
+        """RemoveSkill：委托 curator.archive_skill 归档，编程式技能内存禁用。"""
         if not name:
             return "错误：name 必填。"
         err = self._validate_skill_name(name)
@@ -1329,14 +1335,12 @@ class NativeFloodAgent:
         if not skill.skill_dir:
             reg.set_disabled(name, True)
             return f"编程式技能 '{name}' 已禁用（内存；重启后不保留）。"
-        archive = reg.writable_root / ".archived" / name
-        archive.parent.mkdir(parents=True, exist_ok=True)
-        try:
-            shutil.move(str(skill.skill_dir), str(archive))
-        except Exception as e:
-            return f"错误：归档 '{name}' 失败：{e}"
+        curator = get_skill_curator()
+        ok = curator.archive_skill(name)
+        if not ok:
+            return f"错误：归档 '{name}' 失败（curator.archive_skill 返回 False）。"
         self.refresh_skills()
-        return f"技能 '{name}' 已归档（可恢复：{archive}）。"
+        return f"技能 '{name}' 已归档（可恢复：{curator.archive_root / name}）。"
 
     def _handle_refresh_skills(self) -> str:
         """RefreshSkills：触发重扫 + prompt 重建。"""

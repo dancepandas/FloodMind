@@ -81,6 +81,11 @@ class _CrudHarness:
 def crud_setup(tmp_path, monkeypatch):
     reg = SkillRegistry(roots=[tmp_path], writable_root=tmp_path)
     monkeypatch.setattr(skill_reg_mod, "_registry", reg)  # 安装为单例
+    # curator 单例同步：_handle_remove_skill 委托 curator.archive_skill，需要一致的 skills_dirs
+    from floodmind.skills.skill_curator import SkillCurator
+    import floodmind.skills.skill_curator as curator_mod
+    curator = SkillCurator(skills_dirs=[str(tmp_path)], state_file=str(tmp_path / "curator_state.json"))
+    monkeypatch.setattr(curator_mod, "_curator", curator)
     return _CrudHarness(), tmp_path
 
 

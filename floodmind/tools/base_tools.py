@@ -398,12 +398,25 @@ def _get_skill_cached(skill_name: str) -> str:
     skill = _find_skill(skill_name)
 
     if not skill:
+        # 记录失败使用（curator 接活：统计 skill 使用频率/成功率）
+        try:
+            from floodmind.skills.skill_curator import record_skill_usage
+            record_skill_usage(skill_name, success=False)
+        except Exception:
+            pass
         available = [s.name for s in get_skill_registry().all_skills()]
         return _finalize_tool_output(
             "get_skill",
             f"未找到技能 '{skill_name}'。可用技能：{available}",
             skill_name=skill_name,
         )
+
+    # 记录成功使用（curator 接活：累计 usage、re-activate stale）
+    try:
+        from floodmind.skills.skill_curator import record_skill_usage
+        record_skill_usage(skill_name, success=True)
+    except Exception:
+        pass
 
     lines = [
         f"=== 技能【{skill_name}】完整说明 ===",
