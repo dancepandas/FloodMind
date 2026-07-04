@@ -1,14 +1,20 @@
 """
-MCP (Model Context Protocol) Client
+MCP (Model Context Protocol) Client — 运行时热插拔架构
 
-将 FloodMind 作为 MCP 客户端，连接外部 MCP Server，
-发现外部工具并注册到 Agent 的工具列表。
+核心设计：连接与注册解耦。
+- McpClientPool 只管理连接（connect / disconnect / list / call_tool）
+- build_mcp_tool_specs() 是 MCP 工具 → ToolSpec 的唯一构造入口
+- 调用方自行注册/清理工具（orchestrator + specialist 双 registry）
 
-支持两种传输:
-- sse:   HTTP SSE (远程服务)
-- stdio: 本地子进程 stdin/stdout
+SDK 入口:
+    from floodmind import get_mcp_client_pool, build_mcp_tool_specs
 
-协议: JSON-RPC 2.0
+    pool = get_mcp_client_pool()
+    conn = pool.connect_server({"name":"my-mcp","transport":"sse","url":"http://..."})
+    specs = build_mcp_tool_specs(conn, "my-mcp", pool.call_tool)
+    # → 注册 specs 到 Agent 的 tool registry
+
+支持两种传输: sse (远程) / stdio (本地子进程)。协议: JSON-RPC 2.0。
 """
 
 import json
@@ -433,6 +439,7 @@ _mcp_pool: Optional[McpClientPool] = None
 
 
 def get_mcp_client_pool() -> McpClientPool:
+    """获取全局 MCP 连接池单例（惰性创建）。"""
     global _mcp_pool
     if _mcp_pool is None:
         _mcp_pool = McpClientPool()

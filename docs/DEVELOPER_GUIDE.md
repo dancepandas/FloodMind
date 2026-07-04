@@ -509,6 +509,17 @@ for s in pool.list_servers():
 pool.disconnect_server("my-mcp")
 ```
 
+### 5.4 安装现成 MCP Server
+
+如果已有 MCP Server 代码目录：
+
+```bash
+cp -r <来源目录> <项目根>/mcp/<server-name>/
+pip install -r <项目根>/mcp/<server-name>/requirements.txt
+```
+
+然后接入：写 `mcp.json`（持久）或调 `LoadMcpServer`（热插拔）。Agent 自身的 `mcp-builder` skill 中有完整指引。
+
 ---
 
 ## 6. Skill 系统
@@ -606,6 +617,16 @@ stale = curator.find_stale_skills()               # 长期未用
 dups = curator.find_duplicates(threshold=0.7)     # 重复检测
 curator.run_maintenance()                         # 手动巡检
 ```
+
+### 6.6 安装现成 Skill
+
+如果用户提供了已有 Skill 目录（含 SKILL.md + scripts/ 等），直接复制到 writable_root 并刷新：
+
+```bash
+cp -r <来源目录> <项目根>/skills/<skill-name>/
+```
+
+然后 Agent 调 `RefreshSkills` 使其立即生效，调 `GetSkill(name)` 验证。Agent 自身的 `skill-creator` skill 中有完整指引。
 
 ---
 

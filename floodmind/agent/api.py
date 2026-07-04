@@ -6,6 +6,7 @@ FloodMind Agent — 轻量级 SDK 入口
 
 用法:
     from floodmind import Agent, ModelClient, build_agent_tool
+    # 或: from floodmind.agent import Agent
 
     llm = ModelClient(api_key="sk-xxx", base_url="https://...", model_name="my-model")
 
