@@ -21,7 +21,8 @@ export function useModels(sessionId: string) {
 
   useEffect(() => {
     let active = true;
-    (async () => {
+
+    const loadModels = async () => {
       try {
         const modelsRes = await fetchModels();
         if (!active) return;
@@ -36,9 +37,21 @@ export function useModels(sessionId: string) {
       } catch (err) {
         log.warn("fetchModels failed, using defaults", err);
       }
-    })();
+    };
+
+    loadModels();
+
+    // 用户切回浏览器标签页时自动刷新（修改 settings.json 后无需手动刷新页面）
+    const onVisible = () => {
+      if (document.visibilityState === "visible") {
+        loadModels();
+      }
+    };
+    document.addEventListener("visibilitychange", onVisible);
+
     return () => {
       active = false;
+      document.removeEventListener("visibilitychange", onVisible);
     };
   }, []);
 
