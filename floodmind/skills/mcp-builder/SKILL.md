@@ -1,236 +1,229 @@
 ---
 name: mcp-builder
-description: Guide for creating high-quality MCP (Model Context Protocol) servers that enable LLMs to interact with external services through well-designed tools. Use when building MCP servers to integrate external APIs or services, whether in Python (FastMCP) or Node/TypeScript (MCP SDK).
-license: Complete terms in LICENSE.txt
+description: 创建符合 FloodMind MCP 热插拔架构的 MCP Server。当用户想把外部服务/API 封装成 MCP 工具、需要 FloodMind 能动态接入和断开某 MCP、或想知道 MCP Server 怎么写/怎么接入时使用。
 ---
 
-# MCP Server Development Guide
+# MCP Server 开发与接入（FloodMind 版）
 
-## Overview
-
-Create MCP (Model Context Protocol) servers that enable LLMs to interact with external services through well-designed tools. The quality of an MCP server is measured by how well it enables LLMs to accomplish real-world tasks.
+引导创建和接入一个 **FloodMind 能运行时热插拔**的 MCP Server。先讲 FloodMind 的 MCP 架构（确保做对），再讲开发规范。
 
 ---
 
-# Process
+## 一、FloodMind MCP 集成架构
 
-## 🚀 High-Level Workflow
+理解下面的架构才能写出能被 FloodMind 正确接入和管理的 MCP Server。
 
-Creating a high-quality MCP server involves four main phases:
+### 核心组件
 
-### Phase 1: Deep Research and Planning
+```
+McpClientPool (全局单例, floodmind/agent/mcp_client.py)
+  ├── _connections: Dict[str, McpClientConnection]
+  ├── _lock: threading.Lock
+  │
+  ├── connect_server(config) → McpClientConnection
+  │   ├── _connect_sse(url) / _connect_stdio(command, args, env)
+  │   ├── _initialize() → JSON-RPC handshake
+  │   └── _discover_tools() → tools/list
+  │
+  ├── disconnect_server(name) → bool
+  ├── list_servers() → [{name, transport, tools, connected}]
+  │
+  └── call_tool(full_name, kwargs) → result
 
-#### 1.1 Understand Modern MCP Design
+build_mcp_tool_specs(conn, name, call_tool_fn) → List[ToolSpec]
+  ↑ MCP ToolSpec 唯一构造入口（连接与注册解耦）
+```
 
-**API Coverage vs. Workflow Tools:**
-Balance comprehensive API endpoint coverage with specialized workflow tools. Workflow tools can be more convenient for specific tasks, while comprehensive coverage gives agents flexibility to compose operations. Performance varies by client—some clients benefit from code execution that combines basic tools, while others work better with higher-level workflows. When uncertain, prioritize comprehensive API coverage.
+### 连接与注册解耦（核心设计原则）
 
-**Tool Naming and Discoverability:**
-Clear, descriptive tool names help agents find the right tools quickly. Use consistent prefixes (e.g., `github_create_issue`, `github_list_repos`) and action-oriented naming.
+**McpClientPool 只管连接，不管注册。** 连接和工具注册是两个独立步骤：
 
-**Context Management:**
-Agents benefit from concise tool descriptions and the ability to filter/paginate results. Design tools that return focused, relevant data. Some clients support code execution which can help agents filter and process data efficiently.
+```
+connect_server → 建立连接 + 发现工具
+       │
+       ▼
+build_mcp_tool_specs → 把 MCP 工具转为 ToolSpec
+       │
+       ▼
+调用方自行注册 → orchestrator_registry.register + specialist_registry.register
+```
 
-**Actionable Error Messages:**
-Error messages should guide agents toward solutions with specific suggestions and next steps.
+断开的对称操作：
+```
+disconnect_server → 关闭连接
+       │
+       ▼
+调用方自行清理 → unregister_prefix("mcp:{name}:")
+```
 
-#### 1.2 Study MCP Protocol Documentation
+这个设计让 Agent 可以**随时接入、随时断开** MCP Server，不需要重启。
 
-**Navigate the MCP specification:**
+### 工具命名规范
 
-Start with the sitemap to find relevant pages: `https://modelcontextprotocol.io/sitemap.xml`
+MCP 工具在 FloodMind 中的全名为 `mcp:<server_name>:<tool_name>`。例如 RAG 服务 `rag-server` 提供 `search` 工具 → 全名 `mcp:rag-server:search`。
 
-Then fetch specific pages with `.md` suffix for markdown format (e.g., `https://modelcontextprotocol.io/specification/draft.md`).
+`unregister_prefix("mcp:rag-server:")` 可以一次性清理该 server 的所有工具。
 
-Key pages to review:
-- Specification overview and architecture
-- Transport mechanisms (streamable HTTP, stdio)
-- Tool, resource, and prompt definitions
+### 双 registry 注册
 
-#### 1.3 Study Framework Documentation
+MCP 工具同时注册到两个 registry：
+- `orchestrator_registry`（主代理，完整权限）
+- `specialist_registry`（子代理白名单，也有 MCP 工具）
 
-**Recommended stack:**
-- **Language**: TypeScript (high-quality SDK support and good compatibility in many execution environments e.g. MCPB. Plus AI models are good at generating TypeScript code, benefiting from its broad usage, static typing and good linting tools)
-- **Transport**: Streamable HTTP for remote servers, using stateless JSON (simpler to scale and maintain, as opposed to stateful sessions and streaming responses). stdio for local servers.
+### 权限策略
 
-**Load framework documentation:**
+所有 MCP 工具统一 `policy_type="network"`。plan 模式下不可用。
 
-- **MCP Best Practices**: [📋 View Best Practices](./reference/mcp_best_practices.md) - Core guidelines
+### mcp.json 配置
 
-**For TypeScript (recommended):**
-- **TypeScript SDK**: Use WebFetch to load `https://raw.githubusercontent.com/modelcontextprotocol/typescript-sdk/main/README.md`
-- [⚡ TypeScript Guide](./reference/node_mcp_server.md) - TypeScript patterns and examples
+`~/.floodmind/mcp.json`（独立于 settings.json）：
 
-**For Python:**
-- **Python SDK**: Use WebFetch to load `https://raw.githubusercontent.com/modelcontextprotocol/python-sdk/main/README.md`
-- [🐍 Python Guide](./reference/python_mcp_server.md) - Python patterns and examples
+```json
+{
+  "servers": [
+    {
+      "name": "my-api",
+      "transport": "sse",
+      "url": "http://localhost:9000/sse",
+      "enabled": true
+    },
+    {
+      "name": "local-tool",
+      "transport": "stdio",
+      "command": "python",
+      "args": ["./mcp/my_server.py"],
+      "enabled": true
+    }
+  ]
+}
+```
 
-#### 1.4 Plan Your Implementation
-
-**Understand the API:**
-Review the service's API documentation to identify key endpoints, authentication requirements, and data models. Use web search and WebFetch as needed.
-
-**Tool Selection:**
-Prioritize comprehensive API coverage. List endpoints to implement, starting with the most common operations.
-
----
-
-### Phase 2: Implementation
-
-#### 2.1 Set Up Project Structure
-
-See language-specific guides for project setup:
-- [⚡ TypeScript Guide](./reference/node_mcp_server.md) - Project structure, package.json, tsconfig.json
-- [🐍 Python Guide](./reference/python_mcp_server.md) - Module organization, dependencies
-
-#### 2.2 Implement Core Infrastructure
-
-Create shared utilities:
-- API client with authentication
-- Error handling helpers
-- Response formatting (JSON/Markdown)
-- Pagination support
-
-#### 2.3 Implement Tools
-
-For each tool:
-
-**Input Schema:**
-- Use Zod (TypeScript) or Pydantic (Python)
-- Include constraints and clear descriptions
-- Add examples in field descriptions
-
-**Output Schema:**
-- Define `outputSchema` where possible for structured data
-- Use `structuredContent` in tool responses (TypeScript SDK feature)
-- Helps clients understand and process tool outputs
-
-**Tool Description:**
-- Concise summary of functionality
-- Parameter descriptions
-- Return type schema
-
-**Implementation:**
-- Async/await for I/O operations
-- Proper error handling with actionable messages
-- Support pagination where applicable
-- Return both text content and structured data when using modern SDKs
-
-**Annotations:**
-- `readOnlyHint`: true/false
-- `destructiveHint`: true/false
-- `idempotentHint`: true/false
-- `openWorldHint`: true/false
+Agent 启动时自动连接所有 `enabled: true` 的 server。
 
 ---
 
-### Phase 3: Review and Test
+## 二、Agent MCP 管理工具
 
-#### 3.1 Code Quality
+FloodMind 可在运行时**自己接入/断开 MCP Server**（仅 orchestrator 可用）：
 
-Review for:
-- No duplicated code (DRY principle)
-- Consistent error handling
-- Full type coverage
-- Clear tool descriptions
+| 工具 | 功能 | 参数 |
+|---|---|---|
+| `LoadMcpServer` | 运行时动态接入 MCP → 发现工具 → 双 registry 注册 | `name`, `transport`("sse"\|"stdio"), `url`(SSE 必填), `command`/`args`/`env`(stdio) |
+| `ListMcpServers` | 列举所有已接入 server（含工具数、连接状态） | 无 |
+| `DisconnectMcpServer` | 断开连接 + `unregister_prefix` 清理双 registry | `name` |
 
-#### 3.2 Build and Test
+**典型流程**：
 
-**TypeScript:**
-- Run `npm run build` to verify compilation
-- Test with MCP Inspector: `npx @modelcontextprotocol/inspector`
-
-**Python:**
-- Verify syntax: `python -m py_compile your_server.py`
-- Test with MCP Inspector
-
-See language-specific guides for detailed testing approaches and quality checklists.
-
----
-
-### Phase 4: Create Evaluations
-
-After implementing your MCP server, create comprehensive evaluations to test its effectiveness.
-
-**Load [✅ Evaluation Guide](./reference/evaluation.md) for complete evaluation guidelines.**
-
-#### 4.1 Understand Evaluation Purpose
-
-Use evaluations to test whether LLMs can effectively use your MCP server to answer realistic, complex questions.
-
-#### 4.2 Create 10 Evaluation Questions
-
-To create effective evaluations, follow the process outlined in the evaluation guide:
-
-1. **Tool Inspection**: List available tools and understand their capabilities
-2. **Content Exploration**: Use READ-ONLY operations to explore available data
-3. **Question Generation**: Create 10 complex, realistic questions
-4. **Answer Verification**: Solve each question yourself to verify answers
-
-#### 4.3 Evaluation Requirements
-
-Ensure each question is:
-- **Independent**: Not dependent on other questions
-- **Read-only**: Only non-destructive operations required
-- **Complex**: Requiring multiple tool calls and deep exploration
-- **Realistic**: Based on real use cases humans would care about
-- **Verifiable**: Single, clear answer that can be verified by string comparison
-- **Stable**: Answer won't change over time
-
-#### 4.4 Output Format
-
-Create an XML file with this structure:
-
-```xml
-<evaluation>
-  <qa_pair>
-    <question>Find discussions about AI model launches with animal codenames. One model needed a specific safety designation that uses the format ASL-X. What number X was being determined for the model named after a spotted wild cat?</question>
-    <answer>3</answer>
-  </qa_pair>
-<!-- More qa_pairs... -->
-</evaluation>
+```
+用户："帮我把这个 API 封装成 MCP"
+  → Agent 开发 MCP Server（按 §三）
+  → 本地测试通过
+  → 运行时 LoadMcpServer(name="my-api", transport="sse", url="http://localhost:9000/sse")
+  → ListMcpServers 验证工具数和连接状态
+  → 后续对话中直接使用 mcp:my-api:xxx 工具
 ```
 
 ---
 
-# Reference Files
+## 三、开发 MCP Server
 
-## 📚 Documentation Library
+### 推荐技术栈
 
-Load these resources as needed during development:
+| 语言 | 框架 | 适用场景 |
+|---|---|---|
+| **Python** | FastMCP (`mcp` 包) | 首选——与 FloodMind 同语言，本地 stdio 接入零依赖 |
+| **TypeScript** | `@modelcontextprotocol/sdk` | 需要 JS 生态的 API 封装 |
 
-### Core MCP Documentation (Load First)
-- **MCP Protocol**: Start with sitemap at `https://modelcontextprotocol.io/sitemap.xml`, then fetch specific pages with `.md` suffix
-- [📋 MCP Best Practices](./reference/mcp_best_practices.md) - Universal MCP guidelines including:
-  - Server and tool naming conventions
-  - Response format guidelines (JSON vs Markdown)
-  - Pagination best practices
-  - Transport selection (streamable HTTP vs stdio)
-  - Security and error handling standards
+### 传输层选择
 
-### SDK Documentation (Load During Phase 1/2)
-- **Python SDK**: Fetch from `https://raw.githubusercontent.com/modelcontextprotocol/python-sdk/main/README.md`
-- **TypeScript SDK**: Fetch from `https://raw.githubusercontent.com/modelcontextprotocol/typescript-sdk/main/README.md`
+| 传输 | 适用场景 | FloodMind 支持 |
+|---|---|---|
+| **stdio** | 本地进程，FloodMind 启动子进程通信 | ✅ `transport: "stdio"` |
+| **SSE** | 远程服务，HTTP long-lived stream | ✅ `transport: "sse"` |
 
-### Language-Specific Implementation Guides (Load During Phase 2)
-- [🐍 Python Implementation Guide](./reference/python_mcp_server.md) - Complete Python/FastMCP guide with:
-  - Server initialization patterns
-  - Pydantic model examples
-  - Tool registration with `@mcp.tool`
-  - Complete working examples
-  - Quality checklist
+### 工具设计原则
 
-- [⚡ TypeScript Implementation Guide](./reference/node_mcp_server.md) - Complete TypeScript guide with:
-  - Project structure
-  - Zod schema patterns
-  - Tool registration with `server.registerTool`
-  - Complete working examples
-  - Quality checklist
+1. **inputSchema 完整**：每个参数配 `type` + `description`，复杂类型用 `properties` 嵌套
+2. **description 说清"做什么 + 返回什么"**：这是 LLM 决定是否调用的唯一线索
+3. **annotations 准确**：`readOnlyHint`/`destructiveHint`/`idempotentHint` 帮助 FloodMind 做权限决策
+4. **错误消息可执行**：不要只返回 "Error"，要告诉 agent 下一步该做什么
+5. **返回结构化数据**：JSON 优于 Markdown 文本，方便下游工具解析
 
-### Evaluation Guide (Load During Phase 4)
-- [✅ Evaluation Guide](./reference/evaluation.md) - Complete evaluation creation guide with:
-  - Question creation guidelines
-  - Answer verification strategies
-  - XML format specifications
-  - Example questions and answers
-  - Running an evaluation with the provided scripts
+### Python 示例（FastMCP）
+
+```python
+from mcp.server.fastmcp import FastMCP
+
+mcp = FastMCP("my-api")
+
+@mcp.tool()
+def query_data(query: str, limit: int = 10) -> dict:
+    """搜索外部 API 并返回结构化结果。
+
+    Args:
+        query: 搜索关键词
+        limit: 返回条数上限，默认 10
+    """
+    # 实现 API 调用
+    return {"results": [...], "total": 42}
+
+if __name__ == "__main__":
+    mcp.run(transport="stdio")  # 或 mcp.run(transport="sse", port=9000)
+```
+
+---
+
+## 四、测试与接入
+
+### 本地测试
+
+```bash
+# MCP Inspector 交互式测试
+npx @modelcontextprotocol/inspector python my_server.py
+
+# 或直接跑验证
+python my_server.py  # stdio 模式
+```
+
+### 接入 FloodMind
+
+**方式 A：配置文件持久接入**（适合稳定的 server）
+
+1. 写 `~/.floodmind/mcp.json`，添加 server 配置
+2. 重启 FloodMind（或重新创建 agent）→ 自动连接
+
+**方式 B：运行时热插拔**（适合临时/动态 server）
+
+```
+Agent 调 LoadMcpServer(name="my-api", transport="sse", url="http://localhost:9000/sse")
+```
+
+### 验证接入成功
+
+```
+ListMcpServers → 确认 my-api 在列表，工具数 > 0
+GetSkill("mcp-builder") → 了解 MCP 开发规范
+```
+
+---
+
+## 参考资源
+
+- **MCP 协议规范**：`https://modelcontextprotocol.io/specification/draft.md`
+- **MCP 最佳实践**：[reference/mcp_best_practices.md](./reference/mcp_best_practices.md)
+- **Python 开发指南**：[reference/python_mcp_server.md](./reference/python_mcp_server.md)
+- **TypeScript 开发指南**：[reference/node_mcp_server.md](./reference/node_mcp_server.md)
+- **评估指南**：[reference/evaluation.md](./reference/evaluation.md)
+
+---
+
+## 检查清单
+
+- [ ] MCP Server 可以独立启动（Python 或 Node，stdio 或 SSE）
+- [ ] 每个 tool 有完整的 inputSchema（参数类型 + description）
+- [ ] annotations 标记了 readOnlyHint / destructiveHint
+- [ ] 错误返回 actionable（引导 agent 下一步做什么）
+- [ ] 本地 MCP Inspector 测试通过
+- [ ] `mcp.json` 配置正确（或准备 LoadMcpServer 参数）
+- [ ] `ListMcpServers` 确认 server 已连接、工具数正确
+- [ ] 试调一个工具验证端到端可用
