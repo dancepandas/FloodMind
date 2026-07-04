@@ -31,3 +31,6 @@ __pycache__/
 /desktop/
 /tui-ts/node_modules/
 floodmind/tui-ts/node_modules/
+floodmind/memory/long_term_memory.md
+floodmind/memory/long_term_memory.json
+.floodmind/
