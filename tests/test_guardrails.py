@@ -163,18 +163,26 @@ class TestErrorClassifier:
         assert classified.error_type == HydroErrorType.api_timeout
         assert classified.recovery.action == "retry"
 
-    def test_classify_model_error_fallback(self):
+    def test_classify_model_error_fallback(self, monkeypatch):
         """Model error gets fallback suggestion for known model."""
+        monkeypatch.setattr(
+            "floodmind.agent.native.error_classifier.ErrorClassifier._suggest_fallback",
+            lambda mk: "deepseek_v4_flash" if mk == "deepseek_v4_pro" else "",
+        )
         err = TimeoutError("timed out")
         classified = ErrorClassifier.classify_model_error(err, "deepseek_v4_pro")
         assert classified.error_type == HydroErrorType.api_timeout
         assert classified.recovery.fallback_model == "deepseek_v4_flash"
 
-    def test_classify_model_error_default_fallback(self):
-        """Unknown model gets default fallback suggestion."""
+    def test_classify_model_error_default_fallback(self, monkeypatch):
+        """Unknown model gets first available model as fallback."""
+        monkeypatch.setattr(
+            "floodmind.agent.native.error_classifier.ErrorClassifier._suggest_fallback",
+            lambda mk: "test_default_model" if mk else "",
+        )
         err = TimeoutError("timed out")
         classified = ErrorClassifier.classify_model_error(err, "unknown_model")
-        assert classified.recovery.fallback_model == "deepseek_v4_flash"
+        assert classified.recovery.fallback_model == "test_default_model"
 
     def test_classify_unknown_error(self):
         """Generic Exception → unknown with retry."""

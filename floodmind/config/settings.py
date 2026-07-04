@@ -166,14 +166,12 @@ def _load_json_config(path: Path) -> dict:
 
 
 def _load_config() -> dict:
-    """加载配置：内置模板 + 用户 JSON 配置合并。"""
-    cfg = dict(DEFAULT_CONFIG)
+    """加载配置：DEFAULT_CONFIG + 用户 JSON 配置合并。
 
-    # 加载内置模板作为默认值
-    template_path = _template_path()
-    template_cfg = _load_json_config(template_path)
-    if template_cfg:
-        cfg = _deep_merge(cfg, template_cfg)
+    首次启动时自动从模板复制用户配置，后续不再合并模板（用户在 settings.json
+    中删除某个 model 就应该从最终配置中消失，不应被模板覆盖）。
+    """
+    cfg = dict(DEFAULT_CONFIG)
 
     # 用户级 JSON 配置
     user_path = _config_path()
@@ -185,6 +183,10 @@ def _load_config() -> dict:
         # 首次启动：自动复制模板作为初始配置
         try:
             get_floodmind_home().mkdir(parents=True, exist_ok=True)
+            template_path = _template_path()
+            template_cfg = _load_json_config(template_path)
+            if template_cfg:
+                cfg = _deep_merge(cfg, template_cfg)
             with open(template_path, "r", encoding="utf-8") as src:
                 with open(user_path, "w", encoding="utf-8") as dst:
                     dst.write(src.read())

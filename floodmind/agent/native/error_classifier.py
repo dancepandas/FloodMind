@@ -256,17 +256,20 @@ class ErrorClassifier:
 
     @staticmethod
     def _suggest_fallback(model_key: Optional[str]) -> str:
-        """根据当前模型推荐降级方案"""
-        fallback_map = {
-            "deepseek_v4_pro": "deepseek_v4_flash",
-            "qwen_36_plus": "qwen_35_plus",
-            "kimi_k2_6": "kimi_k2_5",
-            "glm_51": "glm_5",
-            "minimax_m25": "minimax_m21",
-        }
-        if model_key and model_key in fallback_map:
-            return fallback_map[model_key]
-        return "deepseek_v4_flash"  # 默认降级
+        """根据当前配置动态推荐降级方案。"""
+        try:
+            from floodmind.agent.native.model_router import _build_fallback_chain
+            chain = _build_fallback_chain()
+            if model_key and model_key in chain and chain[model_key]:
+                return chain[model_key][0]
+            # 返回配置列表中第一个可用模型
+            from floodmind.config.model_presets import get_models_list
+            models = get_models_list()
+            if models:
+                return models[0]["key"]
+        except Exception:
+            pass
+        return ""
 
 
 def execute_with_recovery(

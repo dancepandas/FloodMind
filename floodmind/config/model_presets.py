@@ -83,12 +83,21 @@ def resolve_base_url(preset: Dict[str, Any]) -> str:
     url = preset.get("default_base_url", "").strip()
     if url:
         return url
-    env_var = preset.get("base_url_env", "QWEN_BASE_URL")
+    env_var = preset.get("base_url_env", "")
     if env_var:
         env_url = os.getenv(env_var, "").strip()
         if env_url:
             return env_url
-    return "https://dashscope.aliyuncs.com/compatible-mode/v1"
+    # 兜底：从 provider options 中读取 base_url
+    provider = preset.get("provider", "")
+    if provider:
+        from floodmind.config.settings import get_config
+        provider_opts = get_config().get("provider", {}).get(provider, {}).get("options", {})
+        if isinstance(provider_opts, dict):
+            url = provider_opts.get("baseURL") or provider_opts.get("base_url")
+            if url:
+                return url
+    return ""
 
 
 def get_models_list() -> List[Dict[str, Any]]:

@@ -5,20 +5,24 @@ from unittest.mock import MagicMock
 import pytest
 
 from floodmind.agent.native.model_router import (
-    FALLBACK_CHAIN,
     SMART_TIMEOUTS,
     ModelCallConfig,
     ModelRouter,
     TokenUsageRecord,
     TokenUsageTracker,
+    _build_fallback_chain,
 )
 
 
 class TestFallbackChain:
     """Test model fallback chain resolution."""
 
-    def test_get_fallback_exists(self):
+    def test_get_fallback_exists(self, monkeypatch):
         """Known model returns its first fallback candidate."""
+        monkeypatch.setattr(
+            "floodmind.agent.native.model_router._build_fallback_chain",
+            lambda: {"deepseek_v4_pro": ["deepseek_v4_flash", "glm_51"]},
+        )
         router = ModelRouter()
         fb = router.get_fallback("deepseek_v4_pro")
         assert fb == "deepseek_v4_flash"
@@ -28,10 +32,15 @@ class TestFallbackChain:
         router = ModelRouter()
         assert router.get_fallback("unknown_model_xyz") is None
 
-    def test_fallback_chain_completeness(self):
-        """All entries in FALLBACK_CHAIN have at least one candidate."""
-        for model, chain in FALLBACK_CHAIN.items():
-            assert len(chain) > 0, f"{model} has empty fallback chain"
+    def test_fallback_chain_completeness(self, monkeypatch):
+        """All entries in fallback chain have at least one candidate."""
+        monkeypatch.setattr(
+            "floodmind.agent.native.model_router._build_fallback_chain",
+            lambda: {"a": ["b"], "b": ["c"]},
+        )
+        chain = _build_fallback_chain()
+        for model, fallbacks in chain.items():
+            assert len(fallbacks) > 0, f"{model} has empty fallback chain"
 
 
 class TestSmartTimeouts:

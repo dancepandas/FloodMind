@@ -16,18 +16,24 @@ from typing import Any, Callable, Dict, List, Optional
 logger = logging.getLogger(__name__)
 
 # ── Fallback Chain ────────────────────────────────────────────────
-FALLBACK_CHAIN: Dict[str, List[str]] = {
-    "deepseek_v4_pro": ["deepseek_v4_flash", "qwen_36_plus", "glm_51"],
-    "deepseek_v4_flash": ["qwen_36_plus", "glm_51"],
-    "qwen_36_plus": ["qwen_35_plus", "deepseek_v4_flash"],
-    "qwen_35_plus": ["deepseek_v4_flash", "glm_5"],
-    "kimi_k2_6": ["kimi_k2_5", "deepseek_v4_flash"],
-    "kimi_k2_5": ["deepseek_v4_flash", "qwen_35_plus"],
-    "glm_51": ["glm_5", "deepseek_v4_flash"],
-    "glm_5": ["deepseek_v4_flash"],
-    "minimax_m25": ["minimax_m21", "deepseek_v4_flash"],
-    "minimax_m21": ["deepseek_v4_flash"],
-}
+# 动态构建：从 settings.json 的 provider.models 读取可用模型列表，
+# 按顺序选择下一个作为降级目标。不再硬编码具体模型名称。
+# 注意：此模块加载时 config 尚未初始化，fallback chain 由 ModelRouter.__init__ 动态构建。
+
+def _build_fallback_chain() -> Dict[str, List[str]]:
+    """从当前配置动态构建降级链。"""
+    try:
+        from floodmind.config.model_presets import get_models_list
+        models = get_models_list()
+        keys = [m["key"] for m in models]
+        chain: Dict[str, List[str]] = {}
+        for i, key in enumerate(keys):
+            candidates = keys[i + 1:i + 4]  # 后面最多 3 个作为降级候选
+            if candidates:
+                chain[key] = candidates
+        return chain
+    except Exception:
+        return {}
 
 # ── 智能超时配置 ──────────────────────────────────────────────────
 # 按工具名/任务类型分配不同超时
@@ -140,7 +146,7 @@ class ModelRouter:
         fallback_chain: Optional[Dict[str, List[str]]] = None,
         tracker: Optional[TokenUsageTracker] = None,
     ):
-        self.fallback_chain = fallback_chain or FALLBACK_CHAIN
+        self.fallback_chain = fallback_chain or _build_fallback_chain()
         self.tracker = tracker or TokenUsageTracker()
 
     def get_fallback(self, model_key: str) -> Optional[str]:
