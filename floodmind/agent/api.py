@@ -65,6 +65,10 @@ class Agent:
             每次工具执行前同步调用，返回 False 则拒绝该次调用（工具不执行，模型收到拒绝
             信息）。bare 模式默认放行所有调用，此钩子提供可选的安全网关。
         max_iterations: Agent 循环最大迭代轮数（默认 50）。
+        workspace: 工作区对象（``floodmind.agent.runtime.contracts.workspace.Workspace``）。
+            嵌入式宿主（如桌面端）显式注入，避免跨线程 contextvar 丢失。未传时回退到
+            ``set_workspace()`` 注入的 contextvar（网页版用法）。运行期可用 ``bind_workspace``
+            切换。
 
     Attributes:
         last_usage: 最近一次 run()/stream() 的 token 用量累加
@@ -86,6 +90,7 @@ class Agent:
         on_event: Optional[Callable[[Dict[str, Any]], None]] = None,
         permission_handler: Optional[Callable[[str, Dict[str, Any]], bool]] = None,
         max_iterations: int = 50,
+        workspace: Optional[Any] = None,
     ):
         if memory is None:
             from floodmind.memory.dual_memory import DualMemory
@@ -107,7 +112,16 @@ class Agent:
             system_prompt=system_prompt,
             permission_handler=permission_handler,
             max_iterations=max_iterations,
+            workspace=workspace,
         )
+
+    def bind_workspace(self, ws: Any) -> None:
+        """绑定/切换工作区（透传给底层 NativeFloodAgent）。
+
+        嵌入式宿主（桌面端）替代跨线程不可靠的 contextvar 注入：任意线程调用，
+        下一次 stream() 起在 SDK 子线程内重新生效。
+        """
+        self._agent.bind_workspace(ws)
 
     # ── 事件迭代与收集 ──────────────────────────────────────────────
     def _collect_event(self, event: Dict[str, Any]) -> None:

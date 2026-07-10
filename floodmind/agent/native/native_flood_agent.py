@@ -16,7 +16,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor, as_completed, wait, FIRST_COMPLETED
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, TYPE_CHECKING
 
 from floodmind.agent.native.types import (
     AgentLoopState,
@@ -44,8 +44,15 @@ from floodmind.agent.runtime.services.checkpoint_service import CheckpointServic
 from floodmind.agent.runtime.services.execution_journal_service import ExecutionJournalService
 from floodmind.agent.runtime.services.sandbox_service import SandboxService
 from floodmind.agent.runtime.services.tracing_service import TracingService
-from floodmind.agent.runtime.services.workspace_service import get_workspace
+from floodmind.agent.runtime.services.workspace_service import (
+    get_workspace,
+    set_workspace,
+)
 from floodmind.tools.session_context import get_current_session_output_dir
+
+if TYPE_CHECKING:
+    # 仅用于类型注解；运行时不需要，避免重模块的循环导入风险。
+    from floodmind.agent.runtime.contracts.workspace import Workspace
 
 logger = logging.getLogger(__name__)
 
@@ -258,11 +265,16 @@ class NativeFloodAgent:
         tracing_service: Optional[TracingService] = None,
         max_iterations: int = 10000,
         permission_handler: Optional[Callable[[str, Dict[str, Any]], bool]] = None,
+        workspace: Optional["Workspace"] = None,
         **kwargs,
     ):
         self.llm_service = llm_service
         self.memory = memory
         self.session_id = session_id
+        # 宿主显式注入的 workspace（线程无关，存为实例属性）。子线程 _run_loop 据此重绑
+        # floodmind_workspace contextvar，修复桌面端跨线程丢失的问题；None 时回退
+        # contextvar（网页版 set_workspace 注入）。与 PathService 同模式。
+        self._workspace = workspace
         self._enable_search = enable_search
         self._enable_reasoning = enable_reasoning
         self._agent_type = agent_type
@@ -408,22 +420,8 @@ class NativeFloodAgent:
 
     @staticmethod
     def _warmup_chronos():
-        with NativeFloodAgent._chronos_warmup_lock:
-            if NativeFloodAgent._chronos_warmup_done:
-                logger.info("Chronos-2 预热已完成，跳过重复预热")
-                return
-            NativeFloodAgent._chronos_warmup_done = True
-
-        def _warmup():
-            try:
-                from floodmind.skills.chronos_pipeline import get_pipeline
-                get_pipeline()
-            except Exception as e:
-                logger.warning(f"Chronos-2 预热失败（不影响功能）: {e}")
-                with NativeFloodAgent._chronos_warmup_lock:
-                    NativeFloodAgent._chronos_warmup_done = False
-        t = threading.Thread(target=_warmup, daemon=True, name="chronos-warmup-native")
-        t.start()
+        """Chronos-2 预报模型已外置为 MCP 服务，桌面端不再预热。"""
+        pass
 
     def _init_tools(self) -> None:
         from floodmind.tools import (
@@ -2212,9 +2210,23 @@ class NativeFloodAgent:
             logger.warning("构建经验上下文失败: %s", e)
             return ""
 
+    def bind_workspace(self, ws: Optional["Workspace"]) -> None:
+        """绑定/切换工作区（线程无关，存为实例属性）。
+
+        供嵌入式宿主（桌面端）使用：替代跨线程不可靠的 contextvar 注入——
+        宿主可在任意线程调用本方法，下一次 stream() 起在 SDK 子线程内据此重新
+        set_workspace()，使 _get_output_dir / _get_upload_dir / PathService 写读根一致。
+        """
+        self._workspace = ws
+
+    def _effective_workspace(self):
+        """当前生效的 Workspace：优先实例属性（宿主 bind_workspace / 构造传入），
+        回退到 contextvar（网页版 set_workspace 注入）。与 PathService 同模式。"""
+        return self._workspace or get_workspace()
+
     def _get_output_dir(self, session_id: Optional[str] = None) -> str:
         """主代理产物目录：优先 workspace.user_dir；回退到 session_manager 旧路径。"""
-        ws = get_workspace()
+        ws = self._effective_workspace()
         if ws is not None:
             d = str(ws.user_dir)
             os.makedirs(d, exist_ok=True)
@@ -2233,7 +2245,7 @@ class NativeFloodAgent:
     def _get_upload_dir(self, session_id: Optional[str] = None) -> str:
         """uploads 属 session 管理横切：优先 workspace.session_root，回退旧路径。"""
         sid = session_id or self.session_id
-        ws = get_workspace()
+        ws = self._effective_workspace()
         if ws is not None and sid:
             upload_dir = ws.session_root / sid / "uploads"
             upload_dir.mkdir(parents=True, exist_ok=True)
@@ -2281,6 +2293,13 @@ class NativeFloodAgent:
             def _run_loop() -> None:
                 try:
                     logger.info("[RUN_LOOP] === _run_loop started, session=%s ===", self.session_id)
+
+                    # 子线程不继承宿主在主线程注入的 floodmind_workspace contextvar：
+                    # 显式重绑，保证 _get_output_dir / _get_upload_dir / PathService 写读根
+                    # 在 SDK 子线程内全部一致（修复桌面端跨线程丢失导致的 C 盘写入）。
+                    _ws = self._effective_workspace()
+                    if _ws is not None:
+                        set_workspace(_ws)
 
                     # 是否从 checkpoint 恢复
                     effective_session_id = resume_session_id or self.session_id

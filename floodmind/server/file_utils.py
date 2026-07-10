@@ -204,25 +204,52 @@ def build_uploaded_file_preview(file_info: dict) -> dict:
         return preview
 
     if ext == '.csv':
-        import pandas as pd
-        df = pd.read_csv(file_path).head(20)
-        preview['preview_type'] = 'table'
-        preview['columns'] = [str(col) for col in df.columns.tolist()]
-        preview['rows'] = df.fillna('').astype(str).values.tolist()
+        import csv
+        try:
+            with open(file_path, 'r', encoding='utf-8', errors='replace') as f:
+                reader = csv.reader(f)
+                rows_data = []
+                for i, row in enumerate(reader):
+                    if i >= 20:
+                        break
+                    rows_data.append(row)
+            if rows_data:
+                preview['preview_type'] = 'table'
+                preview['columns'] = rows_data[0] if rows_data else []
+                preview['rows'] = rows_data[1:] if len(rows_data) > 1 else []
+            else:
+                preview['preview_type'] = 'text'
+                preview['content'] = '(空文件)'
+        except Exception as e:
+            preview['preview_type'] = 'text'
+            preview['content'] = f'CSV 预览失败: {e}'
         return preview
 
     if ext in {'.xlsx', '.xls'}:
-        import pandas as pd
-        excel = pd.ExcelFile(file_path)
-        preview['preview_type'] = 'excel'
-        preview['sheets'] = []
-        for sheet_name in excel.sheet_names[:5]:
-            df = pd.read_excel(file_path, sheet_name=sheet_name).head(12)
-            preview['sheets'].append({
-                'sheet_name': sheet_name,
-                'columns': [str(col) for col in df.columns.tolist()],
-                'rows': df.fillna('').astype(str).values.tolist(),
-            })
+        try:
+            from openpyxl import load_workbook
+        except ImportError:
+            preview['preview_type'] = 'text'
+            preview['content'] = 'Excel 预览需要 openpyxl 库。'
+            return preview
+        try:
+            wb = load_workbook(file_path, read_only=True, data_only=True)
+            preview['preview_type'] = 'excel'
+            preview['sheets'] = []
+            for sheet_name in wb.sheetnames[:5]:
+                ws = wb[sheet_name]
+                rows_data = []
+                for i, row in enumerate(ws.iter_rows(values_only=True, max_row=12)):
+                    rows_data.append([str(c) if c is not None else '' for c in row])
+                preview['sheets'].append({
+                    'sheet_name': sheet_name,
+                    'columns': rows_data[0] if rows_data else [],
+                    'rows': rows_data[1:] if len(rows_data) > 1 else [],
+                })
+            wb.close()
+        except Exception as e:
+            preview['preview_type'] = 'text'
+            preview['content'] = f'Excel 预览失败: {e}'
         return preview
 
     if ext == '.md':

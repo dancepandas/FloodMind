@@ -95,9 +95,6 @@ def get_config():
         'model_name': model_label,
         'tools': [
             {'name': 'read_data_file', 'desc': '读取数据文件'},
-            {'name': 'prepare_forecast_input', 'desc': '提取预测输入'},
-            {'name': 'flood_prediction', 'desc': 'Chronos-2 预测'},
-            {'name': 'model_validation', 'desc': '滚动精度验证'},
             {'name': 'write_word_document', 'desc': '生成 Word 报告'},
         ],
     })
