@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef, useCallback } from 'react'
 import { createPortal } from 'react-dom'
-import { Send, Paperclip, Brain, Globe, Database, ChevronDown, ListTree, ChevronRight } from 'lucide-react'
+import { Send, Paperclip, Brain, Globe, ChevronDown, ListTree, ChevronRight } from 'lucide-react'
 import { useIsMobile } from '@/hooks/use-mobile'
 import { FileCard } from '@/features/chat/components/FileCard'
 import type { ModelOption, SessionConfig, PendingPermissionAsk, UploadedFileItem, WorkflowPlan } from '@/types/app'
@@ -156,23 +156,23 @@ export default function WelcomePage({
       <div className="absolute inset-0 pointer-events-none overflow-hidden">
         {/* Primary glow */}
         <div className="absolute top-[5%] left-[15%] w-[600px] h-[600px] rounded-full opacity-[0.07] blur-[120px] animate-float"
-          style={{ background: 'radial-gradient(circle, var(--ocean-400), transparent 70%)' }} />
+          style={{ background: 'radial-gradient(circle, var(--wave), transparent 70%)' }} />
         {/* Secondary glow */}
         <div className="absolute bottom-[5%] right-[10%] w-[500px] h-[500px] rounded-full opacity-[0.05] blur-[100px]"
-          style={{ background: 'radial-gradient(circle, var(--teal-400), transparent 70%)', animation: 'float 5s ease-in-out infinite reverse' }} />
+          style={{ background: 'radial-gradient(circle, var(--reef), transparent 70%)', animation: 'float 5s ease-in-out infinite reverse' }} />
         {/* Accent glow */}
         <div className="absolute top-[40%] right-[25%] w-[300px] h-[300px] rounded-full opacity-[0.03] blur-[80px]"
-          style={{ background: 'radial-gradient(circle, var(--amber-400), transparent 70%)', animation: 'float 6s ease-in-out infinite' }} />
+          style={{ background: 'radial-gradient(circle, var(--sand), transparent 70%)', animation: 'float 6s ease-in-out infinite' }} />
         {/* Grid pattern */}
         <div className="absolute inset-0 opacity-[0.02]"
           style={{
-            backgroundImage: `linear-gradient(var(--ocean-400) 1px, transparent 1px), linear-gradient(90deg, var(--ocean-400) 1px, transparent 1px)`,
+            backgroundImage: `linear-gradient(var(--border) 1px, transparent 1px), linear-gradient(90deg, var(--border) 1px, transparent 1px)`,
             backgroundSize: '72px 72px',
           }} />
         {/* Flowing wave lines */}
         <svg className="absolute bottom-[20%] left-0 w-full h-[200px] opacity-[0.03]" viewBox="0 0 1200 200" preserveAspectRatio="none">
-          <path d="M0 100 C300 20, 600 180, 900 80 S1100 140, 1200 100" fill="none" stroke="var(--ocean-400)" strokeWidth="1.5" className="animate-wave-flow" />
-          <path d="M0 120 C250 60, 550 160, 850 100 S1050 160, 1200 120" fill="none" stroke="var(--teal-400)" strokeWidth="1" className="animate-wave-flow" style={{ animationDelay: '2s' }} />
+          <path d="M0 100 C300 20, 600 180, 900 80 S1100 140, 1200 100" fill="none" stroke="var(--wave)" strokeWidth="1.5" className="animate-wave-flow" />
+          <path d="M0 120 C250 60, 550 160, 850 100 S1050 160, 1200 120" fill="none" stroke="var(--reef)" strokeWidth="1" className="animate-wave-flow" style={{ animationDelay: '2s' }} />
         </svg>
       </div>
 
@@ -181,17 +181,17 @@ export default function WelcomePage({
         <div className={`flex flex-col items-center mb-6 ${transitionClass(0)}`} style={delayStyle(0)}>
           <div className="relative mb-5">
             <div className={`inline-flex items-center justify-center ${isMobile ? 'w-12 h-12' : 'w-14 h-14'} rounded-2xl animate-glow-pulse`}
-              style={{ background: 'var(--ocean-500)', boxShadow: '0 8px 32px rgba(37,99,168,0.25)' }}>
+              style={{ background: 'var(--wave)', boxShadow: '0 8px 32px rgba(14,165,233,0.22)' }}>
               <img src="/floodmind-icon.svg" alt="FloodMind" className={`${isMobile ? 'w-6 h-6' : 'w-8 h-8'}`} style={{ filter: 'brightness(0) invert(1)' }} />
             </div>
-            <div className="absolute -bottom-1 -right-1 w-4 h-4 rounded-full border-2 flex items-center justify-center" style={{ background: 'var(--teal-400)', borderColor: 'hsl(var(--background))' }}>
+            <div className="absolute -bottom-1 -right-1 w-4 h-4 rounded-full border-2 flex items-center justify-center" style={{ background: 'var(--reef)', borderColor: 'var(--bg)' }}>
               <svg width="6" height="6" viewBox="0 0 24 24" fill="white"><path d="M9 16.17L4.83 12l-1.42 1.41L9 19 21 7l-1.41-1.41L9 16.17z" /></svg>
             </div>
           </div>
-          <h1 className={`${isMobile ? 'text-[22px]' : 'text-[28px]'} font-semibold tracking-tight mb-2`} style={{ color: 'hsl(var(--foreground))', fontFamily: 'var(--font-display)' }}>
+          <h1 className={`${isMobile ? 'text-[22px]' : 'text-[28px]'} font-semibold tracking-tight mb-2`} style={{ color: 'var(--text-primary)', fontFamily: 'var(--font-display)' }}>
             FloodMind
           </h1>
-          <p className="text-[13px] text-center max-w-[360px] leading-relaxed" style={{ color: 'hsl(var(--muted-foreground))', opacity: 0.55 }}>
+          <p className="text-[13px] text-center max-w-[360px] leading-relaxed" style={{ color: 'var(--text-secondary)', opacity: 0.75 }}>
             智能水文预报助手 — 融合多源数据与 AI 推理，为流域洪水预报提供全链路决策支持
           </p>
         </div>
@@ -200,11 +200,11 @@ export default function WelcomePage({
         <div className={`w-full mb-8 ${transitionClass(80)}`} style={delayStyle(80)}>
           <div className="flex flex-col items-center text-center">
             <p className="text-[18px] font-medium tracking-wide leading-relaxed"
-              style={{ color: 'hsl(var(--foreground))', fontFamily: 'var(--font-display)', opacity: 0.85 }}>
+              style={{ color: 'var(--text-primary)', fontFamily: 'var(--font-display)', opacity: 0.9 }}>
               「{proverb.text}」
             </p>
             <p className="text-[11px] mt-2 tracking-wider"
-              style={{ color: 'hsl(var(--muted-foreground))', opacity: 0.35 }}>
+              style={{ color: 'var(--text-tertiary)', opacity: 0.7 }}>
               —— {proverb.source}
             </p>
           </div>
@@ -216,8 +216,9 @@ export default function WelcomePage({
             <div
               className="rounded-xl overflow-hidden"
               style={{
-                background: 'var(--glass-bg)',
-                border: '1px solid hsl(var(--border))',
+                background: 'var(--surface)',
+                border: '1px solid var(--border)',
+                boxShadow: 'var(--shadow)',
                 backdropFilter: 'blur(8px)',
               }}
             >
@@ -235,24 +236,24 @@ export default function WelcomePage({
 
               {/* Workflow steps */}
               {workflow?.steps && workflow.steps.length > 0 && (
-                <div style={{ borderTop: files.length > 0 ? '1px solid hsl(var(--border))' : 'none' }}>
+                <div style={{ borderTop: files.length > 0 ? '1px solid var(--border)' : 'none' }}>
                   <button
                     onClick={() => setWorkflowExpanded(!workflowExpanded)}
                     className="w-full flex items-center gap-2 px-3 py-2 text-[11px] transition-colors duration-200"
-                    onMouseEnter={(e) => { e.currentTarget.style.background = 'hsl(var(--muted))'; }}
+                    onMouseEnter={(e) => { e.currentTarget.style.background = 'var(--surface-2)'; }}
                     onMouseLeave={(e) => { e.currentTarget.style.background = 'transparent'; }}
                   >
-                    <ListTree size={12} style={{ color: 'var(--teal-400)' }} strokeWidth={1.8} />
-                    <div className="h-1 flex-1 rounded-full overflow-hidden max-w-[80px]" style={{ background: 'hsl(var(--muted))' }}>
-                      <div className="h-full rounded-full transition-all duration-500" style={{ width: `${(completedSteps / totalSteps) * 100}%`, background: 'var(--gradient-ocean-teal)' }} />
+                    <ListTree size={12} style={{ color: 'var(--reef)' }} strokeWidth={1.8} />
+                    <div className="h-1 flex-1 rounded-full overflow-hidden max-w-[80px]" style={{ background: 'var(--surface-3)' }}>
+                      <div className="h-full rounded-full transition-all duration-500" style={{ width: `${(completedSteps / totalSteps) * 100}%`, background: 'linear-gradient(90deg, var(--wave), var(--reef))' }} />
                     </div>
-                    <span className="font-semibold" style={{ color: 'hsl(var(--foreground))' }}>
+                    <span className="font-semibold" style={{ color: 'var(--text-primary)' }}>
                       {completedSteps}/{totalSteps}
                     </span>
-                    <span className="truncate max-w-[140px]" style={{ color: 'hsl(var(--muted-foreground))', opacity: 0.5 }}>
+                    <span className="truncate max-w-[140px]" style={{ color: 'var(--text-tertiary)' }}>
                       {workflow.steps.find(s => s.status === 'running')?.title || workflow.steps[workflow.steps.length - 1]?.title || ''}
                     </span>
-                    <span className="ml-auto flex-shrink-0" style={{ color: 'hsl(var(--muted-foreground))', opacity: 0.3 }}>
+                    <span className="ml-auto flex-shrink-0" style={{ color: 'var(--text-tertiary)' }}>
                       {workflowExpanded ? <ChevronDown size={12} /> : <ChevronRight size={12} />}
                     </span>
                   </button>
@@ -260,13 +261,13 @@ export default function WelcomePage({
                     <div className="px-3 pb-2 flex flex-col gap-0.5">
                       {workflow.steps.map((step, index) => (
                         <div key={step.key || `${index}`} className="flex items-center gap-2 py-1 px-2 rounded-md transition-colors duration-200"
-                          onMouseEnter={(e) => { e.currentTarget.style.background = 'hsl(var(--muted))'; }}
+                          onMouseEnter={(e) => { e.currentTarget.style.background = 'var(--surface-2)'; }}
                           onMouseLeave={(e) => { e.currentTarget.style.background = 'transparent'; }}
                         >
                           <div className="w-3 h-3 rounded-full flex items-center justify-center flex-shrink-0"
                             style={{
-                              background: step.status === "completed" ? 'var(--teal-50)' : step.status === "running" ? 'var(--ocean-50)' : step.status === "error" ? '#fef2f2' : 'hsl(var(--muted))',
-                              color: step.status === "completed" ? 'var(--teal-500)' : step.status === "running" ? 'var(--ocean-500)' : step.status === "error" ? 'hsl(var(--destructive))' : 'hsl(var(--muted-foreground))',
+                              background: step.status === "completed" ? 'var(--status-completed-bg)' : step.status === "running" ? 'var(--status-running-bg)' : step.status === "error" ? 'var(--status-error-bg)' : 'var(--surface-3)',
+                              color: step.status === "completed" ? 'var(--status-completed-text)' : step.status === "running" ? 'var(--status-running-text)' : step.status === "error" ? 'var(--status-error-text)' : 'var(--text-tertiary)',
                             }}
                           >
                             {step.status === "running" ? (
@@ -281,14 +282,14 @@ export default function WelcomePage({
                           </div>
                           <span className="text-[10px] truncate"
                             style={{
-                              color: step.status === "completed" ? 'var(--teal-600)' : step.status === "error" ? 'hsl(var(--destructive))' : step.status === "running" ? 'hsl(var(--foreground))' : 'hsl(var(--muted-foreground))',
-                              opacity: step.status === "pending" ? 0.45 : 1,
+                              color: step.status === "completed" ? 'var(--text-primary)' : step.status === "error" ? 'var(--alert)' : step.status === "running" ? 'var(--text-primary)' : 'var(--text-secondary)',
+                              opacity: step.status === "pending" ? 0.55 : 1,
                             }}
                           >
                             {step.title || step.label}
                           </span>
                           {step.status === "running" && (
-                            <span className="ml-auto text-[8px] font-semibold animate-pulse-subtle flex-shrink-0" style={{ color: 'var(--ocean-400)', opacity: 0.5 }}>
+                            <span className="ml-auto text-[8px] font-semibold animate-pulse-subtle flex-shrink-0" style={{ color: 'var(--wave)' }}>
                               执行中
                             </span>
                           )}
@@ -304,11 +305,11 @@ export default function WelcomePage({
 
         {/* Input card */}
         <div className={`w-full ${transitionClass(160)}`} style={delayStyle(160)}>
-          <div className="rounded-2xl overflow-hidden"
+          <div className="rounded-[var(--radius-prototype)] overflow-hidden"
             style={{
-              background: 'var(--gradient-card)',
-              border: '1px solid hsl(var(--border))',
-              boxShadow: '0 8px 40px -8px rgba(15,31,56,0.1), 0 0 0 1px rgba(37,99,168,0.03)',
+              background: 'var(--surface)',
+              border: '1px solid var(--border)',
+              boxShadow: 'var(--shadow-md)',
               backdropFilter: 'blur(12px)',
             }}
           >
@@ -316,10 +317,10 @@ export default function WelcomePage({
             <div className="flex items-end">
               <button
                 onClick={() => fileInputRef.current?.click()}
-                className="flex-shrink-0 p-3.5 transition-all duration-200 rounded-tl-2xl"
-                style={{ color: 'hsl(var(--muted-foreground))', opacity: 0.3 }}
-                onMouseEnter={(e) => { e.currentTarget.style.color = 'var(--ocean-500)'; e.currentTarget.style.opacity = '1'; e.currentTarget.style.background = 'var(--ocean-50)' }}
-                onMouseLeave={(e) => { e.currentTarget.style.color = 'hsl(var(--muted-foreground))'; e.currentTarget.style.opacity = '0.3'; e.currentTarget.style.background = 'transparent' }}
+                className="flex-shrink-0 p-3.5 transition-all duration-200 rounded-tl-[var(--radius-prototype)]"
+                style={{ color: 'var(--text-tertiary)', opacity: 0.5 }}
+                onMouseEnter={(e) => { e.currentTarget.style.color = 'var(--wave)'; e.currentTarget.style.opacity = '1'; e.currentTarget.style.background = 'var(--accent-light)' }}
+                onMouseLeave={(e) => { e.currentTarget.style.color = 'var(--text-tertiary)'; e.currentTarget.style.opacity = '0.5'; e.currentTarget.style.background = 'transparent' }}
                 title="上传文件"
               >
                 <Paperclip size={17} strokeWidth={1.7} />
@@ -350,8 +351,8 @@ export default function WelcomePage({
                 }}
                 placeholder="描述你的预报任务..."
                 rows={1}
-                className="flex-1 max-h-[160px] min-h-[56px] py-4 px-2 bg-transparent resize-none outline-none text-[15px] leading-relaxed placeholder:opacity-25"
-                style={{ color: 'hsl(var(--foreground))', fontFamily: 'var(--font-body)' }}
+                className="flex-1 max-h-[160px] min-h-[56px] py-4 px-2 bg-transparent resize-none outline-none text-[15px] leading-relaxed placeholder:opacity-30"
+                style={{ color: 'var(--text-primary)', fontFamily: 'var(--font-body)' }}
                 disabled={disabled}
               />
 
@@ -361,11 +362,11 @@ export default function WelcomePage({
                 className="flex-shrink-0 m-2 w-9 h-9 rounded-xl flex items-center justify-center transition-all duration-300 active:scale-90"
                 style={{
                   background: value.trim() && !disabled
-                    ? 'var(--gradient-ocean-teal)'
-                    : 'hsl(var(--muted))',
-                  color: value.trim() && !disabled ? 'white' : 'hsl(var(--muted-foreground))',
-                  boxShadow: value.trim() && !disabled ? '0 3px 12px rgba(37,99,168,0.25)' : 'none',
-                  opacity: value.trim() && !disabled ? 1 : 0.25,
+                    ? 'linear-gradient(135deg, var(--wave), var(--reef))'
+                    : 'var(--surface-3)',
+                  color: value.trim() && !disabled ? 'white' : 'var(--text-tertiary)',
+                  boxShadow: value.trim() && !disabled ? '0 3px 12px rgba(14,165,233,0.25)' : 'none',
+                  opacity: value.trim() && !disabled ? 1 : 0.35,
                 }}
               >
                 <Send size={15} strokeWidth={2} className={value.trim() ? 'ml-0.5' : ''} />
@@ -373,7 +374,7 @@ export default function WelcomePage({
             </div>
 
             {/* Divider */}
-            <div className="mx-4" style={{ borderBottom: '1px solid hsl(var(--border))', opacity: 0.4 }} />
+            <div className="mx-4" style={{ borderBottom: '1px solid var(--border)', opacity: 0.5 }} />
 
             {/* Feature toggles row */}
             <div className="flex items-center gap-2 px-4 py-2.5">
@@ -384,9 +385,9 @@ export default function WelcomePage({
                   onClick={() => setModelOpen(!modelOpen)}
                   className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-[12px] font-medium transition-all duration-200"
                   style={{
-                    background: 'var(--ocean-50)',
-                    border: '1px solid var(--ocean-200)',
-                    color: 'var(--ocean-500)',
+                    background: 'var(--accent-light)',
+                    border: '1px solid var(--wave)',
+                    color: 'var(--wave)',
                   }}
                 >
                   <ModelIcon modelKey={config.model_key} size={14} />
@@ -402,14 +403,14 @@ export default function WelcomePage({
                         top: menuPos ? menuPos.top : 0,
                         left: menuPos ? menuPos.left : 0,
                         minWidth: menuPos ? menuPos.minWidth : 220,
-                        background: 'rgba(255, 255, 255, 0.97)',
-                        border: '1px solid hsl(var(--border))',
-                        boxShadow: '0 16px 48px -12px rgba(15,31,56,0.18)',
+                        background: 'var(--surface)',
+                        border: '1px solid var(--border)',
+                        boxShadow: 'var(--shadow-md)',
                         transform: 'translateY(-100%)',
                         backdropFilter: 'blur(8px)',
                       }}
                     >
-                      <div className="px-3 py-2 text-[9px] font-bold tracking-[0.14em] uppercase" style={{ color: 'hsl(var(--muted-foreground))', opacity: 0.4, borderBottom: '1px solid hsl(var(--border))' }}>
+                      <div className="px-3 py-2 text-[9px] font-bold tracking-[0.14em] uppercase" style={{ color: 'var(--text-tertiary)', borderBottom: '1px solid var(--border)' }}>
                         选择模型
                       </div>
                       {sortedModels.map((model) => {
@@ -417,13 +418,13 @@ export default function WelcomePage({
                         return (
                           <button key={model.key} onClick={() => selectModel(model)}
                             className="w-full text-left px-3 py-2.5 text-[12px] flex items-center gap-2 transition-colors"
-                            style={{ background: active ? 'var(--ocean-50)' : 'transparent', color: active ? 'var(--ocean-500)' : 'hsl(var(--foreground))' }}
-                            onMouseEnter={(e) => { if (!active) e.currentTarget.style.background = 'hsl(var(--muted))' }}
+                            style={{ background: active ? 'var(--accent-light)' : 'transparent', color: active ? 'var(--wave)' : 'var(--text-primary)' }}
+                            onMouseEnter={(e) => { if (!active) e.currentTarget.style.background = 'var(--surface-2)' }}
                             onMouseLeave={(e) => { if (!active) e.currentTarget.style.background = 'transparent' }}
                           >
                             <ModelIcon modelKey={model.key} size={15} />
                             <span className="truncate">{model.label}</span>
-                            {active && <div className="ml-auto w-1.5 h-1.5 rounded-full" style={{ background: 'var(--ocean-500)' }} />}
+                            {active && <div className="ml-auto w-1.5 h-1.5 rounded-full" style={{ background: 'var(--wave)' }} />}
                           </button>
                         )
                       })}
@@ -439,10 +440,10 @@ export default function WelcomePage({
                 disabled={!currentModel?.supports_reasoning}
                 className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-[12px] font-medium transition-all duration-200 active:scale-[0.96]"
                 style={{
-                  background: config.enable_reasoning ? 'var(--ocean-50)' : 'transparent',
-                  border: `1px solid ${config.enable_reasoning ? 'var(--ocean-200)' : 'hsl(var(--border))'}`,
-                  color: config.enable_reasoning ? 'var(--ocean-500)' : 'hsl(var(--muted-foreground))',
-                  opacity: config.enable_reasoning ? 1 : (!currentModel?.supports_reasoning ? 0.15 : 0.4),
+                  background: config.enable_reasoning ? 'var(--accent-light)' : 'transparent',
+                  border: `1px solid ${config.enable_reasoning ? 'var(--wave)' : 'var(--border)'}`,
+                  color: config.enable_reasoning ? 'var(--wave)' : 'var(--text-secondary)',
+                  opacity: config.enable_reasoning ? 1 : (!currentModel?.supports_reasoning ? 0.15 : 0.55),
                   cursor: !currentModel?.supports_reasoning ? 'not-allowed' : 'pointer',
                 }}
                 title="深度思考"
@@ -456,10 +457,10 @@ export default function WelcomePage({
                 onClick={toggleSearch}
                 className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-[12px] font-medium transition-all duration-200 active:scale-[0.96]"
                 style={{
-                  background: config.enable_search ? 'var(--ocean-50)' : 'transparent',
-                  border: `1px solid ${config.enable_search ? 'var(--ocean-200)' : 'hsl(var(--border))'}`,
-                  color: config.enable_search ? 'var(--ocean-500)' : 'hsl(var(--muted-foreground))',
-                  opacity: config.enable_search ? 1 : 0.4,
+                  background: config.enable_search ? 'var(--accent-light)' : 'transparent',
+                  border: `1px solid ${config.enable_search ? 'var(--wave)' : 'var(--border)'}`,
+                  color: config.enable_search ? 'var(--wave)' : 'var(--text-secondary)',
+                  opacity: config.enable_search ? 1 : 0.55,
                   cursor: 'pointer',
                 }}
                 title="联网搜索"
@@ -469,7 +470,7 @@ export default function WelcomePage({
               </button>
 
               {/* Hint */}
-              <span className={`${isMobile ? 'hidden' : ''} ml-auto text-[10px] select-none`} style={{ color: 'hsl(var(--muted-foreground))', opacity: 0.2 }}>
+              <span className={`${isMobile ? 'hidden' : ''} ml-auto text-[10px] select-none`} style={{ color: 'var(--text-tertiary)', opacity: 0.6 }}>
                 Enter ↵
               </span>
             </div>

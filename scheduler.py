@@ -23,6 +23,7 @@ from floodmind.memory import DualMemory, SessionManager
 from floodmind.agent.native.model_client import ModelClient
 from floodmind.config.model_presets import get_default_model_key
 from floodmind.tools import set_session_context
+from floodmind.agent.runtime.services.workspace_service import build_workspace, set_workspace
 
 
 PROJECT_ROOT = Path(__file__).resolve().parent
@@ -69,8 +70,15 @@ def build_session_manager() -> SessionManager:
     })
 
 
+def _inject_workspace(session_manager: SessionManager, session_id: str):
+    """注入 Workspace + SESSION_CONTEXT（网页版回退到 session outputs，零回归）。"""
+    ws = build_workspace(session_id, session_root=session_manager.sessions_dir)
+    set_workspace(ws)
+    set_session_context(session_id=session_id, output_dir=str(ws.user_dir))
+
+
 def create_agent_for_session(session_manager: SessionManager, session_id: str):
-    set_session_context(session_id=session_id, output_dir=str(session_manager.get_output_dir(session_id)))
+    _inject_workspace(session_manager, session_id)
     model_key = get_default_model_key()
     llm_service = ModelClient.from_settings_with_preset(
         model_key,
@@ -90,7 +98,7 @@ def get_or_create_agent(session_manager: SessionManager, session_id: str):
     session_manager.touch_session(session_id)
     agent = session_manager.get_agent(session_id)
     if agent:
-        set_session_context(session_id=session_id, output_dir=str(session_manager.get_output_dir(session_id)))
+        _inject_workspace(session_manager, session_id)
         return agent
     _, agent = session_manager.get_or_create_session(
         session_id,
@@ -118,7 +126,7 @@ def execute_task(runtime: ScheduledTaskRuntime, session_manager: SessionManager,
     logger.info("开始执行定时任务: id=%s session=%s", task_id, session_id)
     try:
         agent = get_or_create_agent(session_manager, session_id)
-        set_session_context(session_id=session_id, output_dir=str(output_dir))
+        _inject_workspace(session_manager, session_id)
         result = agent.run(command)
         after = snapshot_outputs(output_dir)
         new_files = [Path(path) for path in sorted(after - before)]

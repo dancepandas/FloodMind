@@ -19,7 +19,7 @@ def validate_skill(skill_path):
         return False, "SKILL.md not found"
 
     # Read and validate frontmatter
-    content = skill_md.read_text()
+    content = skill_md.read_text(encoding='utf-8')
     if not content.startswith('---'):
         return False, "No YAML frontmatter found"
 
@@ -38,8 +38,8 @@ def validate_skill(skill_path):
     except yaml.YAMLError as e:
         return False, f"Invalid YAML in frontmatter: {e}"
 
-    # Define allowed properties
-    ALLOWED_PROPERTIES = {'name', 'description', 'license', 'allowed-tools', 'metadata', 'compatibility'}
+    # Define allowed properties（对齐 FloodMind base.py 实际支持的 frontmatter 字段）
+    ALLOWED_PROPERTIES = {'name', 'description', 'version', 'provides_tools', 'category', 'compatibility'}
 
     # Check for unexpected properties (excluding nested keys under metadata)
     unexpected_keys = set(frontmatter.keys()) - ALLOWED_PROPERTIES
@@ -90,6 +90,12 @@ def validate_skill(skill_path):
             return False, f"Compatibility must be a string, got {type(compatibility).__name__}"
         if len(compatibility) > 500:
             return False, f"Compatibility is too long ({len(compatibility)} characters). Maximum is 500 characters."
+
+    # body 行数软限制提示（对齐 base.py _SKILL_BODY_SOFT_LIMIT=500，超了不 fail，只提示精简）
+    body_text = content[match.end():]
+    body_lines = [l for l in body_text.split('\n') if l.strip()]
+    if len(body_lines) > 500:
+        return True, f"Skill is valid!（提示：body {len(body_lines)} 行超过 500 建议上限，建议把详细内容移至 references/）"
 
     return True, "Skill is valid!"
 

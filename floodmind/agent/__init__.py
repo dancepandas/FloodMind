@@ -1,13 +1,13 @@
 """
 智能体模块初始化
 
-统一入口：create_flood_agent() 工厂函数。
+统一入口：create_flood_agent() 工厂函数 / Agent SDK 类。
 LangChain FloodAgent 已移除，仅保留 Native Runtime。
 
 使用懒加载避免 import agent 时触发 config/settings 初始化。
 """
 
-__all__ = ["NativeFloodAgent", "create_flood_agent"]
+__all__ = ["NativeFloodAgent", "create_flood_agent", "Agent"]
 
 
 def __getattr__(name):
@@ -24,4 +24,7 @@ def __getattr__(name):
                 **kwargs,
             )
         return _create
+    if name == "Agent":
+        from floodmind.agent.api import Agent
+        return Agent
     raise AttributeError(f"module 'agent' has no attribute {name!r}")

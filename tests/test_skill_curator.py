@@ -98,7 +98,7 @@ class TestSkillCuratorArchive:
     """Test skill archive and restore."""
 
     def test_archive_moves_directory(self):
-        """Archive moves skill dir to .archive/."""
+        """Archive moves skill dir to .archived/."""
         with tempfile.TemporaryDirectory() as tmp:
             skill_dir = Path(tmp) / "test-skill"
             skill_dir.mkdir()
@@ -109,7 +109,7 @@ class TestSkillCuratorArchive:
             success = curator.archive_skill("test-skill")
             assert success
             assert not skill_dir.exists()
-            assert (Path(tmp) / ".archive" / "test-skill" / "SKILL.md").exists()
+            assert (Path(tmp) / ".archived" / "test-skill" / "SKILL.md").exists()
             assert curator.get_skill_stat("test-skill").status == "archived"
 
     def test_archive_nonexistent_returns_false(self):
@@ -119,7 +119,7 @@ class TestSkillCuratorArchive:
             assert not curator.archive_skill("nonexistent")
 
     def test_restore_moves_back(self):
-        """Restore moves skill back from .archive/."""
+        """Restore moves skill back from .archived/."""
         with tempfile.TemporaryDirectory() as tmp:
             skill_dir = Path(tmp) / "test-skill"
             skill_dir.mkdir()

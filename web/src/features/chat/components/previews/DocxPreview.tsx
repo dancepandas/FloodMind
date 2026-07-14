@@ -56,7 +56,7 @@ export function DocxPreview({ url }: DocxPreviewProps) {
   }
 
   return (
-    <div className="h-full overflow-auto bg-gray-100">
+    <div className="h-full overflow-auto bg-muted">
       {loading && (
         <div className="flex items-center justify-center h-32 text-muted-foreground text-sm">正在加载文档...</div>
       )}

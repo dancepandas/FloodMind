@@ -21,7 +21,7 @@ class PathResolveResult(BaseModel):
     raw_path: str = ""
     normalized_path: str = ""
     resolved_path: str = ""
-    source: Literal["absolute", "session_output", "upload_dir", "dialog_fallback", "project_root_fallback", "no_context_rejected"] = "project_root_fallback"
+    source: Literal["absolute", "user_dir", "upload_dir", "project_root_fallback", "no_context_rejected"] = "project_root_fallback"
     allowed: bool = True
     reason: str = ""
 

@@ -13,7 +13,7 @@ load_dotenv()
 
 from floodmind.config.settings import settings
 from floodmind.agent.native.model_client import ModelClient
-from floodmind.memory import SimpleMemory
+from floodmind.memory import DualMemory
 from floodmind.agent import create_flood_agent
 
 
@@ -83,10 +83,16 @@ def init_agent():
         logger.error("请设置环境变量: DASHSCOPE_API_KEY")
         raise
     
-    # 3. 初始化记忆系统
-    memory = SimpleMemory(
-        max_history=settings.agent.max_history,
-        context_window=settings.agent.context_window
+    # 3. 初始化记忆系统（统一使用 DualMemory：memory._turns 为唯一历史源）
+    import uuid
+    _session_id = f"main-{uuid.uuid4().hex[:8]}"
+    _persist_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", "sessions", _session_id, "memory")
+    os.makedirs(_persist_dir, exist_ok=True)
+    memory = DualMemory(
+        session_id=_session_id,
+        max_short_term=settings.agent.max_history,
+        context_window=settings.agent.context_window,
+        persist_dir=_persist_dir,
     )
     logger.info(f"✓ 记忆系统初始化完成 - 最大历史: {settings.agent.max_history}轮")
     
@@ -136,8 +142,8 @@ def main():
                 if user_input.lower() == 'memory':
                     summary = agent.get_memory_summary()
                     print(f"\n记忆摘要:")
-                    print(f"  最大历史: {summary['max_history']}轮")
-                    print(f"  当前消息数: {summary['message_count']}")
+                    print(f"  对话轮数: {summary.get('turn_count', 0)}")
+                    print(f"  长期事实: {summary.get('long_term_count', 0)}")
                     continue
                 
                 if not user_input:

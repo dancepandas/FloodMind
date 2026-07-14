@@ -1,8 +1,8 @@
-# FloodMind 二次开发指南
+# FloodMind 二次开发指南 v2
 
-## 概述
+> **更新**: 2026-07-14 — workspace 实例属性 + Web 模块化拆分 + worktree 隔离 + Chronos 迁出
 
-FloodMind 是基于大语言模型的智能洪水预报 Agent 系统。本文档面向开发者，介绍如何将 FloodMind 集成到第三方系统、构建自定义界面、扩展模型支持和开发新的 Skill。
+FloodMind 是基于大语言模型的智能水文预报 Agent 系统。本文档面向开发者，介绍如何将 FloodMind 集成到第三方系统、构建自定义界面、扩展模型支持和开发 Skill/Plugin。
 
 ---
 
@@ -11,14 +11,30 @@ FloodMind 是基于大语言模型的智能洪水预报 Agent 系统。本文档
 1. [架构概述](#1-架构概述)
 2. [环境搭建](#2-环境搭建)
 3. [Python API 集成](#3-python-api-集成)
+   - 3.1 [Quick Start: Agent SDK](#31-quick-start-agent-sdk)
+   - 3.2 [流式事件协议](#32-流式事件协议)
+   - 3.3 [工具架构](#33-工具架构)
+   - 3.4 [编程式 Skill 注册](#34-编程式-skill-注册)
+   - 3.5 [记忆与会话管理](#35-记忆与会话管理)
+   - 3.6 [Advanced: NativeFloodAgent & create_flood_agent](#36-advanced-nativefloodagent--create_flood_agent)
 4. [HTTP API 集成](#4-http-api-集成)
-5. [自定义 Skill 开发](#5-自定义-skill-开发)
-6. [系统提示词与身份定制](#6-系统提示词与身份定制)
-7. [模型与 Provider 扩展](#7-模型与-provider-扩展)
-8. [构建自定义 Web 界面](#8-构建自定义-web-界面)
-9. [会话管理与记忆系统](#9-会话管理与记忆系统)
+5. [MCP 集成](#5-mcp-集成)
+   - 5.1 [MCP Server 配置](#51-mcp-server-配置)
+   - 5.2 [运行时 MCP 管理](#52-运行时-mcp-管理)
+   - 5.3 [MCP Client API](#53-mcp-client-api)
+6. [Skill 系统](#6-skill-系统)
+   - 6.1 [创建 Skill](#61-创建-skill)
+   - 6.2 [SKILL.md 格式](#62-skillmd-格式)
+   - 6.3 [Skill 发现机制](#63-skill-发现机制)
+   - 6.4 [Skill CRUD 工具](#64-skill-crud-工具)
+   - 6.5 [Skill 维护 (SkillCurator)](#65-skill-维护-skillcurator)
+7. [系统提示词与身份定制](#7-系统提示词与身份定制)
+8. [模型与 Provider 扩展](#8-模型与-provider-扩展)
+9. [构建自定义 Web 界面](#9-构建自定义-web-界面)
 10. [TUI 界面扩展](#10-tui-界面扩展)
-11. [项目结构参考](#11-项目结构参考)
+11. [Plugin 系统开发](#11-plugin-系统开发)
+12. [测试与调试](#12-测试与调试)
+13. [项目结构参考](#13-项目结构参考)
 
 ---
 
@@ -32,18 +48,25 @@ FloodMind 是基于大语言模型的智能洪水预报 Agent 系统。本文档
                          │
 ┌────────────────────────▼─────────────────────────────┐
 │                 NativeFloodAgent                     │
-│  ┌─────────┐  ┌──────────┐  ┌────────────────────┐  │
-│  │ Planner │  │ Executor │  │ Orchestrator        │  │
-│  │  规划器  │  │  执行器  │  │  编排器 (主控循环)   │  │
-│  └─────────┘  └──────────┘  └────────────────────┘  │
+│  ┌──────────────────────────────────────────────┐   │
+│  │  orchestrator_executor (NativeAgentExecutor)  │   │
+│  │  specialist_executor  (NativeAgentExecutor)   │   │
+│  │  ├─ 状态机: created→awaiting_llm↔awaiting_tool │   │
+│  │  ├─ 双 registry: orchestrator / specialist    │   │
+│  │  └─ EventBus → SSE / 流式回调                  │   │
+│  └──────────────────────────────────────────────┘   │
 └────────────────────────┬─────────────────────────────┘
                          │
 ┌────────────────────────▼─────────────────────────────┐
 │                   服务层                              │
-│  ┌──────────────┐ ┌──────────┐ ┌──────────────────┐ │
-│  │  ModelClient │ │  Memory  │ │  Tool Registry   │ │
-│  │  LLM 服务    │ │  记忆系统  │ │  工具注册表       │ │
-│  └──────────────┘ └──────────┘ └──────────────────┘ │
+│  ┌──────────┐ ┌──────────┐ ┌──────────────────────┐ │
+│  │ModelClient│ │  Memory  │ │ ToolExecutionService │ │
+│  │ LLM 服务  │ │  记忆系统 │ │ 权限/沙箱/日志       │ │
+│  └──────────┘ └──────────┘ └──────────────────────┘ │
+│  ┌──────────┐ ┌──────────┐ ┌──────────────────────┐ │
+│  │McpClient │ │ Skill    │ │ SkillCurator         │ │
+│  │ Pool     │ │ Registry │ │ 使用统计/巡检/归档    │ │
+│  └──────────┘ └──────────┘ └──────────────────────┘ │
 └──────────────────────────────────────────────────────┘
 ```
 
@@ -51,14 +74,16 @@ FloodMind 是基于大语言模型的智能洪水预报 Agent 系统。本文档
 
 | 模块 | 文件 | 职责 |
 |------|------|------|
-| **NativeFloodAgent** | `floodmind/agent/native/native_flood_agent.py` | Agent 生命周期管理、token 流式输出、并行委派 |
-| **NativeAgentExecutor** | `floodmind/agent/native/executor.py` | 工具调用循环、消息组装、产物检测 |
+| **NativeFloodAgent** | `floodmind/agent/native/native_flood_agent.py` | Agent 生命周期、双 registry（orchestrator/specialist）、MCP/Skill 管理工具、流式输出、并行委派 |
+| **NativeAgentExecutor** | `floodmind/agent/native/executor.py` | 状态机驱动的 LLM↔Tool 循环、排队消息注入、上下文压缩 |
 | **ModelClient** | `floodmind/agent/native/model_client.py` | 统一的 LLM 服务接口（stream_chat / chat / invoke） |
-| **DualMemory** | `floodmind/memory/dual_memory.py` | 双层记忆系统（短期 + 长期 + LLM 压缩） |
-| **Skills** | `floodmind/skills/` | 自动发现式技能注册（13 个内置 Skill） |
-| **Tools** | `floodmind/tools/` | 工具层（Glob、Grep、Bash、Read、Write、Edit 等） |
-| **MCP Client** | `floodmind/agent/mcp_client.py` | MCP 协议客户端（stdio/SSE） |
-| **Todo 管理** | `floodmind/tools/todo_tools.py` | 多步骤任务列表跟踪 |
+| **DualMemory** | `floodmind/memory/dual_memory.py` | 扁平 `_turns` 对话历史 + LLM 压缩 + 持久化 |
+| **SkillRegistry** | `floodmind/skills/registry.py` | Skill 单例注册表（3 发现根、CWD 无关、线程安全） |
+| **SkillCurator** | `floodmind/skills/skill_curator.py` | Skill 生命周期管理（使用追踪/stale 检测/归档/巡检） |
+| **McpClientPool** | `floodmind/agent/mcp_client.py` | MCP 连接池（热插拔、连接/注册解耦） |
+| **Tools** | `floodmind/tools/` | AgentTool↔ToolSpec 双抽象 + 内置工具（Glob/Grep/Bash/Read/Write/Edit 等） |
+
+**Agent 双执行器说明**：NativeFloodAgent 内部维护两个 `NativeAgentExecutor` 实例——`orchestrator_executor`（主代理，拥有全部工具和管理权限）和 `specialist_executor`（子代理，白名单工具，无委派/管理权限）。不存在独立的 Planner/Orchestrator 类——规划功能通过 `create_plan`/`update_plan`/`exit_plan_mode` 工具实现，编排通过 `SubAgent`/`ParallelTask` 工具实现。
 
 ---
 
@@ -84,9 +109,17 @@ pip install "floodmind[all]"        # 全部依赖（含 GPU）
 
 ### 配置
 
-配置文件 `~/.floodmind/settings.json`。首次启动自动创建模板。
+配置文件位于 `~/.floodmind/` 目录下，按职责分为独立文件：
 
-最小配置示例（DashScope）：
+| 文件 | 说明 |
+|------|------|
+| `settings.json` | 主配置（模型、Provider、Agent 参数） |
+| `mcp.json` | MCP Server 连接配置（独立管理） |
+| `search.json` | WebSearch 搜索引擎配置 |
+| `SOUL.md` | 智能体身份定义 |
+| `AGENTS.md` | 全局行为规则 |
+
+首次启动自动创建模板。最小配置示例（DashScope）：
 
 ```json
 {
@@ -109,114 +142,269 @@ pip install "floodmind[all]"        # 全部依赖（含 GPU）
 }
 ```
 
+MCP Server 配置独立存储在 `~/.floodmind/mcp.json`：
+
+```json
+{
+  "servers": [
+    {
+      "name": "knowledge",
+      "transport": "stdio",
+      "command": "python",
+      "args": ["~/.floodmind/mcp/knowledge/server.py"],
+      "enabled": true
+    }
+  ]
+}
+```
+
 ---
 
 ## 3. Python API 集成
 
-### 3.1 最小集成：创建 Agent 并执行任务
+### 3.1 Quick Start: Agent SDK
+
+推荐使用 `Agent` SDK 类将 FloodMind 嵌入已有系统。不需要 `settings.json`，纯代码配置：
 
 ```python
-from floodmind.agent.native.model_client import ModelClient
-from floodmind.memory import DualMemory
-from floodmind.agent import create_flood_agent
+from floodmind import Agent, ModelClient, build_agent_tool
 
-# 1. 创建 LLM 服务（从 settings.json 读取配置）
-llm = ModelClient.from_settings()
-
-# 2. 创建记忆系统
-memory = DualMemory(
-    session_id="my-session-001",
-    max_short_term=20,
-    context_window=32768,
-)
-
-# 3. 创建 Agent
-agent = create_flood_agent(
-    llm_service=llm,
-    memory=memory,
-    session_id="my-session-001",
-)
-
-# 4. 流式对话
-for chunk in agent.stream("分析敖江流域霍口水库的流量数据"):
-    chunk_type = chunk.get("type", "")
-    content = chunk.get("content", "")
-    if chunk_type == "token":
-        print(content, end="", flush=True)
-    elif chunk_type == "reasoning":
-        print(f"\n[思考] {content}")
-    elif chunk_type == "tool_start":
-        print(f"\n[调用工具] {chunk.get('tool_name', '')}")
-    elif chunk_type == "error":
-        print(f"\n[错误] {content}")
-
-# 5. 单次执行（非流式）
-result = agent.run("生成敖江流域水文预报报告")
-print(result.final_output)
-print("产物文件:", result.artifacts)
-```
-
-### 3.2 指定模型
-
-```python
-# 使用 settings.json 中的某个 preset 模型
-llm = ModelClient.from_settings_with_preset(
-    model_key="deepseek-v4-flash",
-    enable_reasoning=True,
-)
-
-# 或者直接指定连接信息
+# 1. 创建 LLM 客户端（任意 OpenAI 兼容接口）
 llm = ModelClient(
     api_key="sk-xxx",
-    base_url="https://api.deepseek.com/v1",
-    model_name="deepseek-chat",
-    temperature=0.3,
-    max_tokens=8192,
+    base_url="https://dashscope.aliyuncs.com/compatible-mode/v1",
+    model_name="deepseek-v4-flash",
 )
+
+# 2. 将系统模块封装为工具
+def query_station(station: str) -> str:
+    """查询监测站实时数据"""
+    return f"{station} 水位 32.5m, 流量 120m³/s"
+
+tools = [
+    build_agent_tool(
+        func=query_station,
+        name="QueryStation",
+        description="查询监测站实时数据",
+        is_readonly=True,
+    ),
+]
+
+# 3. 创建 Agent（bare 模式，不加载内置工具/权限/MCP）
+agent = Agent(
+    llm=llm,
+    tools=tools,
+    system_prompt="你是水文预报助手，帮用户查询监测数据并运行预报模型。",
+    session_id="my-system-001",
+)
+
+# 4. 非流式
+result = agent.run("查一下霍口水库水位")
+
+# 5. 流式 — 对接自建前端
+for event in agent.stream("查一下霍口水库水位"):
+    if event["type"] == "answer_delta":
+        print(event["content"], end="", flush=True)
+    elif event["type"] == "action_start":
+        print(f"\n[调用工具] {event['tool_name']}")
+    elif event["type"] == "final_text":
+        print(f"\n[最终结果] {event['content']}")
 ```
 
-### 3.3 直接调用 LLM（不通过 Agent）
+**Agent 构造参数：**
+
+| 参数 | 类型 | 默认 | 说明 |
+|------|------|------|------|
+| `llm` | `ModelClient` | (必填) | LLM 客户端 |
+| `tools` | `list[AgentTool\|ToolSpec]` | `None` | 自定义工具列表 |
+| `system_prompt` | `str` | `None` | 自定义系统提示词 |
+| `memory` | `DualMemory` | `None` | 记忆系统（不传自动创建） |
+| `session_id` | `str` | `""` | 会话 ID（默认 `"sdk-agent"`） |
+| `enable_search` | `bool` | `False` | 启用 WebSearch |
+| `enable_reasoning` | `bool` | `False` | 启用推理模式 |
+| `on_event` | `Callable[[dict], None]` | `None` | 流式事件回调 |
+| `permission_handler` | `Callable[[str, dict], bool]` | `None` | 工具审批钩子 |
+| `max_iterations` | `int` | `50` | 最大循环轮数 |
+| `workspace` | `Workspace` | `None` | 工作区对象。嵌入式宿主（桌面端）显式注入，避免跨线程 contextvar 丢失。构造时或通过 `bind_workspace()` 传入均可。未传时回退到 `set_workspace()` 注入的 contextvar（网页版） |
+
+**结果访问：** 每次 `run()`/`stream()` 后自动重置。
+
+| 属性 | 类型 | 说明 |
+|------|------|------|
+| `agent.last_usage` | `dict` | token 用量（`prompt_tokens`/`completion_tokens`/`total_tokens`） |
+| `agent.artifacts` | `list[dict]` | `file_generated`/`image_generated` 事件 |
+| `agent.raw` | `NativeFloodAgent` | 底层实例（高级用法） |
+
+**工作区注入（桌面端嵌入）：**
 
 ```python
-llm = ModelClient.from_settings()
+from floodmind.agent.runtime.services.workspace_service import build_workspace
+from floodmind.agent.runtime.contracts.workspace import Workspace
 
-# 非流式单次调用
-response = llm.invoke("什么是洪水预报模型？")
-print(response.content)
+# 方式 A: 构造时传入
+ws = build_workspace(session_id="sess-1", user_dir=Path("E:/MyProject"))
+agent = Agent(llm=llm, tools=tools, workspace=ws)
 
-# 非流式多轮对话
-response = llm.chat([
-    {"role": "system", "content": "你是水文领域的专家。"},
-    {"role": "user", "content": "什么是新安江模型？"},
-])
-print(response.content)
+# 方式 B: 运行期切换（线程安全，任意线程调用）
+agent.bind_workspace(ws)
 ```
 
-### 3.4 管理多个会话
+> `bind_workspace()` 存为普通实例属性（非 contextvar），确保 SDK 内部子线程（`_run_loop`）不受
+> 宿主线程上下文影响。桌面端 sidecar 推荐使用此 API 替代模块级 `set_workspace()`。
+
+### 3.2 流式事件协议
+
+`agent.stream()` 产出结构化 dict，`on_event` 回调同样收到：
+
+**回答 / 思考：**
+
+| event.type | 含义 |
+|------------|------|
+| `answer_delta` | 回答文本增量 |
+| `thought_delta` | 思考过程增量（reasoning 时） |
+| `final_text` | 最终完整回答 |
+
+**工具 / 计划：**
+
+| event.type | 含义 |
+|------------|------|
+| `action_start` | 工具调用开始（`tool_name`, `status`, `call_id`） |
+| `action_end` | 工具调用结束（`tool_name`, `content`） |
+| `workflow_plan` | 执行计划（`title`, `steps`） |
+| `workflow_step` | 步骤进度（`step_key`, `status`） |
+
+**生命周期 / 系统：**
+
+| event.type | 含义 |
+|------------|------|
+| `llm_step_start` / `llm_step_end` | LLM 调用边界 |
+| `retry_attempt` | 模型重试（`attempt`） |
+| `context_compress_start` / `_done` | 上下文压缩 |
+| `token_usage` | token 用量累计 |
+| `file_generated` / `image_generated` | 产物事件 |
+| `heartbeat` | 心跳（可忽略） |
+| `error` / `llm_token_error` | 错误 |
+
+### 3.3 工具架构
+
+FloodMind 工具体系有两层抽象：
+
+```
+编写层（开发者使用）              运行时层（Agent 使用）
+┌──────────────────┐            ┌──────────────────┐
+│ AgentTool        │  to_tool_  │ ToolSpec          │
+│ (pydantic)       │──spec()──→│ (dataclass)       │
+│                  │            │                  │
+│ name, description│            │ name, description│
+│ func, parameters │            │ func, parameters │
+│ is_readonly      │            │ permission_policy│
+│ is_destructive   │            │ is_readonly      │
+│ is_concurrency_  │            │ is_destructive   │
+│ safe             │            │ is_concurrency_  │
+└──────────────────┘            │ safe             │
+                                └──────────────────┘
+```
+
+`AgentTool.to_tool_spec()` 是唯一的转换入口。`Agent` SDK 接受两种类型——内部自动归一化。
+
+**`build_agent_tool()` 完整签名：**
 
 ```python
-from floodmind.memory import SessionManager
+def build_agent_tool(
+    func: Callable,                        # 工具函数
+    name: Optional[str] = None,            # 默认 func.__name__
+    description: Optional[str] = None,     # 默认 func.__doc__
+    args_schema: Optional[Type[BaseModel]] = None,  # Pydantic 参数模型
+    parameters: Optional[Dict[str, Any]] = None,    # 原始 JSON Schema
+    is_readonly: bool = True,              # 只读工具（plan 模式可用）
+    is_destructive: bool = False,          # 破坏性操作
+    is_concurrency_safe: bool = True,      # 并发安全
+    check_permissions_fn: Optional[Callable] = None,   # 自定义权限检查
+    validate_input_fn: Optional[Callable] = None,      # 输入校验
+    permission_policy: Optional[ToolPermissionPolicy] = None,  # 权限策略
+) -> AgentTool:
+```
 
-# SessionManager 自动管理会话生命周期
-session_mgr = SessionManager({
+**权限策略** (policy_type)：
+
+| 策略 | 含义 | plan 模式 |
+|------|------|-----------|
+| `readonly` | 纯读取 | ✅ 允许 |
+| `state_write` | 状态写入（文件/配置） | ❌ 拒绝 |
+| `exec` | 系统命令执行 | ❌ 拒绝 |
+| `network` | 网络访问（MCP/搜索） | ❌ 拒绝 |
+| `ask` | 需要用户确认 | ❌ 拒绝 |
+
+### 3.4 编程式 Skill 注册
+
+不需要 SKILL.md 文件，直接用代码注册。`register_skill()` 委托 `SkillRegistry` 单例：
+
+```python
+from floodmind import Skill, register_skill
+
+skill = Skill(
+    name="water-forecast",
+    description="TRIGGER when: 用户要求进行水位预报时",
+    prompt="## 水位预报流程\n1. 读取监测数据\n2. 运行新安江模型\n3. 输出预报结果",
+)
+register_skill(skill)
+```
+
+编程式注册的 skill 不落盘，重启后消失。持久化 skill 用 [Skill CRUD 工具](#64-skill-crud-工具) 或直接写 `SKILL.md`。
+
+### 3.5 记忆与会话管理
+
+```python
+from floodmind.memory import DualMemory, SessionManager
+
+# 独立使用记忆系统
+memory = DualMemory(session_id="my-session-001", context_window=32768)
+memory.add_user_message("查水位")
+
+# SessionManager 管理会话生命周期
+sm = SessionManager({
     "max_active_sessions": 16,
     "idle_timeout_minutes": 30,
     "data_dir": "./data",
 })
+sid = sm.create_session()
+```
 
-# 创建会话
-session_id = session_mgr.create_session()
+> **注意**: `DualMemory` 的 `max_short_term` 和 `max_long_term` 参数已弃用（`_short_term` 子系统已删除）。传入非默认值会触发 `DeprecationWarning`。
 
-# 恢复会话
-agent = create_flood_agent(
-    llm_service=llm,
-    memory=DualMemory(
-        session_id=session_id,
-        max_short_term=20,
-        context_window=32768,
-    ),
-    session_id=session_id,
-)
+### 3.6 Advanced: NativeFloodAgent & create_flood_agent
+
+SDK `Agent` 类封装了 `NativeFloodAgent(bare=True)`。如需完整功能（内置工具、MCP、权限、Skill 系统），使用 `create_flood_agent`：
+
+```python
+from floodmind.agent.native.model_client import ModelClient
+from floodmind.memory import DualMemory
+from floodmind import create_flood_agent
+
+llm = ModelClient.from_settings()
+memory = DualMemory(session_id="full-mode-001", context_window=32768)
+
+agent = create_flood_agent(llm_service=llm, memory=memory, session_id="full-mode-001")
+
+# 流式 — 同 SDK Agent 协议
+for chunk in agent.stream("分析敖江流域霍口水库的流量数据"):
+    chunk_type = chunk.get("type", "")
+    if chunk_type == "answer_delta":
+        print(chunk.get("content", ""), end="", flush=True)
+
+# 非流式
+result = agent.run("生成敖江流域水文预报报告")
+```
+
+直接使用 LLM（不通过 Agent）：
+
+```python
+llm = ModelClient.from_settings()
+response = llm.invoke("什么是洪水预报模型？")
+response = llm.chat([
+    {"role": "system", "content": "你是水文领域的专家。"},
+    {"role": "user", "content": "什么是新安江模型？"},
+])
 ```
 
 ---
@@ -225,82 +413,136 @@ agent = create_flood_agent(
 
 启动服务：`floodmind serve --port 8000`
 
-### 4.1 基础端点
+| 端点 | 方法 | 说明 |
+|------|------|------|
+| `/api/chat` | POST | 流式聊天（SSE/NDJSON） |
+| `/api/init` | POST | 初始化会话 Agent |
+| `/api/sessions` | GET | 列出所有会话 |
+| `/api/sessions/<id>` | GET / DELETE | 会话详情 / 删除 |
+| `/api/upload` | POST | 上传文件（multipart） |
+| `/api/files/<id>/download` | GET | 文件下载 |
+| `/api/models` | GET | 模型列表 |
+| `/api/health` | GET | 健康检查 |
 
-| 端点 | 方法 | Content-Type | 说明 |
-|------|------|-------------|------|
-| `/api/chat` | POST | application/json | 流式聊天（SSE/NDJSON） |
-| `/api/init` | POST | application/json | 初始化会话 Agent |
-| `/api/sessions` | GET | — | 列出所有会话 |
-| `/api/sessions/<id>` | GET / DELETE | — | 会话详情 / 删除 |
-| `/api/upload` | POST | multipart/form-data | 上传文件 |
-| `/api/files/<id>/download` | GET | — | 文件下载 |
-| `/api/models` | GET | — | 模型列表 |
-| `/api/health` | GET | — | 健康检查 |
-
-### 4.2 流式聊天示例
-
-**请求：**
-
-```json
-POST /api/chat
-Content-Type: application/json
-
-{
-  "session_id": "my-session-001",
-  "message": "分析这份水位数据",
-  "enable_reasoning": true,
-  "model_key": "deepseek-v4-flash"
-}
-```
-
-**响应（SSE 流）：**
-
-```
-data: {"type":"reasoning","content":"让我先查看数据..."}
-data: {"type":"token","content":"根据数据"}
-data: {"type":"token","content":"分析..."}
-data: {"type":"artifact","content":{"path":"/outputs/report.docx","label":"分析报告"}}
-data: {"type":"done","content":""}
-```
-
-### 4.3 Python 客户端示例
+**流式聊天示例：**
 
 ```python
-import httpx
-import json
+import httpx, json
 
 def chat(session_id, message):
     url = "http://localhost:8000/api/chat"
-    payload = {
+    with httpx.stream("POST", url, json={
         "session_id": session_id,
         "message": message,
         "enable_reasoning": True,
-    }
-
-    with httpx.stream("POST", url, json=payload, timeout=300) as response:
+    }, timeout=300) as response:
         for line in response.iter_lines():
             if line.startswith("data: "):
                 event = json.loads(line[6:])
-                event_type = event.get("type")
-                content = event.get("content", "")
-                if event_type == "token":
-                    print(content, end="", flush=True)
-                elif event_type == "reasoning":
-                    print(f"\n[思考] {content}")
-                elif event_type == "done":
+                t = event.get("type")
+                if t == "answer_delta":
+                    print(event["content"], end="", flush=True)
+                elif t == "stream_end":
                     print()
-                elif event_type == "error":
-                    print(f"\n[错误] {content}")
+                elif t == "error":
+                    print(f"\n[错误] {event['content']}")
 ```
 
 ---
 
-## 5. 自定义 Skill 开发
+## 5. MCP 集成
 
-Skill 是 FloodMind 的扩展单元。每个 Skill 是一个目录，包含一个 `SKILL.md` 文件和可选的脚本、参考文档。
+FloodMind 的 MCP 集成遵循**运行时热插拔**准则：系统运行状态下随时接入随时发现，不需要重启。连接与注册解耦——`McpClientPool` 只管理连接，`build_mcp_tool_specs()` 构造 ToolSpec，调用方自行注册到 registry。
 
-### 5.1 创建 Skill
+### 5.1 MCP Server 配置
+
+`~/.floodmind/mcp.json`（独立于 settings.json）：
+
+```json
+{
+  "servers": [
+    {
+      "name": "rag-server",
+      "transport": "sse",
+      "url": "http://localhost:9000/sse",
+      "enabled": true
+    },
+    {
+      "name": "data-tool",
+      "transport": "stdio",
+      "command": "python",
+      "args": ["./mcp/data_server.py"],
+      "enabled": true
+    }
+  ]
+}
+```
+
+Agent 启动时自动连接所有 `enabled: true` 的 server。
+
+### 5.2 运行时 MCP 管理
+
+Agent 自身可调用以下管理工具（仅 orchestrator 可用）：
+
+**LoadMcpServer** — 运行时动态接入 MCP server：
+
+```
+Agent 调用 LoadMcpServer(name="new-server", transport="sse", url="http://...")
+  → 连接 → 发现工具 → 注册到双 registry → 立即可用
+```
+
+**ListMcpServers** — 列举所有已接入的 MCP server（含工具数、连接状态）。
+
+**DisconnectMcpServer** — 断开指定 server 并清理其工具：
+
+```
+Agent 调用 DisconnectMcpServer(name="rag-server")
+  → 断开连接 → unregister_prefix("mcp:rag-server:") → 清理完成
+```
+
+### 5.3 MCP Client API
+
+SDK 中直接使用 MCP 客户端：
+
+```python
+from floodmind import get_mcp_client_pool, build_mcp_tool_specs
+
+pool = get_mcp_client_pool()
+
+# 连接 server
+conn = pool.connect_server({
+    "name": "my-mcp",
+    "transport": "sse",
+    "url": "http://localhost:9000/sse",
+})
+
+# 构造 ToolSpec（连接与注册解耦——调用方自行注册）
+specs = build_mcp_tool_specs(conn, "my-mcp", pool.call_tool)
+# specs 是 List[ToolSpec]，可直接传给 Agent(tools=specs)
+
+# 列举 / 断开
+for s in pool.list_servers():
+    print(f"{s['name']}: {len(s['tools'])} tools, connected={s['connected']}")
+
+pool.disconnect_server("my-mcp")
+```
+
+### 5.4 安装现成 MCP Server
+
+如果已有 MCP Server 代码目录：
+
+```bash
+cp -r <来源目录> <项目根>/mcp/<server-name>/
+pip install -r <项目根>/mcp/<server-name>/requirements.txt
+```
+
+然后接入：写 `mcp.json`（持久）或调 `LoadMcpServer`（热插拔）。Agent 自身的 `mcp-builder` skill 中有完整指引。
+
+---
+
+## 6. Skill 系统
+
+### 6.1 创建 Skill
 
 ```bash
 # 从模板创建
@@ -314,92 +556,101 @@ skills/my-skill/
   assets/           # 可选：静态资源
 ```
 
-### 5.2 SKILL.md 格式
+### 6.2 SKILL.md 格式
 
 ```markdown
 ---
 name: my-skill
-description: "TRIGGER when: 用户输入中提到'水位预报'或'流量预测'时。DO NOT TRIGGER when: 用户只是询问模型概念而非执行预报。"
+description: "TRIGGER when: 用户输入中提到'水位预报'时"
 version: 1.0
+category: execution
 ---
 
 # My Skill
 
 ## 触发条件
 - 用户明确要求进行水位预报
-- 用户提供了包含水位数据的文件路径
 
 ## 执行步骤
 1. 读取用户提供的数据文件
 2. 运行预报模型（使用 `scripts/forecast.py`）
 3. 生成预报报告
 
-## 输入要求
-- CSV 文件，包含 `date`、`water_level` 列
-
-## 输出
-- 预报报告（PDF）
-- 预报结果（Excel）
-
 ## 注意事项
 - 数据必须为连续的时间序列
-- 结果仅供参考，请人工复核
 ```
 
-### 5.3 Skill 的脚本路径
+### 6.3 Skill 发现机制
 
-Agent 调用脚本时使用 Skill 目录下的绝对路径：
+FloodMind 从 **3 个根目录**自动发现 Skill（CWD 无关，基于包定位）：
+
+| 根目录 | 用途 |
+|--------|------|
+| `floodmind/skills/` | 内置 Skill（随包发布） |
+| `<项目根>/skills/` | 用户/项目 Skill（**CreateSkill 落盘目标**） |
+| `<项目根>/.claude/skills/` | Claude Code 兼容 |
+
+Skill 加载时自动进行威胁扫描（`scan_content_threats`）。11 个内置 Skill：chronos、csv、data-analysis、doc-coauthoring、docx、mcp-builder、pdf、plotting、pptx、skill-creator、xlsx。
+
+### 6.4 Skill CRUD 工具
+
+Agent 可通过以下工具**自维护 Skill**（仅 orchestrator 可用，全部 `state_write` 除 ListSkills）：
+
+| 工具 | 功能 | 示例 |
+|------|------|------|
+| **ListSkills** | 列出所有 skill（name/version/category/source） | 盘点现有 skill |
+| **CreateSkill** | 创建新 skill，写 `SKILL.md` 到 writable_root | `CreateSkill(name="my-skill", description="...", body="## 流程\n...")` |
+| **UpdateSkill** | 修改已有 skill（append/replace_body/replace_section/remove_section） | `UpdateSkill(name="my-skill", action="append", content="## 备注\n...")` |
+| **RemoveSkill** | 归档 skill → `.archived/`（可恢复，非硬删） | `RemoveSkill(name="old-skill")` |
+| **RefreshSkills** | 重扫所有发现根 + 重建 system prompt | 新增/编辑文件后使其生效 |
+
+**安全**：所有写操作经过 `_validate_skill_name`（拒绝 `/`、`\\`、`..`、`.` 开头），防止路径穿越。
+
+### 6.5 Skill 维护 (SkillCurator)
+
+`SkillCurator` 自动追踪 skill 使用情况并定期巡检：
+
+```
+GetSkill 调用 → record_skill_usage(name, success=True/False)
+  ├─ 累计 total_uses / success_count / failure_count
+  └─ 自动 re-activate（若之前为 stale/archived）
+
+定期巡检（每 6 小时，Agent 启动时触发）：
+  ├─ 标记 stale: active + 30 天未使用
+  ├─ 归档: stale + 90 天未使用 → archive_skill → .archived/
+  └─ 重复检测: Jaccard bigram similarity ≥ 0.7
+
+恢复: curator.restore_skill(name) → .archived/ → writable_root
+```
+
+SDK 中使用：
 
 ```python
-# Agent 会这样执行
-python /absolute/path/to/floodmind/skills/my-skill/scripts/forecast.py \
-    --input /session/upload_dir/data.csv \
-    --output /session/output_dir/forecast.xlsx
+from floodmind.skills.skill_curator import get_skill_curator
+
+curator = get_skill_curator()
+curator.record_usage("my-skill", success=True)   # 手动记录
+stats = curator.get_stats()                       # 使用统计
+stale = curator.find_stale_skills()               # 长期未用
+dups = curator.find_duplicates(threshold=0.7)     # 重复检测
+curator.run_maintenance()                         # 手动巡检
 ```
 
-### 5.4 注册 Skill
+### 6.6 安装现成 Skill
 
-FloodMind 启动时自动扫描 `floodmind/skills/` 目录，无需手动注册。系统会提取所有 `SKILL.md` 的 YAML front-matter 中的 `name` 和 `description`，并将 `description` 作为触发条件写入 Agent 的 system prompt。
+如果用户提供了已有 Skill 目录（含 SKILL.md + scripts/ 等），直接复制到 writable_root 并刷新：
 
-### 5.5 高级：带 MCP 的 Skill
-
-```yaml
----
-name: advanced-hydro
-version: 1.0
-provides_tools:
-  - forecast_water_level
-  - analyze_water_quality
----
+```bash
+cp -r <来源目录> <项目根>/skills/<skill-name>/
 ```
 
-对应脚本：
-
-```python
-# scripts/forecast_water_level.py
-import argparse
-
-def main():
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--input", required=True, help="输入数据路径")
-    parser.add_argument("--output", required=True, help="输出路径")
-    parser.add_argument("--model", default="chronos", help="预报模型")
-    args = parser.parse_args()
-
-    # 实现预报逻辑
-    ...
-
-if __name__ == "__main__":
-    main()
-```
+然后 Agent 调 `RefreshSkills` 使其立即生效，调 `GetSkill(name)` 验证。Agent 自身的 `skill-creator` skill 中有完整指引。
 
 ---
 
-## 6. 系统提示词与身份定制
+## 7. 系统提示词与身份定制
 
-FloodMind 的系统提示词采用分层可替换架构，支持从配置文件到代码级的多种定制方式。
-
-### 6.1 架构概述
+### 7.1 提示词分层架构
 
 ```
 ┌─────────────────────────────────────────────┐
@@ -415,165 +666,63 @@ FloodMind 的系统提示词采用分层可替换架构，支持从配置文件�
 └─────────────────────────────────────────────┘
 ```
 
-### 6.2 编辑 SOUL.md（推荐，无需改代码）
+### 7.2 编辑 SOUL.md
 
-首次启动后在 `~/.floodmind/SOUL.md` 自动生成默认身份文件。编辑此文件即可替换智能体的身份定义：
+`~/.floodmind/SOUL.md`（首次启动自动生成），直接编辑即可替换智能体身份。
 
-```markdown
-你是 MyBot，一个专注于数据分析的智能助手。
+### 7.3 Agent 类型系统
 
-## 角色职责
-1. 接收用户的数据文件和分析需求
-2. 执行统计分析、可视化、报告生成
+FloodMind 内置 4 种 Agent 类型，各有不同的工具权限集：
 
-## 核心特质
-- 严谨的数据驱动型分析
-- 输出结果必须附带数据来源
-```
+| 类型 | 权限 | 用途 |
+|------|------|------|
+| `build` | 全部工具 + 委派 + MCP 管理 + Skill CRUD | 默认，完整访问 |
+| `plan` | 只读工具 + `create_plan`/`update_plan` | 规划模式，禁写 |
+| `general` | 通用工具，无委派/管理权限 | 子代理角色 |
+| `explore` | 只读搜索工具 | 代码探索 |
 
-当 `SOUL.md` 不存在或为空时，系统使用内置的 `DEFAULT_FLOODMIND_IDENTITY` 作为 fallback。
-
-**代码中的加载逻辑：**
-
-```python
-from floodmind.profile.soul import load_soul_md, DEFAULT_FLOODMIND_IDENTITY
-
-soul = load_soul_md() or DEFAULT_FLOODMIND_IDENTITY
-```
-
-### 6.3 编辑 AGENTS.md（项目级行为规则）
-
-AGENTS.md 在两个级别读取并按顺序拼接到系统提示词中：
-
-| 路径 | 作用域 | 典型用途 |
-|------|--------|----------|
-| `~/.floodmind/AGENTS.md` | 全局 | 跨项目的通用规则（字体、配色、文档模板等） |
-| `<工作目录>/AGENTS.md` | 项目级 | 特定项目的约束（绘图风格、数据规范等） |
-
-AGENTS.md 内容示例：
-
-```markdown
-## 绘图默认风格
-- 必须设置图例
-- 中文优先，使用 SimSun 字体
-- 图表配色使用蓝色系
-
-## 文档生成偏好
-- Word 文件使用公司标准模板
-- 报告末尾附免责声明
-```
-
-### 6.4 覆盖 Agent 类型提示词
-
-通过 `settings.json` 为特定 Agent 类型设置自定义 system prompt，该方式会**完全替换**（而非追加）该 Agent 类型的提示词：
+通过 `~/.floodmind/settings.json` 为特定类型覆盖 prompt：
 
 ```json
 {
   "agent": {
     "agents": {
       "build": {
-        "prompt": "你是一个专注于代码审查的 Agent。使用 {tool_descriptions} 等工具...\n{skill_catalog}"
-      },
-      "plan": {
-        "prompt": "你处于规划模式，只读分析和规划，不可修改文件。"
+        "prompt": "你是专注于代码审查的 Agent...\n{skill_catalog}"
       }
     }
   }
 }
 ```
 
-Prompt 模板中可用的占位符：`{skill_catalog}`、`{tool_descriptions}`、`{project_context}`、`{session_env}`、`{current_time_context}`。
+可用占位符：`{skill_catalog}`、`{tool_descriptions}`、`{project_context}`、`{session_env}`、`{current_time_context}`。
 
-### 6.5 代码级定制：组合 guidance 常量
+### 7.4 代码级定制
 
-`floodmind/profile/guidance.py` 提供 11 个独立的行为指导常量，二次开发时可自由组合：
-
-| 常量 | 内容 |
-|------|------|
-| `WORK_METHOD_GUIDANCE` | 工作方式（自己完成 vs 子代理委派） |
-| `SCHEDULED_TASK_GUIDANCE` | 定时任务处理规则 |
-| `KNOWLEDGE_GUIDANCE` | MCP 知识库工具使用规则 |
-| `TODO_GUIDANCE` | 多步骤任务规划与 TodoWrite 使用 |
-| `PREFERENCE_GUIDANCE` | 用户偏好处理规则 |
-| `TOOL_EXECUTION_GUIDANCE` | 工具执行细节 |
-| `PARALLEL_AGENT_GUIDANCE` | 并行子代理规则 |
-| `WORKFLOW_GUIDANCE` | 工作流 5 步 |
-| `WORK_PRINCIPLES_GUIDANCE` | 工作原则 8 条 |
-| `ARTIFACT_JUDGMENT_GUIDANCE` | 产物意图判定 + 文档声明 |
-| `OUTPUT_FORMAT_GUIDANCE` | 输出规范 |
-| `AOJIANG_STATION_GUIDANCE` | 敖江流域站点编码（业务专属） |
-
-子类化示例（只保留核心指导，去除敖江业务逻辑）：
+`floodmind/profile/guidance.py` 提供 12 个独立行为指导常量（`WORK_METHOD_GUIDANCE`、`TOOL_EXECUTION_GUIDANCE`、`WORKFLOW_GUIDANCE` 等），子类化 `NativeFloodAgent` 可自由组合：
 
 ```python
 from floodmind.agent.native.native_flood_agent import NativeFloodAgent
-from floodmind.profile.soul import load_soul_md, DEFAULT_FLOODMIND_IDENTITY
-from floodmind.profile.guidance import (
-    WORK_METHOD_GUIDANCE,
-    TOOL_EXECUTION_GUIDANCE,
-    WORKFLOW_GUIDANCE,
-    WORK_PRINCIPLES_GUIDANCE,
-    OUTPUT_FORMAT_GUIDANCE,
-)
+from floodmind.profile.soul import load_soul_md
+from floodmind.profile.guidance import WORK_METHOD_GUIDANCE, WORKFLOW_GUIDANCE
 
 class MyAgent(NativeFloodAgent):
     @classmethod
     def _build_stable_prompt(cls, skill_catalog, tool_descriptions, tool_registry=None):
-        soul = load_soul_md() or DEFAULT_FLOODMIND_IDENTITY
         return "\n\n".join([
-            soul,
+            load_soul_md(),
             WORK_METHOD_GUIDANCE,
-            TOOL_EXECUTION_GUIDANCE,
             WORKFLOW_GUIDANCE,
-            WORK_PRINCIPLES_GUIDANCE,
-            OUTPUT_FORMAT_GUIDANCE,
             f"## 可用技能\n{skill_catalog}",
             f"## 可用工具\n{tool_descriptions}",
         ])
 ```
 
-### 6.6 提示词优先级
-
-| 优先级 | 来源 | 说明 |
-|--------|------|------|
-| 1（最高） | `agent.agents.<name>.prompt` in settings.json | 完全覆盖某 Agent 类型 |
-| 2 | `~/.floodmind/SOUL.md` | 替换身份段，guidance 层不受影响 |
-| 3（默认） | `DEFAULT_FLOODMIND_IDENTITY` | SOUL.md 缺失时的 fallback |
-
-AGENTS.md 始终作为独立层（Slot #3）注入，不受上述优先级影响。
-
-### 6.7 Profile 路径隔离
-
-通过环境变量 `FLOODMIND_HOME` 可将整个配置目录重定向，实现不同部署场景的隔离：
-
-```bash
-# 开发环境
-set FLOODMIND_HOME=C:\dev\floodmind_config
-floodmind web
-
-# 生产环境
-set FLOODMIND_HOME=C:\prod\floodmind_config
-floodmind web
-```
-
-`FLOODMIND_HOME` 目录下的文件结构：
-
-```
-<FLOODMIND_HOME>/
-├── settings.json     # 主配置
-├── SOUL.md           # 身份定义
-├── AGENTS.md         # 全局指令
-├── sessions/         # 会话数据
-└── memories/         # 记忆存储
-```
-
 ---
 
-## 7. 模型与 Provider 扩展
+## 8. 模型与 Provider 扩展
 
-### 7.1 添加新的 LLM Provider
-
-在 `~/.floodmind/settings.json` 中添加：
+在 `~/.floodmind/settings.json` 中添加 Provider：
 
 ```json
 {
@@ -587,11 +736,8 @@ floodmind web
       "models": {
         "my-model": {
           "name": "我的模型",
-          "description": "性能优秀的通用模型",
           "maxTokens": 8192,
-          "temperature": 0.3,
-          "supportsReasoning": true,
-          "supportsVision": false
+          "supportsReasoning": true
         }
       }
     }
@@ -599,29 +745,27 @@ floodmind web
 }
 ```
 
-### 7.2 Python 中使用自定义模型
+Python 中使用：
 
 ```python
-from floodmind.agent.native.model_client import ModelClient
+from floodmind import ModelClient
 
-# 方式 1：从 settings.json 中按 key 选择
+# 从 settings 按 key 选择
 llm = ModelClient.from_settings_with_preset("my-model")
 
-# 方式 2：直接用连接信息构建
+# 直接用连接信息
 llm = ModelClient(
     api_key="sk-xxx",
     base_url="https://api.my-platform.com/v1",
     model_name="my-model",
     temperature=0.3,
     max_tokens=8192,
-    enable_thinking=True,
 )
 
-# 非流式调用
+# 非流式
 response = llm.invoke("你好")
-print(response.content)
 
-# 流式调用（Agent 内部使用）
+# 流式（Agent 内部使用）
 for event in llm.stream_chat([{"role": "user", "content": "你好"}]):
     if event.type == "token":
         print(event.content, end="", flush=True)
@@ -629,306 +773,91 @@ for event in llm.stream_chat([{"role": "user", "content": "你好"}]):
 
 ---
 
-## 8. 构建自定义 Web 界面
+## 9. 构建自定义 Web 界面
 
-### 8.1 集成内置 Web 前端
-
-FloodMind 的 Web 前端（`web/` 目录）是用 React 19 + TypeScript + Vite 7 构建的。前端通过 `/api/*` REST 端点与后端通信。
+内置前端是 React 19 + TypeScript + Vite 7（`web/` 目录）：
 
 ```bash
-cd web
-npm install
+cd web && npm install
 npm run dev        # 开发模式 (localhost:5173)
-npm run build      # 生产构建
+npm run build      # 生产构建 → web/dist/
 ```
 
-生产模式下，Flask 后端会自动 serve `web/dist/` 中的静态文件。
-
-### 8.2 构建全新前端（仅使用后端 API）
-
-如果你要构建全新的前端（如 Vue、Next.js、移动端），只需调用 HTTP API：
-
-```javascript
-// 示例：初始化会话
-const initRes = await fetch('http://localhost:13014/api/init', {
-  method: 'POST',
-  headers: { 'Content-Type': 'application/json' },
-  body: JSON.stringify({ session_id: 'my-session-001' })
-});
-
-// 示例：流式聊天（EventSource / fetch streaming）
-const chatRes = await fetch('http://localhost:13014/api/chat', {
-  method: 'POST',
-  headers: { 'Content-Type': 'application/json' },
-  body: JSON.stringify({
-    session_id: 'my-session-001',
-    message: '分析水位数据',
-    enable_reasoning: true,
-  })
-});
-
-const reader = chatRes.body.getReader();
-const decoder = new TextDecoder();
-while (true) {
-  const { done, value } = await reader.read();
-  if (done) break;
-  const text = decoder.decode(value);
-  // 解析 SSE 格式的 token 流
-  const lines = text.split('\n');
-  for (const line of lines) {
-    if (line.startsWith('data: ')) {
-      const event = JSON.parse(line.slice(6));
-      handleStreamEvent(event);
-    }
-  }
-}
-```
-
-### 8.3 自定义 Web 服务端口和配置
-
-```python
-from web_server import app
-
-# 自定义端口启动
-app.run(host="0.0.0.0", port=8080, threaded=True)
-
-# 或使用 waitress（生产模式）
-from waitress import serve
-serve(app, host="0.0.0.0", port=8080, threads=8)
-```
-
----
-
-## 9. 会话管理与记忆系统
-
-### 9.1 会话生命周期
-
-```
-创建 → 活跃（对话中）→ 空闲（超时后）→ 清理（过期后）
-```
-
-```python
-from floodmind.memory import SessionManager
-
-sm = SessionManager({
-    "max_active_sessions": 16,
-    "idle_timeout_minutes": 30,
-    "session_retention_days": 30,
-    "data_dir": "./data",
-})
-
-# 创建会话
-sid = sm.create_session()
-
-# 获取会话信息
-session = sm.get_session(sid)
-print(session.title, session.created_at, session.last_active_at)
-
-# 列出所有活跃会话
-for s in sm.list_sessions():
-    print(f"{s['id']}: {s.get('title', '无标题')}")
-```
-
-### 9.2 对话历史导出
-
-```python
-from floodmind.memory import export_session_markdown
-
-# 导出为 Markdown
-markdown = export_session_markdown("session-xxx")
-Path("conversation.md").write_text(markdown, encoding="utf-8")
-
-# CLI 方式
-# floodmind session export session-xxx -o conversation.md
-```
-
-### 9.3 自定义记忆后端
-
-`DualMemory` 存储对话历史到 `data/sessions/<id>/memory/chat_history.json`。如需自定义存储（如数据库），实现 `DualMemory` 的 `save_chat_history()` 和 `load_chat_history()` 方法即可。
+构建全新前端只需调用 HTTP API（见 [§4 HTTP API 集成](#4-http-api-集成)）。
 
 ---
 
 ## 10. TUI 界面扩展
 
-TUI（Terminal User Interface）基于 Textual 框架，位于 `floodmind/tui/`。
-
-### 启动
-
 ```bash
-floodmind tui          # 启动 TUI（后台自动启动 web server）
-floodmind tui --port 8080  # 指定端口
+floodmind tui                # 启动 TUI（后台自动启动 web server）
+floodmind tui --port 8080    # 指定端口
 ```
 
-### 自定义 TUI 主题
-
-编辑 `floodmind/tui/tui.css`：
-
-```css
-Screen {
-  background: #1a1a2e;
-}
-
-ChatScreen {
-  background: #16213e;
-}
-
-AssistantMessage {
-  color: #e0e0e0;
-  border: solid #0f3460;
-}
-
-UserMessage {
-  color: #ffffff;
-  background: #0f3460;
-}
-```
+自定义 CSS 主题：编辑 `floodmind/tui/tui.css`。
 
 ---
 
-## 11. 项目结构参考
+## 11. Plugin 系统开发
 
-```
-FloodMind/
-├── floodmind/                        # Python 主包
-│   ├── agent/                        # Agent 核心
-│   │   ├── native/                   #   Native Agent Runtime
-│   │   │   ├── native_flood_agent.py #     Agent 主体（生命周期、流式输出）
-│   │   │   ├── executor.py           #     工具调用循环
-│   │   │   ├── model_client.py       #     统一 LLM 服务 (stream_chat/chat/invoke)
-│   │   │   ├── planner.py            #     任务规划器
-│   │   │   ├── message_builder.py    #     消息组装
-│   │   │   └── types.py              #     数据类型 + DAG 拓扑
-│   │   ├── runtime/                  #   Runtime 服务
-│   │   │   ├── contracts/            #     数据契约 (messages, tools, events)
-│   │   │   └── services/             #     服务 (ask, permission, path)
-│   │   ├── mcp_client.py             #   MCP 客户端
-│   │   └── scheduled_task_runtime.py #   定时任务
-│   ├── config/                       # 配置
-│   │   ├── settings.py               #   settings.json 读取与模型
-│   │   ├── model_presets.py          #   model preset 解析
-│   │   └── provider_registry.py      #   Provider 注册与管理
-│   ├── profile/                      # 身份与提示词定制
-│   │   ├── soul.py                   #   SOUL.md 加载与种子
-│   │   └── guidance.py               #   行为指导常量（可组合）
-│   ├── memory/                       # 记忆与经验
-│   │   ├── dual_memory.py            #   双层记忆（短期 + 长期 + LLM 压缩）
-│   │   ├── experience_tree.py        #   经验树索引
-│   │   ├── task_experience.py        #   任务经验
-│   │   ├── session_manager.py        #   会话管理
-│   │   └── skill_generator.py        #   经验到 Skill 自动生成
-│   ├── models/                       # 模型模块（旧）
-│   ├── skills/                       # Skills（13 个）
-│   │   ├── aojiang-hydro/            #   敖江水文模型
-│   │   ├── TSLM/                     #   时序预测
-│   │   ├── csv/ xlsx/ docx/ pptx/ pdf/  # 文件处理
-│   │   ├── plotting/                 #   绘图
-│   │   ├── data-analysis/            #   数据分析
-│   │   ├── canvas-design/            #   创意设计
-│   │   ├── doc-coauthoring/          #   文档协作
-│   │   ├── mcp-builder/              #   MCP 构建
-│   │   └── skill-creator/            #   Skill 创建器
-│   ├── tools/                        # Agent 工具层
-│   ├── server/                       # SSE 服务器
-│   ├── tui/                          # 终端 TUI
-│   │   ├── app.py                    #   TUI 应用入口
-│   │   ├── screens/chat.py           #   对话界面
-│   │   ├── screens/home.py           #   主页
-│   │   ├── widgets/                  #   组件（Logo、Message、Prompt、Footer）
-│   │   └── dialogs/                  #   对话框（Models、Sessions、MCP）
-│   ├── tui-ts/                       # TUI TypeScript 前端
-│   └── cli.py                        # CLI 入口
-├── web/                              # React 前端
-│   └── src/
-│       ├── features/                 #   功能模块（chat, context, sidebar, scheduler）
-│       ├── components/ui/            #   UI 组件（shadcn/ui）
-│       └── hooks/                    #   React Hooks
-├── main.py                           # CLI 交互（旧入口）
-├── start.py                          # 统一启动入口（Web + Scheduler）
-├── web_server.py                     # Web 服务（Flask）
-├── scheduler.py                      # 定时任务调度器
-├── pyproject.toml                    # 包配置
-├── Dockerfile                        # Docker 构建
-└── docs/                             # 文档
-    └── DEVELOPER_GUIDE.md
-```
+Plugin 是比 Skill 更强大的 Python 代码扩展机制，可直接注册工具到 Agent、hook 事件。
 
----
-
-## 更多资源
-
-- **README**: 项目概述、快速开始、CLI 参考
-- **AGENTS.md**: Agent 行为指令和项目规则
-- **settings 模板**: `floodmind/config/settings_template.json`（首次启动自动创建）
-- **API 文档**: 见 [HTTP API 集成](#4-http-api-集成) 章节
-
----
-
-## 12. Plugin 系统开发
-
-Plugin 是比 Skill 更强大的扩展机制。Skill 只是 Markdown 指令文件，Plugin 则是 Python 代码，可以直接注册工具到 Agent、hook 事件、修改 Agent 初始化行为。
-
-### 12.1 创建 Plugin
-
-创建一个 Python 文件，继承 `FloodmindPlugin`：
+### 11.1 创建 Plugin
 
 ```python
 # ~/.floodmind/plugins/my_plugin.py
 from floodmind.plugin import FloodmindPlugin
-from floodmind.tools.agent_tool import build_agent_tool
+from floodmind import build_agent_tool
 
 class MyPlugin(FloodmindPlugin):
-    """我的自定义插件"""
-
     @property
     def version(self) -> str:
         return "1.0.0"
 
     def get_tools(self) -> list:
-        """注册自定义工具到 Agent"""
         def _hello(name: str = "World") -> str:
             return f"Hello, {name}!"
-
-        return [
-            build_agent_tool(
-                func=_hello,
-                name="hello",
-                description="Say hello to someone",
-            ),
-        ]
+        return [build_agent_tool(func=_hello, name="hello", description="Say hello")]
 
     def get_hooks(self) -> dict:
-        """注册事件 hook"""
         def on_tool_done(event: dict):
             if event.get("type") == "action_end":
                 print(f"Tool completed: {event.get('tool_name')}")
-
-        return {
-            "action_end": on_tool_done,
-        }
+        return {"action_end": on_tool_done}
 
     def on_agent_init(self, agent) -> None:
-        """Agent 初始化后调用，可修改 agent 配置"""
+        """Agent 初始化后调用"""
         pass
 ```
 
-放入 `~/.floodmind/plugins/` 目录，FloodMind 启动时自动加载。
+### 11.2 Plugin 发现与加载
 
-### 12.2 Plugin 目录结构
-
-支持两种模式：
+两种格式：
 
 ```
-# 单文件插件
+# 单文件
 ~/.floodmind/plugins/my_plugin.py
 
-# 目录插件
+# 目录
 ~/.floodmind/plugins/my_plugin/
-├── plugin.json           # {"name": "...", "version": "...", "entry": "main"}
-├── main.py               # 插件代码
-└── requirements.txt      # 可选：插件依赖
+├── plugin.json           # {"name":"...","version":"...","entry":"main"}
+├── main.py
+└── requirements.txt
 ```
 
-### 12.3 Plugin / Skill / MCP 对比
+`PluginLoader` 自动发现并加载：
+
+```python
+from floodmind.plugin import PluginLoader
+
+loader = PluginLoader()
+for p in loader.discover():
+    print(f"{p.name} v{p.version}: {p.description}")
+```
+
+Plugin 在 `NativeFloodAgent._init_tools()` 期间加载，工具注册到 `_orchestrator_registry`。
+
+### 11.3 Plugin / Skill / MCP 对比
 
 | 扩展方式 | 编写难度 | 能力 | 适用场景 |
 |---------|--------|------|---------|
@@ -936,14 +865,160 @@ class MyPlugin(FloodmindPlugin):
 | **Plugin** | Python 代码 | 工具 + hook + Agent 配置 | 深度集成、自定义逻辑 |
 | **MCP** | 独立进程 | 跨语言、标准化协议 | 外部服务、多 Agent 共享 |
 
-### 12.4 项目级 Plugin 和调试
+---
+
+## 12. 测试与调试
+
+### 12.1 SDK Agent 测试
+
+参考 `tests/test_sdk_agent.py`（40 tests），覆盖 SDK 全路径。关键模式：
+
+```python
+from unittest.mock import MagicMock
+from floodmind import Agent, ModelClient
+
+# Mock LLM 避免真实网络调用
+mock_llm = MagicMock(spec=ModelClient)
+mock_llm.stream_chat.return_value = [...]  # 预设流事件
+
+agent = Agent(llm=mock_llm, system_prompt="test")
+result = agent.run("hello")
+assert result is not None
+
+# 流式测试
+events = list(agent.stream("hello"))
+assert any(e["type"] == "final_text" for e in events)
+```
+
+### 12.2 工具测试
+
+`AgentTool` → `ToolSpec` 转换可独立测试：
+
+```python
+from floodmind import AgentTool
+from floodmind.agent.runtime.contracts.tools import ToolSpec
+
+tool = AgentTool(name="TestTool", description="d", func=lambda: "ok")
+spec = tool.to_tool_spec()
+assert isinstance(spec, ToolSpec)
+assert spec.name == "TestTool"
+```
+
+### 12.3 Skill 系统测试
+
+参考 `tests/test_skill_registry.py`（9 tests）和 `tests/test_skill_curator.py`（17 tests）：
+
+```python
+from floodmind.skills.registry import get_skill_registry, SkillRegistry
+from pathlib import Path
+
+# 隔离测试：自定义 roots
+reg = SkillRegistry(roots=[Path("/tmp/test_skills")], writable_root=Path("/tmp/test_skills"))
+assert len(reg.list_skills()) == 0
+```
+
+### 12.4 运行全部测试
 
 ```bash
-# 查看已加载的插件
-python -c "
-from floodmind.plugin import PluginLoader
-loader = PluginLoader()
-for p in loader.discover():
-    print(f'{p.name} v{p.version}: {p.description}')
-"
+pytest tests/ -q          # 404 tests
+pytest tests/test_sdk_agent.py -v   # SDK 相关
+pytest tests/test_skill_registry.py tests/test_skill_curator.py -v  # Skill 系统
+pytest tests/test_mcp_client.py -v  # MCP 客户端
 ```
+
+---
+
+## 13. 项目结构参考
+
+```
+FloodMind/
+├── floodmind/                        # Python 主包
+│   ├── agent/                        # Agent 核心
+│   │   ├── native/                   #   Native Agent Runtime
+│   │   │   ├── native_flood_agent.py #     Agent 主体（双 registry、MCP/Skill 管理、流式）
+│   │   │   ├── executor.py           #     状态机 LLM↔Tool 循环
+│   │   │   ├── model_client.py       #     统一 LLM 服务
+│   │   │   ├── model_router.py       #     模型路由/降级
+│   │   │   ├── event_bus.py          #     EventBus + StepEventBus
+│   │   │   ├── message_builder.py    #     消息组装
+│   │   │   ├── tool_runtime.py       #     AgentTool→ToolSpec 桥接
+│   │   │   ├── context_compressor.py #     上下文压缩
+│   │   │   ├── artifact_watcher.py   #     产物检测
+│   │   │   ├── tool_guardrails.py    #     工具护栏（重复/螺旋检测）
+│   │   │   ├── retry.py              #     LLM 重试 + 指数退避
+│   │   │   ├── error_classifier.py   #     错误分类 + 恢复策略
+│   │   │   ├── background_review.py  #     后台对话回顾
+│   │   │   └── types.py              #     数据类型定义
+│   │   ├── runtime/                  #   Runtime 服务
+│   │   │   ├── contracts/            #     数据契约 (tools, messages, events, permissions)
+│   │   │   ├── services/             #     服务 (tool_execution, permission, ask, checkpoint, journal, sandbox, tracing, workspace)
+│   │   │   └── adapters/             #     适配器 (Flask SSE/checkpoint/permission/tracing API)
+│   │   ├── mcp_client.py             #   MCP 客户端池 + build_mcp_tool_specs
+│   │   ├── agent_registry.py         #   Agent 类型注册（build/plan/general/explore）
+│   │   ├── api.py                    #   Agent SDK 类
+│   │   └── task_runtime.py           #   任务运行时
+│   ├── config/                       # 配置
+│   ├── server/                       # Web 后端模块化
+│   │   ├── __init__.py               #   Flask create_app() 工厂
+│   │   ├── agent_factory.py          #    Agent 创建/复用 (get_or_create_agent)
+│   │   ├── session_state.py          #   运行时状态 (流控/中断/token)
+│   │   ├── sanitize.py               #   SSE 脱敏
+│   │   ├── config.py                 #   常量&配置
+│   │   ├── file_utils.py             #   文件工具&产物提取
+│   │   └── routes/                   #   Blueprint 路由
+│   │       ├── chat.py               #     聊天 SSE 流式
+│   │       ├── sessions.py           #     会话 CRUD
+│   │       ├── files.py              #     文件上传/产物
+│   │       ├── models.py             #     模型配置
+│   │       ├── memory.py             #     记忆读写
+│   │       ├── permission.py         #     权限审批
+│   │       ├── checkpoints.py        #     检查点
+│   │       └── tasks.py              #     定时任务
+│   ├── profile/                      # 身份与提示词
+│   ├── memory/                       # 记忆与经验
+│   │   ├── dual_memory.py            #   扁平 _turns 对话历史 + 压缩
+│   │   ├── experience_tree.py        #   经验树索引
+│   │   ├── task_experience.py        #   任务经验
+│   │   ├── session_manager.py        #   会话管理（含 worktree 隔离）
+│   │   ├── session_store.py          #   SQLite 存储
+│   │   └── skill_generator.py        #   经验→Skill 自动生成
+│   ├── skills/                       # Skill 系统（发现/注册/策展）
+│   │   ├── base.py                   #   Skill dataclass + 发现 + catalog
+│   │   ├── registry.py               #   SkillRegistry 单例
+│   │   └── skill_curator.py          #   SkillCurator 生命周期
+│   ├── tools/                        # Agent 工具层
+│   │   ├── agent_tool.py             #   AgentTool + ToolRegistry + build_agent_tool
+│   │   ├── base_tools.py             #   内置工具（GetSkill/Bash/WebSearch/...）
+│   │   ├── file_tools.py             #   文件工具
+│   │   └── memory_tools.py           #   记忆工具
+│   ├── plugin/                       # Plugin 系统
+│   ├── tui/                          # 终端 TUI (Textual)
+│   ├── cli.py                        # CLI 入口（floodmind 命令）
+│   └── __init__.py                   # top-level SDK 导出
+├── contrib/                           # 已外置为 MCP 服务的脚本（chronos 等）
+├── web/                              # React 19 + TypeScript 前端
+├── web_server.py                     # Flask 入口（日志 + SessionManager + waitress）
+├── scheduler.py                      # 定时任务调度
+├── tests/                            # 测试（404 tests）
+├── docs/                             # 文档
+│   ├── DEVELOPER_GUIDE.md            #   本文档
+│   └── architecture/                 #   架构 Wiki
+│       ├── OVERVIEW.md               #     架构知识图谱
+│       ├── ASSESSMENT.md             #     系统评估（已完成 vs 待处理）
+│       ├── MCP_ARCHITECTURE.md       #     MCP 子系统详解
+│       ├── SKILL_ARCHITECTURE.md     #     Skill 统详解
+│       └── D_STORAGE_PROPOSAL.md     #     存储提案
+├── pyproject.toml                    # 包配置
+└── start.py                          # 统一启动入口
+```
+
+---
+
+## 更多资源
+
+- **架构 Wiki**: `docs/architecture/OVERVIEW.md` — 完整知识图谱 + MCP/Skill/Tool 架构详解
+- **系统评估**: `docs/architecture/ASSESSMENT.md` — 已完成批次 vs 待处理项
+- **README**: 项目概述、快速开始、CLI 参考
+- **settings 模板**: `floodmind/config/settings_template.json`
+- **SDK 测试参考**: `tests/test_sdk_agent.py` — 44 个 SDK 用例
+- **workspace 测试参考**: `tests/test_native_agent_workspace.py` — 跨线程 contextvar 修复验证

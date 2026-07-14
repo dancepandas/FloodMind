@@ -275,3 +275,21 @@ def generate_skill_catalog(skills: List[Skill]) -> str:
     ])
 
     return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
+# 运行时注册（编程式，用于 SDK 嵌入场景）
+# ---------------------------------------------------------------------------
+
+def register_skill(skill: Skill) -> None:
+    """将 Skill 对象注册到全局注册表（编程式，无需 SKILL.md 文件）。
+
+    用法:
+        from floodmind.skills import register_skill, Skill
+        register_skill(Skill(name="my-skill", description="...", prompt="..."))
+
+    委托到唯一权威源 ``SkillRegistry``（去重：同名替换）。懒导入避免 base↔registry 环。
+    """
+    from floodmind.skills.registry import get_skill_registry
+    get_skill_registry().register_skill(skill)
+

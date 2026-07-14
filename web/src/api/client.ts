@@ -9,6 +9,14 @@ export function buildApiUrl(path: string): string {
   return `${API_BASE}${path}`;
 }
 
+export function resolveMediaUrl(url: string): string {
+  if (!url) return url;
+  if (/^https?:\/\//.test(url) || url.startsWith("//") || url.startsWith("blob:")) {
+    return url;
+  }
+  return buildApiUrl(url);
+}
+
 export async function apiFetch<T>(path: string, init?: RequestInit): Promise<T> {
   const url = buildApiUrl(path);
   const method = init?.method || "GET";

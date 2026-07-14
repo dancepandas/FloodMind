@@ -1,3 +1,11 @@
 {
-  "servers": []
+  "servers": [
+    {
+      "name": "hydro-rag",
+      "type": "stdio",
+      "command": "python",
+      "args": ["D:/chengs/9.project/RAG/mcp_server.py"],
+      "env": {}
+    }
+  ]
 }

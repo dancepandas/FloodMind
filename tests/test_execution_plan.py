@@ -91,9 +91,14 @@ class TestExecutionPlan:
         next_step = plan.next_pending_step()
         assert next_step["step_id"] == "s2"
 
-    def test_all_steps_completed(self):
+    def test_get_batches_cycle_raises(self):
         plan = _make_plan([
-            {"step_id": "s1", "title": "S1", "executor": "execution_specialist", "purpose": "", "status": "completed", "needs": [], "expected_deliverables": []},
-            {"step_id": "s2", "title": "S2", "executor": "execution_specialist", "purpose": "", "status": "completed", "needs": [], "expected_deliverables": []},
+            {"step_id": "a", "title": "A", "executor": "execution_specialist", "purpose": "", "status": "pending", "needs": ["b"], "expected_deliverables": []},
+            {"step_id": "b", "title": "B", "executor": "execution_specialist", "purpose": "", "status": "pending", "needs": ["a"], "expected_deliverables": []},
         ])
-        assert plan.all_steps_completed()
+        with pytest.raises(ValueError, match="依赖环"):
+            plan.get_batches()
+
+    def test_get_batches_empty_plan(self):
+        plan = _make_plan([])
+        assert plan.get_batches() == []

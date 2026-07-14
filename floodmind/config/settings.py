@@ -108,13 +108,8 @@ def get_floodmind_home() -> Path:
     return _DEFAULT_HOME
 
 
-def _config_dir() -> Path:
-    """配置目录：当前生效的 FLOODMIND_HOME"""
-    return get_floodmind_home()
-
-
 def _config_path() -> Path:
-    return _config_dir() / "settings.json"
+    return get_floodmind_home() / "settings.json"
 
 
 def _template_path() -> Path:
@@ -141,7 +136,6 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         "enabled": True,
         "min_message_count": 3,
     },
-    "mcpServers": [],
 }
 
 
@@ -172,14 +166,12 @@ def _load_json_config(path: Path) -> dict:
 
 
 def _load_config() -> dict:
-    """加载配置：内置模板 + 用户 JSON 配置合并。"""
-    cfg = dict(DEFAULT_CONFIG)
+    """加载配置：DEFAULT_CONFIG + 用户 JSON 配置合并。
 
-    # 加载内置模板作为默认值
-    template_path = _template_path()
-    template_cfg = _load_json_config(template_path)
-    if template_cfg:
-        cfg = _deep_merge(cfg, template_cfg)
+    首次启动时自动从模板复制用户配置，后续不再合并模板（用户在 settings.json
+    中删除某个 model 就应该从最终配置中消失，不应被模板覆盖）。
+    """
+    cfg = dict(DEFAULT_CONFIG)
 
     # 用户级 JSON 配置
     user_path = _config_path()
@@ -190,7 +182,11 @@ def _load_config() -> dict:
     else:
         # 首次启动：自动复制模板作为初始配置
         try:
-            _config_dir().mkdir(parents=True, exist_ok=True)
+            get_floodmind_home().mkdir(parents=True, exist_ok=True)
+            template_path = _template_path()
+            template_cfg = _load_json_config(template_path)
+            if template_cfg:
+                cfg = _deep_merge(cfg, template_cfg)
             with open(template_path, "r", encoding="utf-8") as src:
                 with open(user_path, "w", encoding="utf-8") as dst:
                     dst.write(src.read())
@@ -229,7 +225,7 @@ def reload_config() -> dict:
 def save_config(cfg: dict) -> None:
     """保存用户配置到 ~/.floodmind/settings.json。"""
     global _config_cache
-    config_dir = _config_dir()
+    config_dir = get_floodmind_home()
     config_dir.mkdir(parents=True, exist_ok=True)
     config_path = _config_path()
     with open(config_path, "w", encoding="utf-8") as f:
@@ -372,28 +368,105 @@ class BackgroundReviewConfig:
         self.min_message_count = int(raw.get("min_message_count", 3))
 
 
+# ── MCP 配置 (独立文件 mcp.json) ─────────────────────────
+
+def _mcp_config_path() -> Path:
+    return get_floodmind_home() / "mcp.json"
+
+
+def load_mcp_config() -> Dict[str, Any]:
+    """加载 MCP 配置：mcp.json + 环境变量覆盖。
+
+    首次启动时自动从 settings.json 的 mcpServers 字段迁移。
+    """
+    mcp_path = _mcp_config_path()
+
+    # 加载 mcp.json
+    if mcp_path.exists():
+        mcp_cfg = _load_json_config(mcp_path)
+    else:
+        mcp_cfg = {}
+
+    # 首次迁移：从 settings.json 的 mcpServers 字段迁移到 mcp.json
+    if not mcp_cfg.get("servers") and mcp_path == get_floodmind_home() / "mcp.json":
+        user_cfg = _load_json_config(_config_path())
+        legacy = user_cfg.get("mcpServers", user_cfg.get("mcp_servers", []))
+        if legacy and isinstance(legacy, list):
+            mcp_cfg = {"servers": legacy}
+            # 从 settings.json 中移除旧字段
+            if "mcpServers" in user_cfg or "mcp_servers" in user_cfg:
+                user_cfg.pop("mcpServers", None)
+                user_cfg.pop("mcp_servers", None)
+                save_config(user_cfg)
+                _logger.info("已将 mcpServers 从 settings.json 迁移到 mcp.json")
+            # 写入 mcp.json
+            try:
+                get_floodmind_home().mkdir(parents=True, exist_ok=True)
+                with open(mcp_path, "w", encoding="utf-8") as f:
+                    json.dump(mcp_cfg, f, ensure_ascii=False, indent=2)
+            except Exception as e:
+                _logger.warning("写入 mcp.json 失败: %s", e)
+
+    if not mcp_cfg:
+        mcp_cfg = {"servers": []}
+
+    # 环境变量覆盖
+    env_raw = os.getenv("MCP_SERVERS", "")
+    if env_raw.strip():
+        try:
+            parsed = json.loads(env_raw)
+            if isinstance(parsed, list):
+                mcp_cfg["servers"] = parsed
+        except Exception:
+            pass
+
+    return mcp_cfg
+
+
+def save_mcp_config(mcp_cfg: Dict[str, Any]) -> None:
+    """保存 MCP 配置到 mcp.json。"""
+    config_dir = get_floodmind_home()
+    config_dir.mkdir(parents=True, exist_ok=True)
+    mcp_path = _mcp_config_path()
+    with open(mcp_path, "w", encoding="utf-8") as f:
+        json.dump(mcp_cfg, f, ensure_ascii=False, indent=2)
+    _logger.info("MCP 配置已保存: %s", mcp_path)
+
+
 class McpServerConfig:
-    def __init__(self, cfg: dict):
-        raw = cfg.get("mcpServers", cfg.get("mcp_servers", []))
+    def __init__(self):
+        mcp_cfg = load_mcp_config()
+        raw = mcp_cfg.get("servers", [])
         if isinstance(raw, list):
             self.servers: List[Dict[str, Any]] = raw
         else:
-            env_raw = os.getenv("MCP_SERVERS", "")
-            import json as _json
-            if env_raw.strip():
-                try:
-                    parsed = _json.loads(env_raw)
-                    self.servers = parsed if isinstance(parsed, list) else []
-                except Exception:
-                    self.servers = []
-            else:
-                self.servers = []
+            self.servers = []
 
 
 class APIConfig:
     def __init__(self, cfg: dict):
         self.base_url = _cfg(cfg, "api.base_url", "FLOOD_API_URL", "http://127.0.0.1:8000")
         self.timeout = int(_cfg(cfg, "api.timeout", "API_TIMEOUT", 60))
+
+
+class WorkspaceConfig:
+    """工作区配置：决定产物目录与沙盒布局，为桌面版铺路。
+
+    默认值保持网页版行为：
+    - defaultUserDir 为空 → build_workspace 回退到 session_root/<sid>/outputs
+    - sessionRoot 为空 → build_workspace 回退到 PROJECT_ROOT/data/sessions
+    - sandboxStrategy="session_root" → 子代理沙盒仍在 data/sessions 下（旧布局）
+    - overwriteProtection=false → 允许覆盖（与现状一致）
+    """
+
+    def __init__(self, cfg: dict):
+        self.default_user_dir = _cfg(cfg, "workspace.defaultUserDir", "FLOODMIND_USER_DIR", "")
+        self.session_root = _cfg(cfg, "workspace.sessionRoot", "FLOODMIND_SESSION_ROOT", "")
+        self.sandbox_strategy = _cfg(
+            cfg, "workspace.sandboxStrategy", "FLOODMIND_SANDBOX_STRATEGY", "session_root"
+        )
+        ow = _cfg(cfg, "workspace.overwriteProtection", "FLOODMIND_OVERWRITE_PROTECTION", "false")
+        self.overwrite_protection = str(ow).lower() == "true"
 
 
 class Settings:
@@ -406,7 +479,8 @@ class Settings:
         self.agent = AgentConfig(cfg)
         self.task_experience = TaskExperienceConfig(cfg)
         self.background_review = BackgroundReviewConfig(cfg)
-        self.mcp = McpServerConfig(cfg)
+        self.mcp = McpServerConfig()
+        self.workspace = WorkspaceConfig(cfg)
 
     @property
     def qwen(self):

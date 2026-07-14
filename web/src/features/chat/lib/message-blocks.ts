@@ -1,4 +1,4 @@
-import type { ChatMessage, GeneratedArtifact, MessageBlock, ActionDetail } from "@/types/app";
+import type { ChatMessage, GeneratedArtifact, MessageBlock, ActionDetail, UploadedFileItem } from "@/types/app";
 import { uuid } from "@/lib/utils";
 
 const TOOL_DISPLAY_NAMES: Record<string, string> = {
@@ -27,7 +27,7 @@ export function getToolDisplayName(toolName: string): string {
   return TOOL_DISPLAY_NAMES[toolName] || toolName;
 }
 
-export function createUserMessage(content: string): ChatMessage {
+export function createUserMessage(content: string, attachments?: UploadedFileItem[]): ChatMessage {
   return {
     id: uuid(),
     role: "human",
@@ -40,6 +40,7 @@ export function createUserMessage(content: string): ChatMessage {
         content,
       },
     ],
+    attachments: attachments && attachments.length > 0 ? attachments : undefined,
   };
 }
 
@@ -75,21 +76,37 @@ export function appendThoughtBlock(message: ChatMessage, content: string, append
   const normalized = String(content || "").trim();
   if (!normalized) return message;
 
-  const blocks = message.blocks.map((b) => ({ ...b }));
+  const blocks = message.blocks;
   const last = blocks[blocks.length - 1];
-  if (append && last?.type === "thought") {
-    last.content += content;
-    last.isCollapsed = false;
-    last.isStreaming = true;
+  // 快路径：追加到末尾 thought 块。流式 thought 增量的常见情形。
+  // 只替换末尾块（结构化共享），其余块引用不变 → React.memo 可跳过未变块的重渲染。
+  if (append && last?.type === "thought" && !needsTrim(blocks)) {
+    const newBlocks = blocks.slice();
+    newBlocks[newBlocks.length - 1] = {
+      ...last,
+      content: last.content + content,
+      isCollapsed: false,
+      isStreaming: true,
+    };
+    return { ...message, blocks: newBlocks };
+  }
+
+  // 慢路径：新建 thought 块或需裁剪（阶段切换，罕见）。复制全部块。
+  const copied = blocks.map((b) => ({ ...b }));
+  const copiedLast = copied[copied.length - 1];
+  if (append && copiedLast?.type === "thought") {
+    copiedLast.content += content;
+    copiedLast.isCollapsed = false;
+    copiedLast.isStreaming = true;
   } else {
-    blocks.forEach((block) => {
+    copied.forEach((block) => {
       block.isArchived = true;
       if (block.type === "thought") {
         block.isCollapsed = true;
         block.isStreaming = false;
       }
     });
-    blocks.push({
+    copied.push({
       id: uuid(),
       type: "thought",
       content,
@@ -99,15 +116,30 @@ export function appendThoughtBlock(message: ChatMessage, content: string, append
     });
   }
 
-  trimVisibleBlocks(blocks);
-  return { ...message, blocks };
+  trimVisibleBlocks(copied);
+  return { ...message, blocks: copied };
 }
 
 export function appendAnswerBlock(message: ChatMessage, content: string, append = true): ChatMessage {
   const normalized = String(content || "");
-  const blocks = message.blocks.map((b) => ({ ...b }));
+  const blocks = message.blocks;
+  const last = blocks[blocks.length - 1];
+  // 快路径：追加到末尾 answer 块，且无活跃 thought 需归档、无需裁剪。
+  // 流式 answer 增量的常见情形——只替换末尾块，其余块引用不变。
+  // hasNewPhaseAfterAnswer 在 last 为 answer 时恒为 false（其后无块），故只需检查 last 类型。
+  // hasActiveThought 判定与慢路径 thought 归档循环的副作用完全对应：仅当所有 thought
+  // 都已归档/折叠/非流式（即归档循环是 no-op）时才走快路径，保证行为等价。
+  const hasActiveThought = blocks.some((b) => b.type === "thought" && (!b.isArchived || b.isStreaming || !b.isCollapsed));
+  if (append && last?.type === "answer" && !hasActiveThought && !needsTrim(blocks)) {
+    const newBlocks = blocks.slice();
+    newBlocks[newBlocks.length - 1] = { ...last, content: last.content + normalized };
+    return { ...message, content: getMessageAnswerText(newBlocks), blocks: newBlocks };
+  }
 
-  blocks.forEach((block) => {
+  // 慢路径：新建 answer 块 / 归档 thought / 裁剪（阶段切换，罕见）。复制全部块。
+  const copied = blocks.map((b) => ({ ...b }));
+
+  copied.forEach((block) => {
     if (block.type === "thought") {
       block.isCollapsed = true;
       block.isStreaming = false;
@@ -115,21 +147,21 @@ export function appendAnswerBlock(message: ChatMessage, content: string, append 
     }
   });
 
-  const lastAnswerIdx = blocks.map((b, i) => b.type === "answer" ? i : -1).filter(i => i >= 0).pop();
+  const lastAnswerIdx = copied.map((b, i) => b.type === "answer" ? i : -1).filter(i => i >= 0).pop();
   const hasNewPhaseAfterAnswer = lastAnswerIdx !== undefined
-    ? blocks.slice(lastAnswerIdx + 1).some((b) => b.type === "thought" || b.type === "action")
+    ? copied.slice(lastAnswerIdx + 1).some((b) => b.type === "thought" || b.type === "action")
     : false;
 
-  if (append && blocks[blocks.length - 1]?.type === "answer" && !hasNewPhaseAfterAnswer) {
-    blocks[blocks.length - 1].content += normalized;
+  if (append && copied[copied.length - 1]?.type === "answer" && !hasNewPhaseAfterAnswer) {
+    copied[copied.length - 1].content += normalized;
   } else {
-    blocks.forEach((block) => {
+    copied.forEach((block) => {
       if (block.type === "answer") {
         block.isArchived = true;
         block.isCollapsed = true;
       }
     });
-    blocks.push({
+    copied.push({
       id: uuid(),
       type: "answer",
       content: normalized,
@@ -139,12 +171,27 @@ export function appendAnswerBlock(message: ChatMessage, content: string, append 
 
   return {
     ...message,
-    content: getMessageAnswerText(blocks),
-    blocks,
+    content: getMessageAnswerText(copied),
+    blocks: copied,
   };
 }
 
 const MAX_VISIBLE_BLOCKS = 5;
+
+/**
+ * 是否需要裁剪可见块。trimVisibleBlocks 会原地 mutate block 对象（置 isArchived 等），
+ * 因此结构共享的快路径必须先确认不需要裁剪，否则会污染被多消息共享的 block 引用。
+ */
+function needsTrim(blocks: MessageBlock[]): boolean {
+  let visible = 0;
+  for (const b of blocks) {
+    if ((b.type === "thought" || b.type === "action") && !b.isArchived) {
+      visible++;
+      if (visible > MAX_VISIBLE_BLOCKS) return true;
+    }
+  }
+  return false;
+}
 
 function trimVisibleBlocks(blocks: MessageBlock[]): void {
   const visibleIndices: number[] = [];
@@ -177,7 +224,7 @@ function findActionByToolNameRunning(actions: ActionDetail[], toolName: string):
   return actions.findIndex((a) => a.toolName === toolName && a.status === "running");
 }
 
-export function appendActionBlock(message: ChatMessage, toolName: string, status: ActionDetail["status"], content: string, delegation?: ActionDetail["delegation"], callId?: string, askId?: string, askReason?: string, askSessionId?: string, stepKey?: string): ChatMessage {
+export function appendActionBlock(message: ChatMessage, toolName: string, status: ActionDetail["status"], content: string, delegation?: ActionDetail["delegation"], callId?: string, askId?: string, askReason?: string, askSessionId?: string, stepKey?: string, toolInput?: Record<string, unknown>): ChatMessage {
   const blocks = message.blocks.map((b) => {
     const copy: MessageBlock = { ...b };
     if (b.actions) {
@@ -205,6 +252,7 @@ export function appendActionBlock(message: ChatMessage, toolName: string, status
       askId,
       askReason,
       sessionId: askSessionId,
+      toolInput,
     };
 
     const existingActionBlockIdx = blocks.findIndex(
@@ -421,7 +469,6 @@ export function fromServerMessage(raw: Record<string, unknown>): ChatMessage {
     id: uuid(),
     role,
     content,
-    reasoning,
     isComplete: true,
     timestamp: new Date().toISOString(),
     blocks,
@@ -438,7 +485,7 @@ export function updateActionBlockStatus(
   callId: string,
   status: ActionDetail["status"],
   content: string,
-  extra?: { askId?: string; askReason?: string; sessionId?: string },
+  extra?: { askId?: string; askReason?: string; sessionId?: string; toolInput?: Record<string, unknown> },
 ): ChatMessage {
   const blocks = message.blocks.map((b) => {
     const copy: MessageBlock = { ...b };
@@ -463,6 +510,7 @@ export function updateActionBlockStatus(
       askId: clearAsk ? undefined : (extra?.askId ?? action.askId),
       askReason: clearAsk ? undefined : (extra?.askReason ?? action.askReason),
       sessionId: clearAsk ? undefined : (extra?.sessionId ?? action.sessionId),
+      toolInput: clearAsk ? undefined : (extra?.toolInput ?? action.toolInput),
     };
     _recomputeActionBlockState(block);
     break;

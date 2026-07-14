@@ -94,8 +94,8 @@ class ChatScreen(Screen[None]):
                 )
             if self._agent is not None and hasattr(self._agent, 'memory'):
                 memory = self._agent.memory
-                if hasattr(memory, '_compressor') and hasattr(memory._compressor, '_llm'):
-                    memory._compressor._llm = llm
+                if hasattr(memory, 'set_llm'):
+                    memory.set_llm(llm)
             if memory is None:
                 memory = DualMemory(
                     session_id=self._sid,

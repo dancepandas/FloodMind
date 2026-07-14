@@ -41,3 +41,9 @@ from floodmind.agent.runtime.contracts.events import (
     HeartbeatEvent,
     VALID_EVENT_TYPES,
 )
+from floodmind.agent.runtime.contracts.tracing import (
+    TraceEvent,
+    TraceSpan,
+    TraceStatus,
+    TraceType,
+)

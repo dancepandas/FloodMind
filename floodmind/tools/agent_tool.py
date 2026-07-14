@@ -5,16 +5,11 @@ Agent 工具定义
 每个工具都是独立的、可序列化的、可快速迁移的组件。
 """
 
-import inspect
-import json
 import logging
-import os
-import re
-import traceback
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Type, Union
+from typing import Any, Callable, Dict, List, Optional, Type
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 from floodmind.agent.runtime.contracts.permissions import (
     InterruptBehavior,
@@ -24,37 +19,52 @@ from floodmind.agent.runtime.contracts.permissions import (
     ValidationResult,
 )
 from floodmind.agent.runtime.contracts.paths import PathResolveResult
+from floodmind.agent.runtime.contracts.tools import ToolSpec
 from floodmind.agent.runtime.services.path_service import get_path_service
 from floodmind.agent.runtime.services.permission_service import (
     PermissionService,
     get_permission_service,
     set_permission_service,
 )
+from floodmind.agent.runtime.services._runtime_root import PROJECT_ROOT as _PROJECT_ROOT
 
 logger = logging.getLogger(__name__)
 
-_PROJECT_ROOT = Path.cwd()
 
+def _sanitize_parameters(schema: Any) -> Dict[str, Any]:
+    """Strip pydantic schema noise before sending ``parameters`` to the model.
 
-class ToolResult:
-    """工具执行结果"""
+    ``model_json_schema()`` leaks class names via ``title`` and wraps Optional
+    fields in ``anyOf: [{type: T}, {type: null}]`` — both pure noise to the model
+    (and the class-name leak is the long-standing hygiene issue). We drop titles
+    and collapse Optional ``anyOf`` to its non-null type. ``$defs``/``$ref``
+    (nested-model references) are left intact: dereferencing risks correctness,
+    and tool arg schemas are virtually always flat.
+    """
+    if not isinstance(schema, dict):
+        return {"type": "object", "properties": {}}
 
-    def __init__(self, output: Any, success: bool = True, error: Optional[str] = None):
-        self.output = output
-        self.success = success
-        self.error = error
+    def _clean(node: Any) -> Any:
+        if isinstance(node, dict):
+            any_of = node.get("anyOf")
+            if isinstance(any_of, list) and any(
+                isinstance(b, dict) and b.get("type") == "null" for b in any_of
+            ):
+                non_null = [b for b in any_of if not (isinstance(b, dict) and b.get("type") == "null")]
+                if len(non_null) == 1:
+                    merged = dict(node)
+                    merged.pop("anyOf")
+                    merged.update(non_null[0])
+                    node = merged
+                elif len(non_null) >= 2:
+                    node = {**node, "anyOf": non_null}
+            node.pop("title", None)
+            return {k: _clean(v) for k, v in node.items()}
+        if isinstance(node, list):
+            return [_clean(v) for v in node]
+        return node
 
-    def __str__(self) -> str:
-        if self.success:
-            return str(self.output)
-        return f"Error: {self.error}"
-
-    def to_dict(self) -> Dict[str, Any]:
-        return {
-            "output": str(self.output),
-            "success": self.success,
-            "error": self.error,
-        }
+    return _clean(schema)
 
 
 class AgentTool(BaseModel):
@@ -68,84 +78,59 @@ class AgentTool(BaseModel):
     description: str = Field(description="工具描述")
     func: Optional[Callable] = Field(default=None, description="工具执行函数", exclude=True)
     args_schema: Optional[Type[BaseModel]] = Field(default=None, description="参数 schema")
+    parameters: Optional[Dict[str, Any]] = Field(
+        default=None,
+        description="原始 JSON Schema（与 args_schema 互斥的 raw 编写模式；供无 pydantic 模型的系统工具等使用）",
+    )
 
-    # 行为标记
+    # 行为标记（is_readonly/is_destructive/is_concurrency_safe 经
+    # tool_runtime.native_from_agent_tool 透传到运行时 ToolSpec，供 PermissionService 策略判定）
     is_readonly: bool = Field(default=True, description="是否只读")
     is_destructive: bool = Field(default=False, description="是否破坏性操作")
-    requires_confirmation: bool = Field(default=False, description="是否需要用户确认")
     is_concurrency_safe: bool = Field(default=True, description="是否并发安全")
-    category: str = Field(default="general", description="工具分类")
-    tags: List[str] = Field(default_factory=list, description="工具标签")
 
     # 权限
     check_permissions_fn: Optional[Callable] = Field(default=None, description="权限检查函数", exclude=True)
+    validate_input_fn: Optional[Callable] = Field(default=None, description="输入校验函数", exclude=True)
     permission_policy: Optional[ToolPermissionPolicy] = Field(default=None, description="权限策略")
 
-    model_config = {"arbitrary_types_allowed": True}
+    model_config = ConfigDict(arbitrary_types_allowed=True)
 
-    def run(self, **kwargs) -> ToolResult:
-        """执行工具"""
-        if self.func is None:
-            return ToolResult(output=None, success=False, error=f"工具 {self.name} 没有执行函数")
+    def to_tool_spec(self) -> ToolSpec:
+        """投影到运行时 ``ToolSpec`` —— AgentTool→ToolSpec 的唯一权威转换点。
 
-        try:
-            if self.args_schema:
-                validated = self.args_schema(**kwargs)
-                result = self.func(**validated.model_dump())
-            else:
-                result = self.func(**kwargs)
-
-            if isinstance(result, ToolResult):
-                return result
-            return ToolResult(output=result)
-
-        except Exception as e:
-            error_msg = f"工具 {self.name} 执行失败: {e}\n{traceback.format_exc()}"
-            logger.error(error_msg)
-            return ToolResult(output=None, success=False, error=str(e))
-
-    def get_schema(self) -> Dict[str, Any]:
-        """获取工具的 OpenAI function calling schema"""
-        schema: Dict[str, Any] = {
-            "type": "function",
-            "function": {
-                "name": self.name,
-                "description": self.description,
-            },
-        }
-
-        if self.args_schema:
-            args_schema = self.args_schema.model_json_schema()
-            properties = args_schema.get("properties", {})
-            required = args_schema.get("required", [])
-
-            # 清理内部字段
-            for prop in properties.values():
-                prop.pop("title", None)
-
-            schema["function"]["parameters"] = {
-                "type": "object",
-                "properties": properties,
-                "required": required,
-            }
+        schema 生成优先级：raw ``parameters`` > ``args_schema``（pydantic，剥冗余）
+        > 空 object schema。运行时桥（``native_from_agent_tool``）统一委托到此。
+        """
+        if self.parameters is not None:
+            parameters = self.parameters
+        elif self.args_schema is not None:
+            try:
+                parameters = _sanitize_parameters(self.args_schema.model_json_schema())
+            except Exception:
+                parameters = {"type": "object", "properties": {}}
         else:
-            schema["function"]["parameters"] = {
-                "type": "object",
-                "properties": {},
-            }
+            parameters = {"type": "object", "properties": {}}
 
-        return schema
+        func = self.func
+        if func is None:
+            def _no_impl(**kwargs):
+                return f"工具 {self.name} 无实现"
+            func = _no_impl
 
-    def to_tool_info(self) -> Dict[str, Any]:
-        """返回工具信息字典"""
-        return {
-            "name": self.name,
-            "description": self.description,
-            "schema": self.get_schema(),
-            "is_readonly": self.is_readonly,
-            "is_destructive": self.is_destructive,
-            "category": self.category,
-        }
+        return ToolSpec(
+            name=self.name,
+            description=self.description or "",
+            parameters=parameters,
+            func=func,
+            is_readonly=self.is_readonly,
+            is_destructive=self.is_destructive,
+            is_concurrency_safe=self.is_concurrency_safe,
+            permission_policy=self.permission_policy,
+            check_permissions_fn=self.check_permissions_fn,
+            validate_input_fn=self.validate_input_fn,
+            args_schema=self.args_schema,
+        )
 
 
 def build_agent_tool(
@@ -153,13 +138,12 @@ def build_agent_tool(
     name: Optional[str] = None,
     description: Optional[str] = None,
     args_schema: Optional[Type[BaseModel]] = None,
+    parameters: Optional[Dict[str, Any]] = None,
     is_readonly: bool = True,
     is_destructive: bool = False,
-    requires_confirmation: bool = False,
     is_concurrency_safe: bool = True,
-    category: str = "general",
-    tags: Optional[List[str]] = None,
     check_permissions_fn: Optional[Callable] = None,
+    validate_input_fn: Optional[Callable] = None,
     permission_policy: Optional[ToolPermissionPolicy] = None,
 ) -> AgentTool:
     """从函数构建 AgentTool"""
@@ -171,13 +155,12 @@ def build_agent_tool(
         description=tool_description,
         func=func,
         args_schema=args_schema,
+        parameters=parameters,
         is_readonly=is_readonly,
         is_destructive=is_destructive,
-        requires_confirmation=requires_confirmation,
         is_concurrency_safe=is_concurrency_safe,
-        category=category,
-        tags=tags or [],
         check_permissions_fn=check_permissions_fn,
+        validate_input_fn=validate_input_fn,
         permission_policy=permission_policy,
     )
 
@@ -262,8 +245,17 @@ def resolve_tool_path(
     path_str: str,
     access: str = "read",
 ) -> PathResolveResult:
-    """统一路径解析入口"""
-    return get_path_service().resolve_simple(path_str, access=access)
+    """统一路径解析入口。
+
+    自动从 SESSION_CONTEXT 透传当前 session_id 给 PathService，
+    使子代理(sub-*)的 workspace 写路径强制得以生效。
+    """
+    try:
+        from floodmind.tools.session_context import get_current_session_id
+        session_id = get_current_session_id() or ""
+    except Exception:
+        session_id = ""
+    return get_path_service().resolve_simple(path_str, access=access, session_id=session_id)
 
 
 # ---------------------------------------------------------------------------
@@ -304,28 +296,6 @@ TOOL_DEFAULTS = {
 # 安全检查函数
 # ---------------------------------------------------------------------------
 
-_DANGEROUS_COMMANDS = [
-    re.compile(r'\brm\s+-rf\s+/', re.IGNORECASE),
-    re.compile(r'\bmkfs\b', re.IGNORECASE),
-    re.compile(r'\bdd\s+if=', re.IGNORECASE),
-    re.compile(r':\(\)\s*\{\s*:\s*\|\s*:\s*&\s*\}\s*;\s*:', re.IGNORECASE),
-    re.compile(r'\bwget\b.*\b\|.*\bsh\b', re.IGNORECASE),
-    re.compile(r'\bcurl\b.*\b\|.*\bsh\b', re.IGNORECASE),
-    re.compile(r'>\s*/dev/sd', re.IGNORECASE),
-]
-
-
-def check_dangerous_command(command: str) -> ValidationResult:
-    """检查命令是否危险"""
-    cmd_lower = command.lower().strip()
-    for pattern in _DANGEROUS_COMMANDS:
-        if pattern.search(cmd_lower):
-            return ValidationResult(
-                valid=False,
-                reason=f"命令包含危险模式: {pattern.pattern}",
-            )
-    return ValidationResult(valid=True)
-
 
 def check_path_permission(path_str: str, access: str = "read") -> ValidationResult:
     """检查路径权限"""
@@ -348,89 +318,16 @@ class UpdateProjectInstructionsInput(BaseModel):
 # ---------------------------------------------------------------------------
 
 class ToolRegistry:
-    """工具注册中心
+    """工具注册中心。
 
-    集中管理所有工具，支持分类查询和批量注册。
+    集中管理所有工具。采用全局单例模式：模块底部创建唯一的
+    ``global_tool_registry`` 实例，外部统一通过 classmethod
+    （``ToolRegistry.register`` / ``ToolRegistry.get`` 等）访问，避免再实例化。
     """
 
     def __init__(self):
         self._tools: Dict[str, AgentTool] = {}
         self._aliases: Dict[str, str] = {}
-
-    def register(self, tool: AgentTool) -> None:
-        """注册工具"""
-        self._tools[tool.name] = tool
-        logger.debug(f"工具注册: {tool.name}")
-
-    def register_alias(self, alias: str, tool_name: str) -> None:
-        """注册工具别名"""
-        if tool_name not in self._tools:
-            logger.warning(f"别名注册失败：工具 {tool_name} 不存在")
-            return
-        self._aliases[alias] = tool_name
-        logger.debug(f"别名注册: {alias} -> {tool_name}")
-
-    def unregister(self, name: str) -> None:
-        """注销工具"""
-        if name in self._tools:
-            del self._tools[name]
-        self._aliases = {a: t for a, t in self._aliases.items() if t != name}
-
-    def get(self, name: str) -> Optional[AgentTool]:
-        """获取工具（支持别名查找）"""
-        tool = self._tools.get(name)
-        if tool:
-            return tool
-        alias_target = self._aliases.get(name)
-        if alias_target:
-            return self._tools.get(alias_target)
-        return None
-
-    def get_all(self) -> Dict[str, AgentTool]:
-        """获取所有工具"""
-        return dict(self._tools)
-
-    def get_by_category(self, category: str) -> List[AgentTool]:
-        """按分类获取工具"""
-        return [t for t in self._tools.values() if t.category == category]
-
-    def get_schemas(self) -> List[Dict[str, Any]]:
-        """获取所有工具的 OpenAI function calling schemas"""
-        return [tool.get_schema() for tool in self._tools.values()]
-
-    def get_readonly_tools(self) -> List[AgentTool]:
-        """获取只读工具"""
-        return [t for t in self._tools.values() if t.is_readonly]
-
-    def get_destructive_tools(self) -> List[AgentTool]:
-        """获取破坏性工具"""
-        return [t for t in self._tools.values() if t.is_destructive]
-
-    def for_model(self, model_id: str = "") -> List[AgentTool]:
-        """Get tools filtered for a specific model.
-
-        GPT models (gpt-*) use ApplyPatch instead of Write/Edit.
-        Claude models use Write/Edit directly.
-        """
-        tools = list(self._tools.values())
-        model_lower = model_id.lower()
-        if model_lower.startswith("gpt-") and not model_lower.startswith("gpt-4"):
-            # GPT models work better with apply_patch
-            tools = [t for t in tools if t.name not in ("Write", "Edit")]
-        return tools
-
-    def run_tool(self, name: str, **kwargs) -> ToolResult:
-        """执行工具"""
-        tool = self.get(name)
-        if tool is None:
-            return ToolResult(output=None, success=False, error=f"工具 {name} 不存在")
-        return tool.run(**kwargs)
-
-    def __len__(self) -> int:
-        return len(self._tools)
-
-    def __contains__(self, name: str) -> bool:
-        return name in self._tools
 
     @classmethod
     def clear(cls) -> None:
@@ -462,16 +359,6 @@ class ToolRegistry:
         if alias_target:
             return global_tool_registry._tools.get(alias_target)
         return None
-
-    @classmethod
-    def get_all(cls) -> Dict[str, AgentTool]:
-        """获取全局注册表所有工具"""
-        return dict(global_tool_registry._tools)
-
-    @classmethod
-    def get_schemas(cls) -> List[Dict[str, Any]]:
-        """获取全局注册表所有工具的 schemas"""
-        return [tool.get_schema() for tool in global_tool_registry._tools.values()]
 
 
 # 全局工具注册中心

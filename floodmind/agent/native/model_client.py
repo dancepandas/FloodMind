@@ -138,7 +138,6 @@ class ModelClient:
             "temperature": temperature if temperature is not None else self.temperature,
             "max_tokens": max_tokens if max_tokens is not None else self.max_tokens,
         }
-        request_params["stream_options"] = {"include_usage": True}
 
         # 支持 extra_body（如 enable_thinking）
         extra_body = kwargs.get("extra_body")
@@ -377,5 +376,5 @@ def _resolve_base_url(provider_name: str) -> str:
                 url = opts.get("baseURL") or opts.get("base_url")
                 if url:
                     return url
-    # 兜底
-    return os.getenv("QWEN_BASE_URL", "https://dashscope.aliyuncs.com/compatible-mode/v1")
+    # 兜底：从环境变量 FLOODMIND_BASE_URL 读取
+    return os.getenv("FLOODMIND_BASE_URL", "")

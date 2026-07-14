@@ -51,7 +51,7 @@ EXTRACTION_PROMPT = """你是一个经验提取专家。请分析以下任务执
 
 3. `domain_keywords`: 相关领域关键词列表（如 ["aojiang", "huokou", "forecast", "excel"]）
 
-4. `skill_used`: 使用的 skill 名称（如 "aojiang-hydro"，没有则为空字符串）
+4. `skill_used`: 使用的 skill 名称（如 "chronos"，没有则为空字符串）
 
 5. `steps_summary`: 关键步骤摘要（按顺序列出主要步骤，每步一句话）
 

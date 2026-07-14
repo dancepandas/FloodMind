@@ -12,6 +12,10 @@ dist
 dist-ssr
 *.local
 
+# TypeScript 声明产物（tsc emit 生成，Vite 直接用 .ts 源码，勿提交）
+src/**/*.d.ts
+!src/vite-env.d.ts
+
 # Editor directories and files
 .vscode/*
 !.vscode/extensions.json

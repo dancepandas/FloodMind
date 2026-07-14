@@ -46,15 +46,5 @@
     "maxHistory": 20,
     "contextWindow": 32768,
     "enableChronosWarmup": false
-  },
-  "mcpServers": [
-    {
-      "name": "knowledge",
-      "transport": "stdio",
-      "command": "python",
-      "args": ["~/.floodmind/mcp/knowledge/server.py"],
-      "env": {},
-      "_comment": "MCP 知识库 Server，替换内置 KnowledgeSearch/KnowledgeAdd"
-    }
-  ]
+  }
 }

@@ -2,7 +2,7 @@
 基础工具模块
 
 提供Agent执行技能所需的核心工具，所有工具统一使用 build_agent_tool 构建，
-具备完整的行为元数据（readonly/destructive/concurrency_safe/interrupt_behavior）。
+具备完整的行为元数据（readonly/destructive/concurrency_safe）。
 
 工具分类：
 - 只读工具: GetSkill, MemorySearch, WebSearch, WebFetch
@@ -42,16 +42,19 @@ from floodmind.tools.agent_tool import (
     resolve_tool_path,
 )
 from floodmind.agent.runtime.contracts.permissions import ToolPermissionPolicy
+from floodmind.skills.registry import get_skill_registry
+from floodmind.agent.runtime.services.process_sandbox import get_process_sandbox
 from floodmind.tools.session_context import (
     SESSION_CONTEXT,
     set_session_context,
     get_current_session_output_dir,
     get_current_session_id,
 )
+from floodmind.agent.runtime.services._runtime_root import PROJECT_ROOT as _PROJECT_ROOT
+from floodmind.agent.runtime.services.workspace_service import get_workspace
 
 logger = logging.getLogger(__name__)
 
-_PROJECT_ROOT = Path.cwd()
 _RETRY_GUARD_LOCK = threading.Lock()
 _RETRY_GUARD_STATES: Dict[str, dict] = {}
 
@@ -277,7 +280,7 @@ def _finalize_tool_output(tool_name: str, output: str, **signature_parts: Any) -
 
 class GetSkillInput(BaseModel):
     """获取技能说明的输入参数"""
-    skill_name: str = Field(description="[必填] 技能名称，如 'aojiang-hydro'、'docx'")
+    skill_name: str = Field(description="[必填] 技能名称，如 'chronos'、'docx'")
 
 
 
@@ -318,27 +321,27 @@ class CancelScheduledTaskInput(BaseModel):
     task_id: str = Field(description="[必填] 要取消的定时任务 ID")
 
 
-_SKILL_REGISTRY: List[Any] = []
+# session 索引位置：网页版仍是 data/sessions/.session_index.json。
+# 桌面版经 workspace.session_root 解析；这里保留 _SESSION_ROOT 作为兼容回退常量。
 _SESSION_ROOT = _PROJECT_ROOT / "data" / "sessions"
 _REUSABLE_SCRIPT_EXTENSIONS = {".py"}
 
 
-def set_skill_registry(skills: List[Any]):
-    """设置技能注册表（由 skills/__init__.py 调用）"""
-    global _SKILL_REGISTRY
-    _SKILL_REGISTRY = skills
-
-
 def _find_skill(skill_name: str) -> Optional[Any]:
-    """查找技能"""
-    for skill in _SKILL_REGISTRY:
-        if skill.name == skill_name:
-            return skill
-    return None
+    """查找技能（委托唯一权威源 SkillRegistry 单例）。"""
+    return get_skill_registry().get_skill(skill_name)
+
+
+def _session_root_path() -> Path:
+    """当前 session_root：优先 workspace.session_root，回退 _SESSION_ROOT 常量。"""
+    ws = get_workspace()
+    if ws is not None:
+        return ws.session_root
+    return _SESSION_ROOT
 
 
 def _load_session_index() -> Dict[str, Any]:
-    index_path = _SESSION_ROOT / ".session_index.json"
+    index_path = _session_root_path() / ".session_index.json"
     if not index_path.exists():
         return {"sessions": []}
     try:
@@ -376,7 +379,7 @@ def _impl_get_skill(skill_name: str = "") -> str:
 get_skill = build_agent_tool(
     name="GetSkill",
     description=(
-        "获取技能的完整说明和执行方法。[必填] skill_name: 技能名称，如 'aojiang-hydro'、'docx'。"
+        "获取技能的完整说明和执行方法。[必填] skill_name: 技能名称，如 'chronos'、'docx'。"
         "返回内容包含：技能描述、使用说明、可用脚本（含完整路径）、参考文档。"
     ),
     args_schema=GetSkillInput,
@@ -395,12 +398,25 @@ def _get_skill_cached(skill_name: str) -> str:
     skill = _find_skill(skill_name)
 
     if not skill:
-        available = [s.name for s in _SKILL_REGISTRY]
+        # 记录失败使用（curator 接活：统计 skill 使用频率/成功率）
+        try:
+            from floodmind.skills.skill_curator import record_skill_usage
+            record_skill_usage(skill_name, success=False)
+        except Exception:
+            pass
+        available = [s.name for s in get_skill_registry().all_skills()]
         return _finalize_tool_output(
             "get_skill",
             f"未找到技能 '{skill_name}'。可用技能：{available}",
             skill_name=skill_name,
         )
+
+    # 记录成功使用（curator 接活：累计 usage、re-activate stale）
+    try:
+        from floodmind.skills.skill_curator import record_skill_usage
+        record_skill_usage(skill_name, success=True)
+    except Exception:
+        pass
 
     lines = [
         f"=== 技能【{skill_name}】完整说明 ===",
@@ -470,6 +486,10 @@ def _get_skill_cached(skill_name: str) -> str:
         ])
 
     return _finalize_tool_output("get_skill", "\n".join(lines), skill_name=skill_name)
+
+
+# refresh/register/set_disabled 后清 GetSkill 正文缓存，避免 stale（替代旧 set_skill_registry）
+get_skill_registry().add_refresh_callback(_get_skill_cached.cache_clear)
 
 
 
@@ -570,27 +590,55 @@ def _impl_exec_bash(command: str = "", workdir: str = "", timeout: int = 120, en
             if str(k).upper() in _FORBIDDEN_ENV_KEYS:
                 return _finalize_tool_output("exec_bash", f"错误：禁止覆盖环境变量: {k}", command=command, timeout=timeout)
             run_env[str(k)] = str(v)
-        Path(run_env['MPLCONFIGDIR']).mkdir(parents=True, exist_ok=True)
         shell_prefix, shell_name = _detect_shell_command()
+        # 兜底：Windows PowerShell 5.1 不支持 `&&`（LLM 常按 bash 习惯写 `cd X && python Y`，
+        # system prompt 已提示但模型未必遵守）。这里检测到就自动转为 `;`（无条件顺序执行），
+        # cd/目录切换等场景语义等效；条件依赖场景日志会暴露，便于后续发现。
+        if shell_name == "powershell" and "&&" in command:
+            logger.warning(f"[exec_bash] PowerShell 不支持 &&，已自动转为 ;（建议后续直接用 ; 或写 .py 文件执行）：{command[:120]}")
+            command = command.replace("&&", ";")
         shell_cmd = shell_prefix + [command]
 
-        if workdir and workdir.strip():
+        session_id = SESSION_CONTEXT.get("session_id", "")
+        process_sandbox = get_process_sandbox(session_id)
+        delegate_cwd = SESSION_CONTEXT.get("delegate_cwd", "") or ""
+
+        # 子代理 cwd 选择优先级：
+        # 1. delegate_cwd（阶段C：主代理委派指定的工作目录，桌面版并行写 user_dir 子目录）
+        # 2. process_sandbox.workspace_dir（子代理默认 sandbox 隔离）
+        # 3. workdir 参数（显式指定，经权限解析）
+        # 4. SESSION_CONTEXT["output_dir"]（主代理产物目录）
+        if delegate_cwd and Path(delegate_cwd).is_dir():
+            cwd = Path(delegate_cwd)
+        elif process_sandbox is not None and process_sandbox.workspace_dir:
+            cwd = process_sandbox.workspace_dir
+        elif workdir and workdir.strip():
             cwd = resolve_tool_path(workdir.strip(), access="read").resolved
             if not cwd.is_dir():
                 cwd = Path(SESSION_CONTEXT.get("output_dir", str(_PROJECT_ROOT)))
         else:
             cwd = Path(SESSION_CONTEXT.get("output_dir", str(_PROJECT_ROOT)))
 
-        process = subprocess.Popen(
-            shell_cmd,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            env=run_env,
-            cwd=str(cwd),
-            text=True,
-            encoding='utf-8',
-            errors='replace',
-        )
+        if process_sandbox is not None:
+            run_env = process_sandbox.restrict_env(run_env, process_sandbox.workspace_dir or cwd)
+
+        Path(run_env.get('MPLCONFIGDIR', str(_PROJECT_ROOT / 'data' / 'matplotlib'))).mkdir(parents=True, exist_ok=True)
+
+        popen_kwargs = {
+            "stdout": subprocess.PIPE,
+            "stderr": subprocess.PIPE,
+            "env": run_env,
+            "cwd": str(cwd),
+            "text": True,
+            "encoding": "utf-8",
+            "errors": "replace",
+        }
+        if process_sandbox is not None:
+            popen_kwargs = process_sandbox.wrap_popen_kwargs(popen_kwargs)
+
+        process = subprocess.Popen(shell_cmd, **popen_kwargs)
+        if process_sandbox is not None:
+            process_sandbox.register_process(process)
 
         stdout_lines = []
         stderr_lines = []
@@ -613,6 +661,12 @@ def _impl_exec_bash(command: str = "", workdir: str = "", timeout: int = 120, en
         try:
             returncode = process.wait(timeout=timeout)
         except subprocess.TimeoutExpired:
+            # 子代理沙盒：终止整棵进程树，避免孤儿进程残留
+            if process_sandbox is not None:
+                try:
+                    process_sandbox.terminate_all()
+                except Exception as e:
+                    logger.warning("process_sandbox.terminate_all 失败: %s", e)
             process.kill()
             process.wait(timeout=5)
             stdout_thread.join(timeout=5)
@@ -718,11 +772,24 @@ def _impl_web_search(
     if not query:
         return _finalize_tool_output("web_search", "错误：搜索关键词不能为空", query=query, count=count, freshness=freshness, search_types=search_types, site=site)
     
-    api_key = os.getenv("BAIDU_API_KEY")
+    api_key = os.getenv("BAIDU_API_KEY") or os.getenv("FLOODMIND_SEARCH_API_KEY")
+    search_url = "https://qianfan.baidubce.com/v2/ai_search/web_search"
+
+    # 优先从 search.json 配置读取
+    try:
+        from floodmind.config.search_config import get_search_config
+        search_cfg = get_search_config()
+        if search_cfg.get("api_key"):
+            api_key = search_cfg["api_key"]
+        if search_cfg.get("url"):
+            search_url = search_cfg["url"]
+    except Exception:
+        pass
+
     if not api_key:
         return _finalize_tool_output(
             "web_search",
-            "错误：未配置 BAIDU_API_KEY 环境变量，请在 .env 文件中配置",
+            "错误：未配置搜索 API Key。请编辑 ~/.floodmind/search.json 或设置 BAIDU_API_KEY 环境变量",
             query=query,
             count=count,
             freshness=freshness,
@@ -813,7 +880,7 @@ def _impl_web_search(
         request_body["search_filter"] = search_filter
     
     try:
-        url = "https://qianfan.baidubce.com/v2/ai_search/web_search"
+        url = search_url
         headers = {
             "Authorization": f"Bearer {api_key}",
             "Content-Type": "application/json"
@@ -1147,10 +1214,8 @@ def _impl_search_memory(
         if not hasattr(memory_instance, 'search_history'):
             return _finalize_tool_output("search_memory", "错误：记忆系统不支持搜索功能", keywords=keywords, search_type=search_type, max_results=max_results)
 
-        if search_type == "global":
-            results = memory_instance.global_search(keywords, max_results)
-        else:
-            results = memory_instance.search_history(keywords, max_results)
+        # search_type 仅作语义标注：conversation/global 都走对话历史搜索（_turns）
+        results = memory_instance.search_history(keywords, max_results)
 
         if not results or "未找到" in results:
             return _finalize_tool_output("search_memory", f"未找到与 '{keywords}' 相关的内容", keywords=keywords, search_type=search_type, max_results=max_results)
@@ -1669,12 +1734,6 @@ def _register_all_tools():
         ToolRegistry.register_alias("drill_down_experience", "DrillDownExperience")
         ToolRegistry.register_alias("add_task_experience", "AddTaskExperience")
 
-    # ── Todo 任务管理工具 ──────────────────────────────────────────
-    from floodmind.tools.todo_tools import todo_write, todo_list
-    ToolRegistry.register(todo_write)
-    ToolRegistry.register(todo_list)
-    ToolRegistry.register_alias("todo_write", "TodoWrite")
-    ToolRegistry.register_alias("todo_list", "TodoList")
 
 
 _register_all_tools()
@@ -1692,7 +1751,6 @@ __all__ = [
     'list_scheduled_tasks',
     'cancel_scheduled_task',
     'reset_retry_guard',
-    'set_skill_registry',
     'set_memory_instance',
     'set_session_context',
     'get_current_session_output_dir',
