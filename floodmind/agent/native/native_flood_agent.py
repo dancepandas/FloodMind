@@ -326,13 +326,9 @@ class NativeFloodAgent:
         self._init_tools()
         self._init_model_client()
         self._init_executors()
-        if settings.agent.enable_chronos_warmup:
-            self._warmup_chronos()
+        # Chronos 已外置为 MCP 服务，不再预热（_warmup_chronos 保留为 no-op 占位已移除）。
 
         logger.info("NativeFloodAgent 初始化成功")
-
-    _chronos_warmup_done = False
-    _chronos_warmup_lock = threading.Lock()
 
     def _init_bare(self, tools: list, system_prompt: Optional[str]) -> None:
         """bare 模式精简初始化：只注册用户提供的工具，跳过内置工具/权限/MCP/Plugin。"""
@@ -365,7 +361,7 @@ class NativeFloodAgent:
         )
 
         context_compressor = self._make_context_compressor()
-        context_window = settings.agent.context_window
+        context_window = settings.model.context_window
 
         # 构建 executor
         self._orchestrator_executor = NativeAgentExecutor(
@@ -417,11 +413,6 @@ class NativeFloodAgent:
             else:
                 lines.append(f"- `{name}`")
         return "\n".join(lines)
-
-    @staticmethod
-    def _warmup_chronos():
-        """Chronos-2 预报模型已外置为 MCP 服务，桌面端不再预热。"""
-        pass
 
     def _init_tools(self) -> None:
         from floodmind.tools import (
@@ -984,7 +975,7 @@ class NativeFloodAgent:
         from floodmind.agent.context_runtime import ContextRuntime
 
         self._context_runtime = ContextRuntime(
-            context_window=settings.agent.context_window,
+            context_window=settings.model.context_window,
         )
         self._context_runtime.prefetch()
 
@@ -1049,7 +1040,7 @@ class NativeFloodAgent:
         ]
 
         context_compressor = self._make_context_compressor()
-        context_window = settings.agent.context_window
+        context_window = settings.model.context_window
 
         self._orchestrator_executor = NativeAgentExecutor(
             model_client=self._model_client,
@@ -2362,7 +2353,7 @@ class NativeFloodAgent:
                     if hasattr(self.memory, "get_chat_history_for_system_prompt"):
                         _sp = getattr(self._orchestrator_executor, "system_prompts", None)
                         context_chars = len(_sp[0]) if _sp else 0
-                        cw = settings.agent.context_window
+                        cw = settings.model.context_window
                         history_text = self.memory.get_chat_history_for_system_prompt(
                             total_context_chars=context_chars,
                             context_window=cw,

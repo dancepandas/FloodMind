@@ -1,50 +1,41 @@
 {
-  "provider": {
+  "providers": {
     "dashscope": {
       "name": "DashScope (Alibaba)",
-      "options": {
-        "apiKey": "",
-        "baseURL": "https://dashscope.aliyuncs.com/compatible-mode/v1"
-      },
-      "models": {
-        "deepseek-v4-flash": {
+      "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+      "api_key": "",
+      "models": [
+        {
+          "id": "deepseek-v4-flash",
           "name": "DeepSeek V4 Flash",
           "description": "快速高效，适合日常任务",
-          "maxTokens": 65536,
-          "temperature": 0.3,
-          "supportsReasoning": true,
-          "supportsVision": false
+          "context_window": 65536,
+          "default_max_tokens": 65536,
+          "default_temperature": 0.3,
+          "supports_reasoning": true,
+          "supports_vision": false
         },
-        "deepseek-v4-pro": {
+        {
+          "id": "deepseek-v4-pro",
           "name": "DeepSeek V4 Pro",
           "description": "编程、数学与通用任务表现出色",
-          "maxTokens": 65536,
-          "temperature": 0.3,
-          "supportsReasoning": true,
-          "supportsVision": false
+          "context_window": 65536,
+          "default_max_tokens": 65536,
+          "default_temperature": 0.3,
+          "supports_reasoning": true,
+          "supports_vision": false
         },
-        "qwen3.6-plus": {
+        {
+          "id": "qwen3.6-plus",
           "name": "Qwen 3.6 Plus",
           "description": "阿里混合推理模型，支持图像理解",
-          "maxTokens": 32768,
-          "temperature": 0.3,
-          "supportsReasoning": true,
-          "supportsVision": true
+          "context_window": 32768,
+          "default_max_tokens": 32768,
+          "default_temperature": 0.3,
+          "supports_reasoning": true,
+          "supports_vision": true
         }
-      }
+      ]
     }
-  },
-  "model": {
-    "provider": "dashscope",
-    "model": "deepseek-v4-flash",
-    "temperature": 0.3,
-    "maxTokens": 65536,
-    "enableReasoning": false,
-    "enableSearch": false
-  },
-  "agent": {
-    "maxHistory": 20,
-    "contextWindow": 32768,
-    "enableChronosWarmup": false
   }
 }

@@ -64,7 +64,7 @@ class Agent:
         permission_handler: 工具调用审批钩子 ``Callable[[tool_name, tool_input], bool]``。
             每次工具执行前同步调用，返回 False 则拒绝该次调用（工具不执行，模型收到拒绝
             信息）。bare 模式默认放行所有调用，此钩子提供可选的安全网关。
-        max_iterations: Agent 循环最大迭代轮数（默认 50）。
+        max_iterations: Agent 循环最大迭代轮数（默认 999，有 auto-compact + DOOM LOOP 兜底）。
         workspace: 工作区对象（``floodmind.agent.runtime.contracts.workspace.Workspace``）。
             嵌入式宿主（如桌面端）显式注入，避免跨线程 contextvar 丢失。未传时回退到
             ``set_workspace()`` 注入的 contextvar（网页版用法）。运行期可用 ``bind_workspace``
@@ -89,13 +89,14 @@ class Agent:
         enable_reasoning: bool = False,
         on_event: Optional[Callable[[Dict[str, Any]], None]] = None,
         permission_handler: Optional[Callable[[str, Dict[str, Any]], bool]] = None,
-        max_iterations: int = 50,
+        max_iterations: int = 999,
         workspace: Optional[Any] = None,
     ):
         if memory is None:
             from floodmind.memory.dual_memory import DualMemory
+            from floodmind.config.model_resolver import resolve_model
             sid = session_id or "sdk-agent"
-            memory = DualMemory(session_id=sid, context_window=32768)
+            memory = DualMemory(session_id=sid, context_window=resolve_model().context_window)
 
         self._on_event = on_event
         self._last_usage: Dict[str, int] = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}

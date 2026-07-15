@@ -1,51 +1,48 @@
-"""
-模型预设注册表 — 从 settings.json 的 provider.models 段动态读取
+"""模型预设注册表 — 从 settings.json 的 providers 目录读取（OpenCode 层级）。
 
-所有前端可选模型由用户在 ~/.floodmind/settings.json 中配置。
-内置预设仅作为初始模板（settings_template.json），会被用户配置覆盖。
+层级::
+
+    providers.<id>.{base_url, api_key, models[]}
+        models[].{id, context_window, default_max_tokens, default_temperature, ...}
+
+目录读取统一委托 model_resolver.list_models()，避免重复解析。
+对前端暴露的输出形状（get_models_list）保持不变——这是前端模型选择器契约。
 """
 
 import os
 from typing import Any, Dict, List, Optional
 
-from floodmind.config.settings import get_config, settings
-
 
 def _get_all_provider_models() -> Dict[str, Dict[str, Any]]:
-    """从配置中提取所有 provider 的 models"""
-    cfg = get_config()
-    provider_cfg = cfg.get("provider", {})
-    result = {}
-    if not isinstance(provider_cfg, dict):
-        return result
-    for provider_name, provider_data in provider_cfg.items():
-        if not isinstance(provider_data, dict):
+    """从 providers 目录提取所有模型 → {model_key: preset}。
+
+    输出形状保持与旧版一致（供 resolve_api_key/base_url、ModelClient 复用）。
+    """
+    from floodmind.config.model_resolver import list_models
+
+    result: Dict[str, Dict[str, Any]] = {}
+    for pid, pdata, m in list_models():
+        key = m.get("id", "")
+        if not key:
             continue
-        models = provider_data.get("models", {})
-        if not isinstance(models, dict):
-            continue
-        options = provider_data.get("options", {}) if isinstance(provider_data, dict) else {}
-        for model_key, model_info in models.items():
-            if not isinstance(model_info, dict):
-                continue
-            result[model_key] = {
-                "label": model_info.get("name", model_key),
-                "description": model_info.get("description", ""),
-                "model_name": model_key,
-                "provider": provider_name,
-                "api_key_env": "",
-                "base_url_env": "",
-                "default_base_url": options.get("baseURL", options.get("base_url", "")),
-                "api_key": options.get("apiKey", options.get("api_key", "")),
-                "supports_reasoning": model_info.get("supportsReasoning", model_info.get("supports_reasoning", False)),
-                "supports_search": model_info.get("supportsSearch", model_info.get("supports_search", False)),
-                "supports_vision": model_info.get("supportsVision", model_info.get("supports_vision", False)),
-                "max_context_tokens": model_info.get("maxTokens", model_info.get("max_tokens", 8192)),
-                "default_temperature": model_info.get("temperature", model_info.get("default_temperature", 0.3)),
-                "default_max_tokens": model_info.get("maxTokens", model_info.get("max_tokens", 8192)),
-                "thinking_temperature": model_info.get("thinkingTemperature", model_info.get("thinking_temperature", 0.2)),
-                "thinking_max_tokens": model_info.get("thinkingMaxTokens", model_info.get("thinking_max_tokens", 8192)),
-            }
+        result[key] = {
+            "label": m.get("name", key),
+            "description": m.get("description", ""),
+            "model_name": key,
+            "provider": pid,
+            "api_key_env": "",
+            "base_url_env": "",
+            "default_base_url": pdata.get("base_url", ""),
+            "api_key": pdata.get("api_key", ""),
+            "supports_reasoning": bool(m.get("supports_reasoning", m.get("supportsReasoning", False))),
+            "supports_search": bool(m.get("supports_search", m.get("supportsSearch", False))),
+            "supports_vision": bool(m.get("supports_vision", m.get("supportsVision", False))),
+            "max_context_tokens": int(m.get("context_window", m.get("maxTokens", 8192))),
+            "default_temperature": float(m.get("default_temperature", m.get("temperature", 0.3))),
+            "default_max_tokens": int(m.get("default_max_tokens", m.get("maxTokens", 8192))),
+            "thinking_temperature": float(m.get("thinking_temperature", m.get("thinkingTemperature", 0.2))),
+            "thinking_max_tokens": int(m.get("thinking_max_tokens", m.get("thinkingMaxTokens", 8192))),
+        }
     return result
 
 
@@ -53,34 +50,39 @@ def get_preset(model_key: str) -> Optional[Dict[str, Any]]:
     return _get_all_provider_models().get(model_key)
 
 
-DEFAULT_MODEL_KEY = None
+DEFAULT_MODEL_KEY: Optional[str] = None
 
 
 def get_default_model_key() -> str:
+    """默认激活模型 = catalog 第一个（不再读 settings.model 选择段）。"""
     global DEFAULT_MODEL_KEY
     if DEFAULT_MODEL_KEY is None:
-        from floodmind.config.settings import settings
-        model_cfg = settings.model
-        cfg = get_config()
-        model_section = cfg.get("model", {})
-        DEFAULT_MODEL_KEY = model_section.get("model", model_section.get("model_name", "deepseek-v4-flash"))
+        from floodmind.config.model_resolver import list_models
+        candidates = list_models()
+        DEFAULT_MODEL_KEY = (
+            candidates[0][2].get("id", "deepseek-v4-flash") if candidates else "deepseek-v4-flash"
+        )
     return DEFAULT_MODEL_KEY
 
 
 def resolve_api_key(preset: Dict[str, Any]) -> str:
-    key = preset.get("api_key", "").strip()
+    """解析 API Key：preset 配置 > 环境变量。"""
+    key = (preset.get("api_key") or "").strip()
     if key:
         return key
     env_var = preset.get("api_key_env", "DASHSCOPE_API_KEY")
     if env_var:
         key = os.getenv(env_var, "").strip()
     if not key:
+        key = os.getenv("FLOODMIND_API_KEY", "").strip()
+    if not key:
         raise ValueError(f"模型 {preset.get('model_name', 'unknown')} 未配置 API 密钥")
     return key
 
 
 def resolve_base_url(preset: Dict[str, Any]) -> str:
-    url = preset.get("default_base_url", "").strip()
+    """解析 Base URL：preset 配置 > 环境变量。"""
+    url = (preset.get("default_base_url") or "").strip()
     if url:
         return url
     env_var = preset.get("base_url_env", "")
@@ -88,22 +90,14 @@ def resolve_base_url(preset: Dict[str, Any]) -> str:
         env_url = os.getenv(env_var, "").strip()
         if env_url:
             return env_url
-    # 兜底：从 provider options 中读取 base_url
-    provider = preset.get("provider", "")
-    if provider:
-        from floodmind.config.settings import get_config
-        provider_opts = get_config().get("provider", {}).get(provider, {}).get("options", {})
-        if isinstance(provider_opts, dict):
-            url = provider_opts.get("baseURL") or provider_opts.get("base_url")
-            if url:
-                return url
-    return ""
+    return os.getenv("FLOODMIND_BASE_URL", "").strip()
 
 
 def get_models_list() -> List[Dict[str, Any]]:
+    """前端模型选择器契约：[{key,label,description,supports_*,is_default}]。"""
     all_models = _get_all_provider_models()
     default_key = get_default_model_key()
-    result = []
+    result: List[Dict[str, Any]] = []
     for key, preset in all_models.items():
         result.append({
             "key": key,
@@ -117,8 +111,8 @@ def get_models_list() -> List[Dict[str, Any]]:
     return result
 
 
-def reload_presets():
-    """运行时重新加载预设（配置变更后调用）"""
+def reload_presets() -> None:
+    """运行时重新加载预设（配置变更后调用）。"""
     from floodmind.config.settings import reload_config
     reload_config()
     global DEFAULT_MODEL_KEY

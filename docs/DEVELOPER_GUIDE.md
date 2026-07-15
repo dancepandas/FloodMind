@@ -113,34 +113,38 @@ pip install "floodmind[all]"        # 全部依赖（含 GPU）
 
 | 文件 | 说明 |
 |------|------|
-| `settings.json` | 主配置（模型、Provider、Agent 参数） |
+| `settings.json` | 主配置（仅 `providers` 服务商与模型目录，OpenCode 层级） |
 | `mcp.json` | MCP Server 连接配置（独立管理） |
 | `search.json` | WebSearch 搜索引擎配置 |
 | `SOUL.md` | 智能体身份定义 |
 | `AGENTS.md` | 全局行为规则 |
 
-首次启动自动创建模板。最小配置示例（DashScope）：
+首次启动自动创建模板。最小配置示例（DashScope）——**配置最小化**，只暴露服务商目录：
 
 ```json
 {
-  "provider": {
+  "providers": {
     "dashscope": {
       "name": "DashScope (Alibaba)",
-      "options": {
-        "apiKey": "sk-你的密钥",
-        "baseURL": "https://dashscope.aliyuncs.com/compatible-mode/v1"
-      },
-      "models": {
-        "deepseek-v4-flash": { "name": "DeepSeek V4 Flash", "maxTokens": 65536 }
-      }
+      "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+      "api_key": "sk-你的密钥",
+      "models": [
+        {
+          "id": "deepseek-v4-flash",
+          "name": "DeepSeek V4 Flash",
+          "context_window": 65536,
+          "default_max_tokens": 65536,
+          "default_temperature": 0.3,
+          "supports_reasoning": true
+        }
+      ]
     }
-  },
-  "model": {
-    "provider": "dashscope",
-    "model": "deepseek-v4-flash"
   }
 }
 ```
+
+> - **激活模型**默认 = catalog 第一个；界面切换属会话级，不写回配置。
+> - **记忆窗口**取自当前模型 `context_window`；**最大轮次**默认 999（auto-compact 兜底）；**经验系统**始终开启——均不入配置。
 
 MCP Server 配置独立存储在 `~/.floodmind/mcp.json`：
 
@@ -722,38 +726,44 @@ class MyAgent(NativeFloodAgent):
 
 ## 8. 模型与 Provider 扩展
 
-在 `~/.floodmind/settings.json` 中添加 Provider：
+在 `~/.floodmind/settings.json` 的 `providers` 下添加服务商（OpenCode 层级）：
 
 ```json
 {
-  "provider": {
+  "providers": {
     "my-provider": {
       "name": "我的模型平台",
-      "options": {
-        "apiKey": "sk-xxx",
-        "baseURL": "https://api.my-platform.com/v1"
-      },
-      "models": {
-        "my-model": {
+      "base_url": "https://api.my-platform.com/v1",
+      "api_key": "sk-xxx",
+      "models": [
+        {
+          "id": "my-model",
           "name": "我的模型",
-          "maxTokens": 8192,
-          "supportsReasoning": true
+          "context_window": 8192,
+          "default_max_tokens": 8192,
+          "default_temperature": 0.3,
+          "supports_reasoning": true
         }
-      }
+      ]
     }
   }
 }
 ```
 
-Python 中使用：
+Python 中使用——**推荐 `resolve_model()` 单一入口**（桌面端集成无需手解析配置）：
 
 ```python
-from floodmind import ModelClient
+from floodmind import resolve_model, ModelClient
 
-# 从 settings 按 key 选择
+# resolve_model() 返回完整连接+参数（默认激活模型；指定则 resolve_model(model_key="my-model"))
+rm = resolve_model(model_key="my-model")
+llm = ModelClient(rm.api_key, rm.base_url, rm.id,
+                  temperature=rm.temperature, max_tokens=rm.max_tokens)
+
+# 或沿用便捷工厂（内部同样走 resolve_model）
 llm = ModelClient.from_settings_with_preset("my-model")
 
-# 直接用连接信息
+# 直接用连接信息（跳过配置）
 llm = ModelClient(
     api_key="sk-xxx",
     base_url="https://api.my-platform.com/v1",

@@ -75,28 +75,36 @@ pip install "floodmind[all]"        # 全部依赖（含GPU）
 
 首次启动 FloodMind 会自动创建配置文件 `~/.floodmind/settings.json`。
 
-编辑该文件，在对应 provider 的 `options.apiKey` 中填入密钥：
+配置采用 **OpenCode 风格的层级结构**——服务商 → 连接信息 → 模型列表 → 模型参数，层层递进。
+只需在 `providers.<服务商>.api_key` 填入密钥：
 
 ```json
 {
-  "provider": {
+  "providers": {
     "dashscope": {
       "name": "DashScope (Alibaba)",
-      "options": {
-        "apiKey": "sk-你的密钥",
-        "baseURL": "https://dashscope.aliyuncs.com/compatible-mode/v1"
-      },
-      "models": {
-        "deepseek-v4-flash": { "name": "DeepSeek V4 Flash", "maxTokens": 65536 }
-      }
+      "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+      "api_key": "sk-你的密钥",
+      "models": [
+        {
+          "id": "deepseek-v4-flash",
+          "name": "DeepSeek V4 Flash",
+          "context_window": 65536,
+          "default_max_tokens": 65536,
+          "default_temperature": 0.3,
+          "supports_reasoning": true
+        }
+      ]
     }
-  },
-  "model": {
-    "provider": "dashscope",
-    "model": "deepseek-v4-flash"
   }
 }
 ```
+
+> **配置最小化原则**：`settings.json` 只保留服务商目录。其余子系统参数（记忆窗口、最大轮次、经验系统等）均为代码合理默认。
+> - **激活模型**默认选 catalog 第一个；在界面里切换模型属于**会话级**选择，不会写回配置文件。
+> - **记忆窗口**直接取自当前模型的 `context_window`，无需额外配置。
+> - **最大轮次**默认 999（auto-compact + DOOM LOOP 兜底），不入配置。
+> - **经验系统**始终开启。
 
 ### 3. 启动
 
@@ -217,7 +225,19 @@ for event in agent.stream("查一下霍口水库水位"):
 | 产物 | `file_generated` / `image_generated` | `filename`, `download_url?`, `filepath?`, `image_url?`, `size?` |
 | 系统 | `token_usage` / `heartbeat` / `error` / `llm_token_error` | token 用量 / 错误内容 |
 
-**构造参数**：`llm`（必填）、`tools`、`system_prompt`、`memory`、`session_id`、`enable_search`、`enable_reasoning`、`on_event`（事件回调）、`permission_handler`（工具审批钩子）、`max_iterations`（默认 50）、`workspace`（嵌入式工作区注入）。
+**构造参数**：`llm`（必填）、`tools`、`system_prompt`、`memory`、`session_id`、`enable_search`、`enable_reasoning`、`on_event`（事件回调）、`permission_handler`（工具审批钩子）、`max_iterations`（默认 999）、`workspace`（嵌入式工作区注入）。
+
+**模型配置解析（桌面端集成推荐）**：无需手动解析 `settings.json`，调用单一入口 `resolve_model()` 即可拿到完整的连接与参数：
+
+```python
+from floodmind import resolve_model, ModelClient, Agent
+
+rm = resolve_model()                       # 默认激活模型；指定则 resolve_model(model_key="...")
+llm = ModelClient(rm.api_key, rm.base_url, rm.id,
+                  temperature=rm.temperature, max_tokens=rm.max_tokens)
+# rm.context_window 可直接用于自建记忆：DualMemory(context_window=rm.context_window)
+agent = Agent(llm=llm)
+```
 
 **结果属性**：`agent.last_usage`（本次 token 用量）、`agent.artifacts`（本次产物事件）、`agent.raw`（底层 `NativeFloodAgent`）。
 
@@ -254,7 +274,7 @@ from floodmind.memory import DualMemory
 from floodmind.agent.native.native_flood_agent import NativeFloodAgent
 
 llm = ModelClient.from_settings()
-memory = DualMemory(session_id="my-session", max_short_term=20, context_window=32768)
+memory = DualMemory(session_id="my-session", context_window=65536)
 agent = NativeFloodAgent(llm_service=llm, memory=memory, session_id="my-session")
 
 # 流式对话
@@ -371,20 +391,24 @@ class MyAgent(NativeFloodAgent):
 
 ### 模型扩展
 
-在 `~/.floodmind/settings.json` 中添加任意 OpenAI 兼容接口：
+在 `~/.floodmind/settings.json` 的 `providers` 下添加任意 OpenAI 兼容服务商：
 
 ```json
 {
-  "provider": {
+  "providers": {
     "custom": {
       "name": "自定义平台",
-      "options": {
-        "apiKey": "密钥",
-        "baseURL": "https://api.your-provider.com/v1"
-      },
-      "models": {
-        "my-model": { "name": "我的模型", "maxTokens": 8192 }
-      }
+      "base_url": "https://api.your-provider.com/v1",
+      "api_key": "密钥",
+      "models": [
+        {
+          "id": "my-model",
+          "name": "我的模型",
+          "context_window": 8192,
+          "default_max_tokens": 4096,
+          "default_temperature": 0.3
+        }
+      ]
     }
   }
 }
@@ -402,7 +426,7 @@ class MyAgent(NativeFloodAgent):
 
 | 文件 | 说明 |
 |------|------|
-| `settings.json` | 主配置文件（模型、Provider、Agent 参数） |
+| `settings.json` | 主配置文件（仅 providers 服务商与模型目录，OpenCode 层级） |
 | `mcp.json` | MCP Server 连接配置（独立管理，首次启动自动从旧 settings.json 迁移） |
 | `search.json` | WebSearch 搜索引擎配置（API Key、URL、Provider） |
 | `SOUL.md` | 智能体身份定义（首次启动自动生成，可直接编辑） |
@@ -410,63 +434,64 @@ class MyAgent(NativeFloodAgent):
 
 ### OpenAI 兼容接口
 
-FloodMind 支持任意兼容 OpenAI `/v1/chat/completions` 的 API。以下是常见提供商的配置示例：
+FloodMind 支持任意兼容 OpenAI `/v1/chat/completions` 的 API。各服务商只需配 `base_url` + `api_key`：
 
 ```json
 // DashScope（阿里云百炼）
-{ "provider": { "dashscope": { "options": { "baseURL": "https://dashscope.aliyuncs.com/compatible-mode/v1" } } } }
+{ "providers": { "dashscope": { "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1", "api_key": "sk-...", "models": [{"id":"deepseek-v4-flash","context_window":65536}] } } }
 
 // DeepSeek 官方
-{ "provider": { "deepseek": { "options": { "baseURL": "https://api.deepseek.com/v1" } } } }
+{ "providers": { "deepseek": { "base_url": "https://api.deepseek.com/v1", "api_key": "sk-...", "models": [{"id":"deepseek-chat","context_window":65536}] } } }
 
 // OpenAI
-{ "provider": { "openai": { "options": { "baseURL": "https://api.openai.com/v1" } } } }
+{ "providers": { "openai": { "base_url": "https://api.openai.com/v1", "api_key": "sk-...", "models": [{"id":"gpt-4o","context_window":128000}] } } }
 
 // Ollama 本地模型
-{ "provider": { "ollama": { "options": { "baseURL": "http://localhost:11434/v1" } } } }
-
-// 其他 OpenAI 兼容平台（硅基流动 / Groq / 讯飞星辰 等）
-{ "provider": { "custom": { "options": { "baseURL": "https://api.your-provider.com/v1" } } } }
+{ "providers": { "ollama": { "base_url": "http://localhost:11434/v1", "models": [{"id":"llama3","context_window":8192}] } } }
 ```
 
-> 不需要 `apiKey` 的平台（如 Ollama 本地）可省略该字段。
+> 不需要 `api_key` 的平台（如 Ollama 本地）可省略该字段。
 
-### Provider 配置
+### Provider 配置（完整字段）
 
 ```json
 {
-  "provider": {
+  "providers": {
     "<provider-id>": {
       "name": "显示名称",
-      "options": {
-        "apiKey": "密钥",
-        "baseURL": "API 地址"
-      },
-      "models": {
-        "<model-id>": {
+      "base_url": "API 地址",
+      "api_key": "密钥",
+      "models": [
+        {
+          "id": "<model-id>",
           "name": "模型显示名",
           "description": "描述",
-          "maxTokens": 65536,
-          "temperature": 0.3,
-          "supportsReasoning": true,
-          "supportsVision": false
+          "context_window": 65536,
+          "default_max_tokens": 65536,
+          "default_temperature": 0.3,
+          "supports_reasoning": true,
+          "supports_vision": false
         }
-      }
+      ]
     }
   }
 }
 ```
 
-### 主要配置项
+### 配置项说明
 
-| 键 | 说明 | 默认值 |
+`settings.json` 采用 OpenCode 层级，**只暴露 `providers`**。其余为代码默认：
+
+| 项 | 说明 | 默认 |
 |------|------|--------|
-| `model.provider` | 默认 provider | dashscope |
-| `model.model` | 默认模型 | deepseek-v4-flash |
-| `model.enableReasoning` | 启用推理模式 | false |
-| `model.maxTokens` | 最大 token 数 | 65536 |
-| `agent.maxHistory` | 最大历史轮数 | 20 |
-| `agent.contextWindow` | 上下文窗口 | 32768 |
+| `providers.<id>.{base_url,api_key}` | 服务商连接 | — |
+| `providers.<id>.models[].id` | 模型标识 | — |
+| `providers.<id>.models[].context_window` | 模型上下文窗口（记忆窗口取此值） | 32768 |
+| `providers.<id>.models[].default_max_tokens` | 默认最大输出 token | 8192 |
+| `providers.<id>.models[].default_temperature` | 默认采样温度 | 0.3 |
+| 激活模型 | 默认 catalog 第一个，界面切换为会话级 | 第一个 |
+| 最大轮次 | auto-compact + DOOM LOOP 兜底 | 999 |
+| 经验系统 | 始终开启 | 开 |
 
 ### MCP Server 配置
 

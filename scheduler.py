@@ -86,8 +86,7 @@ def create_agent_for_session(session_manager: SessionManager, session_id: str):
     )
     memory = DualMemory(
         session_id=session_id,
-        max_short_term=settings.agent.max_history,
-        context_window=settings.agent.context_window,
+        context_window=settings.model.context_window,
         persist_dir=session_manager.get_memory_dir(session_id),
         llm=llm_service,
     )
