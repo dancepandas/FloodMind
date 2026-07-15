@@ -118,23 +118,33 @@ def _template_path() -> Path:
 
 # ── Built-in Defaults ──────────────────────────────────────
 
+# Agent 循环上限：代码默认，不入配置（有 auto-compact + DOOM LOOP 检测兜底）。
+DEFAULT_MAX_ITERATIONS = 999
+
+# settings.json 仅暴露 providers（服务商目录）；其余子系统参数为代码内部默认，
+# 高级用户可手动追加覆盖。模型生成参数（temperature/max_tokens/context_window）
+# 只挂在模型自身定义上，顶层不重复——单一真相源。
 DEFAULT_CONFIG: Dict[str, Any] = {
-    "agent": {
-        "maxHistory": 20,
-        "contextWindow": 32768,
-        "enableChronosWarmup": False,
-    },
+    "providers": {},
     "task_experience": {
-        "enabled": True,
-        "autoCapture": True,
-        "persistDir": "./data/task_experience",
-        "sealThreshold": 5,
-        "archiveAfterDays": 90,
-        "skillGenerationThreshold": 5,
+        "persist_dir": "./data/task_experience",
+        "seal_threshold": 5,
+        "archive_after_days": 90,
+        "skill_generation_threshold": 5,
     },
     "background_review": {
         "enabled": True,
         "min_message_count": 3,
+    },
+    "api": {
+        "base_url": "http://127.0.0.1:8000",
+        "timeout": 60,
+    },
+    "workspace": {
+        "default_user_dir": "",
+        "session_root": "",
+        "sandbox_strategy": "session_root",
+        "overwrite_protection": False,
     },
 }
 
@@ -165,11 +175,113 @@ def _load_json_config(path: Path) -> dict:
         return {}
 
 
+def _rename_keys(d: dict, mapping: dict) -> dict:
+    """按 mapping 把 camelCase 键改名为 snake_case（仅对存在的键）。"""
+    if not isinstance(d, dict):
+        return d
+    out = {}
+    for k, v in d.items():
+        out[mapping.get(k, k)] = v
+    return out
+
+
+def _migrate_legacy_config(cfg: dict) -> tuple:
+    """把旧格式 settings.json 归一化为新格式（仅 providers 目录）。
+
+    返回 (新cfg, 是否发生迁移)。幂等：新格式输入不触发任何改动。
+
+    - provider（单数）→ providers；options.{apiKey,baseURL} 扁平化；models dict → list
+    - model 选择段、agent.maxHistory/contextWindow/enableChronosWarmup、
+      task_experience.enabled/autoCapture → 丢弃（已有代码默认/会话级替代）
+    - task_experience/workspace 残留 camelCase → snake_case
+    """
+    from floodmind.config.model_resolver import _normalize_models
+
+    migrated = False
+    out = dict(cfg)
+
+    # 1) provider(单数) → providers
+    if "provider" in out:
+        legacy = out.pop("provider")
+        if "providers" not in out and isinstance(legacy, dict):
+            from floodmind.config.model_resolver import _migrate_legacy_providers
+            out["providers"] = _migrate_legacy_providers(legacy)
+        migrated = True
+
+    # 归一化 providers 内部残留的 options / dict-models
+    if isinstance(out.get("providers"), dict):
+        new_prov = {}
+        for pid, pdata in out["providers"].items():
+            if not isinstance(pdata, dict):
+                new_prov[pid] = pdata
+                continue
+            np = dict(pdata)
+            if "options" in np:
+                opts = np.pop("options")
+                if isinstance(opts, dict):
+                    np.setdefault("api_key", opts.get("apiKey") or opts.get("api_key", ""))
+                    np.setdefault("base_url", opts.get("baseURL") or opts.get("base_url", ""))
+                    migrated = True
+            if isinstance(np.get("models"), dict):
+                np["models"] = _normalize_models(np["models"])
+                migrated = True
+            new_prov[pid] = np
+        out["providers"] = new_prov
+
+    # 2) 丢弃旧 model 选择段
+    if "model" in out:
+        out.pop("model", None)
+        migrated = True
+
+    # 3) agent 段：移除已废弃键；空则整段删除
+    if isinstance(out.get("agent"), dict) and out["agent"]:
+        agent = dict(out["agent"])
+        stale = ("maxHistory", "contextWindow", "enableChronosWarmup")
+        if any(k in agent for k in stale):
+            agent = {k: v for k, v in agent.items() if k not in stale}
+            migrated = True
+        out["agent"] = agent or None
+        if out["agent"] is None:
+            out.pop("agent", None)
+
+    # 4) task_experience：去开关 + camelCase→snake_case
+    if isinstance(out.get("task_experience"), dict):
+        te = out["task_experience"]
+        for stale in ("enabled", "autoCapture"):
+            if stale in te:
+                te.pop(stale, None)
+                migrated = True
+        te = _rename_keys(te, {
+            "persistDir": "persist_dir",
+            "sealThreshold": "seal_threshold",
+            "archiveAfterDays": "archive_after_days",
+            "skillGenerationThreshold": "skill_generation_threshold",
+            "hotnessDecayDays": "hotness_decay_days",
+            "maintenanceIntervalHours": "maintenance_interval_hours",
+            "dedupSimilarityThreshold": "dedup_similarity_threshold",
+            "minToolCalls": "min_tool_calls",
+            "topK": "top_k",
+        })
+        out["task_experience"] = te
+
+    # 5) workspace：camelCase→snake_case
+    if isinstance(out.get("workspace"), dict):
+        out["workspace"] = _rename_keys(out["workspace"], {
+            "defaultUserDir": "default_user_dir",
+            "sessionRoot": "session_root",
+            "sandboxStrategy": "sandbox_strategy",
+            "overwriteProtection": "overwrite_protection",
+        })
+
+    return out, migrated
+
+
 def _load_config() -> dict:
     """加载配置：DEFAULT_CONFIG + 用户 JSON 配置合并。
 
-    首次启动时自动从模板复制用户配置，后续不再合并模板（用户在 settings.json
-    中删除某个 model 就应该从最终配置中消失，不应被模板覆盖）。
+    首次启动时自动从模板复制用户配置（仅 providers），后续不再合并模板
+    （用户在 settings.json 中删除某个 model 就应该从最终配置中消失）。
+    检测到旧格式时自动迁移并备份原文件为 settings.json.bak.<timestamp>。
     """
     cfg = dict(DEFAULT_CONFIG)
 
@@ -200,6 +312,24 @@ def _load_config() -> dict:
     if old_cfg:
         cfg = _deep_merge(cfg, old_cfg)
         _logger.debug("已加载旧配置: %s", old_path)
+
+    # 旧格式 → 新格式迁移；发生迁移则备份并回写
+    cfg, migrated = _migrate_legacy_config(cfg)
+    if migrated and user_path.exists():
+        try:
+            from datetime import datetime
+            stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            backup = user_path.with_name(f"settings.json.bak.{stamp}")
+            # 先备份原文件，再写新结构
+            with open(user_path, "r", encoding="utf-8") as f:
+                original_text = f.read()
+            with open(backup, "w", encoding="utf-8") as f:
+                f.write(original_text)
+            with open(user_path, "w", encoding="utf-8") as f:
+                json.dump(cfg, f, ensure_ascii=False, indent=2)
+            _logger.info("settings.json 已从旧格式迁移到新格式，备份: %s", backup)
+        except Exception as e:
+            _logger.warning("迁移后回写 settings.json 失败（内存中仍为新格式）: %s", e)
 
     return cfg
 
@@ -261,102 +391,157 @@ class ProviderConfig:
 
     def __init__(self, name: str, data: dict):
         self.name = name
-        self.api_key: str = data.get("api_key", "") if isinstance(data, dict) else ""
-        self.base_url: str = data.get("base_url", "https://api.openai.com/v1") if isinstance(data, dict) else "https://api.openai.com/v1"
+        data = data if isinstance(data, dict) else {}
+        opts = data.get("options")
+        opts = opts if isinstance(opts, dict) else {}
+        # 新结构扁平 api_key/base_url；兼容旧 options.apiKey/baseURL
+        self.api_key: str = (
+            data.get("api_key") or data.get("apiKey") or opts.get("apiKey") or opts.get("api_key", "")
+        )
+        self.base_url: str = (
+            data.get("base_url")
+            or data.get("baseURL")
+            or opts.get("baseURL")
+            or opts.get("base_url", "https://api.openai.com/v1")
+        )
 
     def __repr__(self):
         return f"Provider({self.name}, base_url={self.base_url})"
 
 
 class ModelConfig:
-    """模型选择配置 — 从 settings.json 的 provider 段读取"""
+    """激活模型配置——resolve_model() 的门面。
+
+    保留 ``settings.model.*`` 调用点不破：所有属性委托 resolve_model()，
+    使其成为唯一真相源。``model_name`` 支持 setter（CLI/TUI 切换模型用），
+    设置后即作为 override；其余参数随 override 模型解析。
+    模型生成参数（temperature/max_tokens/context_window）只来自模型自身定义。
+    """
 
     def __init__(self, cfg: dict):
         self._cfg = cfg
+        # CLI/TUI 运行期切换 / 环境变量覆盖激活模型
+        env_model = os.getenv("FLOODMIND_MODEL", "").strip()
+        self._active_key: Optional[str] = env_model or None
+        # 会话级运行时开关（默认 False，由 UI/SDK 传入；保留可写属性兼容旧调用）
+        self.enable_reasoning = str(
+            os.getenv("FLOODMIND_ENABLE_REASONING", "false")
+        ).lower() == "true"
+        self.enable_search = str(
+            os.getenv("FLOODMIND_ENABLE_SEARCH", "false")
+        ).lower() == "true"
 
-        self.provider_name = _cfg(cfg, "model.provider", "FLOODMIND_PROVIDER", "dashscope")
-        self.model_name = _cfg(cfg, "model.model", "FLOODMIND_MODEL", "deepseek-v4-flash")
-        self.enable_reasoning = _cfg(cfg, "model.enableReasoning", "FLOODMIND_ENABLE_REASONING", "false")
-        if isinstance(self.enable_reasoning, str):
-            self.enable_reasoning = self.enable_reasoning.lower() == "true"
-        self.enable_search = _cfg(cfg, "model.enableSearch", "FLOODMIND_ENABLE_SEARCH", "false")
-        if isinstance(self.enable_search, str):
-            self.enable_search = self.enable_search.lower() == "true"
+    def _resolved(self):
+        from floodmind.config.model_resolver import resolve_model
+        return resolve_model(model_key=self._active_key)
 
-        self.temperature = float(_cfg(cfg, "model.temperature", "FLOODMIND_TEMPERATURE", 0.3))
-        self.max_tokens = int(_cfg(cfg, "model.maxTokens", "FLOODMIND_MAX_TOKENS", 8192))
-        self.top_p = float(_cfg(cfg, "model.topP", "FLOODMIND_TOP_P", 0.9))
+    @property
+    def provider_name(self) -> str:
+        try:
+            return self._resolved().provider
+        except ValueError:
+            return os.getenv("FLOODMIND_PROVIDER", "dashscope") or "dashscope"
 
-        provider_data = self._get_provider(cfg)
-        self.api_key = _cfg(cfg, "", "FLOODMIND_API_KEY", provider_data.get("apiKey", "") or provider_data.get("api_key", ""))
-        if not self.api_key:
-            self.api_key = os.getenv("DASHSCOPE_API_KEY", "")
-        self.base_url = _cfg(cfg, "", "FLOODMIND_BASE_URL",
-                             provider_data.get("baseURL", "") or provider_data.get("base_url", "https://api.openai.com/v1"))
+    @property
+    def model_name(self) -> str:
+        # 反映"意图激活"的模型 key（env/override）；缺失才回退解析出的第一个
+        if self._active_key:
+            return self._active_key
+        try:
+            return self._resolved().id
+        except ValueError:
+            return os.getenv("FLOODMIND_MODEL", "") or "deepseek-v4-flash"
 
-        self.reasoning_model = self.model_name
+    @model_name.setter
+    def model_name(self, key: str) -> None:
+        self._active_key = key or None
 
-    def _get_provider(self, cfg: dict) -> dict:
-        provider_cfg = cfg.get("provider", {})
-        if isinstance(provider_cfg, dict):
-            prov = provider_cfg.get(self.provider_name, {})
-            if isinstance(prov, dict):
-                return prov.get("options", prov)
-        return {}
+    @property
+    def api_key(self) -> str:
+        try:
+            return self._resolved().api_key
+        except ValueError:
+            return os.getenv("FLOODMIND_API_KEY", "") or os.getenv("DASHSCOPE_API_KEY", "")
 
-    def get_provider(self) -> ProviderConfig:
-        data = self._get_provider(self._cfg)
-        return ProviderConfig(self.provider_name, data)
+    @property
+    def base_url(self) -> str:
+        try:
+            return self._resolved().base_url
+        except ValueError:
+            return os.getenv("FLOODMIND_BASE_URL", "https://api.openai.com/v1")
+
+    @property
+    def temperature(self) -> float:
+        try:
+            return self._resolved().temperature
+        except ValueError:
+            return 0.3
+
+    @property
+    def max_tokens(self) -> int:
+        try:
+            return self._resolved().max_tokens
+        except ValueError:
+            return 8192
+
+    @property
+    def top_p(self) -> float:
+        return 0.9
+
+    @property
+    def context_window(self) -> int:
+        """记忆窗口——直接取自激活模型，无额外配置回退。"""
+        try:
+            return self._resolved().context_window
+        except ValueError:
+            return 32768
+
+    @property
+    def reasoning_model(self) -> str:
+        return self.model_name
+
+    def get_provider(self) -> "ProviderConfig":
+        return ProviderConfig(self.provider_name, self._provider_data())
+
+    def _provider_data(self) -> dict:
+        from floodmind.config.model_resolver import _providers_section
+        prov = _providers_section(self._cfg)
+        return prov.get(self.provider_name, {}) if isinstance(prov, dict) else {}
 
     def get_models_list(self) -> list:
-        """从 provider 配置获取模型列表"""
-        provider_cfg = self._cfg.get("provider", {})
-        prov = provider_cfg.get(self.provider_name, {})
-        models = prov.get("models", {}) if isinstance(prov, dict) else {}
-        result = []
-        for key, info in models.items():
-            if isinstance(info, dict):
-                result.append({
-                    "key": key,
-                    "label": info.get("name", key),
-                    "description": info.get("description", ""),
-                    "supportsReasoning": info.get("supportsReasoning", False),
-                    "supportsVision": info.get("supportsVision", False),
-                    "maxTokens": info.get("maxTokens", 8192),
-                    "temperature": info.get("temperature", 0.3),
-                })
-        return result
+        from floodmind.config.model_presets import get_models_list as _gml
+        return _gml()
 
 
 class AgentConfig:
+    """Agent 运行时配置。
+
+    chronos 已外置为 MCP（不再 warmup）；max_iterations 为代码默认（不入配置，
+    auto-compact + DOOM LOOP 兜底）。此段在 settings.json 中通常不存在。
+    """
+
     def __init__(self, cfg: dict):
         self.runtime = "native"
-        self.enable_chronos_warmup = _cfg(cfg, "agent.enableChronosWarmup", "AGENT_ENABLE_CHRONOS_WARMUP", "false")
-        if isinstance(self.enable_chronos_warmup, str):
-            self.enable_chronos_warmup = self.enable_chronos_warmup.lower() == "true"
-        self.max_history = int(_cfg(cfg, "agent.maxHistory", "AGENT_MAX_HISTORY", 20))
-        self.context_window = int(_cfg(cfg, "agent.contextWindow", "AGENT_CONTEXT_WINDOW", 32768))
+        self.max_iterations = DEFAULT_MAX_ITERATIONS
 
 
 
 
 class TaskExperienceConfig:
+    """任务经验系统——强制常开（不加开关），仅保留调优阈值。"""
+
     def __init__(self, cfg: dict):
-        self.enabled = _cfg(cfg, "task_experience.enabled", "TASK_EXPERIENCE_ENABLED", "true")
-        if isinstance(self.enabled, str):
-            self.enabled = self.enabled.lower() == "true"
-        self.auto_capture = _cfg(cfg, "task_experience.autoCapture", "TASK_EXPERIENCE_AUTO_CAPTURE", "true")
-        if isinstance(self.auto_capture, str):
-            self.auto_capture = self.auto_capture.lower() == "true"
-        self.persist_dir = _cfg(cfg, "task_experience.persistDir", "TASK_EXPERIENCE_PERSIST_DIR", "./data/task_experience")
-        self.top_k = int(_cfg(cfg, "task_experience.topK", "TASK_EXPERIENCE_TOP_K", 5))
-        self.min_tool_calls_for_capture = int(_cfg(cfg, "task_experience.minToolCalls", "TASK_EXPERIENCE_MIN_TOOL_CALLS", 2))
-        self.seal_threshold = int(_cfg(cfg, "task_experience.sealThreshold", "TASK_EXPERIENCE_SEAL_THRESHOLD", 5))
-        self.hotness_decay_days = int(_cfg(cfg, "task_experience.hotnessDecayDays", "TASK_EXPERIENCE_HOTNESS_DECAY_DAYS", 90))
-        self.maintenance_interval_hours = int(_cfg(cfg, "task_experience.maintenanceIntervalHours", "TASK_EXPERIENCE_MAINTENANCE_INTERVAL_HOURS", 6))
-        self.dedup_similarity_threshold = float(_cfg(cfg, "task_experience.dedupSimilarityThreshold", "TASK_EXPERIENCE_DEDUP_THRESHOLD", 0.8))
-        self.archive_after_days = int(_cfg(cfg, "task_experience.archiveAfterDays", "TASK_EXPERIENCE_ARCHIVE_AFTER_DAYS", 90))
-        self.skill_generation_threshold = int(_cfg(cfg, "task_experience.skillGenerationThreshold", "TASK_EXPERIENCE_SKILL_GEN_THRESHOLD", 5))
+        self.enabled = True          # 一直开启，不再可配置
+        self.auto_capture = True     # 一直开启，不再可配置
+        self.persist_dir = _cfg(cfg, "task_experience.persist_dir", "TASK_EXPERIENCE_PERSIST_DIR", "./data/task_experience")
+        self.top_k = int(_cfg(cfg, "task_experience.top_k", "TASK_EXPERIENCE_TOP_K", 5))
+        self.min_tool_calls_for_capture = int(_cfg(cfg, "task_experience.min_tool_calls", "TASK_EXPERIENCE_MIN_TOOL_CALLS", 2))
+        self.seal_threshold = int(_cfg(cfg, "task_experience.seal_threshold", "TASK_EXPERIENCE_SEAL_THRESHOLD", 5))
+        self.hotness_decay_days = int(_cfg(cfg, "task_experience.hotness_decay_days", "TASK_EXPERIENCE_HOTNESS_DECAY_DAYS", 90))
+        self.maintenance_interval_hours = int(_cfg(cfg, "task_experience.maintenance_interval_hours", "TASK_EXPERIENCE_MAINTENANCE_INTERVAL_HOURS", 6))
+        self.dedup_similarity_threshold = float(_cfg(cfg, "task_experience.dedup_similarity_threshold", "TASK_EXPERIENCE_DEDUP_THRESHOLD", 0.8))
+        self.archive_after_days = int(_cfg(cfg, "task_experience.archive_after_days", "TASK_EXPERIENCE_ARCHIVE_AFTER_DAYS", 90))
+        self.skill_generation_threshold = int(_cfg(cfg, "task_experience.skill_generation_threshold", "TASK_EXPERIENCE_SKILL_GEN_THRESHOLD", 5))
 
 
 class BackgroundReviewConfig:
@@ -460,12 +645,12 @@ class WorkspaceConfig:
     """
 
     def __init__(self, cfg: dict):
-        self.default_user_dir = _cfg(cfg, "workspace.defaultUserDir", "FLOODMIND_USER_DIR", "")
-        self.session_root = _cfg(cfg, "workspace.sessionRoot", "FLOODMIND_SESSION_ROOT", "")
+        self.default_user_dir = _cfg(cfg, "workspace.default_user_dir", "FLOODMIND_USER_DIR", "")
+        self.session_root = _cfg(cfg, "workspace.session_root", "FLOODMIND_SESSION_ROOT", "")
         self.sandbox_strategy = _cfg(
-            cfg, "workspace.sandboxStrategy", "FLOODMIND_SANDBOX_STRATEGY", "session_root"
+            cfg, "workspace.sandbox_strategy", "FLOODMIND_SANDBOX_STRATEGY", "session_root"
         )
-        ow = _cfg(cfg, "workspace.overwriteProtection", "FLOODMIND_OVERWRITE_PROTECTION", "false")
+        ow = _cfg(cfg, "workspace.overwrite_protection", "FLOODMIND_OVERWRITE_PROTECTION", "false")
         self.overwrite_protection = str(ow).lower() == "true"
 
 

@@ -41,6 +41,9 @@ class SessionInfo:
     title: str = ""
     message_count: int = 0
     status: str = "active"
+    parent_session_id: Optional[str] = None
+    branch_name: Optional[str] = None
+    worktree_path: Optional[str] = None
     metadata: Dict[str, Any] = field(default_factory=dict)
 
     def touch(self):
@@ -84,6 +87,8 @@ class SessionManager:
         self.data_dir = Path(self.config["data_dir"])
         self.sessions_dir = self.data_dir / "sessions"
         self.sessions_dir.mkdir(parents=True, exist_ok=True)
+        self.worktrees_dir = self.data_dir / "worktrees"
+        self.worktrees_dir.mkdir(parents=True, exist_ok=True)
         
         self._sessions: OrderedDict[str, SessionInfo] = OrderedDict()
         self._agents: Dict[str, Any] = {}
@@ -599,19 +604,31 @@ class SessionManager:
         return result
     
     def delete_session(self, session_id: str):
-        """删除会话（包括所有数据）"""
+        """删除会话（包括所有数据和工作树）"""
         session_id = validate_session_id(session_id)
         with self._lock:
             if session_id in self._agents:
                 del self._agents[session_id]
-            
+
             if session_id in self._sessions:
                 del self._sessions[session_id]
-            
+
             session_dir = self.get_session_dir(session_id)
             if session_dir.exists():
                 shutil.rmtree(session_dir)
-            
+
+            # 清理关联的 worktree（按元数据精确匹配，避免前缀误删）
+            for wt_dir in list(self.worktrees_dir.iterdir()):
+                if not wt_dir.is_dir():
+                    continue
+                meta = self._read_worktree_meta(wt_dir)
+                wt_session_id = meta.get("session_id") if meta else wt_dir.name.split("-", 1)[0]
+                if wt_session_id == session_id:
+                    try:
+                        shutil.rmtree(wt_dir)
+                    except Exception as e:
+                        logger.warning(f"清理 worktree 失败: {wt_dir} — {e}")
+
             self._save_session_index()
             logger.info(f"删除会话: {session_id}")
 
@@ -657,6 +674,232 @@ class SessionManager:
 
         logger.info(f"会话分叉: {session_id} → {new_id} ({len(messages)} messages)")
         return new_id
+
+    def get_worktree_dir(self, session_id: str, branch_name: str = "") -> Path:
+        """获取工作树目录"""
+        session_id = validate_session_id(session_id)
+        branch_name = branch_name.strip() or session_id
+        # 安全处理：将非法文件名字符替换为 _
+        safe_branch = "".join(c if c.isalnum() or c in "-_." else "_" for c in branch_name)
+        return self.worktrees_dir / f"{session_id}-{safe_branch}"
+
+    def _worktree_meta_file(self, worktree_dir: Path) -> Path:
+        """worktree 元数据文件路径"""
+        return worktree_dir / ".floodmind_worktree.json"
+
+    def _read_worktree_meta(self, worktree_dir: Path) -> Optional[Dict[str, str]]:
+        """读取 worktree 元数据（session_id / branch_name）"""
+        meta_file = self._worktree_meta_file(worktree_dir)
+        if not meta_file.exists():
+            return None
+        try:
+            return json.loads(meta_file.read_text(encoding="utf-8"))
+        except Exception:
+            return None
+
+    def _write_worktree_meta(
+        self, worktree_dir: Path, session_id: str, branch_name: str
+    ) -> None:
+        """写入 worktree 元数据"""
+        try:
+            meta_file = self._worktree_meta_file(worktree_dir)
+            meta_file.write_text(
+                json.dumps(
+                    {"session_id": session_id, "branch_name": branch_name},
+                    ensure_ascii=False,
+                    indent=2,
+                ),
+                encoding="utf-8",
+            )
+        except Exception as e:
+            logger.warning(f"写入 worktree 元数据失败: {worktree_dir} — {e}")
+
+    def create_worktree(
+        self, session_id: str, branch_name: str = "",
+        base_path: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """创建 git worktree 隔离的会话工作区。
+
+        Args:
+            session_id: 父会话 ID
+            branch_name: 分支名（可选，默认根据 session_id 生成）
+            base_path: git 仓库根路径（可选，默认项目根目录）
+
+        Returns:
+            {"success": bool, "worktree_path": str, "branch_name": str, "error": str}
+        """
+        import subprocess
+
+        session_id = validate_session_id(session_id)
+        branch_name = branch_name.strip() or f"branch-{session_id[:8]}"
+        worktree_dir = self.get_worktree_dir(session_id, branch_name)
+        # 桌面端/编译模式下 CWD 不可靠，优先使用显式项目根
+        repo_path = base_path or os.environ.get('FLOODMIND_PROJECT_ROOT') or os.getcwd()
+
+        # 避免重复创建
+        if worktree_dir.exists():
+            self._write_worktree_meta(worktree_dir, session_id, branch_name)
+            logger.info(f"Worktree 已存在: {worktree_dir}")
+            return {
+                "success": True,
+                "worktree_path": str(worktree_dir),
+                "branch_name": branch_name,
+            }
+
+        try:
+            result = subprocess.run(
+                ["git", "worktree", "add", str(worktree_dir), "-b", branch_name],
+                cwd=repo_path,
+                capture_output=True, text=True, timeout=30,
+            )
+            if result.returncode == 0:
+                # 写入元数据，避免 session_id 含 '-' 时目录名解析歧义
+                self._write_worktree_meta(worktree_dir, session_id, branch_name)
+                # 更新会话信息
+                with self._lock:
+                    if session_id in self._sessions:
+                        self._sessions[session_id].worktree_path = str(worktree_dir)
+                        self._sessions[session_id].branch_name = branch_name
+                        self._save_session_index()
+                logger.info(f"Worktree 创建成功: {worktree_dir} (branch: {branch_name})")
+                return {
+                    "success": True,
+                    "worktree_path": str(worktree_dir),
+                    "branch_name": branch_name,
+                }
+            else:
+                error_msg = result.stderr.strip()
+                logger.error(f"Worktree 创建失败: {error_msg}")
+                return {"success": False, "error": error_msg}
+        except subprocess.TimeoutExpired:
+            return {"success": False, "error": "git worktree add 超时"}
+        except FileNotFoundError:
+            return {"success": False, "error": "未找到 git 命令，请确保已安装 Git"}
+        except Exception as e:
+            logger.error(f"Worktree 创建异常: {e}")
+            return {"success": False, "error": str(e)}
+
+    def list_worktrees(self, session_id: str = "") -> List[Dict[str, Any]]:
+        """列出所有工作树（或指定会话的工作树）"""
+        result = []
+        session_id = validate_session_id(session_id) if session_id else ""
+
+        if not self.worktrees_dir.exists():
+            return result
+
+        for wt_dir in self.worktrees_dir.iterdir():
+            if not wt_dir.is_dir():
+                continue
+
+            # 优先读取元数据，避免目录名解析歧义
+            meta = self._read_worktree_meta(wt_dir)
+            if meta:
+                sid = meta.get("session_id", "")
+                branch = meta.get("branch_name", "")
+            else:
+                # 兼容旧格式：按目录名解析（session_id-branch_name）
+                parts = wt_dir.name.split("-", 1)
+                sid = parts[0] if parts else wt_dir.name
+                branch = parts[1] if len(parts) > 1 else ""
+
+            if session_id and sid != session_id:
+                continue
+
+            result.append({
+                "id": wt_dir.name,
+                "session_id": sid,
+                "branch_name": branch,
+                "path": str(wt_dir),
+                "created_at": datetime.fromtimestamp(wt_dir.stat().st_ctime).isoformat(),
+            })
+
+        result.sort(key=lambda x: x["created_at"], reverse=True)
+        return result
+
+    def remove_worktree(self, session_id: str, branch_name: str = "") -> Dict[str, Any]:
+        """删除工作树。
+
+        返回: {"success": bool, "error": str}
+        """
+        import subprocess
+
+        session_id = validate_session_id(session_id)
+        worktree_dir = self.get_worktree_dir(session_id, branch_name)
+
+        if not worktree_dir.exists():
+            return {"success": False, "error": f"Worktree 不存在: {worktree_dir}"}
+
+        try:
+            # git worktree remove（清理 git 元数据 + 删除目录）
+            result = subprocess.run(
+                ["git", "worktree", "remove", str(worktree_dir), "--force"],
+                capture_output=True, text=True, timeout=30,
+            )
+            # 无论 git 是否成功，只要目录还在就强制清理
+            if worktree_dir.exists():
+                shutil.rmtree(worktree_dir)
+            if result.returncode == 0 or not worktree_dir.exists():
+                # 更新会话信息
+                with self._lock:
+                    if session_id in self._sessions:
+                        self._sessions[session_id].worktree_path = None
+                        self._sessions[session_id].branch_name = None
+                        self._save_session_index()
+                logger.info(f"Worktree 已删除: {worktree_dir}")
+                return {"success": True}
+            else:
+                return {"success": False, "error": result.stderr.strip()}
+        except subprocess.TimeoutExpired:
+            # 超时后仍尝试强制删除目录
+            if worktree_dir.exists():
+                try:
+                    shutil.rmtree(worktree_dir)
+                    return {"success": True}
+                except Exception as e:
+                    return {"success": False, "error": f"git worktree remove 超时且目录删除失败: {e}"}
+            return {"success": False, "error": "git worktree remove 超时"}
+        except FileNotFoundError:
+            # git 未安装时直接删除目录
+            if worktree_dir.exists():
+                try:
+                    shutil.rmtree(worktree_dir)
+                    with self._lock:
+                        if session_id in self._sessions:
+                            self._sessions[session_id].worktree_path = None
+                            self._sessions[session_id].branch_name = None
+                            self._save_session_index()
+                    return {"success": True}
+                except Exception as e:
+                    return {"success": False, "error": f"未找到 git 命令且目录删除失败: {e}"}
+            return {"success": False, "error": "未找到 git 命令"}
+        except Exception as e:
+            logger.error(f"Worktree 删除异常: {e}")
+            return {"success": False, "error": str(e)}
+
+    def fork_to_worktree(
+        self, session_id: str, branch_name: str = "", from_message_id: str = "",
+    ) -> Dict[str, Any]:
+        """分叉会话到新的 worktree 工作区。
+
+        先调用 fork_session 创建新会话，再为新会话创建 worktree。
+        """
+        new_id = self.fork_session(session_id, from_message_id)
+        branch = branch_name.strip() or f"fork-{new_id[:8]}"
+        result = self.create_worktree(new_id, branch)
+        if result["success"]:
+            # 标记新会话的父关系和分支
+            with self._lock:
+                if new_id in self._sessions:
+                    self._sessions[new_id].parent_session_id = session_id
+                    self._sessions[new_id].branch_name = branch
+                    self._sessions[new_id].worktree_path = result["worktree_path"]
+                    self._save_session_index()
+            logger.info(f"会话已分叉到 worktree: {session_id} → {new_id} ({branch})")
+        return {
+            **result,
+            "new_session_id": new_id,
+            "parent_session_id": session_id,
+        }
 
     def export_session(self, session_id: str) -> str:
         """导出会话为 Markdown。"""

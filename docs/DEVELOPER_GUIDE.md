@@ -1,6 +1,6 @@
 # FloodMind 二次开发指南 v2
 
-> **更新**: 2026-07-04 — MCP 统一 (A/B/C)、Skill 统一 (A/B/C/D)、C-core/C-deep 完成后重写
+> **更新**: 2026-07-14 — workspace 实例属性 + Web 模块化拆分 + worktree 隔离 + Chronos 迁出
 
 FloodMind 是基于大语言模型的智能水文预报 Agent 系统。本文档面向开发者，介绍如何将 FloodMind 集成到第三方系统、构建自定义界面、扩展模型支持和开发 Skill/Plugin。
 
@@ -113,34 +113,38 @@ pip install "floodmind[all]"        # 全部依赖（含 GPU）
 
 | 文件 | 说明 |
 |------|------|
-| `settings.json` | 主配置（模型、Provider、Agent 参数） |
+| `settings.json` | 主配置（仅 `providers` 服务商与模型目录，OpenCode 层级） |
 | `mcp.json` | MCP Server 连接配置（独立管理） |
 | `search.json` | WebSearch 搜索引擎配置 |
 | `SOUL.md` | 智能体身份定义 |
 | `AGENTS.md` | 全局行为规则 |
 
-首次启动自动创建模板。最小配置示例（DashScope）：
+首次启动自动创建模板。最小配置示例（DashScope）——**配置最小化**，只暴露服务商目录：
 
 ```json
 {
-  "provider": {
+  "providers": {
     "dashscope": {
       "name": "DashScope (Alibaba)",
-      "options": {
-        "apiKey": "sk-你的密钥",
-        "baseURL": "https://dashscope.aliyuncs.com/compatible-mode/v1"
-      },
-      "models": {
-        "deepseek-v4-flash": { "name": "DeepSeek V4 Flash", "maxTokens": 65536 }
-      }
+      "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+      "api_key": "sk-你的密钥",
+      "models": [
+        {
+          "id": "deepseek-v4-flash",
+          "name": "DeepSeek V4 Flash",
+          "context_window": 65536,
+          "default_max_tokens": 65536,
+          "default_temperature": 0.3,
+          "supports_reasoning": true
+        }
+      ]
     }
-  },
-  "model": {
-    "provider": "dashscope",
-    "model": "deepseek-v4-flash"
   }
 }
 ```
+
+> - **激活模型**默认 = catalog 第一个；界面切换属会话级，不写回配置。
+> - **记忆窗口**取自当前模型 `context_window`；**最大轮次**默认 999（auto-compact 兜底）；**经验系统**始终开启——均不入配置。
 
 MCP Server 配置独立存储在 `~/.floodmind/mcp.json`：
 
@@ -225,6 +229,7 @@ for event in agent.stream("查一下霍口水库水位"):
 | `on_event` | `Callable[[dict], None]` | `None` | 流式事件回调 |
 | `permission_handler` | `Callable[[str, dict], bool]` | `None` | 工具审批钩子 |
 | `max_iterations` | `int` | `50` | 最大循环轮数 |
+| `workspace` | `Workspace` | `None` | 工作区对象。嵌入式宿主（桌面端）显式注入，避免跨线程 contextvar 丢失。构造时或通过 `bind_workspace()` 传入均可。未传时回退到 `set_workspace()` 注入的 contextvar（网页版） |
 
 **结果访问：** 每次 `run()`/`stream()` 后自动重置。
 
@@ -233,6 +238,23 @@ for event in agent.stream("查一下霍口水库水位"):
 | `agent.last_usage` | `dict` | token 用量（`prompt_tokens`/`completion_tokens`/`total_tokens`） |
 | `agent.artifacts` | `list[dict]` | `file_generated`/`image_generated` 事件 |
 | `agent.raw` | `NativeFloodAgent` | 底层实例（高级用法） |
+
+**工作区注入（桌面端嵌入）：**
+
+```python
+from floodmind.agent.runtime.services.workspace_service import build_workspace
+from floodmind.agent.runtime.contracts.workspace import Workspace
+
+# 方式 A: 构造时传入
+ws = build_workspace(session_id="sess-1", user_dir=Path("E:/MyProject"))
+agent = Agent(llm=llm, tools=tools, workspace=ws)
+
+# 方式 B: 运行期切换（线程安全，任意线程调用）
+agent.bind_workspace(ws)
+```
+
+> `bind_workspace()` 存为普通实例属性（非 contextvar），确保 SDK 内部子线程（`_run_loop`）不受
+> 宿主线程上下文影响。桌面端 sidecar 推荐使用此 API 替代模块级 `set_workspace()`。
 
 ### 3.2 流式事件协议
 
@@ -704,38 +726,44 @@ class MyAgent(NativeFloodAgent):
 
 ## 8. 模型与 Provider 扩展
 
-在 `~/.floodmind/settings.json` 中添加 Provider：
+在 `~/.floodmind/settings.json` 的 `providers` 下添加服务商（OpenCode 层级）：
 
 ```json
 {
-  "provider": {
+  "providers": {
     "my-provider": {
       "name": "我的模型平台",
-      "options": {
-        "apiKey": "sk-xxx",
-        "baseURL": "https://api.my-platform.com/v1"
-      },
-      "models": {
-        "my-model": {
+      "base_url": "https://api.my-platform.com/v1",
+      "api_key": "sk-xxx",
+      "models": [
+        {
+          "id": "my-model",
           "name": "我的模型",
-          "maxTokens": 8192,
-          "supportsReasoning": true
+          "context_window": 8192,
+          "default_max_tokens": 8192,
+          "default_temperature": 0.3,
+          "supports_reasoning": true
         }
-      }
+      ]
     }
   }
 }
 ```
 
-Python 中使用：
+Python 中使用——**推荐 `resolve_model()` 单一入口**（桌面端集成无需手解析配置）：
 
 ```python
-from floodmind import ModelClient
+from floodmind import resolve_model, ModelClient
 
-# 从 settings 按 key 选择
+# resolve_model() 返回完整连接+参数（默认激活模型；指定则 resolve_model(model_key="my-model"))
+rm = resolve_model(model_key="my-model")
+llm = ModelClient(rm.api_key, rm.base_url, rm.id,
+                  temperature=rm.temperature, max_tokens=rm.max_tokens)
+
+# 或沿用便捷工厂（内部同样走 resolve_model）
 llm = ModelClient.from_settings_with_preset("my-model")
 
-# 直接用连接信息
+# 直接用连接信息（跳过配置）
 llm = ModelClient(
     api_key="sk-xxx",
     base_url="https://api.my-platform.com/v1",
@@ -902,7 +930,7 @@ assert len(reg.list_skills()) == 0
 ### 12.4 运行全部测试
 
 ```bash
-pytest tests/ -q          # 397 tests
+pytest tests/ -q          # 404 tests
 pytest tests/test_sdk_agent.py -v   # SDK 相关
 pytest tests/test_skill_registry.py tests/test_skill_curator.py -v  # Skill 系统
 pytest tests/test_mcp_client.py -v  # MCP 客户端
@@ -940,19 +968,34 @@ FloodMind/
 │   │   ├── api.py                    #   Agent SDK 类
 │   │   └── task_runtime.py           #   任务运行时
 │   ├── config/                       # 配置
+│   ├── server/                       # Web 后端模块化
+│   │   ├── __init__.py               #   Flask create_app() 工厂
+│   │   ├── agent_factory.py          #    Agent 创建/复用 (get_or_create_agent)
+│   │   ├── session_state.py          #   运行时状态 (流控/中断/token)
+│   │   ├── sanitize.py               #   SSE 脱敏
+│   │   ├── config.py                 #   常量&配置
+│   │   ├── file_utils.py             #   文件工具&产物提取
+│   │   └── routes/                   #   Blueprint 路由
+│   │       ├── chat.py               #     聊天 SSE 流式
+│   │       ├── sessions.py           #     会话 CRUD
+│   │       ├── files.py              #     文件上传/产物
+│   │       ├── models.py             #     模型配置
+│   │       ├── memory.py             #     记忆读写
+│   │       ├── permission.py         #     权限审批
+│   │       ├── checkpoints.py        #     检查点
+│   │       └── tasks.py              #     定时任务
 │   ├── profile/                      # 身份与提示词
 │   ├── memory/                       # 记忆与经验
 │   │   ├── dual_memory.py            #   扁平 _turns 对话历史 + 压缩
 │   │   ├── experience_tree.py        #   经验树索引
 │   │   ├── task_experience.py        #   任务经验
-│   │   ├── session_manager.py        #   会话管理
+│   │   ├── session_manager.py        #   会话管理（含 worktree 隔离）
 │   │   ├── session_store.py          #   SQLite 存储
 │   │   └── skill_generator.py        #   经验→Skill 自动生成
-│   ├── skills/                       # Skill 系统
+│   ├── skills/                       # Skill 系统（发现/注册/策展）
 │   │   ├── base.py                   #   Skill dataclass + 发现 + catalog
 │   │   ├── registry.py               #   SkillRegistry 单例
-│   │   ├── skill_curator.py          #   SkillCurator 生命周期
-│   │   ├── chronos/ csv/ ...  # 11 个内置 Skill
+│   │   └── skill_curator.py          #   SkillCurator 生命周期
 │   ├── tools/                        # Agent 工具层
 │   │   ├── agent_tool.py             #   AgentTool + ToolRegistry + build_agent_tool
 │   │   ├── base_tools.py             #   内置工具（GetSkill/Bash/WebSearch/...）
@@ -962,17 +1005,19 @@ FloodMind/
 │   ├── tui/                          # 终端 TUI (Textual)
 │   ├── cli.py                        # CLI 入口（floodmind 命令）
 │   └── __init__.py                   # top-level SDK 导出
+├── contrib/                           # 已外置为 MCP 服务的脚本（chronos 等）
 ├── web/                              # React 19 + TypeScript 前端
-├── web_server.py                     # Flask Web 服务
+├── web_server.py                     # Flask 入口（日志 + SessionManager + waitress）
 ├── scheduler.py                      # 定时任务调度
-├── tests/                            # 测试（397 tests, 34 files）
+├── tests/                            # 测试（404 tests）
 ├── docs/                             # 文档
 │   ├── DEVELOPER_GUIDE.md            #   本文档
 │   └── architecture/                 #   架构 Wiki
 │       ├── OVERVIEW.md               #     架构知识图谱
 │       ├── ASSESSMENT.md             #     系统评估（已完成 vs 待处理）
 │       ├── MCP_ARCHITECTURE.md       #     MCP 子系统详解
-│       └── SKILL_ARCHITECTURE.md     #     Skill 统详解
+│       ├── SKILL_ARCHITECTURE.md     #     Skill 统详解
+│       └── D_STORAGE_PROPOSAL.md     #     存储提案
 ├── pyproject.toml                    # 包配置
 └── start.py                          # 统一启动入口
 ```
@@ -985,4 +1030,5 @@ FloodMind/
 - **系统评估**: `docs/architecture/ASSESSMENT.md` — 已完成批次 vs 待处理项
 - **README**: 项目概述、快速开始、CLI 参考
 - **settings 模板**: `floodmind/config/settings_template.json`
-- **SDK 测试参考**: `tests/test_sdk_agent.py` — 40 个 SDK 用例
+- **SDK 测试参考**: `tests/test_sdk_agent.py` — 44 个 SDK 用例
+- **workspace 测试参考**: `tests/test_native_agent_workspace.py` — 跨线程 contextvar 修复验证

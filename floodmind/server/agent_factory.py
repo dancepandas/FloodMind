@@ -42,17 +42,16 @@ def create_agent_for_session(
             enable_reasoning=enable_reasoning,
         )
     else:
-        llm_service = ModelClient.from_settings(
-            temperature=settings.qwen.temperature,
-            max_tokens=settings.qwen.max_tokens,
-            enable_thinking=enable_reasoning,
-        )
+        llm_service = ModelClient.from_settings(enable_thinking=enable_reasoning)
+
+    # 记忆窗口取自激活模型（无额外配置回退）
+    from floodmind.config.model_resolver import resolve_model
+    cw = resolve_model(model_key=model_key).context_window
 
     memory_dir = session_manager.get_memory_dir(session_id)
     memory = DualMemory(
         session_id=session_id,
-        max_short_term=20,
-        context_window=32768,
+        context_window=cw,
         persist_dir=memory_dir,
         llm=llm_service,
     )

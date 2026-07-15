@@ -90,17 +90,15 @@ def init_agent():
     os.makedirs(_persist_dir, exist_ok=True)
     memory = DualMemory(
         session_id=_session_id,
-        max_short_term=settings.agent.max_history,
-        context_window=settings.agent.context_window,
+        context_window=settings.model.context_window,
         persist_dir=_persist_dir,
     )
-    logger.info(f"✓ 记忆系统初始化完成 - 最大历史: {settings.agent.max_history}轮")
-    
+    logger.info(f"✓ 记忆系统初始化完成 - 上下文窗口: {settings.model.context_window}")
+
     # 4. 创建智能体
     agent = create_flood_agent(
         llm_service=llm_service,
         memory=memory,
-        enable_chronos_warmup=settings.agent.enable_chronos_warmup
     )
     logger.info("✓ 智能体创建完成")
     

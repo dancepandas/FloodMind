@@ -158,34 +158,35 @@ def parse_model(model_spec: str) -> Tuple[str, str]:
     if "/" in model_spec:
         provider_id, model_id = model_spec.split("/", 1)
         return provider_id.strip(), model_id.strip()
-    # Use default provider
-    from floodmind.config.settings import settings
-    return settings.model.provider_name, model_spec.strip()
+    # Use default provider (= catalog 第一个模型的 provider)
+    from floodmind.config.model_resolver import resolve_model
+    return resolve_model().provider, model_spec.strip()
 
 
 def resolve_provider(provider_id: str) -> Dict[str, Any]:
-    """从 settings.json 解析提供商配置"""
+    """从 settings.json 解析提供商配置（providers 新结构，兼容旧 provider.options）。"""
     from floodmind.config.settings import get_config
+    from floodmind.config.model_resolver import _providers_section, _normalize_models
+
     cfg = get_config()
-    provider_cfg = cfg.get("provider", {}).get(provider_id, {})
+    providers = _providers_section(cfg)
+    pdata = providers.get(provider_id, {}) if isinstance(providers, dict) else {}
+    if not isinstance(pdata, dict):
+        pdata = {}
 
-    if not isinstance(provider_cfg, dict):
-        provider_cfg = {}
-
-    options = provider_cfg.get("options", {}) if isinstance(provider_cfg, dict) else {}
-    models = provider_cfg.get("models", {}) if isinstance(provider_cfg, dict) else {}
+    models_list = _normalize_models(pdata.get("models", []))
 
     result = {
         "id": provider_id,
-        "name": provider_cfg.get("name", provider_id),
-        "base_url": options.get("baseURL", options.get("base_url", "")),
-        "api_key": options.get("apiKey", options.get("api_key", "")),
-        "models": list(models.keys()) if isinstance(models, dict) else [],
+        "name": pdata.get("name", provider_id),
+        "base_url": pdata.get("base_url") or pdata.get("baseURL", ""),
+        "api_key": pdata.get("api_key") or pdata.get("apiKey", ""),
+        "models": [m.get("id", "") for m in models_list if m.get("id")],
     }
 
     # Fallback: env vars
     if not result["api_key"]:
-        for env_var in provider_cfg.get("env", []):
+        for env_var in PROVIDER_DEFS.get(provider_id, {}).get("env", []):
             val = os.getenv(env_var, "").strip()
             if val:
                 result["api_key"] = val
@@ -200,35 +201,36 @@ def resolve_provider(provider_id: str) -> Dict[str, Any]:
 
 
 def list_available_providers() -> List[Dict[str, Any]]:
-    """列出所有已配置的有效提供商"""
+    """列出所有已配置的有效提供商（有 api_key，或 ollama 本地）。"""
     from floodmind.config.settings import get_config
+    from floodmind.config.model_resolver import _providers_section, _normalize_models
+
     cfg = get_config()
-    provider_cfg = cfg.get("provider", {})
-    if not isinstance(provider_cfg, dict):
+    providers = _providers_section(cfg)
+    if not isinstance(providers, dict):
         return []
-    result = []
-    for pid in sorted(provider_cfg.keys()):
-        pdata = provider_cfg[pid]
+    result: List[Dict[str, Any]] = []
+    for pid in sorted(providers.keys()):
+        pdata = providers[pid]
         if not isinstance(pdata, dict):
             continue
-        options = pdata.get("options", {}) if isinstance(pdata, dict) else {}
-        models = pdata.get("models", {}) if isinstance(pdata, dict) else {}
-        has_key = bool(options.get("apiKey", "").strip()) or bool(options.get("api_key", "").strip())
-        if has_key or pid == "ollama":
+        api_key = (pdata.get("api_key") or pdata.get("apiKey") or "").strip()
+        if api_key or pid == "ollama":
+            models_list = _normalize_models(pdata.get("models", []))
             result.append({
                 "id": pid,
                 "name": pdata.get("name", pid),
-                "base_url": options.get("baseURL", options.get("base_url", "")),
-                "models": list(models.keys()) if isinstance(models, dict) else [],
+                "base_url": pdata.get("base_url") or pdata.get("baseURL", ""),
+                "models": [m.get("id", "") for m in models_list if m.get("id")],
             })
     return result
 
 
 def get_default_model() -> Tuple[str, str]:
-    """Get the default provider/model pair."""
-    from floodmind.config.settings import settings
-    model_cfg = settings.model
-    return model_cfg.provider_name, model_cfg.model_name
+    """默认 (provider, model) = catalog 第一个。"""
+    from floodmind.config.model_resolver import resolve_model
+    rm = resolve_model()
+    return rm.provider, rm.id
 
 
 # ---------------------------------------------------------------------------
@@ -249,15 +251,17 @@ def get_llm_client(provider_id: str = "", model_id: str = "", **kwargs):
 
     Cached per (provider, model, key, url) combination.
     """
-    from floodmind.config.settings import settings
-    if not provider_id:
-        provider_id = settings.model.provider_name
-    if not model_id:
-        model_id = settings.model.model_name
+    from floodmind.config.model_resolver import resolve_model
 
-    provider = resolve_provider(provider_id)
-    api_key = kwargs.get("api_key") or provider["api_key"]
-    base_url = kwargs.get("base_url") or provider["base_url"]
+    if provider_id or model_id:
+        rm = resolve_model(model_key=model_id or None, provider_id=provider_id or None)
+    else:
+        rm = resolve_model()
+
+    api_key = kwargs.get("api_key") or rm.api_key
+    base_url = kwargs.get("base_url") or rm.base_url
+    provider_id = rm.provider
+    model_id = rm.id
 
     ck = _cache_key(provider_id, model_id, api_key, base_url)
     if ck in _client_cache:
@@ -268,8 +272,8 @@ def get_llm_client(provider_id: str = "", model_id: str = "", **kwargs):
         api_key=api_key,
         base_url=base_url,
         model_name=model_id,
-        temperature=kwargs.get("temperature", settings.model.temperature),
-        max_tokens=kwargs.get("max_tokens", settings.model.max_tokens),
+        temperature=kwargs.get("temperature", rm.temperature),
+        max_tokens=kwargs.get("max_tokens", rm.max_tokens),
     )
     _client_cache[ck] = client
     logger.info("Created LLM client: %s/%s @ %s", provider_id, model_id, base_url)

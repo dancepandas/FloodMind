@@ -99,8 +99,7 @@ class ChatScreen(Screen[None]):
             if memory is None:
                 memory = DualMemory(
                     session_id=self._sid,
-                    max_short_term=settings.agent.max_history,
-                    context_window=settings.agent.context_window,
+                    context_window=settings.model.context_window,
                     llm=llm,
                 )
             self._agent = create_flood_agent(

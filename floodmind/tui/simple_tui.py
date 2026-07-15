@@ -145,8 +145,7 @@ class SimpleTUI(App):
         )
         memory = DualMemory(
             session_id=sid,
-            max_short_term=settings.agent.max_history,
-            context_window=settings.agent.context_window,
+            context_window=settings.model.context_window,
             llm=llm,
         )
         self._agent = create_flood_agent(llm_service=llm, memory=memory, session_id=sid)

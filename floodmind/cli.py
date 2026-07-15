@@ -72,11 +72,11 @@ def _validate_api_key() -> None:
      set FLOODMIND_API_KEY=你的key{dashscope_fallback}
 
   2. 用户级配置 (推荐，一劳永逸):
-      floodmind config set provider.{provider}.options.apiKey 你的key
+      floodmind config set providers.{provider}.api_key 你的key
 
    3. 直接编辑配置文件:
        ~/.floodmind/settings.json
-      在 provider.{provider}.options.apiKey 处填写你的key
+      在 providers.{provider}.api_key 处填写你的key
 
   配置完成后重新运行 floodmind 即可。
 """, err=True)
@@ -212,8 +212,7 @@ def run(task, model, resume_session_id, resume_checkpoint_id, verbose):
     sid = resume_session_id or f"cli-run-{uuid.uuid4().hex[:8]}"
     memory = DualMemory(
         session_id=sid,
-        max_short_term=settings.agent.max_history,
-        context_window=settings.agent.context_window,
+        context_window=settings.model.context_window,
         llm=llm,
     )
     agent = create_flood_agent(llm_service=llm, memory=memory, session_id=sid)
@@ -561,8 +560,7 @@ def _run_chat_legacy(model=None, reasoning=None) -> int:
     sid = f"cli-chat-{uuid.uuid4().hex[:8]}"
     memory = DualMemory(
         session_id=sid,
-        max_short_term=settings.agent.max_history,
-        context_window=settings.agent.context_window,
+        context_window=settings.model.context_window,
         llm=llm,
     )
     agent = create_flood_agent(llm_service=llm, memory=memory, session_id=sid)

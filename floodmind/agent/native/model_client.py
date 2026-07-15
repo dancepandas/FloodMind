@@ -58,16 +58,19 @@ class ModelClient:
         max_tokens: Optional[int] = None,
         enable_thinking: bool = False,
     ) -> "ModelClient":
-        """从 settings.json 构造 ModelClient，参数未提供时用 settings 中的默认值"""
-        from floodmind.config.settings import settings as _s
+        """从 settings.json 构造 ModelClient（默认激活模型），参数未提供时用解析值。
 
-        mc = _s.model
+        解析统一走 resolve_model()——SDK/桌面端的稳定契约。
+        """
+        from floodmind.config.model_resolver import resolve_model
+
+        rm = resolve_model()
         return cls(
-            api_key=api_key or mc.api_key,
-            base_url=base_url or _resolve_base_url(mc.provider_name),
-            model_name=model_name or mc.model_name,
-            temperature=temperature if temperature is not None else float(mc.temperature),
-            max_tokens=max_tokens if max_tokens is not None else int(mc.max_tokens),
+            api_key=api_key or rm.api_key,
+            base_url=base_url or rm.base_url,
+            model_name=model_name or rm.id,
+            temperature=temperature if temperature is not None else rm.temperature,
+            max_tokens=max_tokens if max_tokens is not None else rm.max_tokens,
             enable_thinking=enable_thinking,
         )
 
@@ -77,32 +80,24 @@ class ModelClient:
         model_key: str,
         enable_reasoning: bool = False,
     ) -> "ModelClient":
-        """根据 settings.json 中的 model preset 构造 ModelClient"""
-        from floodmind.config.model_presets import (
-            get_preset,
-            resolve_api_key,
-            resolve_base_url,
-        )
+        """根据 settings.json 中的指定模型构造 ModelClient。"""
+        from floodmind.config.model_resolver import resolve_model
 
-        preset = get_preset(model_key)
-        if not preset:
-            raise ValueError(f"未找到模型预设: {model_key}")
-
-        p_api_key = resolve_api_key(preset)
-        p_base_url = resolve_base_url(preset)
-        p_model_name = preset["model_name"]
-
+        rm = resolve_model(model_key=model_key)
         if enable_reasoning:
+            # 推理模式：取模型 thinking_* 参数（缺省回退 default_*）
+            from floodmind.config.model_presets import get_preset
+            preset = get_preset(model_key) or {}
             temperature = preset.get("thinking_temperature", 0.2)
-            max_tokens = preset.get("thinking_max_tokens", 4096)
+            max_tokens = preset.get("thinking_max_tokens", rm.max_tokens)
         else:
-            temperature = preset.get("default_temperature", 0.3)
-            max_tokens = preset.get("default_max_tokens", 4096)
+            temperature = rm.temperature
+            max_tokens = rm.max_tokens
 
         return cls(
-            api_key=p_api_key,
-            base_url=p_base_url,
-            model_name=p_model_name,
+            api_key=rm.api_key,
+            base_url=rm.base_url,
+            model_name=rm.id,
             temperature=temperature,
             max_tokens=max_tokens,
             enable_thinking=enable_reasoning,
@@ -360,21 +355,3 @@ class ModelClient:
         except Exception as e:
             logger.error("ModelClient unexpected stream error: %s", e, exc_info=True)
             yield ModelEvent(type="error", content=f"流式输出异常: {str(e)}")
-
-
-# ── 工具函数 ─────────────────────────────────────────────────────
-def _resolve_base_url(provider_name: str) -> str:
-    """根据 provider_name 从配置中找到对应的 base URL"""
-    from floodmind.config.settings import get_config
-    cfg = get_config()
-    provider_cfg = cfg.get("provider", {})
-    if isinstance(provider_cfg, dict):
-        p = provider_cfg.get(provider_name)
-        if isinstance(p, dict):
-            opts = p.get("options", {}) or {}
-            if isinstance(opts, dict):
-                url = opts.get("baseURL") or opts.get("base_url")
-                if url:
-                    return url
-    # 兜底：从环境变量 FLOODMIND_BASE_URL 读取
-    return os.getenv("FLOODMIND_BASE_URL", "")

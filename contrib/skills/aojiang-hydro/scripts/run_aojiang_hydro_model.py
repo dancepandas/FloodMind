@@ -210,7 +210,7 @@ def main() -> None:
         "--model_forecast_rainfall_params",
         help="未来降雨数组 JSON",
     )
-    parser.add_argument("--base_url", default="http://192.168.30.108:3500", help="服务基础地址")
+    parser.add_argument("--base_url", default="http://192.168.30.108:11111", help="服务基础地址")
     parser.add_argument("--timeout", type=int, default=120, help="请求超时时间（秒）")
     parser.add_argument("--output_file", help="结构化结果 JSON 保存路径；默认输出到当前目录下 result.json")
     parser.add_argument("--excel_output_file", help="可选，结果 Excel 保存路径；默认与 JSON 输出同名 .xlsx")
@@ -231,7 +231,7 @@ def main() -> None:
         result_payload = call_hydro_case_api(
             payload=payload,
             base_url=args.base_url,
-            endpoint="/aj/hydro_model",
+            endpoint="/aj/hydro_model_sync",
             case_name="敖江",
             timeout=args.timeout,
         )
