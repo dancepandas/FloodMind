@@ -34,3 +34,6 @@ floodmind/tui-ts/node_modules/
 floodmind/memory/long_term_memory.md
 floodmind/memory/long_term_memory.json
 .floodmind/
+
+# API keys (local only, never commit)
+docs/key.txt

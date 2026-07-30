@@ -304,7 +304,6 @@ class NativeFloodAgent:
         self._step_start_time = 0.0
         self._last_loop_state: Optional[AgentLoopState] = None
         self._current_run_context: Optional[RunContext] = None
-        self._orchestrator_extra_body: dict = {}
 
         self._cached_experience_context: str = ""
         self._cached_experience_version: int = -1
@@ -346,10 +345,9 @@ class NativeFloodAgent:
         prompt = system_prompt or "你是一个智能助手，使用可用工具帮助用户完成任务。"
 
         # 初始化 model client：如果传入的已是 ModelClient 实例则直接复用
+        # （思考开关语义由 model_client.enable_thinking 承载，厂商方言由 pipeline 翻译）
         if isinstance(self.llm_service, ModelClient):
             self._model_client = self.llm_service
-            if self.llm_service.enable_thinking:
-                self._orchestrator_extra_body = {"enable_thinking": True}
         else:
             self._init_model_client()
 
@@ -370,7 +368,6 @@ class NativeFloodAgent:
             event_bus=self._event_bus,
             message_builder=self._message_builder,
             max_iterations=self._max_iterations,
-            extra_body=self._orchestrator_extra_body,
             system_prompts=[prompt + "\n\n## 可用工具\n" + tool_descriptions],
             tools_schema=self._orchestrator_registry.tools_schema(),
             tool_registry=self._orchestrator_registry,
@@ -935,12 +932,9 @@ class NativeFloodAgent:
     def _init_model_client(self) -> None:
         if self.llm_service is not None:
             # 兼容外部传入 LLM service 的旧路径（如 web_server 传入的 get_qwen_llm_service）
-            if hasattr(self.llm_service, "enable_reasoning") and self.llm_service.enable_reasoning:
-                thinking = True
-                self._orchestrator_extra_body = {"enable_thinking": True}
-            else:
-                thinking = False
-                self._orchestrator_extra_body = {}
+            thinking = bool(
+                hasattr(self.llm_service, "enable_reasoning") and self.llm_service.enable_reasoning
+            )
 
             self._model_client = ModelClient(
                 api_key=getattr(self.llm_service, "api_key", ""),
@@ -949,6 +943,7 @@ class NativeFloodAgent:
                 temperature=getattr(self.llm_service, "temperature", 0.3),
                 max_tokens=getattr(self.llm_service, "max_tokens", 4096),
                 enable_thinking=thinking,
+                provider=getattr(self.llm_service, "provider", ""),
             )
             return
 
@@ -961,10 +956,6 @@ class NativeFloodAgent:
             raise ValueError(f"未知的模型预设: {model_key}")
 
         enable_thinking = bool(self._enable_reasoning and preset.get("supports_reasoning"))
-        if enable_thinking:
-            self._orchestrator_extra_body = {"enable_thinking": True}
-        else:
-            self._orchestrator_extra_body = {}
 
         self._model_client = ModelClient.from_settings_with_preset(
             model_key=model_key,
@@ -1048,7 +1039,6 @@ class NativeFloodAgent:
             event_bus=self._event_bus,
             message_builder=self._message_builder,
             max_iterations=10000,
-            extra_body=self._orchestrator_extra_body,
             system_prompts=orchestrator_prompts,
             tools_schema=self._orchestrator_registry.tools_schema(),
             tool_registry=self._orchestrator_registry,
@@ -2282,6 +2272,8 @@ class NativeFloodAgent:
             result_holder: Dict[str, Any] = {}
 
             def _run_loop() -> None:
+                # 提前取出，保证 finally 恢复时变量一定存在
+                saved_thinking = self._model_client.enable_thinking
                 try:
                     logger.info("[RUN_LOOP] === _run_loop started, session=%s ===", self.session_id)
 
@@ -2387,11 +2379,8 @@ class NativeFloodAgent:
                         memory_messages=memory_messages,
                     )
 
-                    saved_extra = getattr(self._orchestrator_executor, "extra_body", None)
-                    if enable_reasoning:
-                        self._orchestrator_executor.extra_body = {"enable_thinking": True}
-                    else:
-                        self._orchestrator_executor.extra_body = {}
+                    # 思考开关只翻语义位——厂商方言由 model_client.pipeline 翻译
+                    self._model_client.enable_thinking = bool(enable_reasoning)
 
                     self._event_bus.set_queue(q)
 
@@ -2421,8 +2410,7 @@ class NativeFloodAgent:
                         q.put({"type": "error", "content": error_str})
                 finally:
                     self._current_run_context = None
-                    if saved_extra is not None:
-                        self._orchestrator_executor.extra_body = saved_extra
+                    self._model_client.enable_thinking = saved_thinking
                     try:
                         from floodmind.agent.runtime.services.ask_service import get_ask_service
                         get_ask_service().clear_emit_fn(session_id=effective_session_id)

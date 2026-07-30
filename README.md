@@ -27,6 +27,7 @@ FloodMind 是一个面向洪水预报业务的智能体协同处理系统。基�
 - **文档自动生成** — 支持 Excel、Word、PDF、PPT 等格式
 - **多界面支持** — React Web 前端 + 终端 TUI + 纯文本 CLI
 - **多模型支持** — 配置即用：任意 OpenAI 兼容接口均可接入
+- **厂商 Pipeline 自动路由** — 按 base_url / provider / 模型名自动选择厂商专属调用管线（DashScope/DeepSeek/Kimi/MiniMax + OpenAI 兜底），翻译思考开关方言、流式 reasoning 解析、`<think>` 标签剥离、usage 位置兼容
 - **DOOM LOOP 检测** — 连续相同工具+相同参数 3 次自动终止
 - **自动重试** — LLM 调用失败（网络/503）指数退避重试
 - **Plugin 系统** — Python 原生插件扩展，注册工具/hook/Agent 初始化
@@ -414,6 +415,8 @@ class MyAgent(NativeFloodAgent):
 }
 ```
 
+> **厂商 Pipeline 自动路由**：`ModelClient` 构造时按 base_url / provider id / 模型名前缀自动绑定厂商专属调用管线（`floodmind/agent/native/providers/`）。已内置 DashScope、DeepSeek、Kimi、MiniMax 四家——自动翻译思考开关方言（`enable_thinking` / `thinking.type` / `reasoning_split`）、按厂商位置解析流式 reasoning 与 usage、剥离 `<think>` 标签、剥离厂商禁传参数。未命中的服务商走 OpenAI 兼容兜底；聚合网关按模型名前缀命中时只启用解析适配（请求保持标准参数），不会向网关发送厂商方言。
+
 ---
 
 ## 配置说明
@@ -445,6 +448,9 @@ FloodMind 支持任意兼容 OpenAI `/v1/chat/completions` 的 API。各服务�
 
 // OpenAI
 { "providers": { "openai": { "base_url": "https://api.openai.com/v1", "api_key": "sk-...", "models": [{"id":"gpt-4o","context_window":128000}] } } }
+
+// MiniMax
+{ "providers": { "minimax": { "base_url": "https://api.minimaxi.com/v1", "api_key": "sk-...", "models": [{"id":"MiniMax-M3","context_window":1000000}] } } }
 
 // Ollama 本地模型
 { "providers": { "ollama": { "base_url": "http://localhost:11434/v1", "models": [{"id":"llama3","context_window":8192}] } } }
@@ -538,6 +544,7 @@ FloodMind/
 │   │   │   ├── native_flood_agent.py  # Agent 主体（双 registry、MCP/Skill、流式）
 │   │   │   ├── executor.py        #     状态机 LLM↔Tool 循环
 │   │   │   ├── model_client.py    #     统一 LLM 服务
+│   │   │   ├── providers/         #     厂商 Pipeline（dashscope/deepseek/kimi/minimax + OpenAI 兜底，自动路由）
 │   │   │   ├── model_router.py    #     模型路由/降级
 │   │   │   ├── event_bus.py       #     EventBus + StepEventBus
 │   │   │   ├── message_builder.py #     消息组装

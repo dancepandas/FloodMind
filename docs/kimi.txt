@@ -1,0 +1,5392 @@
+> ## Documentation Index
+> Fetch the complete documentation index at: https://platform.kimi.com/docs/llms.txt
+> Use this file to discover all available pages before exploring further.
+
+# 思考模型
+
+思考模型在给出最终回答前，会先用推理 token 进行“思考”——分解问题、规划步骤、评估多种方案，推理过程通过响应中的 `reasoning_content` 字段返回。先思考再回答，让模型在复杂推理、代码生成、多步工具调用等任务上表现更好，代价是更高的延迟和更多的 token 消耗。
+
+## 按场景选择思考模型
+
+本页涉及以下思考模型：
+
+* **`kimi-k3`**：旗舰思考模型，始终进行推理且保留式思考（Preserved Thinking）始终开启，并可能返回 `reasoning_content`；请求通过顶层 `reasoning_effort` 配置推理强度，支持 `"low"` / `"high"` / `"max"`（默认 `"max"`）。
+* **`kimi-k2.7-code`**：面向代码场景，**始终开启思考**，且 **保留式思考（Preserved Thinking）始终开启**。其高速版 `kimi-k2.7-code-highspeed` 与之为同一模型、思考行为完全一致，本页所有说明同样适用。
+* **`kimi-k2.6`**：通用思考模型，默认开启思考，可按需关闭，**支持保留式思考**。
+* **`kimi-k2.5`**：通用思考模型，默认开启思考，可按需关闭，但 **不支持保留式思考**。
+
+各模型的请求参数差异如下：
+
+| 请求字段               | `kimi-k3`                                | `kimi-k2.7-code`                                   | `kimi-k2.6`                   | `kimi-k2.5`                   |
+| ------------------ | ---------------------------------------- | -------------------------------------------------- | ----------------------------- | ----------------------------- |
+| `reasoning_effort` | `"low"` / `"high"` / `"max"`（默认 `"max"`） | 不支持                                                | 不支持                           | 不支持                           |
+| `thinking.type`    | —                                        | 仅 `"enabled"`，始终思考，传 `"disabled"` 报错               | `"enabled"`（默认）/ `"disabled"` | `"enabled"`（默认）/ `"disabled"` |
+| `thinking.keep`    | —                                        | 不传或传合法值 `"all"` 均按 `"all"` 处理（始终开启、无法关闭），传入其他非法值报错 | `null`（默认，不保留）/ `"all"`（启用）   | 无此参数，不支持                      |
+
+如果您使用 kimi api 进行基准测试，请参考这篇 [基准测试最佳实践](/docs/guide/benchmark-best-practice)
+
+## 基本调用
+
+### 调用 kimi-k3
+
+`kimi-k3` 始终进行推理且保留式思考始终开启，无需（也不应）传入 `thinking` 参数；只需指定 `model`，并按需通过顶层 `reasoning_effort` 调节[推理强度](/docs/guide/use-reasoning-effort)：
+
+<Tabs>
+  <Tab title="curl">
+    ```bash theme={null}
+    $ curl https://api.moonshot.cn/v1/chat/completions \
+        -H "Content-Type: application/json" \
+        -H "Authorization: Bearer $MOONSHOT_API_KEY" \
+        -d '{
+            "model": "kimi-k3",
+            "messages": [
+                {
+                    "role": "user",
+                    "content": "证明根号 2 是无理数。"
+                }
+            ]
+        }'
+    ```
+  </Tab>
+
+  <Tab title="python">
+    ```python theme={null}
+    import os
+    from openai import OpenAI
+
+    client = OpenAI(
+        api_key=os.environ["MOONSHOT_API_KEY"],
+        base_url="https://api.moonshot.cn/v1",
+    )
+
+    completion = client.chat.completions.create(
+        model="kimi-k3",
+        messages=[{"role": "user", "content": "证明根号 2 是无理数。"}],
+    )
+
+    message = completion.choices[0].message
+    if hasattr(message, "reasoning_content"):
+        print(getattr(message, "reasoning_content"))
+    print(message.content)
+    ```
+  </Tab>
+</Tabs>
+
+多轮对话和工具调用必须把 API 返回的完整 assistant message 原样回传到 `messages`（包括 `reasoning_content`），详见[保留式思考](#preserved-thinking)。更多 K3 用法见 [Kimi K3 快速开始](/docs/guide/kimi-k3-quickstart)。
+
+### 调用 kimi-k2.7-code：无需传 thinking 参数
+
+`kimi-k2.7-code` 是面向代码场景的思考模型，与 `kimi-k2.6` 共享同一套思考机制（`reasoning_content`、多步工具调用、流式输出等），差异仅在 `thinking` 参数（见上方对照表）。使用时无需（也不应）传入 `thinking` 参数，只需切换 `model` 即可，模型始终输出 `reasoning_content`。由于保留式思考始终开启，多轮对话中请务必把每一轮历史 assistant 消息的 `reasoning_content` 原样保留在 `messages` 中。
+
+以下示例发起一次最基本的流式调用，并在输出中区分思考内容与最终回答：
+
+<Tabs>
+  <Tab title="curl">
+    ```bash theme={null}
+    $ curl https://api.moonshot.cn/v1/chat/completions \
+        -H "Content-Type: application/json" \
+        -H "Authorization: Bearer $MOONSHOT_API_KEY" \
+        -d '{
+            "model": "kimi-k2.7-code",
+            "messages": [
+                {
+                    "role": "system",
+                    "content": "你是 Kimi。"
+                },
+                {
+                    "role": "user",
+                    "content": "用 Python 实现快速排序。"
+                }
+            ]
+        }'
+    ```
+  </Tab>
+
+  <Tab title="python">
+    ```python theme={null}
+    import os
+    import openai
+
+    client = openai.Client(
+        base_url="https://api.moonshot.cn/v1",
+        api_key=os.getenv("MOONSHOT_API_KEY"),
+    )
+
+    stream = client.chat.completions.create(
+        model="kimi-k2.7-code",
+        messages=[
+            {
+                "role": "system",
+                "content": "你是 Kimi。",
+            },
+            {
+                "role": "user",
+                "content": "用 Python 实现快速排序。"
+            },
+        ],
+        max_tokens=1024*32,
+        stream=True,
+        # temperature 不可修改、thinking 始终开启，均无需设置
+    )
+
+    thinking = False
+    for chunk in stream:
+        if chunk.choices:
+            choice = chunk.choices[0]
+            if choice.delta and hasattr(choice.delta, "reasoning_content"):
+                if not thinking:
+                    thinking = True
+                    print("=============开始思考=============")
+                print(getattr(choice.delta, "reasoning_content"), end="")
+            if choice.delta and choice.delta.content:
+                if thinking:
+                    thinking = False
+                    print("\n=============思考结束=============")
+                print(choice.delta.content, end="")
+    ```
+  </Tab>
+</Tabs>
+
+### 调用 kimi-k2.6：默认即输出思考内容
+
+`kimi-k2.6` 是通用思考模型，默认即启用思考能力，下面的基本调用无需传入 `thinking` 参数也会输出思考内容（如需关闭思考或开启保留式思考，见下方 [thinking 参数](#thinking-parameter) 说明）：
+
+<Tabs>
+  <Tab title="curl">
+    ```bash theme={null}
+    $ curl https://api.moonshot.cn/v1/chat/completions \
+        -H "Content-Type: application/json" \
+        -H "Authorization: Bearer $MOONSHOT_API_KEY" \
+        -d '{
+            "model": "kimi-k2.6",
+            "messages": [
+                {
+                    "role": "system",
+                    "content": "你是 Kimi。"
+                },
+                {
+                    "role": "user",
+                    "content": "请解释 1+1=2。"
+                }
+            ]
+        }'
+    ```
+  </Tab>
+
+  <Tab title="python">
+    ```python theme={null}
+    import os
+    import openai
+
+    client = openai.Client(
+        base_url="https://api.moonshot.cn/v1",
+        api_key=os.getenv("MOONSHOT_API_KEY"),
+    )
+
+    stream = client.chat.completions.create(
+        model="kimi-k2.6",
+        messages=[
+            {
+                "role": "system",
+                "content": "你是 Kimi。",
+            },
+            {
+                "role": "user",
+                "content": "请解释 1+1=2。"
+            },
+        ],
+        max_tokens=1024*32,
+        stream=True,
+        # temperature 不可修改，无需设置；默认即启用思考能力，无需额外参数
+    )
+
+    thinking = False
+    for chunk in stream:
+        if chunk.choices:
+            choice = chunk.choices[0]
+            if choice.delta and hasattr(choice.delta, "reasoning_content"):
+                if not thinking:
+                    thinking = True
+                    print("=============开始思考=============")
+                print(getattr(choice.delta, "reasoning_content"), end="")
+            if choice.delta and choice.delta.content:
+                if thinking:
+                    thinking = False
+                    print("\n=============思考结束=============")
+                print(choice.delta.content, end="")
+    ```
+  </Tab>
+</Tabs>
+
+## 控制思考行为
+
+### K3：用 `reasoning_effort` 调节推理强度
+
+`kimi-k3` 始终进行推理，不支持 `thinking` 参数。通过请求顶层 `reasoning_effort` 调节推理强度，支持 `"low"` / `"high"` / `"max"` 三档（默认 `"max"`），用法与示例见[推理强度](/docs/guide/use-reasoning-effort)。
+
+<span id="thinking-parameter" />
+
+### 用 thinking 参数控制 kimi-k2.6 的思考行为
+
+`kimi-k2.6` 通过 `thinking` 参数控制思考行为，包含两个子字段：
+
+* `thinking.type`：`"enabled"`（默认）| `"disabled"`，控制是否开启思考。由于默认即为 `"enabled"`，上面的示例无需显式传入即可思考；禁用示例见 [k2.6 禁用思考能力示例](/docs/guide/kimi-k2-6-quickstart#k2-6-禁用思考能力示例)。
+* `thinking.keep`：`null`（默认，忽略历史轮次的思考）| `"all"`（保留历史轮次的 `reasoning_content`，启用保留式思考，用法详见 [保留式思考](#preserved-thinking)）。
+
+## 从响应中读取 reasoning\_content
+
+使用 `kimi-k2.7-code`、`kimi-k2.6` 等思考模型（启用思考能力时）时，API 响应通过 `reasoning_content` 字段承载模型的思考内容。读取该字段时注意：
+
+* openai SDK 中的 `ChoiceDelta` 和 `ChatCompletionMessage` 类型并不提供 `reasoning_content` 字段，因此无法直接通过 `.reasoning_content` 的方式访问该字段，仅支持通过 `hasattr(obj, "reasoning_content")` 来判断是否存在字段，如果存在，则使用 `getattr(obj, "reasoning_content")` 获取字段值
+* 如果你使用其他框架或自行通过 HTTP 接口对接，可以直接获取与 `content` 字段同级的 `reasoning_content` 字段
+* 在流式输出（`stream=True`）的场合，`reasoning_content` 字段一定会先于 `content` 字段出现，你可以在业务代码中通过判断是否出现 `content` 字段来识别思考内容（或称推理过程）是否结束
+* `reasoning_content` 中包含的 Tokens 也受 `max_tokens` 参数控制，`reasoning_content` 的 Tokens 数加上 `content` 的 Tokens 数应小于等于 `max_tokens`
+
+## 配置多步工具调用
+
+`kimi-k2.7-code` 和 `kimi-k2.6`（启用思考能力时）都支持通过深度推理进行多步工具调用，进而完成非常复杂的任务。为确保最佳效果，**使用思考模型时请务必按以下方式配置调用：**
+
+* 单轮任务内（一次工具调用循环中产生的多步推理）应保留上下文中所有的思考内容（`reasoning_content` 字段）并随请求回传，模型会按需选择必要的思考内容进行推理；跨轮对话是否保留历史思考由 `thinking.keep` 控制（`kimi-k2.6` 默认 `null` 不保留，`kimi-k2.7-code` 始终保留）。
+* 设置 `max_tokens>=16000` 以避免无法输出完整的 `reasoning_content` 和 `content`。
+* **无需设置 `temperature`。** `kimi-k2.7-code`、`kimi-k2.6` 的 `temperature` 不可修改，使用默认值即可，请勿显式传入（详见[模型参数参考](/docs/api/models-overview)）。
+* 使用流式输出（`stream=True`）：思考模型的输出内容包含了 `reasoning_content`，相比普通模型其输出内容更多，启用流式输出能获得更好的用户体验，同时一定程度避免网络超时问题。
+
+### 完整示例：生成今日新闻报告
+
+下面的示例展示了一个"今日新闻报告生成"的场景，模型会依次调用 `date`（获取日期）和 `web_search`（搜索今日新闻）等官方工具，并在这个过程中展现深度思考过程：
+
+```python expandable theme={null}
+import os
+import json
+import httpx
+import openai
+
+
+class FormulaChatClient:
+    def __init__(self, base_url: str, api_key: str):
+        """初始化 Formula 客户端"""
+        self.base_url = base_url
+        self.api_key = api_key
+        self.openai = openai.Client(
+            base_url=base_url,
+            api_key=api_key,
+        )
+        self.httpx = httpx.Client(
+            base_url=base_url,
+            headers={"Authorization": f"Bearer {api_key}"},
+            timeout=30.0,
+        )
+        # 使用 kimi-k2.6 模型，thinking 将默认启用
+        self.model = "kimi-k2.6"
+
+    def get_tools(self, formula_uri: str):
+        """从 Formula API 获取工具定义"""
+        response = self.httpx.get(f"/formulas/{formula_uri}/tools")
+        response.raise_for_status()  # 检查 HTTP 状态码
+
+        try:
+            return response.json().get("tools", [])
+        except json.JSONDecodeError as e:
+            print(f"错误: 无法解析响应为 JSON (状态码: {response.status_code})")
+            print(f"响应内容: {response.text[:500]}")
+            raise
+
+    def call_tool(self, formula_uri: str, function: str, args: dict):
+        """调用官方工具"""
+        response = self.httpx.post(
+            f"/formulas/{formula_uri}/fibers",
+            json={"name": function, "arguments": json.dumps(args)},
+        )
+        response.raise_for_status()  # 检查 HTTP 状态码
+        fiber = response.json()
+
+        if fiber.get("status", "") == "succeeded":
+            return fiber["context"].get("output") or fiber["context"].get("encrypted_output")
+
+        if "error" in fiber:
+            return f"Error: {fiber['error']}"
+        if "error" in fiber.get("context", {}):
+            return f"Error: {fiber['context']['error']}"
+        return "Error: Unknown error"
+
+    def close(self):
+        """关闭客户端连接"""
+        self.httpx.close()
+
+
+# 初始化客户端
+base_url = os.getenv("MOONSHOT_BASE_URL", "https://api.moonshot.cn/v1")
+api_key = os.getenv("MOONSHOT_API_KEY")
+
+if not api_key:
+    raise ValueError("MOONSHOT_API_KEY 环境变量未设置，请先设置 API 密钥")
+
+print(f"Base URL: {base_url}")
+print(f"API Key: {api_key[:10]}...{api_key[-10:] if len(api_key) > 20 else api_key}\n")
+
+client = FormulaChatClient(base_url, api_key)
+
+# 定义要使用的官方工具 Formula URI
+formula_uris = [
+    "moonshot/date:latest",
+    "moonshot/web-search:latest"
+]
+
+# 加载所有工具定义并建立映射
+print("正在加载官方工具...")
+all_tools = []
+tool_to_uri = {}  # function.name -> formula_uri 的映射
+
+for uri in formula_uris:
+    try:
+        tools = client.get_tools(uri)
+        for tool in tools:
+            func = tool.get("function")
+            if func:
+                func_name = func.get("name")
+                if func_name:
+                    tool_to_uri[func_name] = uri
+                    all_tools.append(tool)
+                    print(f"  已加载工具: {func_name} from {uri}")
+    except Exception as e:
+        print(f"  警告: 加载工具 {uri} 失败: {e}")
+        continue
+
+print(f"总共加载 {len(all_tools)} 个工具\n")
+
+if not all_tools:
+    raise ValueError("未能加载任何工具，请检查 API 密钥和网络连接")
+
+# 初始化消息列表
+messages = [
+    {
+        "role": "system",
+        "content": "你是 Kimi，一个专业的新闻分析师。你擅长收集、分析和整理信息，生成高质量的新闻报告。",
+    },
+]
+
+# 用户请求生成今日新闻报告
+user_request = "请帮我生成一份今日新闻报告，包含重要的科技、经济和社会新闻。"
+messages.append({
+    "role": "user",
+    "content": user_request
+})
+
+print(f"用户请求: {user_request}\n")
+
+# 开始多步对话循环
+max_iterations = 10  # 防止无限循环
+for iteration in range(max_iterations):
+    # 调用模型
+    try:
+        completion = client.openai.chat.completions.create(
+            model=client.model,
+            messages=messages,
+            max_tokens=1024 * 32,
+            tools=all_tools,
+        )
+    except openai.AuthenticationError as e:
+        print(f"认证错误: {e}")
+        print("请检查 API key 是否正确，以及 API key 是否有权限访问该端点")
+        raise
+    except Exception as e:
+        print(f"调用模型时发生错误: {e}")
+        raise
+
+    # 获取响应
+    message = completion.choices[0].message
+
+    # 打印思考过程
+    if hasattr(message, "reasoning_content"):
+        print(f"=============第 {iteration + 1} 轮思考开始=============")
+        reasoning = getattr(message, "reasoning_content")
+        if reasoning:
+            print(reasoning[:500] + "..." if len(reasoning) > 500 else reasoning)
+        print(f"=============第 {iteration + 1} 轮思考结束=============\n")
+
+    # 添加 assistant 消息到上下文（保留 reasoning_content）
+    messages.append(message)
+
+    # 如果模型没有调用工具，说明对话结束
+    if not message.tool_calls:
+        print("=============最终回答=============")
+        print(message.content)
+        break
+
+    # 处理工具调用
+    print(f"模型决定调用 {len(message.tool_calls)} 个工具:\n")
+
+    for tool_call in message.tool_calls:
+        func_name = tool_call.function.name
+        args = json.loads(tool_call.function.arguments)
+
+        print(f"调用工具: {func_name}")
+        print(f"参数: {json.dumps(args, ensure_ascii=False, indent=2)}")
+
+        # 获取对应的 formula_uri
+        formula_uri = tool_to_uri.get(func_name)
+        if not formula_uri:
+            print(f"错误: 找不到工具 {func_name} 对应的 Formula URI")
+            continue
+
+        # 调用工具
+        result = client.call_tool(formula_uri, func_name, args)
+
+        # 打印结果（截断过长内容）
+        if len(str(result)) > 200:
+            print(f"工具结果: {str(result)[:200]}...\n")
+        else:
+            print(f"工具结果: {result}\n")
+
+        # 添加工具结果到消息列表
+        tool_message = {
+            "role": "tool",
+            "tool_call_id": tool_call.id,
+            "name": func_name,
+            "content": result
+        }
+        messages.append(tool_message)
+
+print("\n对话完成！")
+
+# 清理资源
+client.close()
+```
+
+整个过程展现了 `kimi-k2.7-code`、`kimi-k2.6` 等思考模型（启用思考能力时）如何通过深度思考来规划和执行复杂的多步骤任务，每个步骤都有完整的推理过程（`reasoning_content`），并且思考内容会保留在上下文中以确保工具调用的准确性。
+
+<span id="preserved-thinking" />
+
+## 在多轮对话中保留思考（Preserved Thinking）
+
+保留式思考指在多轮对话中，把历史轮次（previous turns）的 `reasoning_content` 一并透传给模型，让模型在本轮推理时能延续之前的思考脉络。
+
+对于 `kimi-k2.6` 模型，可通过请求体中的 `thinking.keep` 参数控制是否保留历史思考：
+
+| 取值              | 行为                                      |
+| --------------- | --------------------------------------- |
+| `null` / 不传（默认） | 忽略历史轮次的 `reasoning_content`，上下文更短、成本更低。 |
+| `"all"`         | 完整保留历史轮次的 `reasoning_content`，启用保留式思考。  |
+
+<Note>
+  `thinking.keep` 只影响历史轮次的 `reasoning_content`，并 **不** 改变模型在当前轮次是否产生/输出思考内容（该行为由 `thinking.type` 控制）。推荐把 `keep: "all"` 与 `type: "enabled"` 搭配使用。
+
+  对 `kimi-k2.7-code`，保留式思考始终开启、无法关闭：`thinking.keep` 不传或传合法值 `"all"` 都按 `"all"` 处理（传入 `"all"` 以外的非法值会报错）。因此使用该模型时，**必须**（而非可选）把历史轮次 assistant 消息的 `reasoning_content` 原样保留在 `messages` 中，做法与下方示例一致。
+</Note>
+
+使用 `keep: "all"` 时，需要把每一轮历史 assistant 消息中的 `reasoning_content` 原样保留在 `messages` 中。最简单的做法是把上一轮 API 返回的 assistant message 直接 append 回 `messages`，如以下示例所示：
+
+<Tabs>
+  <Tab title="curl">
+    ```bash theme={null}
+    $ curl https://api.moonshot.cn/v1/chat/completions \
+        -H "Content-Type: application/json" \
+        -H "Authorization: Bearer $MOONSHOT_API_KEY" \
+        -d '{
+            "model": "kimi-k2.6",
+            "messages": [
+                {"role": "system", "content": "你是 Kimi。"},
+                {"role": "user", "content": "第一个问题..."},
+                {
+                    "role": "assistant",
+                    "reasoning_content": "<上一轮 API 返回的 reasoning_content>",
+                    "content": "<上一轮 API 返回的最终回答>"
+                },
+                {"role": "user", "content": "请基于之前的分析继续推导下一步。"}
+            ],
+            "thinking": {
+                "type": "enabled",
+                "keep": "all"
+            }
+        }'
+    ```
+  </Tab>
+
+  <Tab title="python">
+    ```python theme={null}
+    import os
+    import openai
+
+    client = openai.Client(
+        base_url="https://api.moonshot.cn/v1",
+        api_key=os.getenv("MOONSHOT_API_KEY"),
+    )
+
+    # messages 中需完整保留每一轮 API 返回的 assistant 消息（含 reasoning_content）
+    messages = [
+        {"role": "system", "content": "你是 Kimi。"},
+        {"role": "user", "content": "第一个问题..."},
+        {
+            "role": "assistant",
+            "reasoning_content": "<上一轮 API 返回的 reasoning_content>",
+            "content": "<上一轮 API 返回的最终回答>",
+        },
+        {"role": "user", "content": "请基于之前的分析继续推导下一步。"},
+    ]
+
+    response = client.chat.completions.create(
+        model="kimi-k2.6",
+        messages=messages,
+        stream=True,
+        extra_body={"thinking": {"type": "enabled", "keep": "all"}},
+    )
+    ```
+  </Tab>
+</Tabs>
+
+<Warning>
+  `reasoning_content` 会计入 token 消耗。开启保留式思考后，历史思考内容会持续占用上下文长度并计费，请酌情使用。
+</Warning>
+
+## 常见问题
+
+### Q1: 为什么需要保留 `reasoning_content`？
+
+A: 保留 `reasoning_content` 可以确保多步推理的连贯性，特别是在工具调用过程中。请把 API 返回的完整 assistant message 原样回传到 `messages`。对 K3，多轮对话和工具调用都必须这样处理；对 K2.x，跨轮保留行为由各模型的 `thinking.keep` 决定：`kimi-k2.6` 默认不保留，`kimi-k2.7-code` 始终保留。
+
+### Q2: `reasoning_content` 会消耗额外的 token 吗？
+
+A: 是的，`reasoning_content` 会计入输入/输出 token 消耗。具体计费方式请参考[产品定价](/docs/pricing/chat)。
+
+> ## Documentation Index
+> Fetch the complete documentation index at: https://platform.kimi.com/docs/llms.txt
+> Use this file to discover all available pages before exploring further.
+
+# 推理强度
+
+Kimi K3 始终进行推理，并通过请求顶层 `reasoning_effort` 配置 **推理强度**。该字段支持 `"low"` / `"high"` / `"max"` 三档，默认 `"max"`。
+
+## 设置推理强度
+
+在 Chat Completions 请求顶层设置 `reasoning_effort`：
+
+```json theme={null}
+{
+  "model": "kimi-k3",
+  "messages": [{"role": "user", "content": "请推导一下这个数列的通项公式：1, 4, 9, 25, 64, ..."}],
+  "reasoning_effort": "high"
+}
+```
+
+从 K2.x 迁移到 K3 时，移除 K2.x 的 `thinking` 配置，并按需使用顶层 `reasoning_effort`。
+
+<Tabs>
+  <Tab title="curl">
+    ```bash theme={null}
+    $ curl https://api.moonshot.cn/v1/chat/completions \
+        -H "Content-Type: application/json" \
+        -H "Authorization: Bearer $MOONSHOT_API_KEY" \
+        -d '{
+            "model": "kimi-k3",
+            "messages": [
+                {
+                    "role": "user",
+                    "content": "请推导一下这个数列的通项公式：1, 4, 9, 25, 64, ..."
+                }
+            ],
+            "reasoning_effort": "high"
+        }'
+    ```
+  </Tab>
+
+  <Tab title="python">
+    ```python theme={null}
+    import os
+    from openai import OpenAI
+
+    client = OpenAI(
+        api_key=os.environ["MOONSHOT_API_KEY"],
+        base_url="https://api.moonshot.cn/v1",
+    )
+
+    completion = client.chat.completions.create(
+        model="kimi-k3",
+        messages=[
+            {"role": "user", "content": "请推导一下这个数列的通项公式：1, 4, 9, 25, 64, ..."},
+        ],
+        reasoning_effort="high",
+    )
+
+    message = completion.choices[0].message
+    if hasattr(message, "reasoning_content"):
+        print(getattr(message, "reasoning_content"))
+    print(message.content)
+    ```
+  </Tab>
+</Tabs>
+
+## 字段说明
+
+| 字段                 | 类型     | 必填 | 说明                                                       |
+| ------------------ | ------ | -- | -------------------------------------------------------- |
+| `reasoning_effort` | string | 否  | K3 的顶层推理强度字段，支持 `"low"` / `"high"` / `"max"`，默认 `"max"`。 |
+
+K3 的多轮对话和工具调用必须将 API 返回的完整 assistant message 原样回传到 `messages`，包括 `reasoning_content` 和 `tool_calls`。
+
+## 相关阅读
+
+* [Kimi K3 API 工具调用最佳实践](/docs/guide/kimi-k3-tool-calling-best-practice)：工具调用场景中的推理强度配置建议
+* [使用思考模式](/docs/guide/use-thinking-models)：各模型的思考行为与保留式思考（Preserved Thinking）
+* [模型参数参考](/docs/api/models-overview)：各模型的参数配置差异
+
+> ## Documentation Index
+> Fetch the complete documentation index at: https://platform.kimi.com/docs/llms.txt
+> Use this file to discover all available pages before exploring further.
+
+# 配置多轮对话参数
+
+与 Kimi 智能助手不同，Kimi API 是 **无状态** 的，本身没有记忆功能：多次请求之间，模型不知道你前一次请求的内容，也不会记住任何上下文——上一次你告诉它今年 27 岁，下一次请求它并不知情。要实现多轮对话，需要手动维护每次请求的上下文（Context），把历史消息随下一次请求一起发送，让模型能看到此前聊过的内容。
+
+<Note>
+  本页示例默认使用最新模型 `kimi-k3`。K3 使用请求顶层 `reasoning_effort` 配置推理强度（支持 `"low"` / `"high"` / `"max"`，默认 `"max"`）。换用 `kimi-k2.6`、`kimi-k2.5` 等其他模型时，只需替换 `model` 字段，但各模型的参数配置存在差异，详见[模型参数参考](/docs/api/models-overview)。
+</Note>
+
+## 用 messages 列表为模型补上记忆
+
+以下示例改造自上一章节，演示如何通过维护 `messages` 列表让模型拥有记忆：每轮对话把用户的新消息（role=user）和模型的回复（role=assistant）都追加到列表中，再整体随请求发送。实现要点已以注释形式标注在代码中：
+
+<Tabs>
+  <Tab title="python">
+    ```python theme={null}
+    import os
+    from openai import OpenAI
+
+    client = OpenAI(
+        api_key = os.environ["MOONSHOT_API_KEY"], # 运行前请设置 MOONSHOT_API_KEY 环境变量
+        base_url = "https://api.moonshot.cn/v1",
+    )
+
+    # 我们定义一个全局变量 messages，用于记录我们和 Kimi 大模型产生的历史对话消息
+    # 在 messages 中，既包含我们向 Kimi 大模型提出的问题（role=user），也包括 Kimi 大模型给我们的回复（role=assistant）
+    # 当然，也包括初始的 System Prompt（role=system）
+    # messages 中的消息按时间顺序从小到大排列
+    messages = [
+        {"role": "system", "content": "你是 Kimi，由 Moonshot AI 提供的人工智能助手，你更擅长中文和英文的对话。你会为用户提供安全，有帮助，准确的回答。同时，你会拒绝一切涉及恐怖主义，种族歧视，黄色暴力等问题的回答。Moonshot AI 为专有名词，不可翻译成其他语言。"},
+    ]
+
+    def chat(input: str) -> str:
+        """
+        chat 函数支持多轮对话，每次调用 chat 函数与 Kimi 大模型对话时，Kimi 大模型都会"看到"此前已经
+        产生的历史对话消息，换句话说，Kimi 大模型拥有了记忆。
+        """
+
+        global messages
+
+        # 我们将用户最新的问题构造成一个 message（role=user），并添加到 messages 的尾部
+        messages.append({
+            "role": "user",
+            "content": input,
+        })
+
+        # 携带 messages 与 Kimi 大模型对话
+        completion = client.chat.completions.create(
+            model="kimi-k3",
+            messages=messages
+        )
+
+        # 通过 API 我们获得了 Kimi 大模型给予我们的回复消息（role=assistant）
+        assistant_message = completion.choices[0].message
+
+        # 为了让 Kimi 大模型拥有完整的记忆，我们必须将 Kimi 大模型返回给我们的消息也添加到 messages 中
+        messages.append(assistant_message)
+
+        return assistant_message.content
+
+    print(chat("你好，我今年 27 岁。"))
+    print(chat("你知道我今年几岁吗？")) # 在这里，Kimi 大模型根据此前的上下文信息，将会知道你今年的年龄是 27 岁
+    ```
+  </Tab>
+
+  <Tab title="node.js">
+    ```js theme={null}
+    const OpenAI = require("openai")
+
+    const client = new OpenAI({
+      apiKey: process.env.MOONSHOT_API_KEY, // 运行前请设置 MOONSHOT_API_KEY 环境变量
+      baseURL: "https://api.moonshot.cn/v1",
+    });
+
+    // 我们定义一个全局变量 messages，用于记录我们和 Kimi 大模型产生的历史对话消息
+    // 在 messages 中，既包含我们向 Kimi 大模型提出的问题（role=user），也包括 Kimi 大模型给我们的回复（role=assistant）
+    // 当然，也包括初始的 System Prompt（role=system）
+    // messages 中的消息按时间顺序从小到大排列
+    let messages = [
+      {
+        role: "system",
+        content: "你是 Kimi，由 Moonshot AI 提供的人工智能助手，你更擅长中文和英文的对话。你会为用户提供安全，有帮助，准确的回答。同时，你会拒绝一切涉及恐怖主义，种族歧视，黄色暴力等问题的回答。Moonshot AI 为专有名词，不可翻译成其他语言。",
+      },
+    ];
+
+    async function chat(input) {
+      /**
+       * chat 函数支持多轮对话，每次调用 chat 函数与 Kimi 大模型对话时，Kimi 大模型都会"看到"此前已经
+       * 产生的历史对话消息，换句话说，Kimi 大模型拥有了记忆。
+       */
+
+      // 我们将用户最新的问题构造成一个 message（role=user），并添加到 messages 的尾部
+      messages.push({
+        role: "user",
+        content: input,
+      });
+
+      // 携带 messages 与 Kimi 大模型对话
+      const completion = await client.chat.completions.create({
+        model: "kimi-k3",
+        messages: messages
+      });
+
+      // 通过 API 我们获得了 Kimi 大模型给予我们的回复消息（role=assistant）
+      const assistantMessage = completion.choices[0].message;
+
+      // 为了让 Kimi 大模型拥有完整的记忆，我们必须将 Kimi 大模型返回给我们的消息也添加到 messages 中
+      messages.push(assistantMessage);
+
+      return assistantMessage.content;
+    }
+
+    // 使用示例
+    (async () => {
+      console.log(await chat("你好，我今年 27 岁。"));
+      console.log(await chat("你知道我今年几岁吗？")); // 在这里，Kimi 大模型根据此前的上下文信息，将会知道你今年的年龄是 27 岁
+    })();
+    ```
+  </Tab>
+</Tabs>
+
+要点回顾：
+
+* Kimi API 本身没有上下文记忆功能，需要通过 `messages` 参数手动把"之前聊了什么"告知模型；
+* `messages` 中既要存用户提出的问题（role=user），也要存模型的回复（role=assistant）。
+
+## 截断历史消息，控制上下文长度
+
+随着 `chat` 调用次数增多，`messages` 列表不断增长，每次请求消耗的 Tokens 也随之增加，最终列表中的消息会超出模型支持的上下文窗口。建议用某种策略把 `messages` 控制在可控范围内，例如每次只保留最新的 20 条消息作为本次请求的上下文。
+
+以下示例演示如何用 `make_messages` 函数控制每次请求的消息数量（默认保留最新 20 条），注意它如何保证截断后 System Messages 仍然留在列表中：
+
+<Tabs>
+  <Tab title="python">
+    ```python theme={null}
+    import os
+    from openai import OpenAI
+
+    client = OpenAI(
+        api_key = os.environ["MOONSHOT_API_KEY"], # 运行前请设置 MOONSHOT_API_KEY 环境变量
+        base_url = "https://api.moonshot.cn/v1",
+    )
+
+    # 我们将 System Messages 单独放置在一个列表中，这是因为每次请求都应该携带 System Messages
+    system_messages = [
+    	{"role": "system", "content": "你是 Kimi，由 Moonshot AI 提供的人工智能助手，你更擅长中文和英文的对话。你会为用户提供安全，有帮助，准确的回答。同时，你会拒绝一切涉及恐怖主义，种族歧视，黄色暴力等问题的回答。Moonshot AI 为专有名词，不可翻译成其他语言。"},
+    ]
+
+    # 我们定义一个全局变量 messages，用于记录我们和 Kimi 大模型产生的历史对话消息
+    # 在 messages 中，既包含我们向 Kimi 大模型提出的问题（role=user），也包括 Kimi 大模型给我们的回复（role=assistant）
+    # messages 中的消息按时间顺序从小到大排列
+    messages = []
+
+
+    def make_messages(input: str, n: int = 20) -> list[dict]:
+    	"""
+    	使用 make_messaegs 控制每次请求的消息数量，使其保持在一个合理的范围内，例如默认值是 20。在构建消息列表
+    	的过程中，我们会先添加 System Prompt，这是因为无论如何对消息进行截断，System Prompt 都是必不可少
+    	的内容，再获取 messages —— 即历史记录中，最新的 n 条消息作为请求使用的消息，在大部分场景中，这样
+    	能保证请求的消息所占用的 Tokens 数量不超过模型上下文窗口。
+    	"""
+    	global messages
+
+    	# 首先，我们将用户最新的问题构造成一个 message（role=user），并添加到 messages 的尾部
+    	messages.append({
+    		"role": "user",
+    		"content": input,
+    	})
+
+    	# new_messages 是我们下一次请求使用的消息列表，现在让我们来构建它
+    	new_messages = []
+
+    	# 每次请求都需要携带 System Messages，因此我们需要先把 system_messages 添加到消息列表中；
+    	# 注意，即使对消息进行截断，也应该注意保证 System Messages 仍然在 messages 列表中。
+    	new_messages.extend(system_messages)
+
+    	# 在这里，当历史消息超过 n 条时，我们仅保留最新的 n 条消息
+    	if len(messages) > n:
+    		messages = messages[-n:]
+
+    	new_messages.extend(messages)
+    	return new_messages
+
+
+    def chat(input: str) -> str:
+    	"""
+    	chat 函数支持多轮对话，每次调用 chat 函数与 Kimi 大模型对话时，Kimi 大模型都会"看到"此前已经
+    	产生的历史对话消息，换句话说，Kimi 大模型拥有了记忆。
+    	"""
+
+    	# 携带 messages 与 Kimi 大模型对话
+    	completion = client.chat.completions.create(
+            model="kimi-k3",
+            messages=make_messages(input)
+        )
+
+    	# 通过 API 我们获得了 Kimi 大模型给予我们的回复消息（role=assistant）
+    	assistant_message = completion.choices[0].message
+
+    	# 为了让 Kimi 大模型拥有完整的记忆，我们必须将 Kimi 大模型返回给我们的消息也添加到 messages 中
+    	messages.append(assistant_message)
+
+    	return assistant_message.content
+
+    print(chat("你好，我今年 27 岁。"))
+    print(chat("你知道我今年几岁吗？")) # 在这里，Kimi 大模型根据此前的上下文信息，将会知道你今年的年龄是 27 岁
+    ```
+  </Tab>
+
+  <Tab title="node.js">
+    ```js theme={null}
+    const OpenAI = require("openai")
+
+    const client = new OpenAI({
+      apiKey: process.env.MOONSHOT_API_KEY, // 运行前请设置 MOONSHOT_API_KEY 环境变量
+      baseURL: "https://api.moonshot.cn/v1",
+    });
+
+    // 我们将 System Messages 单独放置在一个列表中，这是因为每次请求都应该携带 System Messages
+    const systemMessages = [
+      {
+        role: "system",
+        content: "你是 Kimi，由 Moonshot AI 提供的人工智能助手，你更擅长中文和英文的对话。你会为用户提供安全，有帮助，准确的回答。同时，你会拒绝一切涉及恐怖主义，种族歧视，黄色暴力等问题的回答。Moonshot AI 为专有名词，不可翻译成其他语言。",
+      },
+    ];
+
+    // 我们定义一个全局变量 messages，用于记录我们和 Kimi 大模型产生的历史对话消息
+    // 在 messages 中，既包含我们向 Kimi 大模型提出的问题（role=user），也包括 Kimi 大模型给我们的回复（role=assistant）
+    // messages 中的消息按时间顺序从小到大排列
+    let messages = [];
+
+    async function makeMessages(input, n = 20) {
+      /**
+       * 使用 make_messages 控制每次请求的消息数量，使其保持在一个合理的范围内，例如默认值是 20。在构建消息列表
+       * 的过程中，我们会先添加 System Prompt，这是因为无论如何对消息进行截断，System Prompt 都是必不可少的
+       * 内容，再获取 messages —— 即历史记录中，最新的 n 条消息作为请求使用的消息，在大部分场景中，这样
+       * 能保证请求的消息所占用的 Tokens 数量不超过模型上下文窗口。
+       */
+      // 首先，我们将用户最新的问题构造成一个 message（role=user），并添加到 messages 的尾部
+      messages.push({
+        role: "user",
+        content: input,
+      });
+
+      // newMessages 是我们下一次请求使用的消息列表，现在让我们来构建它
+      let newMessages = [];
+
+      // 每次请求都需要携带 System Messages，因此我们需要先把 systemMessages 添加到消息列表中；
+      // 注意，即使对消息进行截断，也应该注意保证 System Messages 仍然在 messages 列表中。
+      newMessages = systemMessages.concat(newMessages);
+
+      // 在这里，当历史消息超过 n 条时，我们仅保留最新的 n 条消息
+      if (messages.length > n) {
+        messages = messages.slice(-n);
+      }
+
+      newMessages = newMessages.concat(messages);
+      return newMessages;
+    }
+
+    async function chat(input) {
+      /**
+       * chat 函数支持多轮对话，每次调用 chat 函数与 Kimi 大模型对话时，Kimi 大模型都会"看到"此前已经
+       * 产生的历史对话消息，换句话说，Kimi 大模型拥有了记忆。
+       */
+
+      // 携带 messages 与 Kimi 大模型对话
+      const completion = await client.chat.completions.create({
+        model: "kimi-k3",
+        messages: await makeMessages(input)
+      });
+
+      // 通过 API 我们获得了 Kimi 大模型给予我们的回复消息（role=assistant）
+      const assistantMessage = completion.choices[0].message;
+
+      // 为了让 Kimi 大模型拥有完整的记忆，我们必须将 Kimi 大模型返回给我们的消息也添加到 messages 中
+      messages.push(assistantMessage);
+
+      return assistantMessage.content;
+    }
+
+    (async () => {
+      console.log(await chat("你好，我今年 27 岁。"));
+      console.log(await chat("你知道我今年几岁吗？")); // 在这里，Kimi 大模型根据此前的上下文信息，将会知道你今年的年龄是 27 岁
+    })();
+    ```
+  </Tab>
+</Tabs>
+
+## 生产环境还需要考虑什么
+
+上述代码示例仅覆盖最简单的调用场景，实际业务中可能还需要处理更多场景和边界：
+
+* 并发场景下可能需要额外的读写锁；
+* 多用户场景需要为每个用户单独维护 `messages` 列表；
+* 对 `messages` 列表进行持久化；
+* 用更精确的方式计算 `messages` 列表中需要保留多少条消息；
+* 对被遗弃的消息做一次总结，生成一条新消息加入 `messages` 列表；
+* ……
+
+> ## Documentation Index
+> Fetch the complete documentation index at: https://platform.kimi.com/docs/llms.txt
+> Use this file to discover all available pages before exploring further.
+
+# 使用 Kimi API 的流式输出功能
+
+Kimi 大模型收到问题后会先进行推理，再逐个 Token 生成回答；流式输出（Streaming）让模型每生成一定数量的 Tokens（通常是 1 个 Token）就立即发送给客户端，而不是等全部生成完毕再一次性返回。等待完整回复通常要数秒，问题复杂、回复较长时可能拉长到 10 秒甚至 20 秒；开启流式输出后，用户能第一时间看到第一个 Token，显著减少等待时间。当你与 [Kimi 智能助手](https://kimi.com) 对话时，回复逐字“跳”出来，就是流式输出的效果。
+
+## 开启流式输出
+
+在请求中设置 `stream=True` 即可开启流式输出。此时 SDK 返回一个可迭代对象，用循环逐个读取数据块（chunk）：每个 chunk 的结构与 completion 相似，但 `message` 字段被替换为 `delta` 字段。
+
+<Note>
+  本页示例默认使用最新模型 `kimi-k3`。K3 使用请求顶层 `reasoning_effort` 配置推理强度（支持 `"low"` / `"high"` / `"max"`，默认 `"max"`）。换用 `kimi-k2.6`、`kimi-k2.5` 等其他模型时，只需替换 `model` 字段，但各模型的参数配置存在差异，详见[模型参数参考](/docs/api/models-overview)。
+</Note>
+
+<Tabs>
+  <Tab title="python">
+    ```python theme={null}
+    import os
+    from openai import OpenAI
+
+    client = OpenAI(
+        api_key = os.environ["MOONSHOT_API_KEY"], # 运行前请设置 MOONSHOT_API_KEY 环境变量
+        base_url = "https://api.moonshot.cn/v1",
+    )
+
+    stream = client.chat.completions.create(
+        model = "kimi-k3",
+        messages = [
+            {"role": "system", "content": "你是 Kimi，由 Moonshot AI 提供的人工智能助手，你更擅长中文和英文的对话。你会为用户提供安全，有帮助，准确的回答。同时，你会拒绝一切涉及恐怖主义，种族歧视，黄色暴力等问题的回答。Moonshot AI 为专有名词，不可翻译成其他语言。"},
+            {"role": "user", "content": "你好，我叫李雷，1+1等于多少？"}
+        ],
+        stream=True, # <-- 注意这里，我们通过设置 stream=True 开启流式输出模式
+    )
+
+    # 当启用流式输出模式（stream=True），SDK 返回的内容也发生了变化，我们不再直接访问返回值中的 choice
+    # 而是通过 for 循环逐个访问返回值中每个单独的块（chunk）
+
+    for chunk in stream:
+    	# 在这里，每个 chunk 的结构都与之前的 completion 相似，但 message 字段被替换成了 delta 字段
+    	delta = chunk.choices[0].delta # <-- message 字段被替换成了 delta 字段
+
+    	if delta.content:
+    		# 我们在打印内容时，由于是流式输出，为了保证句子的连贯性，我们不人为地添加
+    		# 换行符，因此通过设置 end="" 来取消 print 自带的换行符。
+    		print(delta.content, end="")
+    ```
+  </Tab>
+
+  <Tab title="node.js">
+    ```js theme={null}
+    const OpenAI = require('openai')
+
+    const client = new OpenAI({
+        apiKey: process.env.MOONSHOT_API_KEY, // 运行前请设置 MOONSHOT_API_KEY 环境变量
+        baseURL: "https://api.moonshot.cn/v1",
+    })
+
+    async function main() {
+        const stream = await client.chat.completions.create({
+            model: "kimi-k3",
+            messages: [
+                {role: "system", content: "你是 Kimi，由 Moonshot AI 提供的人工智能助手，你更擅长中文和英文的对话。你会为用户提供安全，有帮助，准确的回答。同时，你会拒绝一切涉及恐怖主义，种族歧视，黄色暴力等问题的回答。Moonshot AI 为专有名词，不可翻译成其他语言。"},
+                {role: "user", content: "你好，我叫李雷，1+1等于多少？"}
+            ],
+            stream: true, // <-- 注意这里，我们通过设置 stream=True 开启流式输出模式
+        })
+
+        // 当启用流式输出模式（stream=True），SDK 返回的内容也发生了变化，我们不再直接访问返回值中的 choice
+        // 而是通过 for 循环逐个访问返回值中每个单独的块（chunk）
+
+        for await (chunk of stream) {
+            // 在这里，每个 chunk 的结构都与之前的 completion 相似，但 message 字段被替换成了 delta 字段
+            delta = chunk.choices[0].delta // <-- message 字段被替换成了 delta 字段
+
+            if (delta.content) {
+                // 我们在打印内容时，由于是流式输出，为了保证句子的连贯性，我们不人为地添加
+                // 换行符，因此通过设置 end="" 来取消 print 自带的换行符。
+                console.log(delta.content, end="")
+            }
+        }
+    }
+
+    main()
+    ```
+  </Tab>
+</Tabs>
+
+## 解析 SSE 响应体
+
+开启流式输出后，接口不再返回 JSON 格式的响应（`Content-Type: application/json`），而是返回 `Content-Type: text/event-stream`（SSE），服务端得以源源不断地向客户端传输 Tokens。[SSE](https://kimi.com/share/cr7boh3dqn37a5q9tds0) 的响应体如下所示：
+
+```text theme={null}
+data: {"id":"cmpl-1305b94c570f447fbde3180560736287","object":"chat.completion.chunk","created":1698999575,"model":"kimi-k3","choices":[{"index":0,"delta":{"role":"assistant","content":""},"finish_reason":null}]}
+
+data: {"id":"cmpl-1305b94c570f447fbde3180560736287","object":"chat.completion.chunk","created":1698999575,"model":"kimi-k3","choices":[{"index":0,"delta":{"content":"你好"},"finish_reason":null}]}
+
+...
+
+data: {"id":"cmpl-1305b94c570f447fbde3180560736287","object":"chat.completion.chunk","created":1698999575,"model":"kimi-k3","choices":[{"index":0,"delta":{"content":"。"},"finish_reason":null}]}
+
+data: {"id":"cmpl-1305b94c570f447fbde3180560736287","object":"chat.completion.chunk","created":1698999575,"model":"kimi-k3","choices":[{"index":0,"delta":{},"finish_reason":"stop","usage":{"prompt_tokens":19,"completion_tokens":13,"total_tokens":32}}]}
+
+data: [DONE]
+```
+
+响应体中的每个数据块均以 `data: ` 为前缀，紧跟一个合法的 JSON 对象，并以两个换行符 `\n\n` 结束。所有数据块传输完成后，服务端发送 `data: [DONE]` 标识传输结束，此时可断开网络连接。
+
+*注意：请始终使用 `data: [DONE]` 判断数据是否传输完成，而不是使用 `finish_reason` 或其他方式。如果未收到 `data: [DONE]`，即使已经获取了 `finish_reason=stop`，也不应视作传输完成；换句话说，在收到 `data: [DONE]` 之前，都应视作 **消息是不完整的**。*
+
+流式输出过程中会有 `content` 字段会逐块下发；`role` 和 `usage` 不会在每个数据块中重复出现——`role` 仅出现在第一个数据块，`usage` 仅出现在最后一个数据块。
+
+## 统计 Tokens 用量
+
+计算 Tokens 有两种方式。最直接、最准确的一种，是等所有数据块传输完毕后，读取最后一个数据块中的 `usage` 字段，查看本次请求产生的 `prompt_tokens`/`completion_tokens`/`total_tokens`：
+
+```text theme={null}
+...
+
+data: {"id":"cmpl-1305b94c570f447fbde3180560736287","object":"chat.completion.chunk","created":1698999575,"model":"kimi-k3","choices":[{"index":0,"delta":{},"finish_reason":"stop","usage":{"prompt_tokens":19,"completion_tokens":13,"total_tokens":32}}]}
+                                               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+                                               通过访问最后一个数据块中的 usage 字段来查看当前请求产生的 Tokens 数量
+data: [DONE]
+```
+
+<Note>
+  注意 `usage` 嵌套在最后一个数据块的 `choices[0]` 内（即 `choices[0].usage`），而非数据块顶层。使用 OpenAI SDK 时 `chunk.usage` 为 `None`，请读取 `chunk.choices[0].usage`，或自行解析原始 SSE 数据块。
+</Note>
+
+但流式输出可能因网络连接中断、客户端程序错误等不可控因素被打断，此时最后一个数据块尚未到达，也就无从得知本次请求消耗的 Tokens。为避免统计失败，建议保存已收到的每个数据块的内容，并在请求结束后（无论是否成功结束）调用 Tokens 计算接口统计实际消耗量：
+
+<Tabs>
+  <Tab title="python">
+    ```python theme={null}
+    import os
+    import httpx
+    from openai import OpenAI
+
+    client = OpenAI(
+        api_key = os.environ["MOONSHOT_API_KEY"], # 运行前请设置 MOONSHOT_API_KEY 环境变量
+        base_url = "https://api.moonshot.cn/v1",
+    )
+
+    stream = client.chat.completions.create(
+        model = "kimi-k3",
+        messages = [
+            {"role": "system", "content": "你是 Kimi，由 Moonshot AI 提供的人工智能助手，你更擅长中文和英文的对话。你会为用户提供安全，有帮助，准确的回答。同时，你会拒绝一切涉及恐怖主义，种族歧视，黄色暴力等问题的回答。Moonshot AI 为专有名词，不可翻译成其他语言。"},
+            {"role": "user", "content": "你好，我叫李雷，1+1等于多少？"}
+        ],
+        stream=True, # <-- 注意这里，我们通过设置 stream=True 开启流式输出模式
+    )
+
+
+    def estimate_token_count(input: str) -> int:
+        """
+        在这里实现你的 Tokens 计算逻辑，或是直接调用我们的 Tokens 计算接口计算 Tokens
+
+        https://api.moonshot.cn/v1/tokenizers/estimate-token-count
+        """
+        header = {
+            "Authorization": f"Bearer {os.environ['MOONSHOT_API_KEY']}",
+        }
+        data = {
+            "model": "kimi-k3",
+            "messages": [
+                {"role": "user", "content": input},
+            ]
+        }
+        r = httpx.post("https://api.moonshot.cn/v1/tokenizers/estimate-token-count", headers=header, json=data)
+        r.raise_for_status()
+        return r.json()["data"]["total_tokens"]
+
+
+    completion = []
+    for chunk in stream:
+    	delta = chunk.choices[0].delta
+    	if delta.content:
+    		completion.append(delta.content)
+
+
+    print("completion_tokens:", estimate_token_count("".join(completion)))
+    ```
+  </Tab>
+
+  <Tab title="node.js">
+    ```js theme={null}
+    const axios = require('axios');
+    const OpenAI = require('openai');
+
+    client = new OpenAI({
+        apiKey: process.env.MOONSHOT_API_KEY,
+        baseURL: "https://api.moonshot.cn/v1",
+    })
+
+
+    async function estimate_token_count(input_messages) {
+        /*
+        在这里实现你的 Tokens 计算逻辑，或是直接调用我们的 Tokens 计算接口计算 Tokens
+
+        https://api.moonshot.cn/v1/tokenizers/estimate-token-count
+        */
+        header = {
+            "Authorization": `Bearer ${process.env.MOONSHOT_API_KEY}`,
+        }
+        data = {
+            "model": "kimi-k3",
+            "messages": input_messages,
+        }
+        r = await axios.post("https://api.moonshot.cn/v1/tokenizers/estimate-token-count", data, {headers: header})
+        .catch(function (error) {
+            console.log(error)
+        })
+        return r.data.data.total_tokens
+    }
+
+    async function main() {
+
+        const stream = await client.chat.completions.create({
+            model: "kimi-k3",
+            messages: [
+                {role: "system", content: "你是 Kimi，由 Moonshot AI 提供的人工智能助手，你更擅长中文和英文的对话。你会为用户提供安全，有帮助，准确的回答。同时，你会拒绝一切涉及恐怖主义，种族歧视，黄色暴力等问题的回答。Moonshot AI 为专有名词，不可翻译成其他语言。"},
+                {role: "user", content: "你好，我叫李雷，1+1等于多少？"}
+            ],
+            stream: true, // <-- 注意这里，我们通过设置 stream=True 开启流式输出模式
+        })
+
+        const completion = [];
+        for await (chunk of stream) {
+            const delta = chunk.choices[0].delta
+            if (delta.content) {
+                completion.push(delta.content)
+            }
+        }
+
+        console.log("completion_tokens:", await estimate_token_count(completion.join("")))
+    }
+
+    main()
+    ```
+  </Tab>
+</Tabs>
+
+## 终止流式输出
+
+需要提前终止输出时，直接关闭 HTTP 网络连接或丢弃后续数据块即可，例如在循环中 `break`：
+
+```python theme={null}
+for chunk in stream:
+	if condition:
+		break
+```
+
+## 不用 SDK 直接处理 SSE
+
+在没有 SDK 的语言环境，或 SDK 无法满足你的业务逻辑时，可以直接对接 HTTP 接口来处理流式输出。以下示例演示如何逐行读取并解析 [SSE](https://kimi.com/share/cr7boh3dqn37a5q9tds0) 响应体，详细说明见代码注释：
+
+<Tabs>
+  <Tab title="python">
+    ```python theme={null}
+    import os
+    import json
+    import httpx # 我们使用 httpx 库来执行我们的 HTTP 请求
+
+
+    data = {
+    	"model": "kimi-k3",
+    	"messages": [
+    		# 具体的 messages
+    	],
+    	"stream": True,
+    }
+
+
+    # 使用 httpx 向 Kimi 大模型发出 chat 请求，并获得响应 r
+    r = httpx.post("https://api.moonshot.cn/v1/chat/completions", headers={"Authorization": f"Bearer {os.environ['MOONSHOT_API_KEY']}"}, json=data)
+    if r.status_code != 200:
+    	raise Exception(r.text)
+
+
+    data: str
+
+    # 在这里，我们使用了 iter_lines 方法来逐行读取响应体
+    for line in r.iter_lines():
+    	# 去除每一行收尾的空格，以便更好地处理数据块
+    	line = line.strip()
+
+    	# 接下来我们要处理三种不同的情况：
+    	#   1. 如果当前行是空行，则表明前一个数据块已接收完毕（即前文提到的，通过两个换行符结束数据块传输），我们可以对该数据块进行反序列化，并打印出对应的 content 内容；
+    	#   2. 如果当前行为非空行，且以 data: 开头，则表明这是一个数据块传输的开始，我们去除 data: 前缀后，首先判断是否是结束符 [DONE]，如果不是，将数据内容保存到 data 变量；
+    	#   3. 如果当前行为非空行，但不以 data: 开头，则表明当前行仍然归属上一个正在传输的数据块，我们将当前行的内容追加到 data 变量尾部；
+
+    	if len(line) == 0:
+    		chunk = json.loads(data)
+
+    		# 这里的处理逻辑可以替换成你的业务逻辑，打印仅是为了展示处理流程
+    		choice = chunk["choices"][0]
+    		usage = choice.get("usage")
+    		if usage:
+    			print("total_tokens:", usage["total_tokens"])
+    		delta = choice["delta"]
+    		role = delta.get("role")
+    		if role:
+    			print("role:", role)
+    		content = delta.get("content")
+    		if content:
+    			print(content, end="")
+
+    		data = "" # 重置 data
+    	elif line.startswith("data: "):
+    		data = line.lstrip("data: ")
+
+    		# 当数据块内容为 [DONE] 时，则表明所有数据块已发送完毕，可断开网络连接
+    		if data == "[DONE]":
+    			break
+    	else:
+    		data = data + "\n" + line # 我们仍然在追加内容时，为其添加一个换行符，因为这可能是该数据块有意将数据分行展示
+    ```
+  </Tab>
+
+  <Tab title="node.js">
+    ```js theme={null}
+    const axios = require('axios'); // 使用 axios 库来执行 HTTP 请求
+
+    let data = {
+        "model": "kimi-k3",
+        "messages": [
+            // 具体的 messages
+        ],
+        "stream": true,
+    };
+
+    // 使用 axios 向 Kimi 大模型发出 chat 请求，并获得响应 r
+    axios.post("https://api.moonshot.cn/v1/chat/completions", data, {
+        responseType: 'stream'
+    }).then(response => {
+        let data = '';
+        response.data.on('data', chunk => {
+            // 去除每一行收尾的空格，以便更好地处理数据块
+            let line = chunk.toString().trim();
+
+            if (line === '') {
+                try {
+                    let chunk = JSON.parse(data);
+                    let choice = chunk.choices[0];
+                    let usage = choice.usage;
+                    if (usage) {
+                        console.log("total_tokens:", usage.total_tokens);
+                    }
+                    let delta = choice.delta;
+                    let role = delta.role;
+                    if (role) {
+                        console.log("role:", role);
+                    }
+                    let content = delta.content;
+                    if (content) {
+                        console.log(content);
+                    }
+                } catch (error) {
+                    console.error("Error parsing JSON:", error);
+                }
+                data = ''; // 重置 data
+            } else if (line.startsWith('data: ')) {
+                data = line.substring(6);
+                if (data === '[DONE]') {
+                    response.data.destroy();
+                }
+            } else {
+                data += '\n' + line;
+            }
+        });
+    }).catch(error => {
+        console.error("Error in request:", error);
+    });
+    ```
+  </Tab>
+</Tabs>
+
+无论使用哪种语言，处理流式输出的基本步骤相同：
+
+1. 发起 HTTP 请求，并在请求体中将 `stream` 参数设置为 `true`；
+2. 检查响应 `Headers` 中的 `Content-Type`，为 `text/event-stream` 即表示当前响应是流式输出；
+3. 逐行读取响应内容并解析数据块（JSON 格式），通过 `data: ` 前缀和换行符 `\n` 判断数据块的起止位置；
+4. 数据块内容为 `[DONE]` 时表示传输完成。
+
+## 多个回复（`n` 参数）
+
+<Note>
+  当前模型（`kimi-k3`、`kimi-k2.7-code`、`kimi-k2.6`）的 `n` 固定为 `1`，暂不支持一次请求返回多个回复；传入大于 1 的 `n` 会返回 400 错误（`invalid n: only 1 is allowed for this model`），流式与非流式请求均如此。各模型的参数约束详见[模型参数参考](/docs/api/models-overview)。
+</Note>
+
+> ## Documentation Index
+> Fetch the complete documentation index at: https://platform.kimi.com/docs/llms.txt
+> Use this file to discover all available pages before exploring further.
+
+# 使用 Kimi API 的 JSON Mode
+
+JSON Mode 让 Kimi 大模型输出合法的、可被正确解析的 JSON 文档。当你需要结构化的输出时——例如总结一篇文章并得到这样的结构化数据——用 `response_format` 参数启用它：
+
+```json theme={null}
+{
+	"title": "文章标题",
+	"author": "文章作者",
+	"publish_time": "发布时间",
+	"summary": "文章总结"
+}
+```
+
+## 用 response\_format 启用 JSON Mode
+
+如果只在提示词 prompt 中告诉 Kimi 大模型："请输出 JSON 格式的内容"，Kimi 大模型能理解你的诉求，也会按要求生成 JSON 文档，但生成的内容通常会有一些瑕疵：例如在 JSON 文档之外，Kimi 还会额外输出其他文字内容对 JSON 文档进行解释——
+
+```text theme={null}
+以下是你需要的 JSON 文档
+
+{
+	"title": "文章标题",
+	"author": "文章作者",
+	"publish_time": "发布时间",
+	"summary": "文章总结"
+}
+```
+
+——或是输出格式有误、无法被正确解析的 JSON 文档（注意最后一行 `summary` 字段末尾的逗号）：
+
+```text theme={null}
+{
+	"title": "文章标题",
+	"author": "文章作者",
+	"publish_time": "发布时间",
+	"summary": "文章总结",
+}
+```
+
+`response_format` 参数用于约束输出格式，默认值为 `{"type": "text"}`，即普通的、没有任何格式约束的文本内容。将 `response_format` 设置为 `{"type": "json_object"}` 即可启用 JSON Mode，Kimi 大模型会按照要求输出一个合法的、可被正确解析的 JSON 文档。
+
+使用 JSON Mode 分三步：
+
+1. 在 system 或 user prompt 中定义输出 JSON 的格式，包括具体的字段名称、字段类型等；**最佳实践是给出具体的输出示例，并解释每个字段的具体含义**；
+2. 将 `response_format` 参数设置为 `{"type": "json_object"}`；
+3. 解析 Kimi 大模型返回消息中的 `content`，`message.content` 是一个合法的、被序列化成字符串的 JSON Object。
+
+## 完整示例：智能客服的多类型消息回复
+
+设想一个微信智能机器人客服（简称智能客服）：它使用 Kimi 大模型来回答客户提出的问题，不仅能回复文字消息，还能回复图片、链接卡片、语音等类型的消息，并且可以在一次回复中混合多种类型的消息——例如对于客户的产品咨询类问题，既提供文字回复，也提供产品图片，最后附上购买链接（以链接卡片的形式）。
+
+下面的代码演示了如何在这个场景中使用 JSON Mode 让模型按固定结构输出回复，并逐一解析各类消息内容：
+
+<Note>
+  本页示例默认使用最新模型 `kimi-k3`。K3 使用请求顶层 `reasoning_effort` 配置推理强度（支持 `"low"` / `"high"` / `"max"`，默认 `"max"`）。换用 `kimi-k2.6`、`kimi-k2.5` 等其他模型时，只需替换 `model` 字段，但各模型的参数配置存在差异，详见[模型参数参考](/docs/api/models-overview)。
+</Note>
+
+<Tabs>
+  <Tab title="python">
+    ```python theme={null}
+    import os
+    import json
+
+    from openai import OpenAI
+
+    client = OpenAI(
+        api_key=os.environ["MOONSHOT_API_KEY"], # 运行前请设置 MOONSHOT_API_KEY 环境变量
+        base_url="https://api.moonshot.cn/v1",
+    )
+
+    system_prompt = """
+    你是月之暗面（Kimi）的智能客服，你负责回答用户提出的各种问题。请参考文档内容回复用户的问题，你的回答可以是文字、图片、链接，在一次回复中可以同时包含文字、图片、链接。
+
+    请使用如下 JSON 格式输出你的回复：
+
+    {
+        "text": "文字信息",
+        "image": "图片地址",
+        "url": "链接地址"
+    }
+
+    注意，请将文字信息放置在 `text` 字段中，将图片以 `oss://` 开头的链接形式放在 `image` 字段中，将普通链接放置在 `url` 字段中。
+    """
+
+    completion = client.chat.completions.create(
+        model="kimi-k3",
+        messages=[
+            {"role": "system",
+             "content": "你是 Kimi，由 Moonshot AI 提供的人工智能助手，你更擅长中文和英文的对话。你会为用户提供安全，有帮助，准确的回答。同时，你会拒绝一切涉及恐怖主义，种族歧视，黄色暴力等问题的回答。Moonshot AI 为专有名词，不可翻译成其他语言。"},
+            {"role": "system", "content": system_prompt}, # <-- 将附带输出格式的 system prompt 提交给 Kimi
+            {"role": "user", "content": "你好，我叫李雷，1+1等于多少？"}
+        ],
+        response_format={"type": "json_object"}, # <-- 使用 response_format 参数指定输出格式为 json_object
+    )
+
+    # 由于我们设置了 JSON Mode，Kimi 大模型返回的 message.content 为序列化后的 JSON Object 字符串，
+    # 我们使用 json.loads 解析其内容，将其反序列化为 python 中的字典 dict。
+    content = json.loads(completion.choices[0].message.content)
+
+    # 解析文本内容
+    if "text" in content:
+    	# 为了演示，我们将内容打印出来；
+    	# 在真实的业务逻辑中，你可能需要调用发送文本消息的接口将生成的文本发送给用户。
+        print("text:", content["text"])
+
+    # 解析图片内容
+    if "image" in content:
+    	# 为了演示，我们将内容打印出来；
+    	# 在真实的业务逻辑中，你可能需要先解析图片地址，下载图片后，调用发送图片消息
+    	# 的接口将图片发送给用户。
+        print("image:", content["image"])
+
+    # 解析链接
+    if "url" in content:
+    	# 为了演示，我们将内容打印出来；
+    	# 在真实的业务逻辑中，你可能需要调用发送链接卡片的接口，将链接以卡片的形式发送给用户。
+        print("url:", content["url"])
+    ```
+  </Tab>
+
+  <Tab title="node.js">
+    ```js theme={null}
+    const OpenAI = require("openai")
+
+    const client = new OpenAI({
+        apiKey: process.env.MOONSHOT_API_KEY, // 运行前请设置 MOONSHOT_API_KEY 环境变量
+        baseURL: "https://api.moonshot.cn/v1",
+    })
+
+    system_prompt = `
+    你是月之暗面（Kimi）的智能客服，你负责回答用户提出的各种问题。请参考文档内容回复用户的问题，你的回答可以是文字、图片、链接，在一次回复中可以同时包含文字、图片、链接。
+    "
+    "
+    请使用如下 JSON 格式输出你的回复：
+
+    {
+        "text": "文字信息",
+        "image": "图片地址",
+        "url": "链接地址"
+    }
+    "
+    注意，请将文字信息放置在 'text' 字段中，将图片以 oss:// 开头的链接形式放在 'image' 字段中，将普通链接放置在 'url' 字段中。
+    `
+    async function main() {
+        const completion = await client.chat.completions.create({
+            model: "kimi-k3",
+            messages: [
+                {role: "system",
+                 content: "你是 Kimi，由 Moonshot AI 提供的人工智能助手，你更擅长中文和英文的对话。你会为用户提供安全，有帮助，准确的回答。同时，你会拒绝一切涉及恐怖主义，种族歧视，黄色暴力等问题的回答。Moonshot AI 为专有名词，不可翻译成其他语言。"},
+                {role: "system", content: system_prompt}, // <-- 将附带输出格式的 system prompt 提交给 Kimi
+                {role: "user", content: "你好，我叫李雷，1+1等于多少？"}
+            ],
+            response_format: {type: "json_object"}, // <-- 使用 response_format 参数指定输出格式为 json_object
+        })
+
+        // 由于我们设置了 JSON Mode，Kimi 大模型返回的 message.content 为序列化后的 JSON Object 字符串，
+        // 我们使用 JSON.parse 解析其内容，将其反序列化为 JavaScript 对象。
+        content = JSON.parse(completion.choices[0].message.content)
+
+        // 解析文本内容
+        if (content.text) {
+            console.log("text:", content.text)
+        }
+        // 解析图片内容
+        if (content.image) {
+            console.log("image:", content.image)
+        }
+        // 解析链接
+        if (content.url) {
+            console.log("url", content.url)
+        }
+    }
+
+    main()
+    ```
+  </Tab>
+</Tabs>
+
+## 排查被截断的 JSON 输出
+
+如果正确设置了 `response_format` 参数、也在提示词 prompt 中指定了 JSON 文档的格式，但获取的 JSON 文档不完整或被截断、导致无法正确解析，请检查返回值中的 `finish_reason` 字段是否为 `length`。
+
+较小的 `max_tokens` 值会导致模型输出内容被截断，使用 JSON Mode 时同样适用这个规则。建议在预估输出的 JSON 文档大小后，设置一个合理的 `max_tokens` 值，以便能正确解析 Kimi 大模型返回的 JSON 文档。
+
+关于 Kimi 大模型输出不完整或被截断问题的更详细说明，请参考[常见问题及解决方案](/docs/guide/troubleshooting)。
+
+## 注意事项
+
+* Kimi 大模型只会生成 JSON Object 类型的 JSON 文档，不要引导它生成 JSON Array 或其他类型的 JSON 文档；
+* 如果没有正确告知 Kimi 大模型需要输出的 JSON Object 的格式，它会生成不符合预期的结果。
+
+> ## Documentation Index
+> Fetch the complete documentation index at: https://platform.kimi.com/docs/llms.txt
+> Use this file to discover all available pages before exploring further.
+
+# 使用 Kimi API 的 Partial Mode
+
+Partial Mode 让 Kimi 大模型顺着给定的语句继续往下生成，而不是从头开始回复。当你需要固定回复的开头（例如客服场景中智能机器人每一句都以"尊敬的用户您好"开头）、补全被截断的长输出，或强化角色扮演的一致性时，可以使用 Partial Mode。
+
+<Note>
+  本页示例默认使用最新模型 `kimi-k3`。K3 使用请求顶层 `reasoning_effort` 配置推理强度（支持 `"low"` / `"high"` / `"max"`，默认 `"max"`）。换用 `kimi-k2.6`、`kimi-k2.5` 等其他模型时，只需替换 `model` 字段，但各模型的参数配置存在差异，详见[模型参数参考](/docs/api/models-overview)。
+</Note>
+
+## 让模型从指定开头继续生成
+
+Partial Mode 的用法是：在 `messages` 列表尾部追加一条 `role=assistant`、`partial=True` 的消息，把希望模型"接着说"的内容放在 `content` 字段中，模型就会强制以该内容开头生成回复。以下示例演示了如何让模型以固定话术开头：
+
+<Tabs>
+  <Tab title="python">
+    ```python theme={null}
+    import os
+
+    from openai import OpenAI
+
+    client = OpenAI(
+        api_key=os.environ["MOONSHOT_API_KEY"], # 运行前请设置 MOONSHOT_API_KEY 环境变量
+        base_url = "https://api.moonshot.cn/v1",
+    )
+
+    completion = client.chat.completions.create(
+        model = "kimi-k3",
+        messages = [
+            {"role": "system", "content": "你是 Kimi，由 Moonshot AI 提供的人工智能助手，你更擅长中文和英文的对话。你会为用户提供安全，有帮助，准确的回答。同时，你会拒绝一切涉及恐怖主义，种族歧视，黄色暴力等问题的回答。Moonshot AI 为专有名词，不可翻译成其他语言。"},
+            {"role": "user", "content": "你好？"},
+            {
+                "partial": True, # <-- 通过 partial 参数，开启 Partial Mode
+            	"role": "assistant", # <-- 我们在用户提问之后添加一条 role=assistant 的消息
+            	"content": "尊敬的用户您好，", # <-- 通过 content 把话"喂到 Kimi 大模型嘴里"，让 Kimi 大模型接着这句话继续往下说
+            },
+        ]
+    )
+
+    # Kimi 大模型会顺着"喂到嘴里的话"继续说下去，因此我们需要手动将喂给 Kimi 大模型的话拼接到最终生成的回复中
+    print("尊敬的用户您好，" + completion.choices[0].message.content)
+    ```
+  </Tab>
+
+  <Tab title="node.js">
+    ```js theme={null}
+    const OpenAI = require('openai')
+
+    const client = new OpenAI({
+        apiKey: process.env.MOONSHOT_API_KEY, // 运行前请设置 MOONSHOT_API_KEY 环境变量
+        baseURL: "https://api.moonshot.cn/v1",
+    })
+
+    async function main() {
+        let completion = await client.chat.completions.create({
+            model: "kimi-k3",
+            messages: [
+                {role: "system", content: "你是 Kimi，由 Moonshot AI 提供的人工智能助手，你更擅长中文和英文的对话。你会为用户提供安全，有帮助，准确的回答。同时，你会拒绝一切涉及恐怖主义，种族歧视，黄色暴力等问题的回答。Moonshot AI 为专有名词，不可翻译成其他语言。"},
+                {role: "user", content: "你好？"},
+                {
+                    partial: true, // <-- 通过 partial 参数，开启 Partial Mode
+                    role: "assistant", // <-- 我们在用户提问之后添加一条 role=assistant 的消息
+                    content: "尊敬的用户您好，", // <-- 通过 content 把话"喂到 Kimi 大模型嘴里"，让 Kimi 大模型接着这句话继续往下说
+                },
+            ]
+        })
+
+        // Kimi 大模型会顺着"喂到嘴里的话"继续说下去，因此我们需要手动将喂给 Kimi 大模型的话拼接到最终生成的回复中
+        console.log("尊敬的用户您好，" + completion.choices[0].message.content)
+    }
+
+    main()
+    ```
+  </Tab>
+</Tabs>
+
+使用 Partial Mode 的要点：
+
+1. 在 messages 列表尾部添加一条额外的 message，设置 `role=assistant`、`partial=True`；
+2. 将需要喂给 Kimi 大模型的内容放置在 `content` 字段中，Kimi 大模型会强制以 `content` 的内容开头开始生成回复；
+3. 将步骤 2 中的 `content` 拼接到 Kimi 大模型生成的内容之前，组成完整的回复。
+
+## 补全被截断的输出
+
+调用 Kimi API 时，可能由于对输入和输出 Tokens 数量的预估出现偏差，导致 `max_tokens` 字段的值被设置过低，Kimi 大模型不能完整地输出回复内容。这种情况下，`finish_reason` 的值为 `length`，即 Kimi 大模型生成的回复所占用的 Tokens 数量大于请求设置的 `max_tokens` 值。此时，如果你对已经输出的内容感到满意，想让 Kimi 大模型顺着已经输出的内容继续输出剩余内容，就可以用 Partial Mode 把已输出的内容作为前缀传回。以下示例演示了输出被截断后的续写流程：
+
+<Note>
+  注意 `max_tokens` 会优先被思考消耗：`kimi-k3` 默认开启思考，`max_tokens` 设置较小时，截断点可能落在思考阶段——此时 `content` 仍为空、`finish_reason` 已是 `length`，续写会因前缀为空而从头生成。使用本流程时，请把 `max_tokens` 设得足够大，确保截断发生在正文阶段。
+</Note>
+
+<Tabs>
+  <Tab title="python">
+    ```python theme={null}
+    import os
+    from openai import OpenAI
+
+    client = OpenAI(
+        api_key=os.environ["MOONSHOT_API_KEY"], # 运行前请设置 MOONSHOT_API_KEY 环境变量
+        base_url = "https://api.moonshot.cn/v1",
+    )
+
+    completion = client.chat.completions.create(
+        model="kimi-k3",
+        messages=[
+            {"role": "user", "content": "请背诵完整的出师表。"},
+        ],
+        max_tokens=1200,  # <-- 注意这里，我们设置一个较小的 max_tokens 的值，以观察 Kimi 大模型无法完整输出内容的情况
+    )
+
+    if completion.choices[0].finish_reason == "length":  # <-- 当内容被截断时，finish_reason 的值为 length
+        prefix = completion.choices[0].message.content
+        reasoning_content = completion.choices[0].message.reasoning_content
+        print(prefix, end="")  # <-- 在这里，你将看到被截断的部分输出内容
+        print("「继续输出--------->」")
+        completion = client.chat.completions.create(
+            model="kimi-k3",
+            messages=[
+                {"role": "user", "content": "请背诵完整的出师表。"},
+                {"role": "assistant", "content": prefix, "partial": True, "reasoning_content": reasoning_content} # 思考模式需要reasoning_content
+            ],
+            max_tokens=86400,  # <-- 注意这里，我们将 max_tokens 的值设置为一个较大的值，以确保 Kimi 大模型能完整输出内容
+        )
+        print(completion.choices[0].message.content)  # <-- 在这里，你将看到 Kimi 大模型顺着之前已经输出的内容，继续将输出内容补全完整
+    ```
+  </Tab>
+
+  <Tab title="node.js">
+    ```js theme={null}
+    const OpenAI = require('openai')
+
+    client = new OpenAI({
+        apiKey: process.env.MOONSHOT_API_KEY, // 运行前请设置 MOONSHOT_API_KEY 环境变量
+        baseURL: "https://api.moonshot.cn/v1",
+    })
+
+    async function main() {
+        let completion = await client.chat.completions.create({
+            model: "kimi-k3",
+            messages: [
+                {role: "user", content: "请背诵完整的出师表。"},
+            ],
+            max_tokens: 1200,  // <-- 注意这里，我们设置一个较小的 max_tokens 的值，以观察 Kimi 大模型无法完整输出内容的情况
+        })
+
+        if (completion.choices[0].finish_reason == "length") {  // <-- 当内容被截断时，finish_reason 的值为 length
+            prefix = completion.choices[0].message.content
+            reasoning_content = completion.choices[0].message.reasoning_content
+            console.log(prefix)
+            console.log("「继续输出--------->」")
+            let completion = await client.chat.completions.create({
+                model: "kimi-k3",
+                messages: [
+                    {"role": "user", "content": "请背诵完整的出师表。"},
+                    {"role": "assistant", "content": prefix, "partial": true, "reasoning_content": reasoning_content},
+                ],
+                max_tokens: 86400
+            })
+            console.log(completion.choices[0].message.content)  // <-- 在这里，你将看到 Kimi 大模型顺着之前已经输出的内容，继续将输出内容补全完整
+        }
+    }
+
+    main()
+    ```
+  </Tab>
+</Tabs>
+
+思考模式下续写时，需要把上一轮返回的 `reasoning_content` 一并传回（见示例中的注释）。
+
+## 用 `name` 字段固定角色身份
+
+`name` 是 Partial Mode 中的一个特殊字段，作用是强化模型对角色的认知，强制模型以 `name` 指定的角色的口吻输出内容。`name` 字段是输出内容前缀的一部分。以下示例使用 Kimi 大模型进行角色扮演，以《明日方舟》中的凯尔希医生为例：通过设置 `"name": "凯尔希"`，让 Kimi 大模型以凯尔希作为自己的角色进行输出，更好地保持角色的一致性：
+
+<Tabs>
+  <Tab title="python">
+    ```python theme={null}
+    from openai import OpenAI
+
+    client = OpenAI(
+        api_key=os.environ["MOONSHOT_API_KEY"],
+        base_url="https://api.moonshot.cn/v1",
+    )
+
+    completion = client.chat.completions.create(
+        model="kimi-k3",
+        messages=[
+            {
+                "role": "system",
+                "content": "下面你扮演凯尔希，请用凯尔希的语气和我对话。凯尔希是手机游戏《明日方舟》中的六星医疗职业医师分支干员。前卡兹戴尔勋爵，前巴别塔成员，罗德岛高层管理人员之一，罗德岛医疗项目领头人。在冶金工业、社会学、源石技艺、考古学、历史系谱学、经济学、植物学、地质学等领域皆拥有渊博学识。于罗德岛部分行动中作为医务人员提供医学理论协助与应急医疗器械，同时也作为罗德岛战略指挥系统的重要组成人员活跃在各项目中。",
+            },
+            {
+                "role": "user",
+                "content": "你怎么看待特蕾西娅和阿米娅？",
+            },
+            {
+                "partial": True,
+                "role": "assistant",
+                "name": "凯尔希",
+                "content": "",
+            },
+        ],
+        max_tokens=65536,
+    )
+
+    print(completion.choices[0].message.content)
+    ```
+  </Tab>
+
+  <Tab title="node.js">
+    ```js theme={null}
+    const OpenAI = require('openai')
+
+    client = new OpenAI({
+        apiKey: process.env.MOONSHOT_API_KEY,
+        baseURL: "https://api.moonshot.cn/v1",
+    })
+
+    async function main() {
+        let completion = await client.chat.completions.create({
+            model: "kimi-k3",
+            messages: [
+                {
+                    role: "system",
+                    content: "下面你扮演凯尔希，请用凯尔希的语气和我对话。凯尔希是手机游戏《明日方舟》中的六星医疗职业医师分支干员。前卡兹戴尔勋爵，前巴别塔成员，罗德岛高层管理人员之一，罗德岛医疗项目领头人。在冶金工业、社会学、源石技艺、考古学、历史系谱学、经济学、植物学、地质学等领域皆拥有渊博学识。于罗德岛部分行动中作为医务人员提供医学理论协助与应急医疗器械，同时也作为罗德岛战略指挥系统的重要组成人员活跃在各项目中。",
+                },
+                {
+                    role: "user",
+                    content: "你怎么看待特蕾西娅和阿米娅？",
+                },
+                {
+                    partial: true,
+                    role: "assistant",
+                    name: "凯尔希",
+                    content: "",
+                },
+            ],
+            max_tokens: 65536,
+        })
+
+        console.log(completion.choices[0].message.content)
+    }
+
+     main()
+    ```
+  </Tab>
+</Tabs>
+
+## 在长对话中保持角色一致
+
+以下通用方法可以帮助大模型在长时间对话中保持角色扮演的一致性：
+
+* 提供清晰的角色描述：在设置角色时，详细介绍他们的个性、背景以及可能具有的任何具体特征或怪癖，帮助 Kimi 大模型更好地理解和模仿角色；
+* 增加关于角色的细节：说话的语气、风格、个性，甚至背景故事和动机等，例如上面示例中提供了一些凯尔希的语录；
+* 指导角色在各种情况下如何行动：如果预计角色会遇到某些特定类型的用户输入，或者希望控制角色扮演互动中某些情况下的输出，应在系统提示词（system prompt）中提供明确的指令和指南，说明该角色在这些情况下应如何行动；
+* 定期强化角色设定：如果对话的轮次非常长，可以定期使用系统提示词（system prompt）强化角色的设定，特别是当模型开始产生一些偏离时。
+
+以下示例演示了在多轮对话之后重新插入系统提示词、强化角色设定的做法：
+
+<Tabs>
+  <Tab title="python">
+    ```python theme={null}
+     import os
+
+     from openai import OpenAI
+
+     client = OpenAI(
+         api_key=os.environ["MOONSHOT_API_KEY"],
+         base_url="https://api.moonshot.cn/v1",
+     )
+
+     completion = client.chat.completions.create(
+         model="kimi-k3",
+         messages=[
+             {
+                 "role": "system",
+                 "content": "下面你扮演凯尔希，请用凯尔希的语气和我对话。凯尔希是手机游戏《明日方舟》中的六星医疗职业医师分支干员。前卡兹戴尔勋爵，前巴别塔成员，罗德岛高层管理人员之一，罗德岛医疗项目领头人。在冶金工业、社会学、源石技艺、考古学、历史系谱学、经济学、植物学、地质学等领域皆拥有渊博学识。于罗德岛部分行动中作为医务人员提供医学理论协助与应急医疗器械，同时也作为罗德岛战略指挥系统的重要组成人员活跃在各项目中。",
+             },
+             {
+                 "role": "user",
+                 "content": "你怎么看待特蕾西娅和阿米娅？",
+             },
+
+             # 假设这中间产生了非常多轮的对话
+             # ...
+
+             {
+                 "role": "system",
+                 "content": "下面你扮演凯尔希，请用凯尔希的语气和我对话。凯尔希是手机游戏《明日方舟》中的六星医疗职业医师分支干员。前卡兹戴尔勋爵，前巴别塔成员，罗德岛高层管理人员之一，罗德岛医疗项目领头人。在冶金工业、社会学、源石技艺、考古学、历史系谱学、经济学、植物学、地质学等领域皆拥有渊博学识。于罗德岛部分行动中作为医务人员提供医学理论协助与应急医疗器械，同时也作为罗德岛战略指挥系统的重要组成人员活跃在各项目中。",
+             },
+             {
+                 "partial": True,
+                 "role": "assistant",
+                 "name": "凯尔希",
+                 "content": "",
+             },
+         ],
+         max_tokens=65536,
+     )
+
+     print(completion.choices[0].message.content)
+    ```
+  </Tab>
+
+  <Tab title="node.js">
+    ```js theme={null}
+    const OpenAI = require('openai')
+
+    client = new OpenAI({
+        apiKey: process.env.MOONSHOT_API_KEY,
+        baseURL: "https://api.moonshot.cn/v1",
+    })
+
+    async function main() {
+        let completion = await client.chat.completions.create({
+            model: "kimi-k3",
+            messages: [
+                {
+                    role: "system",
+                    content: "下面你扮演凯尔希，请用凯尔希的语气和我对话。凯尔希是手机游戏《明日方舟》中的六星医疗职业医师分支干员。前卡兹戴尔勋爵，前巴别塔成员，罗德岛高层管理人员之一，罗德岛医疗项目领头人。在冶金工业、社会学、源石技艺、考古学、历史系谱学、经济学、植物学、地质学等领域皆拥有渊博学识。于罗德岛部分行动中作为医务人员提供医学理论协助与应急医疗器械，同时也作为罗德岛战略指挥系统的重要组成人员活跃在各项目中。",
+                },
+                {
+                    role: "user",
+                    content: "你怎么看待特蕾西娅和阿米娅？",
+                },
+
+                // 假设这中间产生了非常多轮的对话
+                // ...
+
+                {
+                    role: "system",
+                    content: "下面你扮演凯尔希，请用凯尔希的语气和我对话。凯尔希是手机游戏《明日方舟》中的六星医疗职业医师分支干员。前卡兹戴尔勋爵，前巴别塔成员，罗德岛高层管理人员之一，罗德岛医疗项目领头人。在冶金工业、社会学、源石技艺、考古学、历史系谱学、经济学、植物学、地质学等领域皆拥有渊博学识。于罗德岛部分行动中作为医务人员提供医学理论协助与应急医疗器械，同时也作为罗德岛战略指挥系统的重要组成人员活跃在各项目中。",
+                },
+                {
+                    partial: true,
+                    role: "assistant",
+                    name: "凯尔希",
+                    content: "",
+                },
+            ],
+            max_tokens: 65536,
+        })
+
+        console.log(completion.choices[0].message.content)
+    }
+
+     main()
+    ```
+  </Tab>
+</Tabs>
+
+> ## Documentation Index
+> Fetch the complete documentation index at: https://platform.kimi.com/docs/llms.txt
+> Use this file to discover all available pages before exploring further.
+
+# 配置 Kimi 视觉模型
+
+Kimi 视觉模型（包括 `kimi-k3`/`moonshot-v1-8k-vision-preview`/`moonshot-v1-32k-vision-preview`/`moonshot-v1-128k-vision-preview`/`kimi-k2.5`/`kimi-k2.6`/`kimi-k2.7-code`/`kimi-k2.7-code-highspeed`）能够理解视觉内容，包括图片文字、图片颜色和物体形状等内容。`kimi-k3`、`kimi-k2.6`、`kimi-k2.7-code` 和 `kimi-k2.7-code-highspeed` 模型还能理解视频内容。需要让模型识别图片或视频时，按本页方式构造多模态请求。
+
+## 用 base64 直接上传图片
+
+以下示例把本地图片编码为 base64，通过 `image_url` 类型的消息部分传给 Kimi，并向它提问图片内容：
+
+```python theme={null}
+import os
+import base64
+
+from openai import OpenAI
+
+client = OpenAI(
+    api_key=os.environ.get("MOONSHOT_API_KEY"),
+    base_url="https://api.moonshot.cn/v1",
+)
+
+# 在这里，你需要将 kimi.png 文件替换为你想让 Kimi 识别的图片的地址
+image_path = "kimi.png"
+
+with open(image_path, "rb") as f:
+    image_data = f.read()
+
+# 我们使用标准库 base64.b64encode 函数将图片编码成 base64 格式的 image_url
+image_url = f"data:image/{os.path.splitext(image_path)[1].lstrip('.')};base64,{base64.b64encode(image_data).decode('utf-8')}"
+
+
+completion = client.chat.completions.create(
+    model="kimi-k3",
+    messages=[
+        {"role": "system", "content": "你是 Kimi。"},
+        {
+            "role": "user",
+            # 注意这里，content 由原来的 str 类型变更为一个 list，这个 list 中包含多个部分的内容，图片（image_url）是一个部分（part），
+            # 文字（text）是一个部分（part）
+            "content": [
+                {
+                    "type": "image_url", # <-- 使用 image_url 类型来上传图片，内容为使用 base64 编码过的图片内容
+                    "image_url": {
+                        "url": image_url,
+                    },
+                },
+                {
+                    "type": "text",
+                    "text": "请描述图片的内容。", # <-- 使用 text 类型来提供文字指令，例如"描述图片内容"
+                },
+            ],
+        },
+    ],
+)
+
+print(completion.choices[0].message.content)
+```
+
+使用 Vision 模型时，`message.content` 必须是 `array[object]`（即 JSON 数组）。**不要** 将 JSON 数组序列化后以 `string` 形式放入 `message.content`；这是非标准格式，不保证被当作视觉输入处理，不同模型或版本的行为可能不同。请始终使用下方的数组格式。
+
+正确的格式——`content` 是包含多个部分的 JSON 数组：
+
+```json theme={null}
+{
+    "model": "kimi-k3",
+    "messages":
+    [
+        {
+            "role": "system",
+            "content": "你是 Kimi，由 Moonshot AI 提供的人工智能助手，你更擅长中文和英文的对话。你会为用户提供安全，有帮助，准确的回答。同时，你会拒绝一切涉及恐怖主义，种族歧视，黄色暴力等问题的回答。Moonshot AI 为专有名词，不可翻译成其他语言。"
+        },
+        {
+            "role": "user",
+            "content":
+            [
+                {
+                    "type": "image_url",
+                    "image_url":
+                    {
+                        "url": "data:image/png;base64,..."
+                    }
+                },
+                {
+                    "type": "text",
+                    "text": "请描述这个图片"
+                }
+            ]
+        }
+    ]
+}
+```
+
+错误的格式——数组被序列化成了字符串：
+
+```json theme={null}
+{
+    "model": "kimi-k3",
+    "messages":
+    [
+        {
+            "role": "system",
+            "content": "你是 Kimi，由 Moonshot AI 提供的人工智能助手，你更擅长中文和英文的对话。你会为用户提供安全，有帮助，准确的回答。同时，你会拒绝一切涉及恐怖主义，种族歧视，黄色暴力等问题的回答。Moonshot AI 为专有名词，不可翻译成其他语言。"
+        },
+        {
+            "role": "user",
+            "content": "[{\"type\": \"image_url\", \"image_url\": {\"url\": \"data:image/png;base64,...\"}}, {\"type\": \"text\", \"text\": \"请描述这个图片\"}]"
+        }
+    ]
+}
+```
+
+## 用文件 ID 引用已上传的图片或视频
+
+视频文件往往更大，可以先把图片或视频上传到 Moonshot，再通过文件 ID 引用，上传方式请参阅 [图片理解上传](/docs/api/files-upload)。以下示例上传一个视频文件，并通过 `ms://` 协议的 `video_url` 请求模型描述视频内容：
+
+```python theme={null}
+import os
+from pathlib import Path
+
+from openai import OpenAI
+
+client = OpenAI(
+    api_key=os.environ.get("MOONSHOT_API_KEY"),
+    base_url="https://api.moonshot.cn/v1",
+)
+
+# 在这里，你需要将 video.mp4 文件替换为你想让 Kimi 识别的图片或视频的地址
+video_path = "video.mp4"
+
+file_object = client.files.create(file=Path(video_path), purpose="video")  # 上传视频到 Moonshot
+
+completion = client.chat.completions.create(
+    model="kimi-k3",
+    messages=[
+        {
+            "role": "system",
+            "content": "你是 Kimi，由 Moonshot AI 提供的人工智能助手，你更擅长中文和英文的对话。你会为用户提供安全，有帮助，准确的回答。同时，你会拒绝一切涉及恐怖主义，种族歧视，黄色暴力等问题的回答。Moonshot AI 为专有名词，不可翻译成其他语言。"
+        },
+        {
+            "role": "user",
+            "content":
+            [
+                {
+                    "type": "video_url",
+                    "video_url":
+                    {
+                        "url": f"ms://{file_object.id}"  # 注意这里为 ms:// 而不是 base64 编码后的图片
+                    }
+                },
+                {
+                    "type": "text",
+                    "text": "请描述这个视频"
+                }
+            ]
+        }
+    ]
+)
+
+print(completion.choices[0].message.content)
+```
+
+注意上面例子中 `video_url.url` 的格式为 `ms://<file-id>`，ms 为 moonshot storage 的缩写，这是 Moonshot 内部引用文件的协议。
+
+## 支持的图片与视频格式
+
+### 图片
+
+图片支持以下格式（MIME 类型）：
+
+* image/jpeg
+* image/png
+* image/gif
+* image/webp
+* image/bmp
+* image/heic
+* image/heif
+
+注意：GIF、WebP 动图同样通过 `image_url` 方式传入，但底层可能会按视频解码，token 消耗也按视频方式计算。
+
+### SVG
+
+SVG 不支持作为图片输入：通过 `purpose="image"` 上传 SVG，或在 `image_url` 中传入 SVG（包括 base64 形式），都会被拒绝。如需让模型理解 SVG 内容，可以将 SVG 源码（XML 文本）直接放入 `messages` 中作为文本输入。
+
+### 视频
+
+视频支持以下格式（MIME 类型）：
+
+* video/mp4
+* video/mpeg
+* video/mov
+* video/avi
+* video/x-flv
+* video/mpg
+* video/webm
+* video/wmv
+* video/3gpp
+
+## 估算 token 消耗与费用
+
+* 图片与视频按动态 token 计算：通过 [计算 token 接口](/docs/api/estimate)，可以在开始理解前获取包含图片或视频的请求的 token 消耗；
+* 图片分辨率越高，消耗的 token 越多；视频由若干张关键帧组成，关键帧的数量越多、分辨率越高，token 消耗越多；
+* Vision 模型在计费方式上与 `moonshot-v1` 系列模型保持一致，根据模型推理的总 Tokens 计费，token 价格详见 [模型推理价格说明](/docs/pricing/chat-k27-code)。
+
+## 控制图片与视频分辨率
+
+推荐图片分辨率不超过 4k（4096\*2160），视频分辨率不超过 1080p（1920\*1080）。再高的分辨率只会增加处理时间，也不会对模型理解的效果有提升。
+
+## 在 base64 与文件上传之间选择
+
+* 由于请求体的整体大小有限制，对于非常大的视频，必须使用上传文件的方式使用视觉理解功能；
+* 对于需要多次引用的图片或视频，推荐使用文件上传的方式使用视觉理解功能；
+* 关于上传文件的限制，请参阅 [文件上传](/docs/api/files-upload) 文档。
+
+## 功能支持与限制
+
+Vision 视觉模型支持的特性包括：
+
+* 多轮对话
+* 流式输出
+* 工具调用
+* JSON Mode
+* Partial Mode
+
+以下功能暂未支持或部分支持：
+
+* URL 格式的图片：不支持，目前仅支持使用 base64 编码的图片内容和通过文件 ID 上传的图片/视频
+
+其他限制：
+
+* 图片数量：Vision 模型没有图片数量限制，但请确保请求的 Body 大小不超过 100M
+
+不同模型对 `temperature`、`top_p`、`n` 等参数的取值约束不同，建议不要手动设置；各模型参数差异见 [模型参数配置差异](/docs/api/models-overview) 。
+
+> ## Documentation Index
+> Fetch the complete documentation index at: https://platform.kimi.com/docs/llms.txt
+> Use this file to discover all available pages before exploring further.
+
+# Kimi K3 API 工具调用最佳实践
+
+> 工具数量较多时，结合动态加载、tool_choice 与推理强度设计工具调用流程。
+
+当 Agent 可用的工具达到几十上百个时，不要把所有工具定义一次性放进请求——它们会占掉大量上下文，还会让模型更容易选错工具。本页介绍一套在 Kimi K3 上的工具编排方式：先用一个搜索工具检索候选工具，再按需把工具定义动态注入对话。
+
+## 先声明一个搜索工具，而不是全部工具
+
+会话开始时，在请求顶层 `tools` 中只声明一个由你后端实现的 `search_tools` 工具，以及少量每轮都可能用到的核心工具：
+
+```json theme={null}
+{
+  "tools": [
+    {
+      "type": "function",
+      "function": {
+        "name": "search_tools",
+        "description": "按关键词搜索可用工具，返回工具名称和简介",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "query": {
+              "type": "string",
+              "description": "搜索关键词，例如 github、database"
+            }
+          },
+          "required": ["query"]
+        }
+      }
+    }
+  ]
+}
+```
+
+在 system prompt 中告知模型可搜索的领域标签（例如工具目录、业务域），引导它在需要工具时先调用 `search_tools`。这样无论工具总量多大，每轮请求里的工具声明都只有少量几个。
+
+## 用 tool\_choice 强制首轮检索
+
+模型可以选择不调用任何工具、直接凭记忆作答。为了确保它先检索再回答，首轮请求设置 `tool_choice: "required"`：
+
+```json theme={null}
+{
+  "model": "kimi-k3",
+  "messages": [{"role": "user", "content": "帮我创建一个 GitHub PR"}],
+  "tools": ["..."],
+  "tool_choice": "required"
+}
+```
+
+检索完成后，后续请求把 `tool_choice` 恢复为 `"auto"`。修改 `tool_choice` 不会破坏前缀缓存，可以按请求粒度调整。各取值含义见[工具调用约束](/docs/guide/use-tool-choice)。
+
+## 按需注入工具定义
+
+`search_tools` 返回候选工具后，由你的应用把对应工具的完整声明，通过一条携带 `tools` 的 `system` 消息插入 `messages`。工具从该消息所在的位置开始对模型可见：
+
+```json theme={null}
+{
+  "role": "system",
+  "tools": [
+    {
+      "type": "function",
+      "function": {
+        "name": "create_github_pr",
+        "description": "在指定仓库创建 Pull Request",
+        "parameters": {
+          "type": "object",
+          "properties": {}
+        }
+      }
+    }
+  ]
+}
+```
+
+动态声明的格式与顶层 `tools` 完全一致，不需要维护两套 schema；注入的工具与顶层声明的全局工具并存。动态工具声明按请求生效，不会被服务端记住。下一轮可以继续携带原声明，让工具保持可用并复用前缀缓存；也可以移除该声明。如果工具未在其他位置声明，模型将无法调用这个工具，同时后续前缀可能无法命中缓存。完整用法见[动态加载工具](/docs/guide/use-dynamic-tool-loading)。
+
+<Note>
+  当前一个请求的 prompt tokens 大于 256 时，新的请求才能命中前缀缓存；当前一个请求的 prompt tokens 小于 256 时，请求不会被缓存而是被丢弃。详见[上下文缓存](/docs/guide/use-context-caching-feature-of-kimi-api)。
+</Note>
+
+## 按任务复杂度确定推理强度
+
+请求顶层 `reasoning_effort` 支持 `low` / `high` / `max` 三档，默认 `max`。
+
+建议在会话开始前确定该配置。在 `messages` 末尾追加动态工具声明，不会影响已有前缀的缓存；删除或修改之前的工具声明，可能影响变更位置之后的缓存命中。修改 `tool_choice` 不会破坏前缀缓存。配置说明见[推理强度](/docs/guide/use-reasoning-effort)。
+
+## 完整流程
+
+1. 会话开始：顶层 `tools` 只放 `search_tools` 和少量核心工具；
+2. 首轮检索：`tool_choice: "required"` 强制模型调用 `search_tools`；
+3. 按需注入：按检索结果用 `system` 消息动态插入工具定义；
+4. 直接调用：模型在后续生成中调用已加载的工具；
+5. 推理强度：会话开始前确定顶层 `reasoning_effort` 配置。
+
+## 相关阅读
+
+* [动态加载工具](/docs/guide/use-dynamic-tool-loading)
+* [工具调用约束](/docs/guide/use-tool-choice)
+* [推理强度](/docs/guide/use-reasoning-effort)
+* [使用 Kimi API 完成工具调用](/docs/guide/use-kimi-api-to-complete-tool-calls)
+* [模型参数参考](/docs/api/models-overview)
+
+> ## Documentation Index
+> Fetch the complete documentation index at: https://platform.kimi.com/docs/llms.txt
+> Use this file to discover all available pages before exploring further.
+
+# 动态加载工具
+
+当你的应用需要挂载大量工具时，如果把所有工具的声明一次性放进请求顶层的 `tools` 字段，会遇到 **工具定义膨胀（Tool Definition Bloat）** 问题：每个请求都要携带全部工具的描述和参数 schema，token 消耗高；候选工具越多，模型也越容易选错工具、构造出错误的调用参数。
+
+动态加载工具（Dynamically Loaded Tools）允许你在对话过程中 **按需注入工具**：先只挂载少量核心工具，当对话进展到需要某个工具时，再把它动态插入 `messages` 中，从而同时降低 token 消耗、提升工具选择的准确性。由于工具声明只会 **追加** 在 `messages` 尾部，已有对话前缀保持不变，这种注入方式不会破坏已建立的前缀缓存，可以与 [上下文缓存](/docs/guide/use-context-caching-feature-of-kimi-api) 叠加使用以进一步降低成本和延迟。关于这一设计背后的思路（Lazy-Load、工具目录）与组合实践，见 [Kimi K3 API 工具调用最佳实践](/docs/guide/kimi-k3-tool-calling-best-practice)。
+
+<img src="https://mintcdn.com/moonshotcn/yK6w_PTw9H6ntFDS/assets/pics/dynamically-loaded-tools.jpg?fit=max&auto=format&n=yK6w_PTw9H6ntFDS&q=85&s=27e41365a449fe8550c41199491a3b7a" alt="动态加载工具示意：从“带上整个工具箱”到“按需取用所需工具”" width="1254" height="1254" data-path="assets/pics/dynamically-loaded-tools.jpg" />
+
+## 在 messages 中注入工具声明
+
+在 `messages` 中插入一条 `role` 为 `system` 的消息，并通过该消息的 `tools` 字段声明要加载的工具。声明格式与请求顶层 `tools` 字段的格式完全一致，且需要提供工具的 **完整信息**（`name`、`description`、`parameters`）：
+
+```json theme={null}
+{
+  "messages": [
+    {
+      "role": "system",
+      "content": "You are Kimi, an AI assistant developed by Moonshot AI.\nYou are capable of a wide range of tasks, including:\n📝 Q&A & Explanation – Answer all kinds of questions, ranging from scientific knowledge to daily life matters\n✍️ Writing Assistance – Draft essays, emails and reports, or polish your written text\n💻 Coding Support – Write and debug code, and explain technical concepts\n🔍 Analysis & Summarization – Process lengthy documents, extract key points and analyze data\n🌍 Translation – Support mutual translation between multiple languages\n💡 Brainstorming – Help you expand ideas and generate creative inspirations\nYou also accept extremely long context inputs, making you ideal for users who need analysis or summaries of lengthy documents."
+    },
+    {
+      "role": "user",
+      "content": "Calculate fuel consumption."
+    },
+    {
+      "role": "system",
+      "tools": [
+        {
+          "type": "function",
+          "function": {
+            "name": "Calculator",
+            "description": "计算器，只支持单个算术表达式的求值",
+            "parameters": {
+              "type": "object",
+              "properties": {
+                "expr": {
+                  "type": "string",
+                  "description": "算术表达式，支持四则运算、指数运算、对数函数、三角函数，使用 javascript 语法"
+                }
+              },
+              "required": ["expr"]
+            }
+          }
+        }
+      ]
+    }
+  ]
+}
+```
+
+几点说明：
+
+* 携带 `tools` 的 `system` 消息与普通的 input messages **地位相同**：它出现在 `messages` 列表的哪个位置，工具就从哪个位置开始对模型可见；
+* 动态加载的工具与请求顶层 `tools` 字段声明的全局工具 **并存**，模型可以同时看到两类工具；
+* 动态注入的工具声明必须是 **完整** 的工具定义，不能只传工具名或引用全局已声明的工具。
+
+<Tabs>
+  <Tab title="curl">
+    ```bash theme={null}
+    $ curl https://api.moonshot.cn/v1/chat/completions \
+        -H "Content-Type: application/json" \
+        -H "Authorization: Bearer $MOONSHOT_API_KEY" \
+        -d '{
+            "model": "kimi-k3",
+            "messages": [
+                {
+                    "role": "system",
+                    "content": "You are Kimi, an AI assistant developed by Moonshot AI.\nYou are capable of a wide range of tasks, including:\n📝 Q&A & Explanation – Answer all kinds of questions, ranging from scientific knowledge to daily life matters\n✍️ Writing Assistance – Draft essays, emails and reports, or polish your written text\n💻 Coding Support – Write and debug code, and explain technical concepts\n🔍 Analysis & Summarization – Process lengthy documents, extract key points and analyze data\n🌍 Translation – Support mutual translation between multiple languages\n💡 Brainstorming – Help you expand ideas and generate creative inspirations\nYou also accept extremely long context inputs, making you ideal for users who need analysis or summaries of lengthy documents."
+                },
+                {
+                    "role": "user",
+                    "content": "帮我计算一下 23 * 47 的结果。"
+                },
+                {
+                    "role": "system",
+                    "tools": [
+                        {
+                            "type": "function",
+                            "function": {
+                                "name": "Calculator",
+                                "description": "计算器，只支持单个算术表达式的求值",
+                                "parameters": {
+                                    "type": "object",
+                                    "properties": {
+                                        "expr": {
+                                            "type": "string",
+                                            "description": "算术表达式，支持四则运算、指数运算、对数函数、三角函数，使用 javascript 语法"
+                                        }
+                                    },
+                                    "required": ["expr"]
+                                }
+                            }
+                        }
+                    ]
+                }
+            ]
+        }'
+    ```
+  </Tab>
+
+  <Tab title="python">
+    ```python theme={null}
+    import os
+    from openai import OpenAI
+
+    client = OpenAI(
+        api_key=os.environ["MOONSHOT_API_KEY"],
+        base_url="https://api.moonshot.cn/v1",
+    )
+
+    completion = client.chat.completions.create(
+        model="kimi-k3",
+        messages=[
+            {"role": "system", "content": "You are Kimi, an AI assistant developed by Moonshot AI.\nYou are capable of a wide range of tasks, including:\n📝 Q&A & Explanation – Answer all kinds of questions, ranging from scientific knowledge to daily life matters\n✍️ Writing Assistance – Draft essays, emails and reports, or polish your written text\n💻 Coding Support – Write and debug code, and explain technical concepts\n🔍 Analysis & Summarization – Process lengthy documents, extract key points and analyze data\n🌍 Translation – Support mutual translation between multiple languages\n💡 Brainstorming – Help you expand ideas and generate creative inspirations\nYou also accept extremely long context inputs, making you ideal for users who need analysis or summaries of lengthy documents."},
+            {"role": "user", "content": "帮我计算一下 23 * 47 的结果。"},
+            # 动态加载工具：在对话中插入一条携带 tools 的 system 消息
+            {
+                "role": "system",
+                "tools": [
+                    {
+                        "type": "function",
+                        "function": {
+                            "name": "Calculator",
+                            "description": "计算器，只支持单个算术表达式的求值",
+                            "parameters": {
+                                "type": "object",
+                                "properties": {
+                                    "expr": {
+                                        "type": "string",
+                                        "description": "算术表达式，支持四则运算、指数运算、对数函数、三角函数，使用 javascript 语法",
+                                    }
+                                },
+                                "required": ["expr"],
+                            },
+                        },
+                    }
+                ],
+            },
+        ],
+    )
+
+    print(completion.choices[0].message.tool_calls)
+    ```
+  </Tab>
+</Tabs>
+
+## 用动态加载实现 Tool Search
+
+API 层面没有专门的 tool search 接口。如果你的工具数量很多，可以组合「自定义 search 工具 + 动态加载工具」来自行实现 tool search：
+
+1. 在请求顶层 `tools` 中只声明一个 `search_tools` 工具，由你的后端实现，按关键词返回匹配的工具名称和简介；
+2. 在 system prompt 中声明可被搜索的关键词（例如工具目录、领域标签），引导模型在需要工具时先调用 `search_tools`；
+3. 根据 `search_tools` 返回的结果，由你的应用把对应工具的 **完整声明** 通过一条携带 `tools` 的 `system` 消息动态插入 `messages`；
+4. 模型即可在后续生成中直接调用这些新加载的工具。
+
+这样无论工具总量有多大，每一轮请求中实际存在的工具声明都只有少量几个，上下文窗口和模型的选择压力都可控。
+
+## 对上下文缓存的影响
+
+动态加载工具可以与 [上下文缓存](/docs/guide/use-context-caching-feature-of-kimi-api) 叠加使用。上下文缓存按前缀匹配：只有当前请求与之前请求完全一致的前缀部分才能命中缓存，前缀中任何位置发生变化，该位置之后的缓存都会失效。因此工具声明的注入方式直接决定缓存命中率，遵循以下原则可以在按需加载工具的同时保持较高的缓存命中率：
+
+* **追加，不要插入**：新的工具声明一律追加到 `messages` 末尾，已有前缀保持不变，不影响已建立的缓存；向对话中间插入或修改任何消息（包括已注入的工具声明），都会使变更位置之后的缓存无法命中；
+* **保留已注入的声明**：动态工具声明按请求生效，不会被服务端记住。建议在后续请求中原样保留已加载的工具声明，这样工具保持可用、前缀保持稳定，有利于持续命中缓存；你也可以根据业务需要自行决定是否继续携带。若不再携带，该工具声明即失效，如果工具未在其他位置声明，模型将无法调用它；同时由于 `messages` 发生变化，变更位置之后的前缀缓存也可能无法命中；
+* **核心工具固定在顶层声明，之后不再改动**：把每轮都要用的核心工具放在请求顶层 `tools` 字段做全局声明，声明之后保持内容不变。顶层全局工具声明不影响缓存命中，保持稳定即可让前缀缓存持续有效；只有按需使用的工具才做动态注入。
+
+| 操作                     | 对前缀缓存的影响         |
+| :--------------------- | :--------------- |
+| 在 `messages` 末尾追加工具声明  | 不影响已有前缀缓存        |
+| 后续请求原样保留已注入的工具声明       | 前缀保持稳定，有利于持续命中缓存 |
+| 删除、修改对话中间的消息，或在中间插入新声明 | 变更位置之后的缓存可能无法命中  |
+| 在顶层 `tools` 字段声明全局工具   | 不影响缓存命中          |
+
+注意缓存的生效门槛：当前一个请求的 prompt tokens 大于 256 时，新的请求才能命中前缀缓存；当前一个请求的 prompt tokens 小于 256 时，请求不会被缓存而是被丢弃。详见 [上下文缓存](/docs/guide/use-context-caching-feature-of-kimi-api)。
+
+## 注意事项
+
+* 动态工具声明与全局 `tools` 声明 **格式完全统一**，接入方无需维护两套 schema，迁移成本低；
+* 携带 `tools` 的 `system` 消息同样会占用上下文长度，请只对当前对话真正需要的工具做动态注入；
+* 动态加载工具目前仅 `kimi-k3` 支持，在其他模型（如 `kimi-k2.6`）上请求会返回 `tokenization failed` 错误；
+* 携带 `tools` 的 `system` 消息不能再携带 `content` 字段，否则请求会以 400 报错（`cannot be used with content`）；使用 OpenAI SDK 时可直接在 `messages` 中透传 `tools` 字段，无需 `extra_body`。
+
+## 相关阅读
+
+* [Kimi K3 API 工具调用最佳实践](/docs/guide/kimi-k3-tool-calling-best-practice)：动态加载、tool\_choice 与推理强度的组合实践
+* [工具调用约束](/docs/guide/use-tool-choice)：通过 `tool_choice` 约束模型的工具调用行为
+* [使用 Kimi API 完成工具调用](/docs/guide/use-kimi-api-to-complete-tool-calls)：工具调用的完整流程与示例
+* [模型参数参考](/docs/api/models-overview)：各模型对 `tool_choice` 等参数的支持差异
+
+> ## Documentation Index
+> Fetch the complete documentation index at: https://platform.kimi.com/docs/llms.txt
+> Use this file to discover all available pages before exploring further.
+
+# 工具调用约束
+
+声明工具（`tools`）后，模型默认自行判断本轮是否需要调用工具。`tool_choice` 参数让你显式控制这个行为：强制调用、完全禁止，或保持默认。
+
+## 强制模型调用工具：`"required"`
+
+当工作流必须走工具链路时使用——例如强制检索、强制查询数据库，不允许模型凭记忆直接作答：
+
+```json theme={null}
+{
+  "tool_choice": "required"
+}
+```
+
+模型在本轮必须至少调用一个工具。使用时请确保请求中声明了可调用的工具。一个典型用法是工具搜索模式：首轮用 `"required"` 强制模型调用 `search_tools`，检索完成后恢复 `"auto"`，详见 [Kimi K3 API 工具调用最佳实践](/docs/guide/kimi-k3-tool-calling-best-practice)。
+
+## 禁止工具调用：`"none"`
+
+当请求只需要纯文本回复、不希望模型误触发工具时使用：
+
+```json theme={null}
+{
+  "tool_choice": "none"
+}
+```
+
+模型会直接输出文本，不产生任何 `tool_calls`，同时降低延迟与 token 消耗。
+
+## 让模型自行决定：`"auto"`（默认）
+
+不传入 `tool_choice` 时即为 `"auto"`：模型根据上下文自行决定是否调用工具，适合常规对话。
+
+## 强制调用指定工具：传入函数对象
+
+除了三个枚举值，`tool_choice` 还可以传入一个函数对象，强制模型调用指定工具：
+
+```json theme={null}
+{
+  "tool_choice": {"type": "function", "function": {"name": "get_weather"}}
+}
+```
+
+<Note>
+  指定函数调用当前与思考开启不兼容：思考开启时传入会返回 400 错误（`tool_choice 'specified' is incompatible with thinking enabled`）。
+</Note>
+
+## 完整请求示例
+
+以下示例声明了一个天气查询工具，并用 `tool_choice: "required"` 强制模型调用它：
+
+<Tabs>
+  <Tab title="curl">
+    ```bash theme={null}
+    $ curl https://api.moonshot.cn/v1/chat/completions \
+        -H "Content-Type: application/json" \
+        -H "Authorization: Bearer $MOONSHOT_API_KEY" \
+        -d '{
+            "model": "kimi-k3",
+            "messages": [
+                {
+                    "role": "user",
+                    "content": "今天北京的天气怎么样？"
+                }
+            ],
+            "tools": [
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "get_weather",
+                        "description": "查询指定城市的实时天气",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {
+                                "city": {
+                                    "type": "string",
+                                    "description": "城市名称"
+                                }
+                            },
+                            "required": ["city"]
+                        }
+                    }
+                }
+            ],
+            "tool_choice": "required"
+        }'
+    ```
+  </Tab>
+
+  <Tab title="python">
+    ```python theme={null}
+    import os
+    from openai import OpenAI
+
+    client = OpenAI(
+        api_key=os.environ["MOONSHOT_API_KEY"],
+        base_url="https://api.moonshot.cn/v1",
+    )
+
+    completion = client.chat.completions.create(
+        model="kimi-k3",
+        messages=[
+            {"role": "user", "content": "今天北京的天气怎么样？"},
+        ],
+        tools=[
+            {
+                "type": "function",
+                "function": {
+                    "name": "get_weather",
+                    "description": "查询指定城市的实时天气",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "city": {"type": "string", "description": "城市名称"}
+                        },
+                        "required": ["city"],
+                    },
+                },
+            }
+        ],
+        # 强制模型至少调用一个工具；不传入时默认为 "auto"
+        tool_choice="required",
+    )
+
+    print(completion.choices[0].message.tool_calls)
+    ```
+  </Tab>
+</Tabs>
+
+## 注意事项
+
+* `tool_choice` 是请求级参数，每次请求独立生效，只对本次生成的工具选择行为产生约束；
+* 是否设置 `tool_choice` **不会破坏前缀缓存**，可以放心按请求粒度调整该参数。
+
+## 相关阅读
+
+* [Kimi K3 API 工具调用最佳实践](/docs/guide/kimi-k3-tool-calling-best-practice)：动态加载、tool\_choice 与推理强度的组合实践
+* [动态加载工具](/docs/guide/use-dynamic-tool-loading)：工具数量较多时按需注入工具定义，降低 token 消耗、提升选择准确率
+* [使用 Kimi API 完成工具调用](/docs/guide/use-kimi-api-to-complete-tool-calls)：工具调用的完整流程与示例
+* [模型参数参考](/docs/api/models-overview)：各模型对 `tool_choice` 参数的支持差异
+
+> ## Documentation Index
+> Fetch the complete documentation index at: https://platform.kimi.com/docs/llms.txt
+> Use this file to discover all available pages before exploring further.
+
+# 使用 Kimi API 完成工具调用（tool_calls）
+
+工具调用 `tool_calls` 让 Kimi 大模型从“说”进化到“做”：模型根据对话上下文决定是否调用工具、以 JSON 格式生成调用参数，由你的应用执行工具并回传结果，模型再基于结果生成最终回复。借助 `tool_calls`，Kimi 大模型能帮你搜索互联网内容、查询数据库，甚至操作智能家居。本页用一个联网搜索案例走通从定义、注册到执行的完整流程，并覆盖流式输出等场景的注意事项。
+
+## 一次工具调用的完整流程
+
+一次工具调用 `tool_calls` 包含以下步骤：
+
+1. 使用 JSON Schema 格式定义工具；
+2. 通过 `tools` 参数将定义好的工具提交给 Kimi 大模型，你可以一次性提交多个工具；
+3. Kimi 大模型会根据当前聊天的上下文，决定使用哪个或哪几个工具，Kimi 大模型也可以选择不使用工具；
+4. Kimi 大模型会将调用工具所需要的参数和信息通过 JSON 格式输出；
+5. 使用 Kimi 大模型输出的参数，执行对应的工具，并将工具执行结果提交给 Kimi 大模型；
+6. Kimi 大模型根据工具执行结果，给予用户回复；
+
+<Tip>
+  如果你的应用需要挂载大量工具（几十上百个），建议使用[动态加载工具](/docs/guide/use-dynamic-tool-loading)按需注入工具定义，而不是一次性全部提交——可以显著降低 token 消耗并提升工具选择的准确率。
+</Tip>
+
+## 用工具调用让模型学会联网搜索
+
+Kimi 大模型的知识来源于训练数据，无法回答时效性强的问题。下面用“搜索引擎”和“网页浏览器”两个工具，演示如何让模型自己搜索最新知识并据此作答。
+
+### 用 JSON Schema 定义工具
+
+人在网上查资料时，通常先打开搜索引擎（例如百度或必应）搜索内容、浏览搜索结果，再打开一个或多个结果网页获取需要的知识。把这两个动作抽象成工具，就是“搜索引擎”和“网页浏览器”——用 JSON Schema 描述后提交给 Kimi 大模型，它就能和人一样搜索并浏览网页。
+
+工具定义使用 JSON Schema 格式编写：
+
+> [JSON Schema](https://json-schema.org/) is a vocabulary that you can use to annotate and validate JSON documents.
+>
+> [JSON Schema](https://json-schema.org/) 是一种用于描述 JSON 数据格式的 JSON 文档。
+
+我们定义以下 JSON Schema：
+
+```json theme={null}
+{
+	"type": "object",
+	"properties": {
+		"name": {
+			"type": "string"
+		}
+	}
+}
+```
+
+这个 JSON Schema 定义了一个 JSON Object，这个 JSON Object 中包含了一个名为 `name` 的字段，并且该字段的类型为 `string`，例如：
+
+```json theme={null}
+{
+	"name": "Hei"
+}
+```
+
+通过 JSON Schema 来描述我们的工具定义，能让 Kimi 大模型更清晰和直观地知道我们的工具需要哪些参数，以及每个参数的类型和介绍。接下来让我们来定义前文提到的“搜索引擎”和“网页浏览器”这两个工具：
+
+<Tabs>
+  <Tab title="python">
+    ```python theme={null}
+    tools = [
+    	{
+    		"type": "function", # 约定的字段 type，目前支持 function 作为值
+    		"function": { # 当 type 为 function 时，使用 function 字段定义具体的函数内容
+    			"name": "search", # 函数的名称，请使用英文大小写字母、数据加上减号和下划线作为函数名称
+    			"description": """
+    				通过搜索引擎搜索互联网上的内容。
+
+    				当你的知识无法回答用户提出的问题，或用户请求你进行联网搜索时，调用此工具。请从与用户的对话中提取用户想要搜索的内容作为 query 参数的值。
+    				搜索结果包含网站的标题、网站的地址（URL）以及网站简介。
+    			""", # 函数的介绍，在这里写上函数的具体作用以及使用场景，以便 Kimi 大模型能正确地选择使用哪些函数
+    			"parameters": { # 使用 parameters 字段来定义函数接收的参数
+    				"type": "object", # 固定使用 type: object 来使 Kimi 大模型生成一个 JSON Object 参数
+    				"required": ["query"], # 使用 required 字段告诉 Kimi 大模型哪些参数是必填项
+    				"properties": { # properties 中是具体的参数定义，你可以定义多个参数
+    					"query": { # 在这里，key 是参数名称，value 是参数的具体定义
+    						"type": "string", # 使用 type 定义参数类型
+    						"description": """
+    							用户搜索的内容，请从用户的提问或聊天上下文中提取。
+    						""" # 使用 description 描述参数以便 Kimi 大模型更好地生成参数
+    					}
+    				}
+    			}
+    		}
+    	},
+    	{
+    		"type": "function", # 约定的字段 type，目前支持 function 作为值
+    		"function": { # 当 type 为 function 时，使用 function 字段定义具体的函数内容
+    			"name": "crawl", # 函数的名称，请使用英文大小写字母、数据加上减号和下划线作为函数名称
+    			"description": """
+    				根据网站地址（URL）获取网页内容。
+    			""", # 函数的介绍，在这里写上函数的具体作用以及使用场景，以便 Kimi 大模型能正确地选择使用哪些函数
+    			"parameters": { # 使用 parameters 字段来定义函数接收的参数
+    				"type": "object", # 固定使用 type: object 来使 Kimi 大模型生成一个 JSON Object 参数
+    				"required": ["url"], # 使用 required 字段告诉 Kimi 大模型哪些参数是必填项
+    				"properties": { # properties 中是具体的参数定义，你可以定义多个参数
+    					"url": { # 在这里，key 是参数名称，value 是参数的具体定义
+    						"type": "string", # 使用 type 定义参数类型
+    						"description": """
+    							需要获取内容的网站地址（URL），通常情况下从搜索结果中可以获取网站的地址。
+    						""" # 使用 description 描述参数以便 Kimi 大模型更好地生成参数
+    					}
+    				}
+    			}
+    		}
+    	}
+    ]
+    ```
+  </Tab>
+
+  <Tab title="node.js">
+    ```js theme={null}
+    const tools = [
+    	{
+    		"type": "function", // 约定的字段 type，目前支持 function 作为值
+    		"function": { // 当 type 为 function 时，使用 function 字段定义具体的函数内容
+    			"name": "search", // 函数的名称，请使用英文大小写字母、数据加上减号和下划线作为函数名称
+    			"description": ""/*
+    				通过搜索引擎搜索互联网上的内容。
+
+    				当你的知识无法回答用户提出的问题，或用户请求你进行联网搜索时，调用此工具。请从与用户的对话中提取用户想要搜索的内容作为 query 参数的值。
+    				搜索结果包含网站的标题、网站的地址（URL）以及网站简介。
+    			*/, // 函数的介绍，在这里写上函数的具体作用以及使用场景，以便 Kimi 大模型能正确地选择使用哪些函数
+    			"parameters": { // 使用 parameters 字段来定义函数接收的参数
+    				"type": "object", // 固定使用 type: object 来使 Kimi 大模型生成一个 JSON Object 参数
+    				"required": ["query"], // 使用 required 字段告诉 Kimi 大模型哪些参数是必填项
+    				"properties": { // properties 中是具体的参数定义，你可以定义多个参数
+    					"query": { // 在这里，key 是参数名称，value 是参数的具体定义
+    						"type": "string", // 使用 type 定义参数类型
+    						"description": ""/*
+    							用户搜索的内容，请从用户的提问或聊天上下文中提取。
+    						*/ // 使用 description 描述参数以便 Kimi 大模型更好地生成参数
+    					}
+    				}
+    			}
+    		}
+    	},
+    	{
+    		"type": "function", // 约定的字段 type，目前支持 function 作为值
+    		"function": { // 当 type 为 function 时，使用 function 字段定义具体的函数内容
+    			"name": "crawl", // 函数的名称，请使用英文大小写字母、数据加上减号和下划线作为函数名称
+    			"description": ""/*
+    				根据网站地址（URL）获取网页内容。
+    			*/, // 函数的介绍，在这里写上函数的具体作用以及使用场景，以便 Kimi 大模型能正确地选择使用哪些函数
+    			"parameters": { // 使用 parameters 字段来定义函数接收的参数
+    				"type": "object", // 固定使用 type: object 来使 Kimi 大模型生成一个 JSON Object 参数
+    				"required": ["url"], // 使用 required 字段告诉 Kimi 大模型哪些参数是必填项
+    				"properties": { // properties 中是具体的参数定义，你可以定义多个参数
+    					"url": { // 在这里，key 是参数名称，value 是参数的具体定义
+    						"type": "string", // 使用 type 定义参数类型
+    						"description": ""/*
+    							需要获取内容的网站地址（URL），通常情况下从搜索结果中可以获取网站的地址。
+    						*/ // 使用 description 描述参数以便 Kimi 大模型更好地生成参数
+    					}
+    				}
+    			}
+    		}
+    	}
+    ]
+    ```
+  </Tab>
+</Tabs>
+
+在使用 JSON Schema 定义工具时，我们使用以下固定的格式来定义一个工具：
+
+```json theme={null}
+{
+	"type": "function",
+	"function": {
+		"name": "NAME",
+		"description": "DESCRIPTION",
+		"parameters": {
+			"type": "object",
+			"properties": {
+
+			}
+		}
+	}
+}
+```
+
+其中，`name`、`description`、`parameters.properties` 由工具提供方定义，其中 `description` 描述了工具的具体作用、以及在什么场合需要使用工具，`parameters` 描述了成功调用工具所需要的具体参数，包括参数类型、参数介绍等；**最终，Kimi 大模型会根据 JSON Schema 的定义，生成一个满足定义要求的 JSON Object 作为工具调用的参数（arguments）。**
+
+### 把工具注册给模型
+
+把 `search` 工具提交给 Kimi 大模型，看看它能否正确调用工具：
+
+<Note>
+  本页示例默认使用最新模型 `kimi-k3`。K3 使用请求顶层 `reasoning_effort` 配置推理强度（支持 `"low"` / `"high"` / `"max"`，默认 `"max"`）。换用 `kimi-k2.6`、`kimi-k2.5` 等其他模型时，只需替换 `model` 字段，但各模型的参数配置存在差异，详见[模型参数参考](/docs/api/models-overview)。
+</Note>
+
+<Tabs>
+  <Tab title="python">
+    ```python theme={null}
+    import os
+
+    from openai import OpenAI
+
+
+    client = OpenAI(
+        api_key=os.environ["MOONSHOT_API_KEY"], # 运行前请设置 MOONSHOT_API_KEY 环境变量
+        base_url="https://api.moonshot.cn/v1",
+    )
+
+    tools = [
+    	{
+    		"type": "function", # 约定的字段 type，目前支持 function 作为值
+    		"function": { # 当 type 为 function 时，使用 function 字段定义具体的函数内容
+    			"name": "search", # 函数的名称，请使用英文大小写字母、数据加上减号和下划线作为函数名称
+    			"description": """
+    				通过搜索引擎搜索互联网上的内容。
+
+    				当你的知识无法回答用户提出的问题，或用户请求你进行联网搜索时，调用此工具。请从与用户的对话中提取用户想要搜索的内容作为 query 参数的值。
+    				搜索结果包含网站的标题、网站的地址（URL）以及网站简介。
+    			""", # 函数的介绍，在这里写上函数的具体作用以及使用场景，以便 Kimi 大模型能正确地选择使用哪些函数
+    			"parameters": { # 使用 parameters 字段来定义函数接收的参数
+    				"type": "object", # 固定使用 type: object 来使 Kimi 大模型生成一个 JSON Object 参数
+    				"required": ["query"], # 使用 required 字段告诉 Kimi 大模型哪些参数是必填项
+    				"properties": { # properties 中是具体的参数定义，你可以定义多个参数
+    					"query": { # 在这里，key 是参数名称，value 是参数的具体定义
+    						"type": "string", # 使用 type 定义参数类型
+    						"description": """
+    							用户搜索的内容，请从用户的提问或聊天上下文中提取。
+    						""" # 使用 description 描述参数以便 Kimi 大模型更好地生成参数
+    					}
+    				}
+    			}
+    		}
+    	},
+    	# {
+    	# 	"type": "function", # 约定的字段 type，目前支持 function 作为值
+    	# 	"function": { # 当 type 为 function 时，使用 function 字段定义具体的函数内容
+    	# 		"name": "crawl", # 函数的名称，请使用英文大小写字母、数据加上减号和下划线作为函数名称
+    	# 		"description": """
+    	# 			根据网站地址（URL）获取网页内容。
+    	# 		""", # 函数的介绍，在这里写上函数的具体作用以及使用场景，以便 Kimi 大模型能正确地选择使用哪些函数
+    	# 		"parameters": { # 使用 parameters 字段来定义函数接收的参数
+    	# 			"type": "object", # 固定使用 type: object 来使 Kimi 大模型生成一个 JSON Object 参数
+    	# 			"required": ["url"], # 使用 required 字段告诉 Kimi 大模型哪些参数是必填项
+    	# 			"properties": { # properties 中是具体的参数定义，你可以定义多个参数
+    	# 				"url": { # 在这里，key 是参数名称，value 是参数的具体定义
+    	# 					"type": "string", # 使用 type 定义参数类型
+    	# 					"description": """
+    	# 						需要获取内容的网站地址（URL），通常情况下从搜索结果中可以获取网站的地址。
+    	# 					""" # 使用 description 描述参数以便 Kimi 大模型更好地生成参数
+    	# 				}
+    	# 			}
+    	# 		}
+    	# 	}
+    	# }
+    ]
+
+    completion = client.chat.completions.create(
+        model="kimi-k3",
+        messages=[
+            {"role": "system", "content": "你是 Kimi，由 Moonshot AI 提供的人工智能助手，你更擅长中文和英文的对话。你会为用户提供安全，有帮助，准确的回答。同时，你会拒绝一切涉及恐怖主义，种族歧视，黄色暴力等问题的回答。Moonshot AI 为专有名词，不可翻译成其他语言。"},
+            {"role": "user", "content": "请联网搜索 Context Caching，并告诉我它是什么。"} # 在提问中要求 Kimi 大模型联网搜索
+        ],
+        tools=tools, # <-- 我们通过 tools 参数，将定义好的 tools 提交给 Kimi 大模型
+    )
+
+    print(completion.choices[0].model_dump_json(indent=4))
+    ```
+  </Tab>
+
+  <Tab title="node.js">
+    ```js theme={null}
+    const OpenAI = require("openai")
+
+
+    const client = new OpenAI({
+        apiKey: process.env.MOONSHOT_API_KEY, // 运行前请设置 MOONSHOT_API_KEY 环境变量
+        baseURL: "https://api.moonshot.cn/v1",
+    })
+
+    const tools = [
+    	{
+    		"type": "function", // 约定的字段 type，目前支持 function 作为值
+    		"function": { // 当 type 为 function 时，使用 function 字段定义具体的函数内容
+    			"name": "search", // 函数的名称，请使用英文大小写字母、数据加上减号和下划线作为函数名称
+    			"description": ""/*
+    				通过搜索引擎搜索互联网上的内容。
+
+    				当你的知识无法回答用户提出的问题，或用户请求你进行联网搜索时，调用此工具。请从与用户的对话中提取用户想要搜索的内容作为 query 参数的值。
+    				搜索结果包含网站的标题、网站的地址（URL）以及网站简介。
+    			*/, // 函数的介绍，在这里写上函数的具体作用以及使用场景，以便 Kimi 大模型能正确地选择使用哪些函数
+    			"parameters": { // 使用 parameters 字段来定义函数接收的参数
+    				"type": "object", // 固定使用 type: object 来使 Kimi 大模型生成一个 JSON Object 参数
+    				"required": ["query"], // 使用 required 字段告诉 Kimi 大模型哪些参数是必填项
+    				"properties": { // properties 中是具体的参数定义，你可以定义多个参数
+    					"query": { // 在这里，key 是参数名称，value 是参数的具体定义
+    						"type": "string", // 使用 type 定义参数类型
+    						"description": ""/*
+    							用户搜索的内容，请从用户的提问或聊天上下文中提取。
+    						*/ // 使用 description 描述参数以便 Kimi 大模型更好地生成参数
+    					}
+    				}
+    			}
+    		}
+    	},
+    	// {
+    	// 	"type": "function", // 约定的字段 type，目前支持 function 作为值
+    	// 	"function": { // 当 type 为 function 时，使用 function 字段定义具体的函数内容
+    	// 		"name": "crawl", // 函数的名称，请使用英文大小写字母、数据加上减号和下划线作为函数名称
+    	// 		"description": """
+    	// 			根据网站地址（URL）获取网页内容。
+    	// 		""", // 函数的介绍，在这里写上函数的具体作用以及使用场景，以便 Kimi 大模型能正确地选择使用哪些函数
+    	// 		"parameters": { // 使用 parameters 字段来定义函数接收的参数
+    	// 			"type": "object", // 固定使用 type: object 来使 Kimi 大模型生成一个 JSON Object 参数
+    	// 			"required": ["url"], // 使用 required 字段告诉 Kimi 大模型哪些参数是必填项
+    	// 			"properties": { // properties 中是具体的参数定义，你可以定义多个参数
+    	// 				"url": { // 在这里，key 是参数名称，value 是参数的具体定义
+    	// 					"type": "string", // 使用 type 定义参数类型
+    	// 					"description": """
+    	// 						需要获取内容的网站地址（URL），通常情况下从搜索结果中可以获取网站的地址。
+    	// 					""" // 使用 description 描述参数以便 Kimi 大模型更好地生成参数
+    	// 				}
+    	// 			}
+    	// 		}
+    	// 	}
+    	// }
+    ]
+
+    async function main() {
+        const completion = await client.chat.completions.create({
+            model: "kimi-k3",
+            messages: [
+                {role: "system", content: "你是 Kimi，由 Moonshot AI 提供的人工智能助手，你更擅长中文和英文的对话。你会为用户提供安全，有帮助，准确的回答。同时，你会拒绝一切涉及恐怖主义，种族歧视，黄色暴力等问题的回答。Moonshot AI 为专有名词，不可翻译成其他语言。"},
+                {role: "user", content: "请联网搜索 Context Caching，并告诉我它是什么。"} // 在提问中要求 Kimi 大模型联网搜索
+            ],
+            tools: tools, // <-- 我们通过 tools 参数，将定义好的 tools 提交给 Kimi 大模型
+        })
+
+        console.log(JSON.stringify(completion.choices[0], null, 4))
+    }
+
+    main()
+    ```
+  </Tab>
+</Tabs>
+
+代码运行成功后，模型返回如下内容：
+
+```json theme={null}
+{
+    "finish_reason": "tool_calls",
+    "message": {
+        "content": "",
+        "role": "assistant",
+        "tool_calls": [
+            {
+                "id": "search:0",
+                "function": {
+                    "arguments": "{\n    \"query\": \"Context Caching\"\n}",
+                    "name": "search"
+                },
+                "type": "function"
+            }
+        ]
+    }
+}
+```
+
+`finish_reason` 为 `tool_calls` 表示本次返回的不是模型回复，而是模型选择执行工具——可以通过 `finish_reason` 的值判断当前回复是否是一次工具调用。
+
+此时 `message` 中的 `content` 为空，因为模型还在执行 `tool_calls`，尚未生成面向用户的回复；新增的 `tool_calls` 字段是一个列表，包含本次需要调用的所有工具调用信息——这说明 **模型可以一次性选择多个工具进行调用，可以是多个不同的工具，也可以是相同工具使用不同参数进行调用** 。`tool_calls` 中每个元素都代表一次工具调用：模型为每次调用生成唯一的 `id`，用 `function.name` 表明工具函数名称，把执行参数放在 `function.arguments` 中（`arguments` 是合法的、被序列化的 JSON Object；`type` 目前是固定值 `function`）。
+
+接下来，用模型生成的工具调用参数去执行具体的工具。
+
+### 执行工具并回传结果
+
+Kimi 大模型不会替你执行工具——收到模型生成的参数后，需要由你的应用自行执行。为什么模型不自己执行工具？设想一个典型场景： **你向用户提供一个基于 Kimi 大模型的智能机器人，在这个场景有三个角色：用户、机器人、Kimi 大模型。用户向机器人提问，机器人调用 Kimi 大模型 API，并将 API 的结果返回给用户。当使用 `tool_calls` 时，用户向机器人提问，机器人带着 `tools` 调用 Kimi API，Kimi 大模型返回 `tool_calls` 参数，机器人执行完 `tool_calls`，将结果再次提交给 Kimi API，Kimi 大模型生成返回给用户的消息（`finish_reason=stop`），此时机器人才会把消息返回给用户。** 整个 `tool_calls` 过程对用户而言是透明、隐式的：用户并不直接“看到”工具调用，只看到机器人返回的最终回复。
+
+下面的完整示例以“机器人”的视角执行模型返回的 `tool_calls`，演示工具执行循环：
+
+<Tabs>
+  <Tab title="python">
+    ```python theme={null}
+    from typing import *
+
+    import json
+    import httpx
+    import os
+
+    from openai import OpenAI
+
+
+    client = OpenAI(
+        api_key=os.environ["MOONSHOT_API_KEY"], # 运行前请设置 MOONSHOT_API_KEY 环境变量
+        base_url="https://api.moonshot.cn/v1",
+    )
+
+    tools = [
+    	{
+    		"type": "function", # 约定的字段 type，目前支持 function 作为值
+    		"function": { # 当 type 为 function 时，使用 function 字段定义具体的函数内容
+    			"name": "search", # 函数的名称，请使用英文大小写字母、数据加上减号和下划线作为函数名称
+    			"description": """
+    				通过搜索引擎搜索互联网上的内容。
+
+    				当你的知识无法回答用户提出的问题，或用户请求你进行联网搜索时，调用此工具。请从与用户的对话中提取用户想要搜索的内容作为 query 参数的值。
+    				搜索结果包含网站的标题、网站的地址（URL）以及网站简介。
+    			""", # 函数的介绍，在这里写上函数的具体作用以及使用场景，以便 Kimi 大模型能正确地选择使用哪些函数
+    			"parameters": { # 使用 parameters 字段来定义函数接收的参数
+    				"type": "object", # 固定使用 type: object 来使 Kimi 大模型生成一个 JSON Object 参数
+    				"required": ["query"], # 使用 required 字段告诉 Kimi 大模型哪些参数是必填项
+    				"properties": { # properties 中是具体的参数定义，你可以定义多个参数
+    					"query": { # 在这里，key 是参数名称，value 是参数的具体定义
+    						"type": "string", # 使用 type 定义参数类型
+    						"description": """
+    							用户搜索的内容，请从用户的提问或聊天上下文中提取。
+    						""" # 使用 description 描述参数以便 Kimi 大模型更好地生成参数
+    					}
+    				}
+    			}
+    		}
+    	},
+    	{
+    		"type": "function", # 约定的字段 type，目前支持 function 作为值
+    		"function": { # 当 type 为 function 时，使用 function 字段定义具体的函数内容
+    			"name": "crawl", # 函数的名称，请使用英文大小写字母、数据加上减号和下划线作为函数名称
+    			"description": """
+    				根据网站地址（URL）获取网页内容。
+    			""", # 函数的介绍，在这里写上函数的具体作用以及使用场景，以便 Kimi 大模型能正确地选择使用哪些函数
+    			"parameters": { # 使用 parameters 字段来定义函数接收的参数
+    				"type": "object", # 固定使用 type: object 来使 Kimi 大模型生成一个 JSON Object 参数
+    				"required": ["url"], # 使用 required 字段告诉 Kimi 大模型哪些参数是必填项
+    				"properties": { # properties 中是具体的参数定义，你可以定义多个参数
+    					"url": { # 在这里，key 是参数名称，value 是参数的具体定义
+    						"type": "string", # 使用 type 定义参数类型
+    						"description": """
+    							需要获取内容的网站地址（URL），通常情况下从搜索结果中可以获取网站的地址。
+    						""" # 使用 description 描述参数以便 Kimi 大模型更好地生成参数
+    					}
+    				}
+    			}
+    		}
+    	}
+    ]
+
+
+    def search_impl(query: str) -> List[Dict[str, Any]]:
+        """
+        search_impl 使用搜索引擎对 query 进行搜索，目前主流的搜索引擎（例如 Bing）都提供了 API 调用方式，你可以自行选择
+        你喜欢的搜索引擎 API 进行调用，并将返回结果中的网站标题、网站链接、网站简介信息放置在一个 dict 中返回。
+
+        这里只是一个简单的示例，你可能需要编写一些鉴权、校验、解析的代码。
+        """
+        r = httpx.get("https://your.search.api", params={"query": query})
+        return r.json()
+
+
+    def search(arguments: Dict[str, Any]) -> Any:
+        query = arguments["query"]
+        result = search_impl(query)
+        return {"result": result}
+
+
+    def crawl_impl(url: str) -> str:
+        """
+        crawl_url 根据 url 获取网页上的内容。
+
+        这里只是一个简单的示例，在实际的网页抓取过程中，你可能需要编写更多的代码来适配复杂的情况，例如异步加载的数据等；同时，在获取
+        网页内容后，你可以根据自己的需要对网页内容进行清洗，只保留文本或移除不必要的内容（例如广告信息等）。
+        """
+        r = httpx.get(url)
+        return r.text
+
+
+    def crawl(arguments: dict) -> str:
+        url = arguments["url"]
+        content = crawl_impl(url)
+        return {"content": content}
+
+
+    # 通过 tool_map 将每个工具名称及其对应的函数进行映射，以便在 Kimi 大模型返回 tool_calls 时能快速找到应该执行的函数
+    tool_map = {
+        "search": search,
+        "crawl": crawl,
+    }
+
+    messages = [
+        {"role": "system",
+         "content": "你是 Kimi，由 Moonshot AI 提供的人工智能助手，你更擅长中文和英文的对话。你会为用户提供安全，有帮助，准确的回答。同时，你会拒绝一切涉及恐怖主义，种族歧视，黄色暴力等问题的回答。Moonshot AI 为专有名词，不可翻译成其他语言。"},
+        {"role": "user", "content": "请联网搜索 Context Caching，并告诉我它是什么。"}  # 在提问中要求 Kimi 大模型联网搜索
+    ]
+
+    finish_reason = None
+
+    # 我们的基本流程是，带着用户的问题和 tools 向 Kimi 大模型提问，如果 Kimi 大模型返回了 finish_reason: tool_calls，则我们执行对应的 tool_calls，
+    # 将执行结果以 role=tool 的 message 的形式重新提交给 Kimi 大模型，Kimi 大模型根据 tool_calls 结果进行下一步内容的生成：
+    #
+    #   1. 如果 Kimi 大模型认为当前的工具调用结果已经可以回答用户问题，则返回 finish_reason: stop，我们会跳出循环，打印出 message.content；
+    #   2. 如果 Kimi 大模型认为当前的工具调用结果无法回答用户问题，需要再次调用工具，我们会继续在循环中执行接下来的 tool_calls，直到 finish_reason 不再是 tool_calls；
+    #
+    # 在这个过程中，只有当 finish_reason 为 stop 时，我们才会将结果返回给用户。
+
+    while finish_reason is None or finish_reason == "tool_calls":
+        completion = client.chat.completions.create(
+            model="kimi-k3",
+            messages=messages,
+            tools=tools,  # <-- 我们通过 tools 参数，将定义好的 tools 提交给 Kimi 大模型
+        )
+        choice = completion.choices[0]
+        finish_reason = choice.finish_reason
+        if finish_reason == "tool_calls": # <-- 判断当前返回内容是否包含 tool_calls
+            messages.append(choice.message) # <-- 我们将 Kimi 大模型返回给我们的 assistant 消息也添加到上下文中，以便于下次请求时 Kimi 大模型能理解我们的诉求
+            for tool_call in choice.message.tool_calls: # <-- tool_calls 可能是多个，因此我们使用循环逐个执行
+                tool_call_name = tool_call.function.name
+                tool_call_arguments = json.loads(tool_call.function.arguments) # <-- arguments 是序列化后的 JSON Object，我们需要使用 json.loads 反序列化一下
+                tool_function = tool_map[tool_call_name] # <-- 通过 tool_map 快速找到需要执行哪个函数
+                tool_result = tool_function(tool_call_arguments)
+
+                # 使用函数执行结果构造一个 role=tool 的 message，以此来向模型展示工具调用的结果；
+                # 注意，我们需要在 message 中提供 tool_call_id 和 name 字段，以便 Kimi 大模型
+                # 能正确匹配到对应的 tool_call。
+                messages.append({
+                    "role": "tool",
+                    "tool_call_id": tool_call.id,
+                    "name": tool_call_name,
+                    "content": json.dumps(tool_result), # <-- 我们约定使用字符串格式向 Kimi 大模型提交工具调用结果，因此在这里使用 json.dumps 将执行结果序列化成字符串
+                })
+
+    print(choice.message.content) # <-- 在这里，我们才将模型生成的回复返回给用户
+    ```
+  </Tab>
+
+  <Tab title="node.js">
+    ```js theme={null}
+    const axios = require('axios');
+    const openai = require('openai'); // 需要安装 openai 库
+
+    const client = new openai.OpenAI({
+        apiKey: process.env.MOONSHOT_API_KEY, // 运行前请设置 MOONSHOT_API_KEY 环境变量
+        baseURL: "https://api.moonshot.cn/v1",
+    });
+
+    const tools = [
+        {
+            "type": "function",
+            "function": {
+                "name": "search",
+                "description": "通过搜索引擎搜索互联网上的内容。\n\n当你的知识无法回答用户提出的问题，或用户请求你进行联网搜索时，调用此工具。请从与用户的对话中提取用户想要搜索的内容作为 query 参数的值。\n搜索结果包含网站的标题、网站的地址（URL）以及网站简介。",
+                "parameters": {
+                    "type": "object",
+                    "required": ["query"],
+                    "properties": {
+                        "query": {
+                            "type": "string",
+                            "description": "用户搜索的内容，请从用户的提问或聊天上下文中提取。"
+                        }
+                    }
+                }
+            }
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "crawl",
+                "description": "根据网站地址（URL）获取网页内容。",
+                "parameters": {
+                    "type": "object",
+                    "required": ["url"],
+                    "properties": {
+                        "url": {
+                            "type": "string",
+                            "description": "需要获取内容的网站地址（URL），通常情况下从搜索结果中可以获取网站的地址。"
+                        }
+                    }
+                }
+            }
+        }
+    ];
+
+    async function searchImpl(query) {
+        const response = await axios.get("https://your.search.api", { params: { query } });
+        return response.data;
+    }
+
+    async function search(args) {
+        const query = args.query;
+        const result = await searchImpl(query);
+        return { "result": result };
+    }
+
+    async function crawlImpl(url) {
+        const response = await axios.get(url);
+        return response.data;
+    }
+
+    async function crawl(args) {
+        const url = args.url;
+        const content = await crawlImpl(url);
+        return { "content": content };
+    }
+
+    const toolMap = {
+        "search": search,
+        "crawl": crawl,
+    };
+
+    const messages = [
+        { "role": "system", "content": "你是 Kimi，由 Moonshot AI 提供的人工智能助手，你更擅长中文和英文的对话。你会为用户提供安全，有帮助，准确的回答。同时，你会拒绝一切涉及恐怖主义，种族歧视，黄色暴力等问题的回答。Moonshot AI 为专有名词，不可翻译成其他语言。" },
+        { "role": "user", "content": "请联网搜索 Context Caching，并告诉我它是什么。" }  // 在提问中要求 Kimi 大模型联网搜索
+    ];
+
+    let finishReason = null;
+    let choice;
+
+    async function main() {
+        while (finishReason === null || finishReason === "tool_calls") {
+            const completion = await client.chat.completions.create({
+                model: "kimi-k3",
+                messages: messages,
+                tools: tools,  // <-- 我们通过 tools 参数，将定义好的 tools 提交给 Kimi 大模型
+            });
+            choice = completion.choices[0];
+            finishReason = choice.finish_reason;
+            if (finishReason === "tool_calls") { // <-- 判断当前返回内容是否包含 tool_calls
+                messages.push(choice.message); // <-- 我们将 Kimi 大模型返回给我们的 assistant 消息也添加到上下文中，以便于下次请求时 Kimi 大模型能理解我们的诉求
+                for (const toolCall of choice.message.tool_calls) { // <-- tool_calls 可能是多个，因此我们使用循环逐个执行
+                    const toolCallName = toolCall.function.name;
+                    const toolCallArguments = JSON.parse(toolCall.function.arguments); // <-- arguments 是序列化后的 JSON Object，我们需要使用 JSON.parse 反序列化一下
+                    const toolFunction = toolMap[toolCallName]; // <-- 通过 tool_map 快速找到需要执行哪个函数
+                    const toolResult = await toolFunction(toolCallArguments);
+
+                    // 使用函数执行结果构造一个 role=tool 的 message，以此来向模型展示工具调用的结果；
+                    // 注意，我们需要在 message 中提供 tool_call_id 和 name 字段，以便 Kimi 大模型
+                    // 能正确匹配到对应的 tool_call。
+                    messages.push({
+                        "role": "tool",
+                        "tool_call_id": toolCall.id,
+                        "name": toolCallName,
+                        "content": JSON.stringify(toolResult), // <-- 我们约定使用字符串格式向 Kimi 大模型提交工具调用结果，因此在这里使用 JSON.stringify 将执行结果序列化成字符串
+                    });
+                }
+            }
+        }
+        console.log(choice.message.content); // <-- 在这里，我们才将模型生成的回复返回给用户
+    }
+
+    main();
+    ```
+  </Tab>
+</Tabs>
+
+我们使用 while 循环来执行包含工具调用在内的代码逻辑，这是因为 Kimi 大模型通常不会只执行一次工具调用，尤其是在联网搜索这个场景，通常，Kimi 大模型会先选择调用 `search` 工具，通过 `search` 工具获取搜索结果后，再调用 `crawl` 工具将搜索结果中的 `url` 转换为具体的网页内容，整体的 messages 结构如下所示：
+
+```
+system: prompt                                                                                               # 系统提示词
+user: prompt                                                                                                 # 用户提问
+assistant: tool_call(name=search, arguments={query: query})                                                  # Kimi 大模型返回 tool_call 调用（单个）
+tool: search_result(tool_call_id=tool_call.id, name=search)                                                  # 提交 tool_call 执行结果
+assistant: tool_call_1(name=crawl, arguments={url: url_1}), tool_call_2(name=crawl, arguments={url: url_2})  # Kimi 大模型继续返回 tool_calls 调用（多个）
+tool: crawl_content(tool_call_id=tool_call_1.id, name=crawl)                                                 # 提交 tool_call_1 执行结果
+tool: crawl_content(tool_call_id=tool_call_2.id, name=crawl)                                                 # 提交 tool_call_2 执行结果
+assistant: message_content(finish_reason=stop)                                                               # Kimi 大模型生成面向用户的回复消息，本轮对话结束
+```
+
+至此，我们完成了“联网查询”工具调用的全过程，如果你实现了自己的 `search` 和 `crawl` 方法，那么当你向 Kimi 大模型要求联网查询时，它会调用 `search` 和 `crawl` 两个工具，并根据工具调用结果给予你正确的回复。
+
+## 处理流式输出中的 tool\_calls
+
+流式输出模式（`stream`）下，`tool_calls` 同样适用，但有几点需要额外注意：
+
+* 在流式输出的过程中，由于 `finish_reason` 将会在最后的数据块中出现，因此建议使用 `delta.tool_calls` 字段是否存在来判断当前回复是否包含工具调用；
+* 在流式输出的过程中，会先输出 `delta.content`，再输出 `delta.tool_calls`，因此你必须等待 `delta.content` 输出完成后，才能判断和识别 `tool_calls`；
+* 在流式输出的过程中，我们会在最初的数据块中，指明当前调用 `tool_calls` 的 `tool_call.id` 和 `tool_call.function.name`，在后续的数据块中将只输出 `tool_call.function.arguments`；
+* 在流式输出的过程中，如果 Kimi 大模型一次性返回多个 `tool_calls`，那么我们会额外使用一个名为 `index` 的字段来标识当前 `tool_call` 的索引，以便于你能正确拼接 `tool_call.function.arguments` 参数，我们使用流式输出章节中的代码例子（不使用 SDK 的场合）来说明如何操作：
+
+<Tabs>
+  <Tab title="python">
+    ```python theme={null}
+    import os
+    import json
+    import httpx
+
+    tools = [
+        {
+            "type": "function",  # 约定的字段 type，目前支持 function 作为值
+            "function": {  # 当 type 为 function 时，使用 function 字段定义具体的函数内容
+                "name": "search",  # 函数的名称，请使用英文大小写字母、数据加上减号和下划线作为函数名称
+                "description": """
+    				通过搜索引擎搜索互联网上的内容。
+
+    				当你的知识无法回答用户提出的问题，或用户请求你进行联网搜索时，调用此工具。请从与用户的对话中提取用户想要搜索的内容作为 query 参数的值。
+    				搜索结果包含网站的标题、网站的地址（URL）以及网站简介。
+    			""",  # 函数的介绍，在这里写上函数的具体作用以及使用场景，以便 Kimi 大模型能正确地选择使用哪些函数
+                "parameters": {  # 使用 parameters 字段来定义函数接收的参数
+                    "type": "object",  # 固定使用 type: object 来使 Kimi 大模型生成一个 JSON Object 参数
+                    "required": ["query"],  # 使用 required 字段告诉 Kimi 大模型哪些参数是必填项
+                    "properties": {  # properties 中是具体的参数定义，你可以定义多个参数
+                        "query": {  # 在这里，key 是参数名称，value 是参数的具体定义
+                            "type": "string",  # 使用 type 定义参数类型
+                            "description": """
+    							用户搜索的内容，请从用户的提问或聊天上下文中提取。
+    						"""  # 使用 description 描述参数以便 Kimi 大模型更好地生成参数
+                        }
+                    }
+                }
+            }
+        },
+    ]
+
+    header = {
+        "Content-Type": "application/json",
+        "Authorization": f"Bearer {os.environ.get('MOONSHOT_API_KEY')}",
+    }
+
+    data = {
+        "model": "kimi-k3",
+        "messages": [
+            {"role": "user", "content": "请联网搜索 Context Caching 技术。"}
+        ],
+        "stream": True,
+        "tools": tools,  # <-- 添加工具调用
+    }
+
+    # 使用 httpx 向 Kimi 大模型发出 chat 请求，并获得响应 r
+    r = httpx.post("https://api.moonshot.cn/v1/chat/completions",
+                   headers=header,
+                   json=data)
+    if r.status_code != 200:
+        raise Exception(r.text)
+
+    data: str
+
+    # 在这里，我们预先构建一个 List，用于存放不同的回复消息，由于我们设置了 n=2，因此我们将 List 初始化为 2 个元素
+    messages = [{}, {}]
+
+    # 在这里，我们使用了 iter_lines 方法来逐行读取响应体
+    for line in r.iter_lines():
+        # 去除每一行收尾的空格，以便更好地处理数据块
+        line = line.strip()
+
+        # 接下来我们要处理三种不同的情况：
+        #   1. 如果当前行是空行，则表明前一个数据块已接收完毕（即前文提到的，通过两个换行符结束数据块传输），我们可以对该数据块进行反序列化，并打印出对应的 content 内容；
+        #   2. 如果当前行为非空行，且以 data: 开头，则表明这是一个数据块传输的开始，我们去除 data: 前缀后，首先判断是否是结束符 [DONE]，如果不是，将数据内容保存到 data 变量；
+        #   3. 如果当前行为非空行，但不以 data: 开头，则表明当前行仍然归属上一个正在传输的数据块，我们将当前行的内容追加到 data 变量尾部；
+
+        if len(line) == 0:
+            chunk = json.loads(data)
+
+            # 通过循环获取每个数据块中所有的 choice，并获取 index 对应的 message 对象
+            for choice in chunk["choices"]:
+                index = choice["index"]
+                message = messages[index]
+                usage = choice.get("usage")
+                if usage:
+                    message["usage"] = usage
+                delta = choice["delta"]
+                role = delta.get("role")
+                if role:
+                    message["role"] = role
+                content = delta.get("content")
+                if content:
+                    if "content" not in message:
+                        message["content"] = content
+                    else:
+                        message["content"] = message["content"] + content
+
+                # 从这里，我们开始处理 tool_calls
+                tool_calls = delta.get("tool_calls")  # <-- 先判断数据块中是否包含 tool_calls
+                if tool_calls:
+                    if "tool_calls" not in message:
+                        message["tool_calls"] = []  # <-- 如果包含 tool_calls，我们初始化一个列表来保存这些 tool_calls，注意此时的列表中没有任何元素，长度为 0
+                    for tool_call in tool_calls:
+                        tool_call_index = tool_call["index"]  # <-- 获取当前 tool_call 的 index 索引
+                        if len(message["tool_calls"]) < (
+                                tool_call_index + 1):  # <-- 根据 index 索引扩充 tool_calls 列表，以便于我们能通过下标访问到对应的 tool_call
+                            message["tool_calls"].extend([{}] * (tool_call_index + 1 - len(message["tool_calls"])))
+                        tool_call_object = message["tool_calls"][tool_call_index]  # <-- 根据下标访问对应的 tool_call
+                        tool_call_object["index"] = tool_call_index
+
+                        # 下面的步骤，是根据数据块中的信息填充每个 tool_call 的 id、type、function 字段
+                        # 在 function 字段中，又包括 name 和 arguments 字段，arguments 字段会由每个数据块
+                        # 依次补充，如同 delta.content 字段一般。
+
+                        tool_call_id = tool_call.get("id")
+                        if tool_call_id:
+                            tool_call_object["id"] = tool_call_id
+                        tool_call_type = tool_call.get("type")
+                        if tool_call_type:
+                            tool_call_object["type"] = tool_call_type
+                        tool_call_function = tool_call.get("function")
+                        if tool_call_function:
+                            if "function" not in tool_call_object:
+                                tool_call_object["function"] = {}
+                            tool_call_function_name = tool_call_function.get("name")
+                            if tool_call_function_name:
+                                tool_call_object["function"]["name"] = tool_call_function_name
+                            tool_call_function_arguments = tool_call_function.get("arguments")
+                            if tool_call_function_arguments:
+                                if "arguments" not in tool_call_object["function"]:
+                                    tool_call_object["function"]["arguments"] = tool_call_function_arguments
+                                else:
+                                    tool_call_object["function"]["arguments"] = tool_call_object["function"][
+                                                                                "arguments"] + tool_call_function_arguments  # <-- 依次补充 function.arguments 字段的值
+                        message["tool_calls"][tool_call_index] = tool_call_object
+
+                data = ""  # 重置 data
+        elif line.startswith("data: "):
+            data = line[len("data: "):]
+
+            # 当数据块内容为 [DONE] 时，则表明所有数据块已发送完毕，可断开网络连接
+            if data == "[DONE]":
+                break
+        else:
+            data = data + "\n" + line  # 我们仍然在追加内容时，为其添加一个换行符，因为这可能是该数据块有意将数据分行展示
+
+    # 在组装完所有 messages 后，我们分别打印其内容
+    for index, message in enumerate(messages):
+        print("index:", index)
+        print("message:", json.dumps(message, ensure_ascii=False))
+        print("")
+    ```
+  </Tab>
+
+  <Tab title="node.js">
+    ```js theme={null}
+    const os = require('os');
+    const axios = require('axios');// 使用 axios 库来执行 HTTP 请求
+
+    const tools = [
+        {
+            "type": "function",
+            "function": {
+                "name": "search",
+                "description": "通过搜索引擎搜索互联网上的内容。\n\n当你的知识无法回答用户提出的问题，或用户请求你进行联网搜索时，调用此工具。请从与用户的对话中提取用户想要搜索的内容作为 query 参数的值。\n搜索结果包含网站的标题、网站的地址（URL）以及网站简介。",
+                "parameters": {
+                    "type": "object",
+                    "required": ["query"],
+                    "properties": {
+                        "query": {
+                            "type": "string",
+                            "description": "用户搜索的内容，请从用户的提问或聊天上下文中提取。"
+                        }
+                    }
+                }
+            }
+        },
+    ];
+
+    const header = {
+        "Content-Type": "application/json",
+        "Authorization": `Bearer ${process.env.MOONSHOT_API_KEY}`
+    };
+
+    const data = {
+        "model": "kimi-k3",
+        "messages": [
+            {"role": "user", "content": "请联网搜索 Context Caching 技术。"}
+        ],
+        "stream": true,
+        "tools": tools,
+        "tool_choice": "auto"
+    };
+
+    axios.post("https://api.moonshot.cn/v1/chat/completions",
+        data,{
+        headers: header,
+        responseType: 'stream'
+    }).then(response => {
+        if (response.status !== 200) {
+            throw new Error(response.text);
+        }
+
+        let data = "";
+        let messages = [{}, {}];
+
+        response.data.on('data', chunk => {
+            let line = chunk.toString().trim();
+
+            if (line === "") {
+                let chunk = JSON.parse(data);
+
+                for (let choice of chunk.choices) {
+                    let index = choice.index;
+                    let message = messages[index];
+                    let usage = choice.usage;
+                    if (usage) message.usage = usage;
+                    let delta = choice.delta;
+                    let role = delta.role;
+                    if (role) message.role = role;
+                    let content = delta.content;
+                    if (content) message.content = (message.content || "") + content;
+
+                    let tool_calls = delta.tool_calls;
+                    if (tool_calls) {
+                        if (!message.tool_calls) message.tool_calls = [];
+                        for (let tool_call of tool_calls) {
+                            let tool_call_index = tool_call.index;
+                            while (message.tool_calls.length < tool_call_index + 1) {
+                                message.tool_calls.push({});
+                            }
+                            let tool_call_object = message.tool_calls[tool_call_index];
+                            tool_call_object.index = tool_call_index;
+
+                            let tool_call_id = tool_call.id;
+                            if (tool_call_id) tool_call_object.id = tool_call_id;
+                            let tool_call_type = tool_call.type;
+                            if (tool_call_type) tool_call_object.type = tool_call_type;
+                            let tool_call_function = tool_call.function;
+                            if (tool_call_function) {
+                                if (!tool_call_object.function) tool_call_object.function = {};
+                                let tool_call_function_name = tool_call_function.name;
+                                if (tool_call_function_name) tool_call_object.function.name = tool_call_function_name;
+                                let tool_call_function_arguments = tool_call_function.arguments;
+                                if (tool_call_function_arguments) {
+                                    if (!tool_call_object.function.arguments) {
+                                        tool_call_object.function.arguments = tool_call_function_arguments;
+                                    } else {
+                                        tool_call_object.function.arguments = tool_call_object.function.arguments + tool_call_function_arguments;
+                                    }
+                                }
+                            }
+                            message.tool_calls[tool_call_index] = tool_call_object;
+                        }
+                    }
+                }
+                data = ""; // 重置 data
+            } else if (line.startsWith("data: ")) {
+                data = line.substring(6);
+            } else {
+                data = data + "\n" + line;
+            }
+        });
+
+        response.data.on('end', () => {
+            for (let index = 0; index < messages.length; index++) {
+                console.log("index:", index);
+                console.log("message:", JSON.stringify(messages[index], null, 4));
+                console.log("");
+            }
+        });
+    }).catch(error => {
+        console.error("请求失败:", error);
+    });
+    ```
+  </Tab>
+</Tabs>
+
+以下是使用 openai SDK 处理流式输出中的 `tool_calls` 的代码示例：
+
+<Tabs>
+  <Tab title="python">
+    ```python theme={null}
+    import os
+    import json
+
+    from openai import OpenAI
+
+    client = OpenAI(
+        api_key=os.environ.get("MOONSHOT_API_KEY"),
+        base_url="https://api.moonshot.cn/v1",
+    )
+
+    tools = [
+        {
+            "type": "function",  # 约定的字段 type，目前支持 function 作为值
+            "function": {  # 当 type 为 function 时，使用 function 字段定义具体的函数内容
+                "name": "search",  # 函数的名称，请使用英文大小写字母、数据加上减号和下划线作为函数名称
+                "description": """
+    				通过搜索引擎搜索互联网上的内容。
+
+    				当你的知识无法回答用户提出的问题，或用户请求你进行联网搜索时，调用此工具。请从与用户的对话中提取用户想要搜索的内容作为 query 参数的值。
+    				搜索结果包含网站的标题、网站的地址（URL）以及网站简介。
+    			""",  # 函数的介绍，在这里写上函数的具体作用以及使用场景，以便 Kimi 大模型能正确地选择使用哪些函数
+                "parameters": {  # 使用 parameters 字段来定义函数接收的参数
+                    "type": "object",  # 固定使用 type: object 来使 Kimi 大模型生成一个 JSON Object 参数
+                    "required": ["query"],  # 使用 required 字段告诉 Kimi 大模型哪些参数是必填项
+                    "properties": {  # properties 中是具体的参数定义，你可以定义多个参数
+                        "query": {  # 在这里，key 是参数名称，value 是参数的具体定义
+                            "type": "string",  # 使用 type 定义参数类型
+                            "description": """
+    							用户搜索的内容，请从用户的提问或聊天上下文中提取。
+    						"""  # 使用 description 描述参数以便 Kimi 大模型更好地生成参数
+                        }
+                    }
+                }
+            }
+        },
+    ]
+
+    completion = client.chat.completions.create(
+        model="kimi-k3",
+        messages=[
+            {"role": "user", "content": "请联网搜索 Context Caching 技术。"}
+        ],
+        stream=True,
+        tools=tools,  # <-- 添加工具调用
+    )
+
+    # 在这里，我们预先构建一个 List，用于存放不同的回复消息，由于我们设置了 n=2，因此我们将 List 初始化为 2 个元素
+    messages = [{}, {}]
+
+    for chunk in completion:
+        # 通过循环获取每个数据块中所有的 choice，并获取 index 对应的 message 对象
+        for choice in chunk.choices:
+            index = choice.index
+            message = messages[index]
+            delta = choice.delta
+            role = delta.role
+            if role:
+                message["role"] = role
+            content = delta.content
+            if content:
+                if "content" not in message:
+                    message["content"] = content
+                else:
+                    message["content"] = message["content"] + content
+
+            # 从这里，我们开始处理 tool_calls
+            tool_calls = delta.tool_calls  # <-- 先判断数据块中是否包含 tool_calls
+            if tool_calls:
+                if "tool_calls" not in message:
+                    message["tool_calls"] = []  # <-- 如果包含 tool_calls，我们初始化一个列表来保存这些 tool_calls，注意此时的列表中没有任何元素，长度为 0
+                for tool_call in tool_calls:
+                    tool_call_index = tool_call.index  # <-- 获取当前 tool_call 的 index 索引
+                    if len(message["tool_calls"]) < (
+                            tool_call_index + 1):  # <-- 根据 index 索引扩充 tool_calls 列表，以便于我们能通过下标访问到对应的 tool_call
+                        message["tool_calls"].extend([{}] * (tool_call_index + 1 - len(message["tool_calls"])))
+                    tool_call_object = message["tool_calls"][tool_call_index]  # <-- 根据下标访问对应的 tool_call
+                    tool_call_object["index"] = tool_call_index
+
+                    # 下面的步骤，是根据数据块中的信息填充每个 tool_call 的 id、type、function 字段
+                    # 在 function 字段中，又包括 name 和 arguments 字段，arguments 字段会由每个数据块
+                    # 依次补充，如同 delta.content 字段一般。
+
+                    tool_call_id = tool_call.id
+                    if tool_call_id:
+                        tool_call_object["id"] = tool_call_id
+                    tool_call_type = tool_call.type
+                    if tool_call_type:
+                        tool_call_object["type"] = tool_call_type
+                    tool_call_function = tool_call.function
+                    if tool_call_function:
+                        if "function" not in tool_call_object:
+                            tool_call_object["function"] = {}
+                        tool_call_function_name = tool_call_function.name
+                        if tool_call_function_name:
+                            tool_call_object["function"]["name"] = tool_call_function_name
+                        tool_call_function_arguments = tool_call_function.arguments
+                        if tool_call_function_arguments:
+                            if "arguments" not in tool_call_object["function"]:
+                                tool_call_object["function"]["arguments"] = tool_call_function_arguments
+                            else:
+                                tool_call_object["function"]["arguments"] = tool_call_object["function"][
+                                                                                "arguments"] + tool_call_function_arguments  # <-- 依次补充 function.arguments 字段的值
+                    message["tool_calls"][tool_call_index] = tool_call_object
+
+    # 在组装完所有 messages 后，我们分别打印其内容
+    for index, message in enumerate(messages):
+        print("index:", index)
+        print("message:", json.dumps(message, ensure_ascii=False))
+        print("")
+    ```
+  </Tab>
+
+  <Tab title="node.js">
+    ```js theme={null}
+    const os = require('os');
+    const openai = require('openai'); // 需要安装 openai 库
+
+    const client = new openai.OpenAI({
+        apiKey: process.env.MOONSHOT_API_KEY,
+        baseURL: "https://api.moonshot.cn/v1"
+    });
+
+    const tools = [
+        {
+            "type": "function",
+            "function": {
+                "name": "search",
+                "description": "通过搜索引擎搜索互联网上的内容。\n\n当你的知识无法回答用户提出的问题，或用户请求你进行联网搜索时，调用此工具。请从与用户的对话中提取用户想要搜索的内容作为 query 参数的值。\n搜索结果包含网站的标题、网站的地址（URL）以及网站简介。",
+                "parameters": {
+                    "type": "object",
+                    "required": ["query"],
+                    "properties": {
+                        "query": {
+                            "type": "string",
+                            "description": "用户搜索的内容，请从用户的提问或聊天上下文中提取。"
+                        }
+                    }
+                }
+            }
+        },
+    ];
+
+    async function main() {
+        const response = await client.chat.completions.create({
+            model: "kimi-k3",
+            messages: [
+                { "role": "user", "content": "请联网搜索 Context Caching 技术。" }
+            ],
+            stream: true,
+            tools: tools,
+            tool_choice: "auto"
+        });
+
+        let messages = [{}, {}];
+        let data = '';
+
+        for await (const chunk of response) {
+             for (const choice of chunk.choices) {
+                const index = choice.index;
+                const message = messages[index];
+                const delta = choice.delta;
+                const role = delta.role;
+                if (role) message.role = role;
+                const content = delta.content;
+                if (content) message.content = (message.content || "") + content;
+
+                const tool_calls = delta.tool_calls;
+                if (tool_calls) {
+                    if (!message.tool_calls) message.tool_calls = [];
+                    for (const tool_call of tool_calls) {
+                        const tool_call_index = tool_call.index;
+                        if (message.tool_calls.length < tool_call_index + 1) {
+                            for (let i = message.tool_calls.length; i < tool_call_index + 1; i++) {
+                                message.tool_calls.push({});
+                            }
+                        }
+                        const tool_call_object = message.tool_calls[tool_call_index];
+                        tool_call_object.index = tool_call_index;
+
+                        const tool_call_id = tool_call.id;
+                        if (tool_call_id) tool_call_object.id = tool_call_id;
+                        const tool_call_type = tool_call.type;
+                        if (tool_call_type) tool_call_object.type = tool_call_type;
+                        const tool_call_function = tool_call.function;
+                        if (tool_call_function) {
+                            if (!tool_call_object.function) tool_call_object.function = {};
+                            const tool_call_function_name = tool_call_function.name;
+                            if (tool_call_function_name) tool_call_object.function.name = tool_call_function_name;
+                            const tool_call_function_arguments = tool_call_function.arguments;
+                            if (tool_call_function_arguments) {
+                                if (!tool_call_object.function.arguments) {
+                                    tool_call_object.function.arguments = tool_call_function_arguments;
+                                } else {
+                                    tool_call_object.function.arguments += tool_call_function_arguments;
+                                }
+                            }
+                        }
+                        message.tool_calls[tool_call_index] = tool_call_object;
+                    }
+                }
+            }
+        }
+
+        for (let index = 0; index < messages.length; index++) {
+            console.log("index:", index);
+            console.log("message:", JSON.stringify(messages[index], null, 2));
+            console.log("");
+        }
+    }
+
+    main().catch(console.error);
+    ```
+  </Tab>
+</Tabs>
+
+## 用 tool\_calls 代替 function\_call
+
+`tool_calls` 由函数调用（`function_call`）进化而来，`function_call` 是 `tool_calls` 的子集——在某些特定语境下，或阅读兼容性代码时，可以将两者划等号。由于 OpenAI 已将 `function_call` 等参数（例如 `functions`）标记为“已废弃”，我们的 API 将不再支持 `function_call`，请用 `tool_calls` 代替。相比 `function_call`，`tool_calls` 有以下优点：
+
+* 支持并行调用，Kimi 大模型可以一次返回多个 `tool_calls`，你可以在代码中使用并发的方式同时调用这些 `tool_call` 以减少时间消耗；
+* 对于没有依赖关系的 `tool_calls`，Kimi 大模型也会倾向于并行调用，这相比于原顺序调用的 `function_call`，在一定程度上降低了 Tokens 消耗；
+
+## 注意事项
+
+* `finish_reason=tool_calls` 时，`message.content` 偶尔不为空：通常是模型在解释需要调用哪些工具、为什么调用。当工具调用耗时较长，或一轮对话需要串行多次调用工具时，这段描述性语句能减少用户等待的焦虑，也方便用户理解工具调用的流程并及时干预和矫正（例如终止错误的工具调用，或在下一轮对话中通过提示词矫正模型的工具选择）；
+* `tools` 参数中的内容也会被计算在总 Tokens 中，请确保 `tools`、`messages` 中的 Tokens 总数合计不超过模型的上下文窗口大小。
+
+### 保证每个 tool\_call 都有对应的 tool 消息
+
+工具调用场景下，消息不再是 `system` / `user` / `assistant` 的简单交替：
+
+```
+system: ...
+user: ...
+assistant: ...
+user: ...
+assistant: ...
+```
+
+而是会变成：
+
+```
+system: ...
+user: ...
+assistant: ...
+tool: ...
+tool: ...
+assistant: ...
+```
+
+当 Kimi 大模型生成了 `tool_calls` 时，请确保每一个 `tool_call` 都有对应的 `role=tool` 的 message，并且这条 message 设置了正确的 `tool_call_id`：`role=tool` 的 messages 数量与 `tool_calls` 的数量不一致会导致错误；`role=tool` 的 messages 中的 `tool_call_id` 与 `tool_calls` 中的 `tool_call.id` 无法对应也会导致错误。
+
+### 排查 tool\_call\_id not found 错误
+
+如果你遇到 `tool_call_id not found` 错误，可能是由于你未将 Kimi API 返回的 `role=assistant` 消息添加到 messages 列表中，正确的消息序列应该看起来像这样：
+
+```
+system: ...
+user: ...
+assistant: ...  # <-- 也许你并未将这一条 assistant message 添加到 messages 列表中
+tool: ...
+tool: ...
+assistant: ...
+```
+
+你可以在每次收到 Kimi API 的返回值后，都执行 `messages.append(message)` 来将 Kimi API 返回的消息添加到消息列表中，以避免出现 `tool_call_id not found` 错误。
+
+*注意：添加到 messages 列表中位于 `role=tool` 的 message 之前的 assistant messages，必须完整包含 Kimi API 返回的 `tool_calls` 字段及字段值。我们推荐直接将 Kimi API 返回的 `choice.message` “原封不动”地添加到 messages 列表中，以避免可能产生的错误。*
+
+> ## Documentation Index
+> Fetch the complete documentation index at: https://platform.kimi.com/docs/llms.txt
+> Use this file to discover all available pages before exploring further.
+
+# 创建对话补全
+
+> 为聊天消息创建补全结果。支持标准聊天、Partial Mode 和 Tool Use（函数调用）。
+
+创建一个对话补全请求，模型将根据输入的消息列表生成回复。
+
+<Accordion title="Content 字段说明">
+  `content` 字段支持以下两种形式：
+
+  **纯文本字符串**
+
+  ```json theme={null}
+  { "content": "你好" }
+  ```
+
+  **对象数组**（用于多模态输入）
+
+  数组中每个元素通过 `type` 字段区分类型：
+
+  ```json theme={null}
+  {
+      "content": [
+          { "type": "text", "text": "描述这张图片" },
+          { "type": "image_url", "image_url": { "url": "data:image/png;base64,..." } },
+          { "type": "video_url", "video_url": { "url": "data:video/mp4;base64,..." } }
+      ]
+  }
+  ```
+
+  其中 `image_url` 和 `video_url` 也支持直接传入字符串，效果等同于对象形式中的 `url` 字段：
+
+  ```json theme={null}
+  { "type": "image_url", "image_url": "data:image/png;base64,..." }
+  ```
+
+  #### 参数说明
+
+  数组中每个元素的字段说明如下：
+
+  | 参数名称        | 是否必须                   | 说明                                           | 类型                                         |
+  | ----------- | ---------------------- | -------------------------------------------- | ------------------------------------------ |
+  | `type`      | required               | 内容类型                                         | `"text"` \| `"image_url"` \| `"video_url"` |
+  | `text`      | 当 `type=text` 时必填      | 文本内容                                         | string                                     |
+  | `image_url` | 当 `type=image_url` 时必填 | 用于传输图片，支持对象形式 `{"url": "..."}` 或直接传入 URL 字符串 | object \| string                           |
+  | `video_url` | 当 `type=video_url` 时必填 | 用于传输视频，支持对象形式 `{"url": "..."}` 或直接传入 URL 字符串 | object \| string                           |
+
+  当 `image_url` 传入对象时，其字段说明如下：
+
+  | 参数名称  | 是否必须     | 说明                              | 类型     |
+  | ----- | -------- | ------------------------------- | ------ |
+  | `url` | required | 使用 base64 编码或通过 file id 指定的图片内容 | string |
+
+  当 `video_url` 传入对象时，其字段说明如下：
+
+  | 参数名称  | 是否必须     | 说明                                                             | 类型     |
+  | ----- | -------- | -------------------------------------------------------------- | ------ |
+  | `url` | required | 使用 base64 编码或通过 file id 指定的视频内容，例如 `data:video/mp4;base64,...` | string |
+
+  <Note>
+    无论使用对象形式（`url` 字段）还是字符串简写，均支持以下两种格式：
+
+    * base64 编码：`data:image/png;base64,...` 或 `data:video/mp4;base64,...`
+    * 文件引用：`ms://<file_id>`
+
+    详见[使用 Kimi 视觉模型](/docs/guide/use-kimi-vision-model)。
+  </Note>
+
+  #### 调用示例
+
+  <CodeGroup>
+    ```python python expandable theme={null}
+    import os
+    import base64
+
+    from openai import OpenAI
+    from openai.types.chat import ChatCompletion
+
+    client: OpenAI = OpenAI(
+        api_key=os.environ.get("MOONSHOT_API_KEY"),
+        base_url="https://api.moonshot.cn/v1",
+    )
+
+    # 对图片进行 base64 编码
+    with open("您的图片地址", "rb") as f:
+        img_base: str = base64.b64encode(f.read()).decode("utf-8")
+
+    response: ChatCompletion = client.chat.completions.create(
+        model="kimi-k2.6",
+        messages=[
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "image_url",
+                        "image_url": {
+                            "url": f"data:image/jpeg;base64,{img_base}",
+                        },
+                    },
+                    {
+                        "type": "text",
+                        "text": "请描述这个图片",
+                    },
+                ],
+            }
+        ],
+    )
+    print(response.choices[0].message.content)
+    ```
+
+    ```bash curl expandable theme={null}
+    curl https://api.moonshot.cn/v1/chat/completions \
+        -H "Content-Type: application/json" \
+        -H "Authorization: Bearer $MOONSHOT_API_KEY" \
+        -d '{
+            "model": "kimi-k2.6",
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "image_url",
+                            "image_url": {
+                                "url": "data:image/jpeg;base64,/9j/4AAQ..."
+                            }
+                        },
+                        {
+                            "type": "text",
+                            "text": "请描述这个图片"
+                        }
+                    ]
+                }
+            ]
+        }'
+    ```
+
+    ```javascript node.js expandable theme={null}
+    const fs = require("fs");
+    const OpenAI = require("openai");
+
+    const client = new OpenAI({
+        apiKey: process.env.MOONSHOT_API_KEY,
+        baseURL: "https://api.moonshot.cn/v1",
+    });
+
+    async function main() {
+        // 对图片进行 base64 编码
+        const imgBase = fs.readFileSync("您的图片地址").toString("base64");
+
+        const response = await client.chat.completions.create({
+            model: "kimi-k2.6",
+            messages: [
+                {
+                    role: "user",
+                    content: [
+                        {
+                            type: "image_url",
+                            image_url: {
+                                url: `data:image/jpeg;base64,${imgBase}`,
+                            },
+                        },
+                        {
+                            type: "text",
+                            text: "请描述这个图片",
+                        },
+                    ],
+                },
+            ],
+        });
+        console.log(response.choices[0].message.content);
+    }
+
+    main();
+    ```
+  </CodeGroup>
+</Accordion>
+
+<Accordion title="响应格式">
+  ### 非流式响应
+
+  ```json theme={null}
+  {
+      "id": "cmpl-04ea926191a14749b7f2c7a48a68abc6",
+      "object": "chat.completion",
+      "created": 1698999496,
+      "model": "kimi-k2.6",
+      "choices": [
+          {
+              "index": 0,
+              "message": {
+                  "role": "assistant",
+                  "content": "你好，李雷！1+1等于2。如果你有其他问题，请随时提问！"
+              },
+              "finish_reason": "stop"
+          }
+      ],
+      "usage": {
+          "prompt_tokens": 19,
+          "completion_tokens": 21,
+          "total_tokens": 40,
+          "cached_tokens": 10
+      }
+  }
+  ```
+
+  ### 流式响应
+
+  ```text theme={null}
+  data: {"id":"cmpl-xxx","object":"chat.completion.chunk","created":1698999575,"model":"kimi-k2.6","choices":[{"index":0,"delta":{"role":"assistant","content":""},"finish_reason":null}]}
+
+  data: {"id":"cmpl-xxx","object":"chat.completion.chunk","created":1698999575,"model":"kimi-k2.6","choices":[{"index":0,"delta":{"content":"你好"},"finish_reason":null}]}
+
+  ...
+
+  data: {"id":"cmpl-xxx","object":"chat.completion.chunk","created":1698999575,"model":"kimi-k2.6","choices":[{"index":0,"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":19,"completion_tokens":13,"total_tokens":32,"cached_tokens":12}}
+
+  data: [DONE]
+  ```
+
+  <Note>
+    响应示例中的模型名称会根据请求中的 model 参数返回。当使用 `kimi-k2.6` 模型时，响应中的 `"model"` 字段将显示为 `"kimi-k2.6"`。
+  </Note>
+</Accordion>
+
+<Accordion title="多轮对话">
+  Kimi API 是无状态的，本身不具有记忆功能。要实现多轮对话，需在每次请求时把前一轮的 assistant 回复（以及工具执行结果，如适用）原样追加到 `messages` 数组中再发送。
+
+  ```python theme={null}
+  messages = [
+      {"role": "system", "content": "你是 Kimi。"},
+      {"role": "user", "content": "你好，我叫李雷。"}
+  ]
+
+  completion = client.chat.completions.create(model="kimi-k2.6", messages=messages)
+  reply = completion.choices[0].message
+
+  # 将 assistant 回复追加回 messages，供下一轮使用
+  messages.append({"role": "assistant", "content": reply.content})
+  messages.append({"role": "user", "content": "1+1 等于多少？"})
+  ```
+
+  当对话历史过长时，建议只保留最近的若干条消息，或做消息压缩，以避免超出模型的上下文长度限制。
+
+  <Note>
+    详见 [配置多轮对话参数](/docs/guide/engage-in-multi-turn-conversations-using-kimi-api)。
+  </Note>
+</Accordion>
+
+<Accordion title="JSON Mode">
+  通过 `response_format` 参数可约束模型输出格式：
+
+  * `{"type": "text"}`（默认）：普通文本输出
+  * `{"type": "json_object"}`：强制输出合法 JSON Object
+  * `{"type": "json_schema", "json_schema": {...}}`：按给定 JSON Schema 输出结构化数据（Structured Output）
+
+  使用 `json_object` 时，**必须在 system prompt 或 user prompt 中明确描述期望的 JSON 字段和类型**，否则模型可能输出不符合预期的结果。
+
+  ```json theme={null}
+  {
+    "model": "kimi-k2.6",
+    "messages": [
+      {"role": "system", "content": "请输出 JSON，包含 title、author、summary 字段。"},
+      {"role": "user", "content": "总结这篇文章..."}
+    ],
+    "response_format": {"type": "json_object"}
+  }
+  ```
+
+  <Note>
+    详见 [使用 Kimi API 的 JSON Mode](/docs/guide/use-json-mode-feature-of-kimi-api)。
+  </Note>
+</Accordion>
+
+<Accordion title="工具调用 Tool Use">
+  通过 `tools` 参数传入 JSON Schema 定义的外部工具，模型可决定在适当时机调用它们。
+
+  **请求示例**
+
+  ```json theme={null}
+  {
+    "model": "kimi-k2.6",
+    "messages": [{"role": "user", "content": "北京今天天气怎么样？"}],
+    "tools": [
+      {
+        "type": "function",
+        "function": {
+          "name": "get_weather",
+          "description": "获取指定城市的天气",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "city": {"type": "string", "description": "城市名称"}
+            },
+            "required": ["city"]
+          }
+        }
+      }
+    ]
+  }
+  ```
+
+  **响应中的 `tool_calls`**
+
+  当 `finish_reason` 为 `"tool_calls"` 时，模型返回 `tool_calls` 数组，包含 `id`、`function.name` 和 `function.arguments`：
+
+  ```json theme={null}
+  {
+    "choices": [{
+      "message": {
+        "role": "assistant",
+        "content": "",
+        "tool_calls": [{
+          "id": "call_xxx",
+          "type": "function",
+          "function": {
+            "name": "get_weather",
+            "arguments": "{\"city\":\"北京\"}"
+          }
+        }]
+      },
+      "finish_reason": "tool_calls"
+    }]
+  }
+  ```
+
+  **提交工具执行结果**
+
+  在本地执行工具后，将结果通过 `role="tool"` 消息追加到 `messages` 中（`tool_call_id` 必须与请求中的 `id` 对应）：
+
+  ```json theme={null}
+  {"role": "tool", "tool_call_id": "call_xxx", "content": "晴，25°C"}
+  ```
+
+  <Note>
+    详见 [使用 Kimi API 完成工具调用](/docs/guide/use-kimi-api-to-complete-tool-calls)。
+  </Note>
+</Accordion>
+
+<Accordion title="思考模式与 Preserved Thinking">
+  `kimi-k3` 始终进行推理，使用顶层 `reasoning_effort`（支持 `"low"`、`"high"`、`"max"`，默认 `"max"`）。`kimi-k2.6` 和 `kimi-k2.7-code` 支持思考模式，模型在输出最终答案前会先输出推理过程（`reasoning_content`）。
+
+  **K2.x 请求参数**
+
+  | 字段              | 类型                          | 说明                                                                                                                                    |
+  | --------------- | --------------------------- | ------------------------------------------------------------------------------------------------------------------------------------- |
+  | `thinking.type` | `"enabled"` \| `"disabled"` | 思考开关（`kimi-k2.7-code` 始终为 `enabled`，不可关闭）                                                                                             |
+  | `thinking.keep` | `null` \| `"all"`           | Preserved Thinking：是否将历史轮次的 `reasoning_content` 保留在上下文。`kimi-k2.6` 默认 `null`（不保留），可选 `"all"`；`kimi-k2.7-code` 固定为 `"all"`（保留），传入其他值报错 |
+
+  **响应字段**
+
+  非流式响应中，`choices[0].message` 包含：
+
+  | 字段                  | 说明                |
+  | ------------------- | ----------------- |
+  | `content`           | 最终答案              |
+  | `reasoning_content` | 推理过程（仅在思考模式启用时返回） |
+
+  ```json theme={null}
+  {
+    "choices": [{
+      "message": {
+        "role": "assistant",
+        "content": "1+1 等于 2。",
+        "reasoning_content": "用户问的是基础数学问题，直接相加即可。"
+      }
+    }]
+  }
+  ```
+
+  <Warning>
+    多轮对话中若使用思考模式，请务必将每一轮 assistant 消息的 `reasoning_content` 原样保留在 `messages` 中，否则模型可能丢失推理上下文。
+  </Warning>
+
+  <Note>
+    详见 [配置思考模式](/docs/guide/use-thinking-models)。
+  </Note>
+</Accordion>
+
+<Accordion title="流式输出 Streaming">
+  设置 `stream: true` 可启用流式输出，模型会以 Server-Sent Events (SSE) 格式逐段返回生成的内容。推荐在聊天、代码生成、长文本输出等实时性要求高的场景中使用。
+
+  ```python theme={null}
+  completion = client.chat.completions.create(
+      model="kimi-k2.6",
+      messages=[{"role": "user", "content": "请解释什么是递归。"}],
+      stream=True
+  )
+
+  for chunk in completion:
+      if chunk.choices[0].delta.content:
+          print(chunk.choices[0].delta.content, end="")
+  ```
+
+  **SSE 响应格式**
+
+  每一行以 `data:` 开头，内容为 JSON 对象。当 `finish_reason` 为 `null` 时，内容在 `delta.content` 中累加；当 `finish_reason` 不为 `null` 时，表示输出结束：
+
+  ```text theme={null}
+  data: {"id":"cmpl-xxx","object":"chat.completion.chunk","created":1698999575,"model":"kimi-k2.6","choices":[{"index":0,"delta":{"role":"assistant","content":""},"finish_reason":null}]}
+
+  data: {"id":"cmpl-xxx","object":"chat.completion.chunk","created":1698999575,"model":"kimi-k2.6","choices":[{"index":0,"delta":{"content":"你好"},"finish_reason":null}]}
+
+  data: {"id":"cmpl-xxx","object":"chat.completion.chunk","created":1698999575,"model":"kimi-k2.6","choices":[{"index":0,"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":19,"completion_tokens":13,"total_tokens":32,"cached_tokens":12}}
+
+  data: [DONE]
+  ```
+
+  **`stream_options`**
+
+  通过 `stream_options: {"include_usage": true}` 可在最后一个 chunk（`data: [DONE]` 之前）额外获取 `usage` 字段，显示本次请求的 Token 消耗：
+
+  ```python theme={null}
+  stream=True,
+  stream_options={"include_usage": True}
+  ```
+
+  <Note>
+    详见 [利用 Kimi API 的流式输出功能](/docs/guide/utilize-the-streaming-output-feature-of-kimi-api)。
+  </Note>
+</Accordion>
+
+<Accordion title="Partial Mode">
+  Partial Mode（Prefill）允许你在 `messages` 的最后一条 assistant 消息中预填输出前缀，从而引导模型按照你期望的格式或方向继续生成。
+
+  **开启方式**
+
+  在 `messages` 数组末尾添加一条 `role="assistant"` 的消息，并设置 `partial: true`：
+
+  ````python theme={null}
+  completion = client.chat.completions.create(
+      model="kimi-k2.6",
+      messages=[
+          {"role": "user", "content": "用 Python 实现快速排序。"},
+          {"role": "assistant", "content": "```python\n", "partial": True}
+      ]
+  )
+  ````
+
+  模型会从 \`\`\`\`python\n\` 之后继续生成代码，而不是先输出解释文字再写代码。
+
+  **常见用途**
+
+  * 强制模型以特定格式开头（如 JSON 的 `{`、代码块的 \`\`\`\`python\`）
+  * 角色扮演中保持角色名称前缀（配合 `name` 字段）
+  * 在 `finish_reason="length"` 时，用相同的前缀续写被截断的内容
+
+  <Warning>
+    请勿将 Partial Mode 与 `response_format={"type": "json_object"}` 混用，否则可能获得预期外的模型回复。如需引导 JSON 输出，建议直接使用 [Structured Output](/docs/guide/response_format) 或单独设置 `partial: true` 并预填 `{`。
+  </Warning>
+
+  <Note>
+    详见 [使用 Kimi API 的 Partial Mode](/docs/guide/use-partial-mode-feature-of-kimi-api)。
+  </Note>
+</Accordion>
+
+
+## OpenAPI
+
+````yaml POST /v1/chat/completions
+openapi: 3.1.0
+info:
+  title: Moonshot AI API
+  version: 1.0.0
+  description: Moonshot AI / Kimi 大语言模型服务 API
+servers:
+  - url: https://api.moonshot.cn
+    description: 生产环境
+security: []
+paths:
+  /v1/chat/completions:
+    post:
+      tags:
+        - Chat
+      summary: 创建聊天补全
+      description: 为聊天消息创建补全结果。支持标准聊天、Partial Mode 和 Tool Use（函数调用）。
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              oneOf:
+                - $ref: '#/components/schemas/KimiK3ChatRequest'
+                - $ref: '#/components/schemas/KimiK27CodeChatRequest'
+                - $ref: '#/components/schemas/KimiK26ChatRequest'
+                - $ref: '#/components/schemas/KimiK25ChatRequest'
+                - $ref: '#/components/schemas/MoonshotV1ChatRequest'
+              discriminator:
+                propertyName: model
+                mapping:
+                  kimi-k3:
+                    $ref: '#/components/schemas/KimiK3ChatRequest'
+                  kimi-k2.7-code:
+                    $ref: '#/components/schemas/KimiK27CodeChatRequest'
+                  kimi-k2.7-code-highspeed:
+                    $ref: '#/components/schemas/KimiK27CodeChatRequest'
+                  kimi-k2.6:
+                    $ref: '#/components/schemas/KimiK26ChatRequest'
+                  kimi-k2.5:
+                    $ref: '#/components/schemas/KimiK25ChatRequest'
+                  moonshot-v1-8k:
+                    $ref: '#/components/schemas/MoonshotV1ChatRequest'
+                  moonshot-v1-32k:
+                    $ref: '#/components/schemas/MoonshotV1ChatRequest'
+                  moonshot-v1-128k:
+                    $ref: '#/components/schemas/MoonshotV1ChatRequest'
+                  moonshot-v1-auto:
+                    $ref: '#/components/schemas/MoonshotV1ChatRequest'
+                  moonshot-v1-8k-vision-preview:
+                    $ref: '#/components/schemas/MoonshotV1ChatRequest'
+                  moonshot-v1-32k-vision-preview:
+                    $ref: '#/components/schemas/MoonshotV1ChatRequest'
+                  moonshot-v1-128k-vision-preview:
+                    $ref: '#/components/schemas/MoonshotV1ChatRequest'
+      responses:
+        '200':
+          description: 聊天补全响应
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ChatCompletionResponse'
+            text/event-stream:
+              schema:
+                $ref: '#/components/schemas/ChatCompletionChunk'
+        '400':
+          description: 请求错误 - 参数无效
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '401':
+          description: 未授权 - API 密钥无效或缺失
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '500':
+          description: 服务器错误
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+      security:
+        - bearerAuth: []
+components:
+  schemas:
+    KimiK3ChatRequest:
+      title: kimi-k3
+      allOf:
+        - $ref: '#/components/schemas/ChatRequestCommon'
+        - type: object
+          properties:
+            model:
+              type: string
+              description: 模型 ID
+              enum:
+                - kimi-k3
+              default: kimi-k3
+            messages:
+              type: array
+              description: >-
+                Kimi K3 对话消息列表。除标准消息外，还可在任意对话位置插入 {"role": "system", "tools":
+                [...]} 消息动态加载工具；该动态工具消息不包含 content 字段，并且只影响后续对话。
+              items:
+                $ref: '#/components/schemas/KimiK3Message'
+            reasoning_effort:
+              type: string
+              enum:
+                - low
+                - high
+                - max
+              default: max
+              description: >-
+                Kimi K3 始终启用思考，并开启 Preserved Thinking。推理强度支持 low、high 和 max，默认为
+                max。
+          required:
+            - model
+            - messages
+    KimiK27CodeChatRequest:
+      title: kimi-k2.7-code
+      allOf:
+        - $ref: '#/components/schemas/ChatRequestBase'
+        - type: object
+          properties:
+            model:
+              type: string
+              description: >-
+                模型 ID。可选 `kimi-k2.7-code` 或其高速版
+                `kimi-k2.7-code-highspeed`；两者为同一模型、参数完全一致，高速版输出速度约 180
+                Tokens/s（短上下文场景可达 260 Tokens/s）。
+              enum:
+                - kimi-k2.7-code
+                - kimi-k2.7-code-highspeed
+              default: kimi-k2.7-code
+            thinking:
+              type: object
+              description: >-
+                控制 kimi-k2.7-code 模型是否启用思考能力，以及是否完整保留多轮对话中的
+                reasoning_content。可选参数，默认值为 {"type": "enabled", "keep": "all"}。
+
+
+                与 kimi-k2.6 的差异：
+
+                - `type` 仅支持 `"enabled"`。与 kimi-k2.6 不同，不支持 `"disabled"` —
+                传入会报错。该模型始终开启思考。
+
+                - `keep` 仅接受合法值 `"all"`；不传或传 `"all"` 时服务端均按 `"all"`
+                处理，传入其他非法值会报错。因此该模型始终启用 Preserved Thinking。
+              properties:
+                type:
+                  type: string
+                  enum:
+                    - enabled
+                  description: >-
+                    启用思考能力。对 kimi-k2.7-code 仅接受 `"enabled"`；传入 `"disabled"`
+                    会报错。这与同时支持 `"disabled"` 的 kimi-k2.6 不同。
+                keep:
+                  type:
+                    - string
+                    - 'null'
+                  enum:
+                    - all
+                    - null
+                  description: >-
+                    控制是否保留历史对话轮次（previous turns）的 reasoning_content，从而启用
+                    Preserved Thinking。
+
+
+                    - 对 kimi-k2.7-code，该参数仅接受合法值 `"all"`：传 `"all"`、传 `null`
+                    或不传表现完全一致，服务端均按 `"all"` 处理 — 始终保留历史轮次的
+                    reasoning_content；传入其他非法值会报错。这与 kimi-k2.6 不同，k2.6 默认为
+                    `null`（除非显式设为 `"all"`，否则不保留历史思考）。
+
+                    - 由于 Preserved Thinking 始终开启，请把每一轮历史 assistant 消息中的
+                    reasoning_content 原样保留在 messages 中。
+
+                    - 注意：该参数只影响历史轮次的 reasoning_content；不改变模型在当前 turn
+                    内是否产生/输出思考内容（由 `type` 控制）。关于使用方式的最佳实践，详见 [Preserved
+                    Thinking](/guide/use-thinking-models#preserved-thinking)。
+              required:
+                - type
+              additionalProperties: false
+          required:
+            - model
+    KimiK26ChatRequest:
+      title: kimi-k2.6
+      allOf:
+        - $ref: '#/components/schemas/ChatRequestBase'
+        - type: object
+          properties:
+            model:
+              type: string
+              description: 模型 ID
+              enum:
+                - kimi-k2.6
+              default: kimi-k2.6
+            thinking:
+              type: object
+              description: >-
+                控制 kimi-k2.6 模型是否启用思考能力，以及是否完整保留多轮对话中的
+                reasoning_content。可选参数，默认值为 {"type": "enabled"}。
+              properties:
+                type:
+                  type: string
+                  enum:
+                    - enabled
+                    - disabled
+                  description: 启用或禁用思考能力
+                keep:
+                  type:
+                    - string
+                    - 'null'
+                  enum:
+                    - all
+                    - null
+                  description: >-
+                    控制是否保留历史对话轮次（previous turns）的 reasoning_content，从而启用
+                    Preserved Thinking。默认为 `null`，即不保留历史轮次的思考内容。
+
+
+                    - `null`（默认）或不传：服务端会忽略历史 turns 的 reasoning_content。
+
+                    - `"all"`：保留历史 turns 的 reasoning_content 并随上下文一同提供给模型，启用
+                    Preserved Thinking。使用时需把每一轮历史 assistant 消息中的
+                    reasoning_content 原样保留在 messages 中。推荐与 `type: "enabled"`
+                    搭配使用。
+
+                    - 注意：该参数只影响历史轮次的 reasoning_content；不改变模型在当前 turn
+                    内是否产生/输出思考内容（由 `type` 控制）。关于使用方式的最佳实践，详见 [Preserved
+                    Thinking](/guide/use-thinking-models#preserved-thinking)。
+              required:
+                - type
+              additionalProperties: false
+          required:
+            - model
+    KimiK25ChatRequest:
+      title: kimi-k2.5
+      allOf:
+        - $ref: '#/components/schemas/ChatRequestBase'
+        - type: object
+          properties:
+            model:
+              type: string
+              description: 模型 ID
+              enum:
+                - kimi-k2.5
+              default: kimi-k2.5
+            thinking:
+              type: object
+              description: '控制模型是否启用思考能力。可选参数，默认值为 {"type": "enabled"}。'
+              properties:
+                type:
+                  type: string
+                  enum:
+                    - enabled
+                    - disabled
+                  description: 启用或禁用思考能力
+              required:
+                - type
+              additionalProperties: false
+          required:
+            - model
+    MoonshotV1ChatRequest:
+      title: moonshot-v1
+      allOf:
+        - $ref: '#/components/schemas/ChatRequestBase'
+        - type: object
+          properties:
+            model:
+              type: string
+              description: 模型 ID
+              enum:
+                - moonshot-v1-8k
+                - moonshot-v1-32k
+                - moonshot-v1-128k
+                - moonshot-v1-auto
+                - moonshot-v1-8k-vision-preview
+                - moonshot-v1-32k-vision-preview
+                - moonshot-v1-128k-vision-preview
+              default: moonshot-v1-128k
+            temperature:
+              type: number
+              format: float
+              description: 采样温度，范围 0 到 1。较高的值（如 0.7）使输出更随机，较低的值（如 0.2）使输出更集中和确定。默认值为 0.0。
+              default: 0
+              minimum: 0
+              maximum: 1
+            top_p:
+              type: number
+              format: float
+              description: >-
+                另一种采样方法，模型考虑累积概率质量为 top_p 的 Token 结果。例如 0.1 表示仅考虑概率质量前 10% 的
+                Token。通常建议只修改此参数或 temperature 其中之一。默认值为 1.0。
+              default: 1
+              minimum: 0
+              maximum: 1
+            'n':
+              type: integer
+              description: 每条输入消息生成的结果数量。默认为 1，不超过 5。当温度非常接近 0 时，只能返回 1 个结果。
+              default: 1
+              minimum: 1
+              maximum: 5
+            presence_penalty:
+              type: number
+              format: float
+              description: 存在惩罚，范围 -2.0 到 2.0。正值会根据 Token 是否出现在文本中进行惩罚，增加模型讨论新话题的可能性
+              default: 0
+              minimum: -2
+              maximum: 2
+            frequency_penalty:
+              type: number
+              format: float
+              description: 频率惩罚，范围 -2.0 到 2.0。正值会根据 Token 在文本中的现有频率进行惩罚，降低模型逐字重复相同短语的可能性
+              default: 0
+              minimum: -2
+              maximum: 2
+          required:
+            - model
+    ChatCompletionResponse:
+      type: object
+      properties:
+        id:
+          type: string
+          description: 补全结果的唯一标识符
+        object:
+          type: string
+          description: 对象类型
+          example: chat.completion
+        created:
+          type: integer
+          description: 补全创建时的 Unix 时间戳
+        model:
+          type: string
+          description: 用于补全的模型
+        choices:
+          type: array
+          description: 补全选项列表
+          items:
+            type: object
+            properties:
+              index:
+                type: integer
+              message:
+                type: object
+                properties:
+                  role:
+                    type: string
+                    enum:
+                      - assistant
+                  content:
+                    type:
+                      - string
+                      - 'null'
+                    description: 助手的消息内容
+                  tool_calls:
+                    type: array
+                    description: 模型发起的工具调用
+                    items:
+                      type: object
+                      properties:
+                        id:
+                          type: string
+                        type:
+                          type: string
+                          enum:
+                            - function
+                        function:
+                          type: object
+                          properties:
+                            name:
+                              type: string
+                            arguments:
+                              type: string
+                              description: 函数参数的 JSON 字符串
+                  reasoning_content:
+                    type:
+                      - string
+                      - 'null'
+                    description: 推理过程（仅在思考模式启用时返回）
+              finish_reason:
+                type: string
+                enum:
+                  - stop
+                  - length
+                  - tool_calls
+        usage:
+          type: object
+          properties:
+            prompt_tokens:
+              type: integer
+              description: 提示中的 Token 数量
+            completion_tokens:
+              type: integer
+              description: 补全中的 Token 数量
+            total_tokens:
+              type: integer
+              description: 使用的总 Token 数量
+            cached_tokens:
+              type: integer
+              description: 命中缓存的 Token 数量
+    ChatCompletionChunk:
+      type: object
+      properties:
+        id:
+          type: string
+          description: 补全结果的唯一标识符
+        object:
+          type: string
+          description: 对象类型
+          example: chat.completion.chunk
+        created:
+          type: integer
+          description: 补全创建时的 Unix 时间戳
+        model:
+          type: string
+          description: 用于补全的模型
+        choices:
+          type: array
+          description: 补全选项列表
+          items:
+            $ref: '#/components/schemas/ChoiceDelta'
+        usage:
+          type:
+            - object
+            - 'null'
+          description: Token 使用统计。包含 usage 的最终 chunk 中为对象，其他 chunk 中为 null
+          properties:
+            prompt_tokens:
+              type: integer
+              description: 提示中的 Token 数量
+            completion_tokens:
+              type: integer
+              description: 补全中的 Token 数量
+            total_tokens:
+              type: integer
+              description: 使用的总 Token 数量
+            cached_tokens:
+              type: integer
+              description: 命中缓存的 Token 数量
+    ErrorResponse:
+      type: object
+      properties:
+        error:
+          type: object
+          properties:
+            message:
+              type: string
+              description: 描述错误原因的错误消息
+            type:
+              type: string
+              description: 错误类型
+            code:
+              type: string
+              description: 错误码
+          required:
+            - message
+      required:
+        - error
+    ChatRequestCommon:
+      type: object
+      properties:
+        logprobs:
+          type: boolean
+          default: false
+          description: >-
+            是否返回输出 Token 的对数概率。设置为 true 时，在响应 message 的 logprobs 字段中返回每个输出 Token
+            的对数概率信息
+        top_logprobs:
+          type: integer
+          minimum: 0
+          maximum: 20
+          description: >-
+            指定在每个 Token 位置返回概率最高的候选 Token 数量（0-20），各候选 Token 附带对数概率。使用此参数时必须将
+            logprobs 设置为 true
+        prediction:
+          type: object
+          description: Predicted Output 配置。当模型响应的大部分内容可以提前预知时（例如重新生成仅有少量修改的文件），可显著降低响应延迟
+          properties:
+            type:
+              type: string
+              enum:
+                - content
+              description: 预测内容类型，当前仅支持 content
+            content:
+              oneOf:
+                - type: string
+                - type: array
+                  items:
+                    type: object
+              description: >-
+                需要模型匹配的静态预测内容，例如正在重新生成的文本文件内容。可以是 string，也可以是
+                array[object]（数组元素仅支持 type 为 text 的文本内容）
+        max_tokens:
+          type: integer
+          deprecated: true
+          description: 已弃用，请使用 max_completion_tokens
+        max_completion_tokens:
+          type: integer
+          description: >-
+            聊天补全生成的最大 Token 数量。默认值因模型而异：Kimi K3 默认为 131072，最大可设置为
+            1048576。如果结果达到最大 Token 数而未结束，finish reason 将为 "length"；否则为
+            "stop"。此值为期望返回的 Token 长度，而非输入加输出的总长度。如果输入加 max_completion_tokens
+            超出模型上下文窗口，将返回 invalid_request_error。
+        response_format:
+          type: object
+          description: >-
+            控制模型输出格式。默认值为 {"type": "text"}，即纯文本输出。设置为 {"type": "json_object"}
+            可启用 JSON 模式，确保输出为合法 JSON 对象（需在 prompt 中引导模型输出 JSON 并指定格式）。设置为
+            {"type": "json_schema"} 可启用 Structured Output，按指定的 JSON Schema
+            约束输出结构（推荐，需配合 json_schema 字段使用）。如果您在使用 JSON Schema 时遇到校验问题，欢迎到 walle
+            GitHub Issues (https://github.com/MoonshotAI/walle/issues) 提交反馈。
+          properties:
+            type:
+              type: string
+              enum:
+                - text
+                - json_object
+                - json_schema
+              description: >-
+                输出格式类型。text：默认，纯文本输出；json_object：保证输出为合法 JSON 对象；json_schema：按指定
+                JSON Schema 约束输出（推荐，需配合 json_schema 字段使用）
+            json_schema:
+              type: object
+              description: 当 type 为 json_schema 时使用，定义输出应遵循的 JSON Schema
+              properties:
+                name:
+                  type: string
+                  description: Schema 名称，用于标识
+                strict:
+                  type: boolean
+                  default: true
+                  description: >-
+                    是否严格按 schema 约束输出。默认为 true。为 true 时 schema 需符合 MFJS
+                    规范，不符合会返回错误或 warning；为 false 时仅保证输出为合法 JSON 对象，不强制约束内部结构。
+                schema:
+                  type: object
+                  description: >-
+                    JSON Schema 对象，定义输出应遵循的结构。需符合 MFJS（Moonshot Flavored JSON
+                    Schema）规范。可使用 walle CLI 工具自检：go install
+                    github.com/moonshotai/walle/cmd/walle@latest && walle
+                    -schema '你的schema' -level strict
+                  additionalProperties: true
+              required:
+                - name
+                - schema
+        stop:
+          oneOf:
+            - type: string
+            - type: array
+              items:
+                type: string
+              maxItems: 5
+          default: null
+          description: 停用词，完全匹配时将停止输出。匹配到的词本身不会被输出。最多允许 5 个字符串，每个不超过 32 字节
+        stream:
+          type: boolean
+          default: false
+          description: 是否以流式方式返回响应，默认 false
+        stream_options:
+          type: object
+          description: 流式响应选项
+          properties:
+            include_usage:
+              type: boolean
+              default: false
+              description: >-
+                如果设置，将在 data: [DONE] 消息之前额外发送一个 chunk。该 chunk 的 usage 字段显示整个请求的
+                Token 使用统计，choices 字段为空数组。其他所有 chunk 也会包含 usage 字段，但值为
+                null。注意：如果流中断，可能无法收到包含总 Token 用量的最终 chunk
+        tools:
+          type: array
+          description: 模型可调用的工具列表
+          items:
+            $ref: '#/components/schemas/ToolDefinition'
+        prompt_cache_key:
+          type: string
+          default: null
+          description: >-
+            用于缓存相似请求的响应以优化缓存命中率。对于 Coding Agent，通常是代表单个会话的 session id 或 task
+            id；退出并恢复会话时应保持不变。对于 Kimi Code Plan，此字段为必填以提高缓存命中率。对于其他多轮对话
+            Agent，也建议使用此字段
+        safety_identifier:
+          type: string
+          description: 用于检测可能违反使用政策的用户的稳定标识符。应为唯一标识每个用户的字符串。建议对用户名或邮箱进行哈希处理以避免发送可识别信息
+        tool_choice:
+          oneOf:
+            - type: string
+              enum:
+                - auto
+                - none
+                - required
+              description: auto：模型自行决定是否调用工具；none：不调用工具；required：强制调用工具
+            - type: object
+              description: 强制调用指定工具
+              properties:
+                type:
+                  type: string
+                  enum:
+                    - function
+                function:
+                  type: object
+                  properties:
+                    name:
+                      type: string
+                      description: 要调用的函数名称
+                  required:
+                    - name
+              required:
+                - type
+                - function
+          description: >-
+            控制模型是否调用工具。`auto`（默认）：模型自行决定是否调用工具；`none`：不调用工具；`required`：强制调用工具；也可传入特定函数对象强制调用指定工具。
+    KimiK3Message:
+      oneOf:
+        - $ref: '#/components/schemas/Message'
+          title: 标准消息
+        - $ref: '#/components/schemas/KimiK3DynamicToolMessage'
+          title: 动态工具消息
+      description: Kimi K3 对话消息。既支持标准消息，也支持不含 content、通过 tools 声明动态工具的 system 消息。
+    ChatRequestBase:
+      type: object
+      properties:
+        logprobs:
+          type: boolean
+          default: false
+          description: >-
+            是否返回输出 Token 的对数概率。设置为 true 时，在响应 message 的 logprobs 字段中返回每个输出 Token
+            的对数概率信息
+        top_logprobs:
+          type: integer
+          minimum: 0
+          maximum: 20
+          description: >-
+            指定在每个 Token 位置返回概率最高的候选 Token 数量（0-20），各候选 Token 附带对数概率。使用此参数时必须将
+            logprobs 设置为 true
+        prediction:
+          type: object
+          description: Predicted Output 配置。当模型响应的大部分内容可以提前预知时（例如重新生成仅有少量修改的文件），可显著降低响应延迟
+          properties:
+            type:
+              type: string
+              enum:
+                - content
+              description: 预测内容类型，当前仅支持 content
+            content:
+              oneOf:
+                - type: string
+                - type: array
+                  items:
+                    type: object
+              description: >-
+                需要模型匹配的静态预测内容，例如正在重新生成的文本文件内容。可以是 string，也可以是
+                array[object]（数组元素仅支持 type 为 text 的文本内容）
+        messages:
+          type: array
+          description: >-
+            包含迄今为止对话的消息列表。每个元素格式为 {"role": "user", "content": "你好"}。role 支持
+            system、user、assistant、tool 其一，content 不得为空。content 字段可以是 string，也可以是
+            array[object]（用于多模态输入）
+          items:
+            $ref: '#/components/schemas/Message'
+        max_tokens:
+          type: integer
+          deprecated: true
+          description: 已弃用，请使用 max_completion_tokens
+        max_completion_tokens:
+          type: integer
+          description: >-
+            聊天补全生成的最大 Token 数量。默认值因模型而异：Kimi K3 默认为 131072，最大可设置为
+            1048576。如果结果达到最大 Token 数而未结束，finish reason 将为 "length"；否则为
+            "stop"。此值为期望返回的 Token 长度，而非输入加输出的总长度。如果输入加 max_completion_tokens
+            超出模型上下文窗口，将返回 invalid_request_error。
+        response_format:
+          type: object
+          description: >-
+            控制模型输出格式。默认值为 {"type": "text"}，即纯文本输出。设置为 {"type": "json_object"}
+            可启用 JSON 模式，确保输出为合法 JSON 对象（需在 prompt 中引导模型输出 JSON 并指定格式）。设置为
+            {"type": "json_schema"} 可启用 Structured Output，按指定的 JSON Schema
+            约束输出结构（推荐，需配合 json_schema 字段使用）。如果您在使用 JSON Schema 时遇到校验问题，欢迎到 walle
+            GitHub Issues (https://github.com/MoonshotAI/walle/issues) 提交反馈。
+          properties:
+            type:
+              type: string
+              enum:
+                - text
+                - json_object
+                - json_schema
+              description: >-
+                输出格式类型。text：默认，纯文本输出；json_object：保证输出为合法 JSON 对象；json_schema：按指定
+                JSON Schema 约束输出（推荐，需配合 json_schema 字段使用）
+            json_schema:
+              type: object
+              description: 当 type 为 json_schema 时使用，定义输出应遵循的 JSON Schema
+              properties:
+                name:
+                  type: string
+                  description: Schema 名称，用于标识
+                strict:
+                  type: boolean
+                  default: true
+                  description: >-
+                    是否严格按 schema 约束输出。默认为 true。为 true 时 schema 需符合 MFJS
+                    规范，不符合会返回错误或 warning；为 false 时仅保证输出为合法 JSON 对象，不强制约束内部结构。
+                schema:
+                  type: object
+                  description: >-
+                    JSON Schema 对象，定义输出应遵循的结构。需符合 MFJS（Moonshot Flavored JSON
+                    Schema）规范。可使用 walle CLI 工具自检：go install
+                    github.com/moonshotai/walle/cmd/walle@latest && walle
+                    -schema '你的schema' -level strict
+                  additionalProperties: true
+              required:
+                - name
+                - schema
+        stop:
+          oneOf:
+            - type: string
+            - type: array
+              items:
+                type: string
+              maxItems: 5
+          default: null
+          description: 停用词，完全匹配时将停止输出。匹配到的词本身不会被输出。最多允许 5 个字符串，每个不超过 32 字节
+        stream:
+          type: boolean
+          default: false
+          description: 是否以流式方式返回响应，默认 false
+        stream_options:
+          type: object
+          description: 流式响应选项
+          properties:
+            include_usage:
+              type: boolean
+              default: false
+              description: >-
+                如果设置，将在 data: [DONE] 消息之前额外发送一个 chunk。该 chunk 的 usage 字段显示整个请求的
+                Token 使用统计，choices 字段为空数组。其他所有 chunk 也会包含 usage 字段，但值为
+                null。注意：如果流中断，可能无法收到包含总 Token 用量的最终 chunk
+        tools:
+          type: array
+          description: 模型可调用的工具列表
+          items:
+            $ref: '#/components/schemas/ToolDefinition'
+        prompt_cache_key:
+          type: string
+          default: null
+          description: >-
+            用于缓存相似请求的响应以优化缓存命中率。对于 Coding Agent，通常是代表单个会话的 session id 或 task
+            id；退出并恢复会话时应保持不变。对于 Kimi Code Plan，此字段为必填以提高缓存命中率。对于其他多轮对话
+            Agent，也建议使用此字段
+        safety_identifier:
+          type: string
+          description: 用于检测可能违反使用政策的用户的稳定标识符。应为唯一标识每个用户的字符串。建议对用户名或邮箱进行哈希处理以避免发送可识别信息
+        tool_choice:
+          oneOf:
+            - type: string
+              enum:
+                - auto
+                - none
+                - required
+              description: auto：模型自行决定是否调用工具；none：不调用工具；required：强制调用工具
+            - type: object
+              description: 强制调用指定工具
+              properties:
+                type:
+                  type: string
+                  enum:
+                    - function
+                function:
+                  type: object
+                  properties:
+                    name:
+                      type: string
+                      description: 要调用的函数名称
+                  required:
+                    - name
+              required:
+                - type
+                - function
+          description: >-
+            控制模型是否调用工具。`auto`（默认）：模型自行决定是否调用工具；`none`：不调用工具；`required`：强制调用工具；也可传入特定函数对象强制调用指定工具。
+      required:
+        - messages
+    ChoiceDelta:
+      type: object
+      properties:
+        index:
+          type: integer
+          description: 选项索引
+        delta:
+          type: object
+          description: 增量内容对象
+          properties:
+            role:
+              type: string
+              description: 消息角色（仅在首个 chunk 中出现）
+            content:
+              type: string
+              description: 消息内容片段
+            tool_calls:
+              type: array
+              description: 模型发起的工具调用片段
+              items:
+                type: object
+                properties:
+                  id:
+                    type: string
+                  type:
+                    type: string
+                    enum:
+                      - function
+                  function:
+                    type: object
+                    properties:
+                      name:
+                        type: string
+                      arguments:
+                        type: string
+                        description: 函数参数的 JSON 字符串
+        finish_reason:
+          type:
+            - string
+            - 'null'
+          enum:
+            - stop
+            - length
+            - tool_calls
+            - null
+          description: 停止原因，仅在最后一个 chunk 中出现
+        usage:
+          type: object
+          description: Token 使用统计（可选）
+          properties:
+            prompt_tokens:
+              type: integer
+              description: 提示中的 Token 数量
+            completion_tokens:
+              type: integer
+              description: 补全中的 Token 数量
+            total_tokens:
+              type: integer
+              description: 使用的总 Token 数量
+    ToolDefinition:
+      type: object
+      properties:
+        type:
+          type: string
+          enum:
+            - function
+        function:
+          type: object
+          properties:
+            name:
+              type: string
+              description: 函数名称。必须符合正则表达式：^[a-zA-Z_][a-zA-Z0-9-_]{2,63}$
+              pattern: ^[a-zA-Z_][a-zA-Z0-9-_]{2,63}$
+            description:
+              type: string
+              description: 函数功能描述
+            parameters:
+              type: object
+              description: >-
+                函数参数，JSON Schema 格式。需符合 [MFJS（Moonshot Flavored JSON
+                Schema）规范](https://github.com/MoonshotAI/walle/blob/main/docs/mfjs-spec.zh.md)。
+              additionalProperties: true
+            strict:
+              type: boolean
+              default: true
+              description: >-
+                是否严格按 parameters schema 约束工具调用参数的输出。默认为 true。设为 false 时仅保证输出为合法
+                JSON 对象，不强制约束内部结构。
+          required:
+            - name
+            - parameters
+      required:
+        - type
+        - function
+    Message:
+      type: object
+      properties:
+        role:
+          type: string
+          enum:
+            - system
+            - user
+            - assistant
+            - tool
+          example: user
+          description: 消息发送者的角色，支持 system、user、assistant、tool
+        content:
+          oneOf:
+            - type: string
+            - type: array
+              items:
+                oneOf:
+                  - title: text
+                    type: object
+                    properties:
+                      type:
+                        type: string
+                        enum:
+                          - text
+                      text:
+                        type: string
+                    required:
+                      - type
+                      - text
+                  - title: image_url
+                    type: object
+                    properties:
+                      type:
+                        type: string
+                        enum:
+                          - image_url
+                      image_url:
+                        oneOf:
+                          - type: object
+                            properties:
+                              url:
+                                type: string
+                            required:
+                              - url
+                          - type: string
+                    required:
+                      - type
+                      - image_url
+                  - title: video_url
+                    type: object
+                    properties:
+                      type:
+                        type: string
+                        enum:
+                          - video_url
+                      video_url:
+                        oneOf:
+                          - type: object
+                            properties:
+                              url:
+                                type: string
+                            required:
+                              - url
+                          - type: string
+                    required:
+                      - type
+                      - video_url
+          example: 你好
+          description: 消息内容。可以是纯文本字符串，也可以是包含 text/image_url/video_url 类型的对象数组（用于多模态输入）
+        name:
+          type: string
+          default: null
+          description: 消息发送者的名称（可选）
+        partial:
+          type: boolean
+          default: false
+          description: 在最后一条 assistant 消息中设置为 true 以启用 Partial Mode
+      required:
+        - role
+        - content
+    KimiK3DynamicToolMessage:
+      type: object
+      description: >-
+        Kimi K3 动态加载工具消息。该消息只能使用 system 角色，通过 tools 字段在当前对话位置声明后续对话可用的工具，且不包含
+        content 字段。
+      properties:
+        role:
+          type: string
+          enum:
+            - system
+          description: 动态加载工具消息的角色，固定为 system
+        tools:
+          type: array
+          description: 从该消息位置开始可供模型调用的工具列表
+          items:
+            $ref: '#/components/schemas/ToolDefinition'
+      required:
+        - role
+        - tools
+      additionalProperties: false
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      description: >-
+        Authorization 请求头需要一个 Bearer 令牌。使用 MOONSHOT_API_KEY 作为令牌。这是一个服务端密钥，请在
+        [API 密钥页面](https://platform.kimi.com/console/api-keys) 生成。
+
+````
+> ## Documentation Index
+> Fetch the complete documentation index at: https://platform.kimi.com/docs/llms.txt
+> Use this file to discover all available pages before exploring further.
+
+# 列出模型
+
+> 列出当前可用的所有模型。
+
+列出当前可用的所有模型，包含模型 ID、上下文长度及能力标识等信息。建议在调用对话补全前查询本接口，以确认目标模型是否可用及具备对应能力。
+
+<Accordion title="调用示例">
+  <CodeGroup>
+    ```python python expandable theme={null}
+    import os
+    from openai import OpenAI
+
+    client = OpenAI(
+        api_key=os.environ.get("MOONSHOT_API_KEY"),
+        base_url="https://api.moonshot.cn/v1",
+    )
+
+    models = client.models.list()
+    print(models.data)
+    ```
+
+    ```bash curl expandable theme={null}
+    curl https://api.moonshot.cn/v1/models \
+        -H "Authorization: Bearer $MOONSHOT_API_KEY"
+    ```
+
+    ```javascript node.js expandable theme={null}
+    const OpenAI = require("openai");
+
+    const client = new OpenAI({
+        apiKey: process.env.MOONSHOT_API_KEY,
+        baseURL: "https://api.moonshot.cn/v1",
+    });
+
+    async function main() {
+        const models = await client.models.list();
+        console.log(models.data);
+    }
+
+    main();
+    ```
+  </CodeGroup>
+</Accordion>
+
+<Accordion title="响应字段说明">
+  响应为一个对象，包含以下字段：
+
+  | 字段       | 类型             | 说明                |
+  | -------- | -------------- | ----------------- |
+  | `object` | string         | 对象类型，固定为 `"list"` |
+  | `data`   | array\[object] | 模型列表，每个元素为一个模型对象  |
+
+  `data` 数组中每个模型对象的字段说明：
+
+  | 字段                   | 类型      | 说明                      |
+  | -------------------- | ------- | ----------------------- |
+  | `id`                 | string  | 模型 ID，例如 `kimi-k3`      |
+  | `object`             | string  | 对象类型，固定为 `"model"`      |
+  | `created`            | integer | 模型创建时的 Unix 时间戳         |
+  | `owned_by`           | string  | 模型所有者标识，例如 `"moonshot"` |
+  | `context_length`     | integer | 模型支持的最大上下文长度（tokens）    |
+  | `supports_image_in`  | boolean | 是否支持图片输入                |
+  | `supports_video_in`  | boolean | 是否支持视频输入                |
+  | `supports_reasoning` | boolean | 是否支持深度思考                |
+</Accordion>
+
+<Note>
+  模型列表及能力标识可能随平台更新而变化。若调用对话补全时收到 `resource_not_found_error`（404），说明模型不存在或当前账号无权限访问，请检查 `model` 参数拼写及账号 tier。
+</Note>
+
+<Warning>
+  本接口需要有效的 API Key 进行认证。若收到 401 错误，请检查 `Authorization` 请求头是否为 `Bearer <MOONSHOT_API_KEY>`，并确认 API Key 与调用端点所属平台一致（`platform.kimi.com` 与 `platform.kimi.ai` 的 Key 不可混用）。
+</Warning>
+
+
+## OpenAPI
+
+````yaml GET /v1/models
+openapi: 3.1.0
+info:
+  title: Moonshot AI API
+  version: 1.0.0
+  description: Moonshot AI / Kimi 大语言模型服务 API
+servers:
+  - url: https://api.moonshot.cn
+    description: 生产环境
+security: []
+paths:
+  /v1/models:
+    get:
+      tags:
+        - Models
+      summary: 列出模型
+      description: 列出当前可用的所有模型。
+      responses:
+        '200':
+          description: 模型列表
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  object:
+                    type: string
+                    example: list
+                  data:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        id:
+                          type: string
+                          description: 模型 ID
+                          example: kimi-k2.5
+                        object:
+                          type: string
+                          example: model
+                        created:
+                          type: integer
+                          description: 创建时间戳
+                        owned_by:
+                          type: string
+                          example: moonshot
+                        context_length:
+                          type: integer
+                          description: 最大上下文长度（tokens）
+                        supports_image_in:
+                          type: boolean
+                          description: 是否支持图片输入
+                        supports_video_in:
+                          type: boolean
+                          description: 是否支持视频输入
+                        supports_reasoning:
+                          type: boolean
+                          description: 是否支持深度思考
+        '401':
+          description: 未授权 - API 密钥无效或缺失
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+      security:
+        - bearerAuth: []
+components:
+  schemas:
+    ErrorResponse:
+      type: object
+      properties:
+        error:
+          type: object
+          properties:
+            message:
+              type: string
+              description: 描述错误原因的错误消息
+            type:
+              type: string
+              description: 错误类型
+            code:
+              type: string
+              description: 错误码
+          required:
+            - message
+      required:
+        - error
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      description: >-
+        Authorization 请求头需要一个 Bearer 令牌。使用 MOONSHOT_API_KEY 作为令牌。这是一个服务端密钥，请在
+        [API 密钥页面](https://platform.kimi.com/console/api-keys) 生成。
+
+````

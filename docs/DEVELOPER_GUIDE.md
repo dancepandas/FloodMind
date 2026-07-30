@@ -781,6 +781,57 @@ for event in llm.stream_chat([{"role": "user", "content": "你好"}]):
         print(event.content, end="", flush=True)
 ```
 
+### 8.1 厂商 Pipeline（调用方言自动路由）
+
+各家模型虽都宣称 OpenAI 兼容，但思考开关参数、reasoning 字段位置、usage 位置、多模态 block 各有方言。`ModelClient` 构造时通过 `route_pipeline(provider, model_name, base_url)` 自动绑定厂商专属 pipeline（`floodmind/agent/native/providers/`），之后不再感知厂商差异：
+
+```python
+llm = ModelClient(api_key=..., base_url="https://api.minimaxi.com/v1",
+                  model_name="MiniMax-M3", provider="minimax")
+llm.pipeline.name   # "minimax" —— 自动路由
+```
+
+路由优先级：**base_url 精确(100) > provider id(60) > 模型名前缀(40) > OpenAI 兜底**。
+仅模型名前缀命中（如聚合网关托管 `MiniMax/xxx`）时 pipeline 进入 `conservative` 模式：
+解析适配全部启用，请求适配退化为标准 OpenAI 参数，避免网关不认厂商方言。
+
+已内置 pipeline：
+
+| Pipeline | 请求适配 | 解析适配 |
+|---|---|---|
+| `dashscope` | `enable_thinking`；`MiniMax/` 模型用 `thinking.type`；`max_completion_tokens`；思考态 tool_choice 降级 | `reasoning_content`；顶层 usage |
+| `deepseek` | `thinking.type`；思考态剥离 temperature/top_p | `reasoning_content`；顶层 usage |
+| `kimi` | 按代际分支（k3 无开关 / k2.7 强制思考 / k2.6 `thinking.keep`）；k 系列剥离 temperature | `choices[0].usage` 优先；公网 URL 图片早失败 |
+| `minimax` | `thinking.type` + `reasoning_split`；M2.x 不可关；temperature 钳制 [0,2] | `reasoning_details` 累积式差分；`<think>` 标签流式剥离 |
+| `openai-compatible`（兜底） | 仅 `stream_options` | 标准字段 |
+
+**新增一家厂商**：在 `providers/` 下新建子类并注册到 `__init__.py` 的 `_PIPELINES`：
+
+```python
+from .base import ProviderPipeline
+
+class MyProviderPipeline(ProviderPipeline):
+    name = "my-provider"
+
+    @classmethod
+    def match(cls, provider_id, model_id, base_url):
+        if "my-platform" in (base_url or "").lower():
+            return 100
+        if (provider_id or "").lower() == "my-provider":
+            return 60
+        return 0
+
+    def prepare_request(self, params, *, enable_thinking, stream):
+        params = super().prepare_request(params, enable_thinking=enable_thinking, stream=stream)
+        if self.conservative:
+            return params
+        # 厂商方言注入（一律 setdefault，显式 extra_body 优先）
+        ...
+        return params
+```
+
+思考开关对上层只是一个语义位 `ModelClient.enable_thinking`——`prepare_request` 负责把它翻译成厂商参数；调用方显式传的 `extra_body` 永远优先（pipeline 用 `setdefault` 注入）。
+
 ---
 
 ## 9. 构建自定义 Web 界面

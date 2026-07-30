@@ -79,6 +79,7 @@ class ChatScreen(Screen[None]):
                         temperature=preset.get("default_temperature", 0.3),
                         max_tokens=preset.get("default_max_tokens", 8192),
                         enable_thinking=bool(settings.model.enable_reasoning),
+                        provider=preset.get("provider", ""),
                     )
                 else:
                     llm = ModelClient.from_settings(

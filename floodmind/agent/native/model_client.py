@@ -33,6 +33,7 @@ class ModelClient:
         max_tokens: int = 4096,
         timeout: int = 90,
         enable_thinking: bool = False,
+        provider: str = "",
     ):
         self.api_key = api_key
         self.base_url = base_url
@@ -41,6 +42,9 @@ class ModelClient:
         self.max_tokens = max_tokens
         self.timeout = timeout
         self.enable_thinking = enable_thinking
+        self.provider = provider
+        from floodmind.agent.native.providers import route_pipeline
+        self.pipeline = route_pipeline(provider, model_name, base_url)
         self._client = openai.OpenAI(
             api_key=api_key,
             base_url=base_url,
@@ -72,6 +76,7 @@ class ModelClient:
             temperature=temperature if temperature is not None else rm.temperature,
             max_tokens=max_tokens if max_tokens is not None else rm.max_tokens,
             enable_thinking=enable_thinking,
+            provider=rm.provider,
         )
 
     @classmethod
@@ -101,6 +106,7 @@ class ModelClient:
             temperature=temperature,
             max_tokens=max_tokens,
             enable_thinking=enable_reasoning,
+            provider=rm.provider,
         )
 
     # ── 非流式调用（兼容旧 QwenLLMService.invoke / .chat）───────
@@ -127,19 +133,23 @@ class ModelClient:
         **kwargs: Any,
     ) -> Message:
         """多轮非流式调用，返回 ai_message"""
+        try:
+            messages = self.pipeline.prepare_messages(messages)
+        except ValueError as e:
+            logger.error("ModelClient message validation failed: %s", e)
+            raise
+
         request_params: Dict[str, Any] = {
             "model": self.model_name,
             "messages": messages,
             "temperature": temperature if temperature is not None else self.temperature,
             "max_tokens": max_tokens if max_tokens is not None else self.max_tokens,
         }
-
-        # 支持 extra_body（如 enable_thinking）
-        extra_body = kwargs.get("extra_body")
-        if extra_body is None and self.enable_thinking:
-            extra_body = {"enable_thinking": True}
-        if extra_body:
-            request_params["extra_body"] = extra_body
+        if kwargs.get("extra_body"):
+            request_params["extra_body"] = dict(kwargs["extra_body"])
+        request_params = self.pipeline.prepare_request(
+            request_params, enable_thinking=self.enable_thinking, stream=False
+        )
 
         try:
             response = self._client.chat.completions.create(**request_params)
@@ -151,19 +161,13 @@ class ModelClient:
         content = choice.message.content or ""
 
         additional_kwargs: Dict[str, Any] = {}
-        reasoning = getattr(choice.message, "reasoning_content", None)
-        if not reasoning:
-            reasoning = getattr(choice.message, "reasoning", None)
+        reasoning = self.pipeline.extract_message_reasoning(choice.message)
         if reasoning:
             additional_kwargs["reasoning_content"] = reasoning
 
-        usage = getattr(response, "usage", None)
+        usage = self.pipeline.extract_response_usage(response)
         if usage:
-            additional_kwargs["usage"] = {
-                "prompt_tokens": getattr(usage, "prompt_tokens", 0) or 0,
-                "completion_tokens": getattr(usage, "completion_tokens", 0) or 0,
-                "total_tokens": getattr(usage, "total_tokens", 0) or 0,
-            }
+            additional_kwargs["usage"] = usage
 
         return ai_message(content=content, **additional_kwargs)
 
@@ -176,6 +180,13 @@ class ModelClient:
         extra_body: Optional[dict] = None,
         abort_check: Optional[Callable[[], bool]] = None,
     ) -> Iterator[ModelEvent]:
+        try:
+            messages = self.pipeline.prepare_messages(messages)
+        except ValueError as e:
+            logger.error("ModelClient message validation failed: %s", e)
+            yield ModelEvent(type="error", content=str(e))
+            return
+
         request_params: Dict[str, Any] = {
             "model": self.model_name,
             "messages": messages,
@@ -183,22 +194,18 @@ class ModelClient:
             "max_tokens": self.max_tokens,
             "stream": True,
         }
-        request_params["stream_options"] = {"include_usage": True}
         if tools:
             request_params["tools"] = tools
             request_params["tool_choice"] = tool_choice
-        # 合成 extra_body：显式参数优先，否则用 enable_thinking
-        effective_extra: Optional[dict] = None
+        # 显式 extra_body 进入 params，pipeline 用 setdefault 注入厂商参数（显式优先）
         if extra_body:
-            effective_extra = dict(extra_body)
-        elif self.enable_thinking:
-            effective_extra = {"enable_thinking": True}
-        if effective_extra:
-            request_params["extra_body"] = effective_extra
+            request_params["extra_body"] = dict(extra_body)
+        request_params = self.pipeline.prepare_request(
+            request_params, enable_thinking=self.enable_thinking, stream=True
+        )
 
         tool_call_accumulators: Dict[int, Dict[str, str]] = {}
-        reasoning_buffer = ""
-        is_in_thinking_phase = False
+        state = self.pipeline.new_stream_state()
 
         try:
             stream = self._client.chat.completions.create(**request_params)
@@ -215,46 +222,30 @@ class ModelClient:
                     yield ModelEvent(type="done", content="")
                     return
 
+                usage = self.pipeline.extract_usage(chunk)
+                if usage and not state.usage_emitted:
+                    state.usage_emitted = True
+                    yield ModelEvent(type="usage", content=json.dumps(usage))
+
                 if not chunk.choices:
-                    usage = getattr(chunk, "usage", None)
-                    if usage:
-                        yield ModelEvent(
-                            type="usage",
-                            content=json.dumps({
-                                "prompt_tokens": usage.prompt_tokens or 0,
-                                "completion_tokens": usage.completion_tokens or 0,
-                                "total_tokens": usage.total_tokens or 0,
-                            }),
-                        )
                     continue
 
                 choice = chunk.choices[0]
                 delta = choice.delta
 
-                if hasattr(delta, "reasoning_content") and delta.reasoning_content:
-                    reasoning_text = str(delta.reasoning_content)
-                    if reasoning_buffer and reasoning_text.startswith(reasoning_buffer):
-                        new_reasoning = reasoning_text[len(reasoning_buffer):]
-                        reasoning_buffer = reasoning_text
-                    else:
-                        new_reasoning = reasoning_text
-                        reasoning_buffer += reasoning_text
-                    is_in_thinking_phase = True
-                    if new_reasoning:
-                        yield ModelEvent(type="reasoning", content=new_reasoning)
+                reasoning_inc = self.pipeline.extract_reasoning(delta, state)
+                if reasoning_inc:
+                    yield ModelEvent(type="reasoning", content=reasoning_inc)
                     continue
-
-                if hasattr(delta, "reasoning") and delta.reasoning:
-                    is_in_thinking_phase = True
-                    yield ModelEvent(type="reasoning", content=str(delta.reasoning))
-                    continue
-
-                if is_in_thinking_phase and delta.content:
-                    is_in_thinking_phase = False
-                    reasoning_buffer = ""
 
                 if delta.content:
-                    yield ModelEvent(type="token", content=delta.content)
+                    answer_inc, tag_reasoning = self.pipeline.filter_content(
+                        str(delta.content), state
+                    )
+                    if tag_reasoning:
+                        yield ModelEvent(type="reasoning", content=tag_reasoning)
+                    if answer_inc:
+                        yield ModelEvent(type="token", content=answer_inc)
 
                 if delta.tool_calls:
                     for tc_delta in delta.tool_calls:
