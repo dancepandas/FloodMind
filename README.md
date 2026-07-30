@@ -169,10 +169,12 @@ FloodMind 提供了多种集成方式，可嵌入到第三方系统或构建自�
 from floodmind import Agent, ModelClient, build_agent_tool
 
 # 1. 创建 LLM 客户端（任意 OpenAI 兼容接口）
+# provider 可选：显式指定服务商以精确路由厂商 Pipeline；不传则按 base_url/模型名自动推断
 llm = ModelClient(
     api_key="sk-xxx",
     base_url="https://dashscope.aliyuncs.com/compatible-mode/v1",
     model_name="deepseek-v4-flash",
+    provider="dashscope",
 )
 
 # 2. 将系统模块封装为工具
@@ -235,8 +237,10 @@ from floodmind import resolve_model, ModelClient, Agent
 
 rm = resolve_model()                       # 默认激活模型；指定则 resolve_model(model_key="...")
 llm = ModelClient(rm.api_key, rm.base_url, rm.id,
-                  temperature=rm.temperature, max_tokens=rm.max_tokens)
+                  temperature=rm.temperature, max_tokens=rm.max_tokens,
+                  provider=rm.provider)    # 显式指定服务商 → 自动绑定厂商 Pipeline
 # rm.context_window 可直接用于自建记忆：DualMemory(context_window=rm.context_window)
+# llm.pipeline.name 可内省当前路由到的厂商管线（"minimax"/"kimi"/"dashscope"/"deepseek"/"openai-compatible"）
 agent = Agent(llm=llm)
 ```
 

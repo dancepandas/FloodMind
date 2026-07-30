@@ -1,6 +1,6 @@
 # FloodMind 二次开发指南 v2
 
-> **更新**: 2026-07-14 — workspace 实例属性 + Web 模块化拆分 + worktree 隔离 + Chronos 迁出
+> **更新**: 2026-07-30 — 厂商 Pipeline 层（§8.1）+ ModelClient `provider` 参数 + `route_pipeline` SDK 导出
 
 FloodMind 是基于大语言模型的智能水文预报 Agent 系统。本文档面向开发者，介绍如何将 FloodMind 集成到第三方系统、构建自定义界面、扩展模型支持和开发 Skill/Plugin。
 
@@ -30,6 +30,7 @@ FloodMind 是基于大语言模型的智能水文预报 Agent 系统。本文档
    - 6.5 [Skill 维护 (SkillCurator)](#65-skill-维护-skillcurator)
 7. [系统提示词与身份定制](#7-系统提示词与身份定制)
 8. [模型与 Provider 扩展](#8-模型与-provider-扩展)
+   - 8.1 [厂商 Pipeline（调用方言自动路由）](#81-厂商-pipeline调用方言自动路由)
 9. [构建自定义 Web 界面](#9-构建自定义-web-界面)
 10. [TUI 界面扩展](#10-tui-界面扩展)
 11. [Plugin 系统开发](#11-plugin-系统开发)
@@ -76,7 +77,8 @@ FloodMind 是基于大语言模型的智能水文预报 Agent 系统。本文档
 |------|------|------|
 | **NativeFloodAgent** | `floodmind/agent/native/native_flood_agent.py` | Agent 生命周期、双 registry（orchestrator/specialist）、MCP/Skill 管理工具、流式输出、并行委派 |
 | **NativeAgentExecutor** | `floodmind/agent/native/executor.py` | 状态机驱动的 LLM↔Tool 循环、排队消息注入、上下文压缩 |
-| **ModelClient** | `floodmind/agent/native/model_client.py` | 统一的 LLM 服务接口（stream_chat / chat / invoke） |
+| **ModelClient** | `floodmind/agent/native/model_client.py` | 统一的 LLM 服务接口（stream_chat / chat / invoke），构造时经 `route_pipeline()` 自动绑定厂商 pipeline |
+| **Provider Pipelines** | `floodmind/agent/native/providers/` | 厂商调用方言适配（dashscope/deepseek/kimi/minimax + OpenAI 兜底），详见 §8.1 |
 | **DualMemory** | `floodmind/memory/dual_memory.py` | 扁平 `_turns` 对话历史 + LLM 压缩 + 持久化 |
 | **SkillRegistry** | `floodmind/skills/registry.py` | Skill 单例注册表（3 发现根、CWD 无关、线程安全） |
 | **SkillCurator** | `floodmind/skills/skill_curator.py` | Skill 生命周期管理（使用追踪/stale 检测/归档/巡检） |
@@ -174,10 +176,13 @@ MCP Server 配置独立存储在 `~/.floodmind/mcp.json`：
 from floodmind import Agent, ModelClient, build_agent_tool
 
 # 1. 创建 LLM 客户端（任意 OpenAI 兼容接口）
+# provider 可选：显式指定服务商以精确路由厂商 pipeline（§8.1）；
+# 不传则按 base_url/模型名自动推断
 llm = ModelClient(
     api_key="sk-xxx",
     base_url="https://dashscope.aliyuncs.com/compatible-mode/v1",
     model_name="deepseek-v4-flash",
+    provider="dashscope",
 )
 
 # 2. 将系统模块封装为工具
@@ -758,7 +763,8 @@ from floodmind import resolve_model, ModelClient
 # resolve_model() 返回完整连接+参数（默认激活模型；指定则 resolve_model(model_key="my-model"))
 rm = resolve_model(model_key="my-model")
 llm = ModelClient(rm.api_key, rm.base_url, rm.id,
-                  temperature=rm.temperature, max_tokens=rm.max_tokens)
+                  temperature=rm.temperature, max_tokens=rm.max_tokens,
+                  provider=rm.provider)   # 显式服务商 → 精确路由厂商 pipeline（§8.1）
 
 # 或沿用便捷工厂（内部同样走 resolve_model）
 llm = ModelClient.from_settings_with_preset("my-model")
@@ -999,6 +1005,7 @@ FloodMind/
 │   │   │   ├── native_flood_agent.py #     Agent 主体（双 registry、MCP/Skill 管理、流式）
 │   │   │   ├── executor.py           #     状态机 LLM↔Tool 循环
 │   │   │   ├── model_client.py       #     统一 LLM 服务
+│   │   │   ├── providers/            #     厂商 Pipeline（base/dashscope/deepseek/kimi/minimax/openai_compatible + route_pipeline）
 │   │   │   ├── model_router.py       #     模型路由/降级
 │   │   │   ├── event_bus.py          #     EventBus + StepEventBus
 │   │   │   ├── message_builder.py    #     消息组装

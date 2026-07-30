@@ -13,6 +13,7 @@ FloodMind — 基于大语言模型的智能 Agent 框架
         Agent,                # SDK 嵌入式 Agent
         ModelClient,          # LLM 客户端
         resolve_model,        # 模型配置解析（单一入口，SDK 稳定契约）
+        route_pipeline,       # 厂商 Pipeline 路由（llm.pipeline 内省/自检）
         build_agent_tool,     # 工具构造器
         DualMemory,           # 记忆系统
         AgentTool,            # 工具基类
@@ -37,6 +38,7 @@ def __getattr__(name):
         "ModelClient": "floodmind.agent.native.model_client",
         "resolve_model": "floodmind.config.model_resolver",
         "ResolvedModel": "floodmind.config.model_resolver",
+        "route_pipeline": "floodmind.agent.native.providers",
         "build_agent_tool": "floodmind.tools.agent_tool",
         "DualMemory": "floodmind.memory.dual_memory",
         "AgentTool": "floodmind.tools.agent_tool",
@@ -62,6 +64,7 @@ __all__ = [
     "ModelClient",
     "resolve_model",
     "ResolvedModel",
+    "route_pipeline",
     "build_agent_tool",
     "DualMemory",
     "AgentTool",
