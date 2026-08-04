@@ -16,7 +16,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor, as_completed, wait, FIRST_COMPLETED
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, TYPE_CHECKING
+from typing import Any, Callable, Dict, Iterable, List, Optional, TYPE_CHECKING
 
 from floodmind.agent.native.types import (
     AgentLoopState,
@@ -35,6 +35,13 @@ from floodmind.agent.native.executor import NativeAgentExecutor
 from floodmind.agent.native.message_builder import MessageBuilder
 from floodmind.agent.native.model_client import ModelClient
 from floodmind.agent.native.tool_runtime import native_from_agent_tool
+from floodmind.agent.native.tool_loading import (
+    ToolLoader,
+    compact_prompt_catalog,
+    make_get_tool_tool,
+    make_search_tools_tool,
+    resolve_tool_loading_config,
+)
 from floodmind.tools.agent_tool import AgentTool
 from floodmind.skills.registry import get_skill_registry
 from floodmind.skills.skill_curator import get_skill_curator, run_maintenance_if_needed
@@ -98,10 +105,17 @@ class _InstanceToolRegistry:
         with self._lock:
             return list(self._tools.values())
 
-    def tools_schema(self) -> List[dict]:
+    def tools_schema(self, names: Optional[Iterable[str]] = None) -> List[dict]:
         with self._lock:
-            tools = list(self._tools.values())
+            if names is None:
+                tools = list(self._tools.values())
+            else:
+                tools = [self._tools[n] for n in names if n in self._tools]
         return [t.to_openai_tool() for t in tools]
+
+    def names(self) -> List[str]:
+        with self._lock:
+            return list(self._tools.keys())
 
     def register_tools(self, tools: list) -> None:
         for tool in tools:
@@ -196,21 +210,12 @@ class NativeFloodAgent:
     @staticmethod
     def _build_model_info() -> str:
         """每次 LLM 调用前动态读取模型配置，文件不变则内容不变（KV cache 命中）。"""
-        from floodmind.config.model_presets import get_models_list, get_default_model_key, reload_presets
+        from floodmind.config.model_presets import get_default_model_key, get_preset, reload_presets
         reload_presets()
-        all_models = get_models_list()
         current_key = get_default_model_key()
-        current_label = next((m["label"] for m in all_models if m["key"] == current_key), current_key)
-        lines = [f"当前模型: {current_label} (key: {current_key})", "可选模型列表:"]
-        for m in all_models:
-            flags = []
-            if m.get("supports_reasoning"): flags.append("推理")
-            if m.get("supports_vision"): flags.append("视觉")
-            if m.get("supports_search"): flags.append("搜索")
-            flag_str = f" [{'/'.join(flags)}]" if flags else ""
-            default_mark = " (默认)" if m.get("is_default") else ""
-            lines.append(f"  - {m['label']} (key: {m['key']}){flag_str}{default_mark}")
-        return "\n".join(lines)
+        preset = get_preset(current_key) or {}
+        current_label = preset.get("label") or preset.get("name") or current_key
+        return f"当前模型: {current_label} (key: {current_key})"
 
 
     SPECIALIST_STATIC_GLOBAL = """你是 FloodMind 子代理，负责完成主代理分配的独立子任务。
@@ -230,7 +235,7 @@ class NativeFloodAgent:
 - 调用工具时一次只传一个参数
 - Bash 可执行任何 shell 命令（python、node、npm 等运行时）
 - skill 指定非 Python 技术栈时，用 Write 写脚本文件，再用 Bash 执行
-- 所有路径参数使用绝对路径
+- 路径参数优先使用相对当前 workspace 的路径；只有已授权外部 roots 才使用绝对路径
 - 超长数据用文件中转，工具参数保持精简
 - 大数组从原始文件读取
 
@@ -266,6 +271,7 @@ class NativeFloodAgent:
         max_iterations: int = 10000,
         permission_handler: Optional[Callable[[str, Dict[str, Any]], bool]] = None,
         workspace: Optional["Workspace"] = None,
+        tool_loading: Optional[Any] = None,
         **kwargs,
     ):
         self.llm_service = llm_service
@@ -300,11 +306,13 @@ class NativeFloodAgent:
         self._plan_lock = threading.Lock()
 
         self._skill_catalog = ""
+        self._tool_loading_config = resolve_tool_loading_config(tool_loading, settings)
+        self._orchestrator_tool_loader = ToolLoader(self._tool_loading_config)
+        self._specialist_tool_loader = ToolLoader(self._tool_loading_config)
         self._active_user_message = ""
         self._step_start_time = 0.0
         self._last_loop_state: Optional[AgentLoopState] = None
         self._current_run_context: Optional[RunContext] = None
-        self._orchestrator_extra_body: dict = {}
 
         self._cached_experience_context: str = ""
         self._cached_experience_version: int = -1
@@ -312,9 +320,10 @@ class NativeFloodAgent:
         # SDK 可配置项（bare 模式由 _init_bare 消费）
         self._max_iterations = max_iterations
         self._permission_handler = permission_handler
-        self._sandbox_service = SandboxService()
-        self._checkpoint_service = CheckpointService(tracing_service=self._tracing_service)
-        self._journal_service = ExecutionJournalService()
+        self._sandbox_service = SandboxService(workspace=self._workspace)
+        service_base_dir = str(self._workspace.session_root) if self._workspace is not None else None
+        self._checkpoint_service = CheckpointService(base_dir=service_base_dir, tracing_service=self._tracing_service)
+        self._journal_service = ExecutionJournalService(base_dir=service_base_dir)
 
         # ── bare 模式：精简初始化（嵌入 SDK 用） ──
         if bare:
@@ -335,21 +344,24 @@ class NativeFloodAgent:
         # 注册用户工具（支持 AgentTool 和 ToolSpec 两种格式）
         self._orchestrator_registry.register_tools(tools)
         self._specialist_registry.register_tools(tools)
+        self._register_tool_catalog_tools()
 
         # 构建 skill catalog（bare 模式下通常为空）
         self._skill_catalog = ""
 
         # 工具描述
-        tool_descriptions = self._build_tool_descriptions(self._orchestrator_registry)
+        tool_descriptions = self._build_tool_descriptions(
+            self._orchestrator_registry,
+            mode=self._tool_loading_config.mode,
+        )
 
         # 提示词：用户自定义 or 最小默认
         prompt = system_prompt or "你是一个智能助手，使用可用工具帮助用户完成任务。"
 
         # 初始化 model client：如果传入的已是 ModelClient 实例则直接复用
+        # （思考开关语义由 model_client.enable_thinking 承载，厂商方言由 pipeline 翻译）
         if isinstance(self.llm_service, ModelClient):
             self._model_client = self.llm_service
-            if self.llm_service.enable_thinking:
-                self._orchestrator_extra_body = {"enable_thinking": True}
         else:
             self._init_model_client()
 
@@ -370,10 +382,10 @@ class NativeFloodAgent:
             event_bus=self._event_bus,
             message_builder=self._message_builder,
             max_iterations=self._max_iterations,
-            extra_body=self._orchestrator_extra_body,
             system_prompts=[prompt + "\n\n## 可用工具\n" + tool_descriptions],
             tools_schema=self._orchestrator_registry.tools_schema(),
             tool_registry=self._orchestrator_registry,
+            tool_loader=self._orchestrator_tool_loader,
             checkpoint_service=self._checkpoint_service,
             execution_journal_service=self._journal_service,
             tracing_service=self._tracing_service,
@@ -391,6 +403,7 @@ class NativeFloodAgent:
             system_prompts=[prompt],
             tools_schema=self._specialist_registry.tools_schema(),
             tool_registry=self._specialist_registry,
+            tool_loader=self._specialist_tool_loader,
             checkpoint_service=self._checkpoint_service,
             execution_journal_service=self._journal_service,
             tracing_service=self._tracing_service,
@@ -399,20 +412,9 @@ class NativeFloodAgent:
         )
 
     @staticmethod
-    def _build_tool_descriptions(registry) -> str:
-        """从工具注册表动态生成工具描述列表。"""
-        if not registry:
-            return "- (无工具注册)"
-        lines = []
-        for tool in registry.all():
-            name = tool.name
-            desc = getattr(tool, "description", "") or ""
-            short = desc.split("。")[0].split(".")[0][:80] if desc else ""
-            if short:
-                lines.append(f"- `{name}`：{short}")
-            else:
-                lines.append(f"- `{name}`")
-        return "\n".join(lines)
+    def _build_tool_descriptions(registry, mode: str = "eager") -> str:
+        """从工具注册表生成紧凑工具目录；完整参数通过 GetTool 按需查看。"""
+        return compact_prompt_catalog(registry, mode=mode)
 
     def _init_tools(self) -> None:
         from floodmind.tools import (
@@ -894,6 +896,28 @@ class NativeFloodAgent:
         # ── Plugin 系统集成 ──
         self._load_plugins()
 
+        # Tool catalog 自省工具最后注册，确保能搜索到内置、MCP 与 plugin 工具。
+        self._register_tool_catalog_tools()
+
+    def _register_tool_catalog_tools(self) -> None:
+        """注册 SearchTools/GetTool：像 GetSkill 一样按需查看工具参数。"""
+        self._orchestrator_registry.register(make_search_tools_tool(
+            self._orchestrator_tool_loader,
+            self._orchestrator_registry,
+        ))
+        self._orchestrator_registry.register(make_get_tool_tool(
+            self._orchestrator_tool_loader,
+            self._orchestrator_registry,
+        ))
+        self._specialist_registry.register(make_search_tools_tool(
+            self._specialist_tool_loader,
+            self._specialist_registry,
+        ))
+        self._specialist_registry.register(make_get_tool_tool(
+            self._specialist_tool_loader,
+            self._specialist_registry,
+        ))
+
     def _load_plugins(self) -> None:
         """加载并注册 Plugin 提供的工具和 hooks。"""
         try:
@@ -935,12 +959,9 @@ class NativeFloodAgent:
     def _init_model_client(self) -> None:
         if self.llm_service is not None:
             # 兼容外部传入 LLM service 的旧路径（如 web_server 传入的 get_qwen_llm_service）
-            if hasattr(self.llm_service, "enable_reasoning") and self.llm_service.enable_reasoning:
-                thinking = True
-                self._orchestrator_extra_body = {"enable_thinking": True}
-            else:
-                thinking = False
-                self._orchestrator_extra_body = {}
+            thinking = bool(
+                hasattr(self.llm_service, "enable_reasoning") and self.llm_service.enable_reasoning
+            )
 
             self._model_client = ModelClient(
                 api_key=getattr(self.llm_service, "api_key", ""),
@@ -949,6 +970,7 @@ class NativeFloodAgent:
                 temperature=getattr(self.llm_service, "temperature", 0.3),
                 max_tokens=getattr(self.llm_service, "max_tokens", 4096),
                 enable_thinking=thinking,
+                provider=getattr(self.llm_service, "provider", ""),
             )
             return
 
@@ -961,10 +983,6 @@ class NativeFloodAgent:
             raise ValueError(f"未知的模型预设: {model_key}")
 
         enable_thinking = bool(self._enable_reasoning and preset.get("supports_reasoning"))
-        if enable_thinking:
-            self._orchestrator_extra_body = {"enable_thinking": True}
-        else:
-            self._orchestrator_extra_body = {}
 
         self._model_client = ModelClient.from_settings_with_preset(
             model_key=model_key,
@@ -1005,7 +1023,10 @@ class NativeFloodAgent:
         self._current_time_context = current_time_context
         self._session_env = session_env
 
-        tool_descriptions = self._build_tool_descriptions(self._orchestrator_registry)
+        tool_descriptions = self._build_tool_descriptions(
+            self._orchestrator_registry,
+            mode=self._tool_loading_config.mode,
+        )
 
         # Use agent-specific prompt if defined, otherwise split into three parts for cache reuse.
         agent_prompt = getattr(self._agent_info, "prompt", "") if self._agent_info else ""
@@ -1048,10 +1069,10 @@ class NativeFloodAgent:
             event_bus=self._event_bus,
             message_builder=self._message_builder,
             max_iterations=10000,
-            extra_body=self._orchestrator_extra_body,
             system_prompts=orchestrator_prompts,
             tools_schema=self._orchestrator_registry.tools_schema(),
             tool_registry=self._orchestrator_registry,
+            tool_loader=self._orchestrator_tool_loader,
             checkpoint_service=self._checkpoint_service,
             execution_journal_service=self._journal_service,
             tracing_service=self._tracing_service,
@@ -1069,6 +1090,7 @@ class NativeFloodAgent:
             system_prompts=specialist_prompts,
             tools_schema=self._specialist_registry.tools_schema(),
             tool_registry=self._specialist_registry,
+            tool_loader=self._specialist_tool_loader,
             checkpoint_service=self._checkpoint_service,
             execution_journal_service=self._journal_service,
             tracing_service=self._tracing_service,
@@ -1088,7 +1110,10 @@ class NativeFloodAgent:
         if agent_prompt:
             ctc = getattr(self, "_current_time_context", "")
             se = getattr(self, "_session_env", "")
-            tool_descriptions = self._build_tool_descriptions(self._orchestrator_registry)
+            tool_descriptions = self._build_tool_descriptions(
+                self._orchestrator_registry,
+                mode=self._tool_loading_config.mode,
+            )
             merged = agent_prompt.format(
                 skill_catalog=self._skill_catalog,
                 current_time_context=ctc,
@@ -1098,7 +1123,10 @@ class NativeFloodAgent:
             )
             self._orchestrator_executor.system_prompts = [merged]
         else:
-            tool_descriptions = self._build_tool_descriptions(self._orchestrator_registry)
+            tool_descriptions = self._build_tool_descriptions(
+                self._orchestrator_registry,
+                mode=self._tool_loading_config.mode,
+            )
             new_global = self._build_stable_prompt(
                 skill_catalog=self._skill_catalog,
                 tool_descriptions=tool_descriptions,
@@ -1622,6 +1650,12 @@ class NativeFloodAgent:
                 attachments=list(parent_context.attachments),
                 output_dir=str(sandbox_ctx.outputs_dir),
                 upload_dir=str(sandbox_ctx.uploads_dir),
+                cwd=sub_cwd,
+                workspace_dir=str(sandbox_ctx.workspace_dir),
+                state_dir=parent_context.state_dir,
+                artifact_dir=str(sandbox_ctx.outputs_dir),
+                tmp_dir=parent_context.tmp_dir,
+                scripts_dir=parent_context.scripts_dir,
                 enable_reasoning=parent_context.enable_reasoning,
                 abort_check=parent_context.abort_check,
                 delegate_cwd=sub_cwd,
@@ -1662,6 +1696,7 @@ class NativeFloodAgent:
                 system_prompts=list(self._specialist_executor.system_prompts),
                 tools_schema=self._specialist_registry.tools_schema(),
                 tool_registry=self._specialist_registry,
+                tool_loader=self._specialist_tool_loader,
                 checkpoint_service=self._checkpoint_service,
                 execution_journal_service=self._journal_service,
                 tracing_service=self._tracing_service,
@@ -2158,10 +2193,15 @@ class NativeFloodAgent:
         return "\n".join(lines).strip()
 
     @staticmethod
-    def _set_session_context(session_id: str, output_dir: str, delegate_cwd: Optional[str] = None) -> None:
+    def _set_session_context(
+        session_id: str,
+        output_dir: str,
+        delegate_cwd: Optional[str] = None,
+        **kwargs,
+    ) -> None:
         try:
             from floodmind.tools.base_tools import set_session_context
-            set_session_context(session_id, output_dir, delegate_cwd=delegate_cwd)
+            set_session_context(session_id, output_dir, delegate_cwd=delegate_cwd, **kwargs)
         except Exception as e:
             logger.warning("Failed to set session context: %s", e)
 
@@ -2248,6 +2288,27 @@ class NativeFloodAgent:
             return upload_dir
         return ""
 
+    def _workspace_context_dirs(self, output_dir: str) -> Dict[str, str]:
+        """当前 run 注入 SESSION_CONTEXT 的 workspace/cwd/state 派生目录。"""
+        ws = self._effective_workspace()
+        if ws is None:
+            return {
+                "cwd": output_dir,
+                "workspace_dir": output_dir,
+                "state_dir": "",
+                "artifact_dir": output_dir,
+                "tmp_dir": "",
+                "scripts_dir": "",
+            }
+        return {
+            "cwd": str(ws.default_cwd),
+            "workspace_dir": str(ws.workspace_dir),
+            "state_dir": str(ws.state_dir or ""),
+            "artifact_dir": str(ws.artifact_dir or output_dir),
+            "tmp_dir": str(ws.tmp_dir or ""),
+            "scripts_dir": str(ws.scripts_dir or ""),
+        }
+
     def stream(
         self,
         user_input: str,
@@ -2282,6 +2343,8 @@ class NativeFloodAgent:
             result_holder: Dict[str, Any] = {}
 
             def _run_loop() -> None:
+                # 提前取出，保证 finally 恢复时变量一定存在
+                saved_thinking = self._model_client.enable_thinking
                 try:
                     logger.info("[RUN_LOOP] === _run_loop started, session=%s ===", self.session_id)
 
@@ -2297,9 +2360,16 @@ class NativeFloodAgent:
 
                     output_dir = self._get_output_dir(effective_session_id)
                     upload_dir = self._get_upload_dir(effective_session_id)
-                    self._set_session_context(effective_session_id, output_dir)
+                    workspace_dirs = self._workspace_context_dirs(output_dir)
+                    self._set_session_context(effective_session_id, output_dir, **workspace_dirs)
 
-                    self._artifact_watcher = ArtifactWatcher(output_dir=output_dir, upload_dir=upload_dir)
+                    artifact_dir = workspace_dirs.get("artifact_dir", "") or output_dir
+                    ignore_managed = Path(artifact_dir).resolve() == Path(output_dir).resolve()
+                    self._artifact_watcher = ArtifactWatcher(
+                        output_dir=artifact_dir,
+                        upload_dir=upload_dir,
+                        ignore_managed_dirs=ignore_managed,
+                    )
                     self._artifact_watcher.take_snapshot()
 
                     context = RunContext(
@@ -2308,6 +2378,12 @@ class NativeFloodAgent:
                         attachments=attachments or [],
                         output_dir=output_dir,
                         upload_dir=upload_dir,
+                        cwd=workspace_dirs.get("cwd", ""),
+                        workspace_dir=workspace_dirs.get("workspace_dir", ""),
+                        state_dir=workspace_dirs.get("state_dir", ""),
+                        artifact_dir=workspace_dirs.get("artifact_dir", ""),
+                        tmp_dir=workspace_dirs.get("tmp_dir", ""),
+                        scripts_dir=workspace_dirs.get("scripts_dir", ""),
                         enable_reasoning=enable_reasoning,
                         abort_check=None,
                     )
@@ -2387,11 +2463,8 @@ class NativeFloodAgent:
                         memory_messages=memory_messages,
                     )
 
-                    saved_extra = getattr(self._orchestrator_executor, "extra_body", None)
-                    if enable_reasoning:
-                        self._orchestrator_executor.extra_body = {"enable_thinking": True}
-                    else:
-                        self._orchestrator_executor.extra_body = {}
+                    # 思考开关只翻语义位——厂商方言由 model_client.pipeline 翻译
+                    self._model_client.enable_thinking = bool(enable_reasoning)
 
                     self._event_bus.set_queue(q)
 
@@ -2421,8 +2494,7 @@ class NativeFloodAgent:
                         q.put({"type": "error", "content": error_str})
                 finally:
                     self._current_run_context = None
-                    if saved_extra is not None:
-                        self._orchestrator_executor.extra_body = saved_extra
+                    self._model_client.enable_thinking = saved_thinking
                     try:
                         from floodmind.agent.runtime.services.ask_service import get_ask_service
                         get_ask_service().clear_emit_fn(session_id=effective_session_id)

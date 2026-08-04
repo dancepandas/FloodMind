@@ -1,9 +1,18 @@
 """FloodMind TUI — FloodMindClient 单元测试"""
 
 import json
+import sys
 from unittest.mock import MagicMock, patch
 
 import pytest
+
+
+class TestFloodMindClientImport:
+    def test_web_client_import_does_not_import_textual(self):
+        sys.modules.pop("textual", None)
+        from floodmind.tui.web_client import FloodMindClient
+        assert FloodMindClient is not None
+        assert "textual" not in sys.modules
 
 
 class TestFloodMindClientInit:

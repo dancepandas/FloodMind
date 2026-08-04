@@ -78,6 +78,25 @@ class TestResolveModel:
         with patch.dict(os.environ, {"FLOODMIND_API_KEY": "sk-env"}, clear=False):
             assert resolve_model().api_key == "sk-env"
 
+    def test_provider_env_fallback_via_registry(self):
+        """provider 未配 api_key 时，回退到 PROVIDER_DEFS 声明的服务商环境变量（如 MINIMAX_API_KEY）。"""
+        cfg = {
+            "providers": {
+                "minimax": {
+                    "base_url": "https://api.minimaxi.com/v1",
+                    "models": [{"id": "MiniMax-M3", "context_window": 1000000}],
+                }
+            }
+        }
+        env = {k: v for k, v in os.environ.items() if k != "FLOODMIND_API_KEY"}
+        env["MINIMAX_API_KEY"] = "sk-mm"
+        with patch("floodmind.config.model_resolver.get_config", return_value=cfg):
+            with patch.dict(os.environ, env, clear=True):
+                rm = resolve_model()
+        assert rm.provider == "minimax"
+        assert rm.api_key == "sk-mm"
+        assert rm.context_window == 1000000
+
     def test_unknown_model_key_falls_back(self):
         """未知 model_key → 回退到 catalog 第一个（不抛错）。"""
         rm = resolve_model(model_key="does-not-exist")

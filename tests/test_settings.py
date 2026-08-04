@@ -27,23 +27,45 @@ class TestConfigLoading:
 
 
 class TestModelConfig:
+    """门面行为用固定 catalog 断言——不依赖开发者本机的 ~/.floodmind/settings.json。"""
+
+    _TEST_CFG = {
+        "providers": {
+            "dashscope": {
+                "base_url": "https://x/v1",
+                "api_key": "sk",
+                "models": [
+                    {"id": "deepseek-v4-flash", "context_window": 65536},
+                    {"id": "qwen3.6-plus", "context_window": 32768},
+                ],
+            }
+        }
+    }
+
+    def _patched(self):
+        return patch(
+            "floodmind.config.model_resolver.get_config",
+            return_value=self._TEST_CFG,
+        )
+
     def test_model_name_default(self):
-        """默认激活模型 = catalog 第一个（deepseek-v4-flash）。"""
-        cfg = ModelConfig(get_config())
-        assert cfg.model_name == "deepseek-v4-flash"
+        """默认激活模型 = catalog 第一个。"""
+        with self._patched():
+            cfg = ModelConfig({})
+            assert cfg.model_name == "deepseek-v4-flash"
 
     def test_context_window_from_model(self):
         """记忆窗口取自激活模型，不再来自 agent 段。"""
-        cfg = ModelConfig(get_config())
-        assert cfg.context_window == 65536
+        with self._patched():
+            cfg = ModelConfig({})
+            assert cfg.context_window == 65536
 
-    @patch.dict(os.environ, {"FLOODMIND_MODEL": "qwen3.6-plus"}, clear=False)
     def test_env_model_override(self):
-        from floodmind.config.settings import reload_config
-        reload_config()
-        cfg = ModelConfig(get_config())
-        assert cfg.model_name == "qwen3.6-plus"
-        assert cfg.context_window == 32768  # qwen3.6-plus 自带窗口
+        with self._patched():
+            with patch.dict(os.environ, {"FLOODMIND_MODEL": "qwen3.6-plus"}, clear=False):
+                cfg = ModelConfig({})
+                assert cfg.model_name == "qwen3.6-plus"
+                assert cfg.context_window == 32768  # qwen3.6-plus 自带窗口
 
 
 class TestAgentConfig:

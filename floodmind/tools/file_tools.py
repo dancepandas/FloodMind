@@ -26,7 +26,7 @@ from floodmind.tools.agent_tool import (
     make_read_path_permission_fn,
     resolve_tool_path,
 )
-from floodmind.agent.runtime.contracts.permissions import ToolPermissionPolicy
+from floodmind.agent.runtime.contracts.permissions import PermissionBehavior, PermissionDecision, ToolPermissionPolicy
 
 from floodmind.tools.base_tools import (
     _finalize_tool_output,
@@ -49,24 +49,40 @@ _BINARY_EXTENSIONS = frozenset({
 })
 
 
-def _get_search_root(path: str) -> Path:
+def _get_search_root(path: str) -> tuple[Optional[Path], str]:
     if path and path.strip():
-        resolved = resolve_tool_path(path.strip(), access="read").resolved
-        if resolved.exists() and resolved.is_dir():
-            return resolved
-    output_dir = SESSION_CONTEXT.get("output_dir")
-    if output_dir:
-        p = Path(output_dir)
-        if p.exists():
-            return p
-    return _PROJECT_ROOT
+        path_result = resolve_tool_path(path.strip(), access="read")
+        if not path_result.allowed:
+            return None, path_result.reason or f"搜索根目录不允许访问: {path}"
+        resolved = path_result.resolved
+        if not resolved.exists():
+            return None, f"搜索根目录不存在: {resolved}"
+        if not resolved.is_dir():
+            return None, f"搜索根路径不是目录: {resolved}"
+        return resolved, ""
+
+    cwd = SESSION_CONTEXT.get("cwd")
+    if cwd:
+        p = Path(cwd).resolve()
+        if p.exists() and p.is_dir():
+            return p, ""
+        return None, f"当前 workspace cwd 不存在或不是目录: {p}"
+
+    workspace_dir = SESSION_CONTEXT.get("workspace_dir")
+    if workspace_dir:
+        p = Path(workspace_dir).resolve()
+        if p.exists() and p.is_dir():
+            return p, ""
+        return None, f"当前 workspace_dir 不存在或不是目录: {p}"
+
+    return None, "缺少 workspace cwd，无法确定默认搜索根。请在工作区内启动 SDK，或显式传入已授权的 path。"
 
 
 # ── Glob ──────────────────────────────────────────────────────────────────
 
 class GlobInput(BaseModel):
     pattern: str = Field(description="[必填] Glob 模式，如 **/*.xlsx, output_*.json")
-    path: str = Field(default="", description="[可选] 搜索根目录，默认当前会话输出目录")
+    path: str = Field(default="", description="[可选] 搜索根目录：相对当前 workspace 的目录，或已授权 roots 内的绝对目录；默认 workspace cwd")
 
 
 def _glob_with_rg(search_root: Path, pattern: str) -> List[Path]:
@@ -123,7 +139,9 @@ def _impl_glob(pattern: str, path: str = "") -> str:
         path = parsed.get("path", path)
 
     pattern = str(pattern).strip() or "**/*"
-    search_root = _get_search_root(path)
+    search_root, root_error = _get_search_root(path)
+    if root_error or search_root is None:
+        return _finalize_tool_output("Glob", f"搜索文件失败：{root_error}", pattern=pattern, path=path)
 
     try:
         matched = _glob_with_rg(search_root, pattern)
@@ -166,7 +184,8 @@ def _impl_glob(pattern: str, path: str = "") -> str:
 Glob_tool = build_agent_tool(
     name="Glob",
     description=(
-        "搜索文件。[必填] pattern: Glob 模式匹配文件名，如 **/*.xlsx。[可选] path: 搜索根目录（绝对路径），默认当前会话输出目录。"
+        "搜索文件。[必填] pattern: Glob 模式匹配文件名，如 **/*.xlsx。"
+        "[可选] path: 搜索根目录，相对当前 workspace，或已授权 roots 内的绝对路径；默认 workspace cwd。"
         "结果按修改时间倒序排列，最多返回 100 条。"
     ),
     args_schema=GlobInput,
@@ -174,8 +193,8 @@ Glob_tool = build_agent_tool(
     is_readonly=True,
     is_destructive=False,
     is_concurrency_safe=True,
-    check_permissions_fn=make_readonly_permission_fn(),
-    permission_policy=ToolPermissionPolicy(policy_type="readonly"),
+    check_permissions_fn=make_read_path_permission_fn("path"),
+    permission_policy=ToolPermissionPolicy(policy_type="read_path", path_field="path"),
 )
 
 
@@ -183,7 +202,7 @@ Glob_tool = build_agent_tool(
 
 class GrepInput(BaseModel):
     pattern: str = Field(description="[必填] 正则表达式模式，用于搜索文件内容")
-    path: str = Field(default="", description="[可选] 搜索根目录（绝对路径），默认当前会话输出目录")
+    path: str = Field(default="", description="[可选] 搜索根目录：相对当前 workspace 的目录，或已授权 roots 内的绝对目录；默认 workspace cwd")
     include: str = Field(default="", description="[可选] 文件过滤模式，如 *.{py,md,json}")
     context: int = Field(default=0, description="[可选] 匹配行前后上下文行数")
     max_results: int = Field(default=50, description="[可选] 最大返回结果数量，默认 50，最大 200")
@@ -346,7 +365,9 @@ def _impl_grep(pattern: str = "", path: str = "", include: str = "", context: in
     except (TypeError, ValueError):
         context = 0
 
-    search_root = _get_search_root(path)
+    search_root, root_error = _get_search_root(path)
+    if root_error or search_root is None:
+        return _finalize_tool_output("Grep", f"搜索内容失败：{root_error}", pattern=pattern, path=path)
 
     try:
         matches = _grep_with_rg(pattern, search_root, include, context, max_results)
@@ -394,7 +415,8 @@ def _impl_grep(pattern: str = "", path: str = "", include: str = "", context: in
 Grep_tool = build_agent_tool(
     name="Grep",
     description=(
-        "搜索文件内容。[必填] pattern: 正则表达式模式。[可选] path: 搜索根目录（绝对路径），默认当前会话输出目录。"
+        "搜索文件内容。[必填] pattern: 正则表达式模式。"
+        "[可选] path: 搜索根目录，相对当前 workspace，或已授权 roots 内的绝对路径；默认 workspace cwd。"
         "[可选] include: 文件过滤模式如 *.{py,md,json}。[可选] context: 上下文行数。[可选] max_results: 最大返回数量。"
     ),
     args_schema=GrepInput,
@@ -402,15 +424,15 @@ Grep_tool = build_agent_tool(
     is_readonly=True,
     is_destructive=False,
     is_concurrency_safe=True,
-    check_permissions_fn=make_readonly_permission_fn(),
-    permission_policy=ToolPermissionPolicy(policy_type="readonly"),
+    check_permissions_fn=make_read_path_permission_fn("path"),
+    permission_policy=ToolPermissionPolicy(policy_type="read_path", path_field="path"),
 )
 
 
 # ── Read ──────────────────────────────────────────────────────────────────
 
 class ReadInput(BaseModel):
-    file_path: str = Field(description="[必填] 文件绝对路径，如 D:/project/data/result.py")
+    file_path: str = Field(description="[必填] 文件路径：相对当前 workspace，或已授权 roots 内的绝对路径")
     offset: int = Field(default=1, description="[可选] 起始行号（从 1 开始），默认 1")
     limit: int = Field(default=2000, description="[可选] 最大读取行数，默认 2000，最大 10000")
 
@@ -427,10 +449,10 @@ def _impl_read(file_path: str = "", offset: int = 1, limit: int = 2000) -> str:
         return _finalize_tool_output("Read", "错误：file_path 参数不能为空", file_path=file_path)
 
     path_result = resolve_tool_path(file_path, access="read")
-    if path_result.source == "no_context_rejected":
+    if not path_result.allowed:
         return _finalize_tool_output(
             "Read",
-            "错误：无会话上下文时相对路径读取被拒绝。请提供绝对路径或文件名。",
+            f"错误：{path_result.reason or '路径不允许读取'}",
             file_path=file_path,
         )
     resolved = path_result.resolved
@@ -511,7 +533,7 @@ def _impl_read(file_path: str = "", offset: int = 1, limit: int = 2000) -> str:
 Read_tool = build_agent_tool(
     name="Read",
     description=(
-        "读取文本文件。[必填] file_path: 文件绝对路径。[可选] offset: 起始行号（从1开始）。[可选] limit: 最大读取行数。"
+        "读取文本文件。[必填] file_path: 文件路径，相对当前 workspace，或已授权 roots 内的绝对路径。[可选] offset: 起始行号（从1开始）。[可选] limit: 最大读取行数。"
         "二进制文件（.xlsx, .docx, .pdf, .png 等）会返回提示信息。"
     ),
     args_schema=ReadInput,
@@ -527,7 +549,7 @@ Read_tool = build_agent_tool(
 # ── Write ─────────────────────────────────────────────────────────────────
 
 class WriteInput(BaseModel):
-    file_path: str = Field(description="[必填] 文件绝对路径，如 D:/project/data/result.py")
+    file_path: str = Field(description="[必填] 文件路径：相对当前 workspace，或已授权 roots 内的绝对路径")
     content: str = Field(description="[必填] 文件内容")
     mode: str = Field(default="overwrite", description="[可选] 写入模式：overwrite（覆盖）或 append（追加），默认 overwrite")
     encoding: str = Field(default="utf-8", description="[可选] 文件编码，默认 utf-8")
@@ -560,10 +582,10 @@ def _impl_write(file_path: str = "", content: str = "", mode: str = "overwrite",
         )
 
     path_result = resolve_tool_path(file_path, access="write")
-    if path_result.source == "no_context_rejected":
+    if not path_result.allowed:
         return _finalize_tool_output(
             "Write",
-            "错误：请传入文件绝对路径，如 D:/project/data/result.py",
+            f"错误：{path_result.reason or '路径不允许写入'}",
             file_path=file_path,
             mode=mode,
         )
@@ -600,7 +622,7 @@ def _impl_write(file_path: str = "", content: str = "", mode: str = "overwrite",
 Write_tool = build_agent_tool(
     name="Write",
     description=(
-        "写入文本文件。[必填] file_path: 文件绝对路径，如 D:/project/data/result.py。[必填] content: 文件内容。"
+        "写入文本文件。[必填] file_path: 文件路径，相对当前 workspace，或已授权 roots 内的绝对路径。[必填] content: 文件内容。"
         "[可选] mode: 写入模式，overwrite（覆盖）或 append（追加），默认 overwrite。[可选] encoding: 文件编码，默认 utf-8。"
         "自动创建父目录。"
     ),
@@ -617,7 +639,7 @@ Write_tool = build_agent_tool(
 # ── Edit ──────────────────────────────────────────────────────────────────
 
 class EditInput(BaseModel):
-    file_path: str = Field(description="[必填] 文件绝对路径")
+    file_path: str = Field(description="[必填] 文件路径：相对当前 workspace，或已授权 roots 内的绝对路径")
     old_string: str = Field(description="[必填] 要查找并替换的精确字符串")
     new_string: str = Field(description="[必填] 替换后的字符串")
     replace_all: bool = Field(default=False, description="[可选] 是否替换所有匹配，默认 False（只替换第一个）")
@@ -645,10 +667,10 @@ def _impl_edit(file_path: str = "", old_string: str = "", new_string: str = "", 
         return _finalize_tool_output("Edit", "错误：old_string 参数不能为空", file_path=file_path)
 
     path_result = resolve_tool_path(file_path, access="write")
-    if path_result.source == "no_context_rejected":
+    if not path_result.allowed:
         return _finalize_tool_output(
             "Edit",
-            "错误：file_path 请传入文件绝对路径",
+            f"错误：{path_result.reason or '路径不允许写入'}",
             file_path=file_path,
         )
     target_file = path_result.resolved
@@ -726,7 +748,7 @@ def _impl_edit(file_path: str = "", old_string: str = "", new_string: str = "", 
 Edit_tool = build_agent_tool(
     name="Edit",
     description=(
-        "字符串替换编辑。[必填] file_path: 文件绝对路径。[必填] old_string: 要查找的精确字符串。[必填] new_string: 替换字符串。"
+        "字符串替换编辑。[必填] file_path: 文件路径，相对当前 workspace，或已授权 roots 内的绝对路径。[必填] old_string: 要查找的精确字符串。[必填] new_string: 替换字符串。"
         "[可选] replace_all: 是否替换所有匹配，默认 False（只替换第一个）。"
     ),
     args_schema=EditInput,
@@ -767,11 +789,15 @@ def _impl_apply_patch(file_path: str = "", patch: str = "") -> str:
     if not patch.strip():
         return _finalize_tool_output("ApplyPatch", "错误：patch 参数不能为空")
 
-    # Parse patch sections
+    # Parse and preflight all patch sections before mutating anything.
     sections = _parse_patch(patch)
     if not sections:
         return _finalize_tool_output("ApplyPatch",
             "错误：无法解析补丁格式。请使用 *** Begin Patch ... *** End Patch 格式")
+
+    preflight = _check_patch_permissions(sections)
+    if preflight.behavior != PermissionBehavior.ALLOW:
+        return _finalize_tool_output("ApplyPatch", f"权限拒绝：{preflight.reason}", patch=patch[:200])
 
     results = []
     for sec in sections:
@@ -826,10 +852,32 @@ def _parse_patch(patch_text: str) -> List[Dict[str, Any]]:
     return sections
 
 
+def _check_patch_permissions(sections: List[Dict[str, Any]]) -> PermissionDecision:
+    for sec in sections:
+        action = sec.get("action", "")
+        raw_path = str(sec.get("file_path", "")).strip()
+        if not raw_path:
+            return PermissionDecision(behavior=PermissionBehavior.DENY, reason="patch section 缺少 file_path")
+        path_result = resolve_tool_path(raw_path, access="write")
+        if not path_result.allowed:
+            return PermissionDecision(behavior=PermissionBehavior.DENY, reason=path_result.reason or f"路径不允许: {raw_path}")
+        if action in ("delete",):
+            return PermissionDecision(behavior=PermissionBehavior.ASK, reason=f"ApplyPatch 包含删除操作: {raw_path}")
+        move_to = str(sec.get("move_to", "")).strip()
+        if move_to:
+            move_result = resolve_tool_path(move_to, access="write")
+            if not move_result.allowed:
+                return PermissionDecision(behavior=PermissionBehavior.DENY, reason=move_result.reason or f"移动目标路径不允许: {move_to}")
+            return PermissionDecision(behavior=PermissionBehavior.ASK, reason=f"ApplyPatch 包含移动操作: {raw_path} -> {move_to}")
+    return PermissionDecision(behavior=PermissionBehavior.ALLOW)
+
+
 def _apply_section(sec: Dict[str, Any]) -> str:
     action = sec["action"]
     raw_path = sec["file_path"]
     path_result = resolve_tool_path(raw_path, access="write")
+    if not path_result.allowed:
+        raise PermissionError(path_result.reason or f"路径不允许: {raw_path}")
     target = path_result.resolved
     move_to = sec.get("move_to", "")
 
@@ -868,6 +916,8 @@ def _apply_section(sec: Dict[str, Any]) -> str:
 
         if move_to:
             move_result = resolve_tool_path(move_to, access="write")
+            if not move_result.allowed:
+                raise PermissionError(move_result.reason or f"移动目标路径不允许: {move_to}")
             new_target = move_result.resolved
             new_target.parent.mkdir(parents=True, exist_ok=True)
             shutil.move(str(target), str(new_target))
@@ -930,6 +980,16 @@ def _apply_hunks(original_lines: List[str], hunks: List[Dict[str, Any]]) -> List
     return result
 
 
+def _check_apply_patch_permissions(tool_input: dict) -> PermissionDecision:
+    patch = str(tool_input.get("patch", ""))
+    if not patch.strip():
+        return PermissionDecision(behavior=PermissionBehavior.ALLOW)
+    sections = _parse_patch(patch)
+    if not sections:
+        return PermissionDecision(behavior=PermissionBehavior.DENY, reason="无法解析 ApplyPatch 补丁格式")
+    return _check_patch_permissions(sections)
+
+
 ApplyPatch_tool = build_agent_tool(
     name="ApplyPatch",
     description=(
@@ -942,8 +1002,8 @@ ApplyPatch_tool = build_agent_tool(
     is_readonly=False,
     is_destructive=True,
     is_concurrency_safe=False,
-    check_permissions_fn=make_write_permission_fn("file_path"),
-    permission_policy=ToolPermissionPolicy(policy_type="write", path_field="file_path"),
+    check_permissions_fn=_check_apply_patch_permissions,
+    permission_policy=ToolPermissionPolicy(policy_type="patch"),
 )
 
 

@@ -269,6 +269,13 @@ def get_agents_md_path(scope: str = "project") -> Path:
         agents_dir = home / ".config" / "floodmind"
         agents_dir.mkdir(parents=True, exist_ok=True)
         return agents_dir / "AGENTS.md"
+    try:
+        from floodmind.agent.runtime.services.workspace_service import get_workspace
+        ws = get_workspace()
+        if ws is not None and getattr(ws, "is_folder_first", False):
+            return ws.workspace_dir / "AGENTS.md"
+    except Exception:
+        pass
     return _PROJECT_ROOT / "AGENTS.md"
 
 

@@ -1,65 +1,74 @@
-"""
-Provider 注册和管理。
+"""Provider pipeline 注册与自动路由。
 
-通过 protocol 字段或 base_url 自动推断使用哪个 Provider，也支持显式指定。
+``route_pipeline()`` 按打分选最优 pipeline：
+base_url 精确(100) > provider id(60) > 模型名前缀(40) > OpenAI 兜底。
+
+- **连线方言看 base_url/provider**（请求怎么发）
+- **模型个性看模型名**（pipeline 内部按 model 分支）
+- 仅模型名前缀命中（如聚合网关托管 ``MiniMax/xxx``）→ ``conservative=True``：
+  解析适配全部启用，请求适配退化为标准 OpenAI 行为，避免网关不认厂商方言参数。
+
+新增厂商：实现一个 ProviderPipeline 子类并加入 ``_PIPELINES`` 即可。
 """
 
 from typing import Optional
 
-from .base import Provider
-from .openai_compatible import OpenAICompatibleProvider
+from .base import ProviderPipeline, StreamState
+from .dashscope import DashScopePipeline
+from .deepseek import DeepSeekPipeline
+from .kimi import KimiPipeline
+from .minimax import MiniMaxPipeline
+from .openai_compatible import OpenAICompatiblePipeline
 from .usage import TokenUsage
 
-__all__ = ["Provider", "TokenUsage", "get_provider"]
+__all__ = [
+    "ProviderPipeline",
+    "StreamState",
+    "TokenUsage",
+    "OpenAICompatiblePipeline",
+    "DashScopePipeline",
+    "DeepSeekPipeline",
+    "KimiPipeline",
+    "MiniMaxPipeline",
+    "route_pipeline",
+]
+
+# 专属 pipeline 注册表（打分制，顺序无关）
+_PIPELINES = [
+    DashScopePipeline,
+    DeepSeekPipeline,
+    KimiPipeline,
+    MiniMaxPipeline,
+]
+
+# 模型名前缀命中的分数阈值：≤ 此分即视为「连线方言未知」，请求适配保守化
+_CONSERVATIVE_THRESHOLD = 40
 
 
-# Provider 注册表：protocol 名 → Provider 类
-# 新增 provider 只需在此注册即可
-_PROVIDER_REGISTRY = {
-    "openai-compatible": OpenAICompatibleProvider,
-    # 未来扩展：
-    # "anthropic-messages": AnthropicProvider,
-    # "google-gemini": GoogleProvider,
-    # "bedrock-converse": BedrockProvider,
-}
-
-
-def get_provider(
+def route_pipeline(
+    provider_id: Optional[str] = None,
+    model_id: Optional[str] = None,
     base_url: Optional[str] = None,
-    provider_name: Optional[str] = None,
-    protocol: Optional[str] = None,
-) -> Provider:
-    """
-    获取对应的 Provider 实例。
+) -> ProviderPipeline:
+    """按 provider id / 模型名 / base_url 自动路由到最佳 pipeline。"""
+    provider_id = provider_id or ""
+    model_id = model_id or ""
+    base_url = base_url or ""
 
-    优先级：protocol 显式指定 > provider_name 推断 > base_url 推断 > 默认 openai-compatible
+    best_cls = None
+    best_score = 0
+    for cls in _PIPELINES:
+        score = cls.match(provider_id, model_id, base_url)
+        if score > best_score:
+            best_cls, best_score = cls, score
 
-    Args:
-        base_url: API base URL，用于自动推断
-        provider_name: provider 配置名（如 "dashscope", "deepseek"）
-        protocol: 显式指定协议名（如 "openai-compatible", "anthropic-messages"）
-
-    Returns:
-        Provider 实例
-    """
-    # 1. protocol 显式指定（最高优先级）
-    if protocol:
-        provider_cls = _PROVIDER_REGISTRY.get(protocol)
-        if provider_cls:
-            return provider_cls()
-        raise ValueError(f"未知的 provider protocol: {protocol}，已知: {list(_PROVIDER_REGISTRY.keys())}")
-
-    # 2. provider_name 推断（未来可扩展）
-    if provider_name:
-        # 未来可根据 provider_name 推断 protocol
-        # 如 provider_name == "anthropic" 返回 AnthropicProvider()
-        pass
-
-    # 3. base_url 推断（未来可扩展）
-    if base_url:
-        # 未来可根据 base_url 关键词匹配特定 provider
-        # 如 "anthropic.com" 返回 AnthropicProvider()
-        pass
-
-    # 4. 默认使用 OpenAI 兼容 provider（覆盖绝大多数场景）
-    return OpenAICompatibleProvider()
+    if best_cls is None:
+        pipeline = OpenAICompatiblePipeline()
+    else:
+        pipeline = best_cls()
+        if best_score <= _CONSERVATIVE_THRESHOLD:
+            pipeline.conservative = True
+    pipeline.provider_id = provider_id
+    pipeline.model_id = model_id
+    pipeline.base_url = base_url
+    return pipeline

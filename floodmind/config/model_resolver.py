@@ -162,16 +162,25 @@ def resolve_model(
 
 def _build(pid: str, pdata: Dict[str, Any], m: Dict[str, Any]) -> ResolvedModel:
     """从目录条目构造 ResolvedModel（连接信息取自 provider，参数取自模型）。"""
-    # api_key：env 优先（FLOODMIND_API_KEY / DASHSCOPE_API_KEY），其次 provider 配置
+    from floodmind.config.provider_registry import PROVIDER_DEFS
+    pdef = PROVIDER_DEFS.get(pid, {})
+
+    # api_key：FLOODMIND_API_KEY 全局覆盖 > provider 配置 > PROVIDER_DEFS 声明的服务商 env
     api_key = os.getenv("FLOODMIND_API_KEY", "").strip()
     if not api_key:
         api_key = (pdata.get("api_key") or "").strip()
-    if not api_key and pid == "dashscope":
-        api_key = os.getenv("DASHSCOPE_API_KEY", "").strip()
+    if not api_key:
+        for env_var in pdef.get("env", []):
+            api_key = os.getenv(env_var, "").strip()
+            if api_key:
+                break
 
+    # base_url：provider 配置 > FLOODMIND_BASE_URL 覆盖 > PROVIDER_DEFS 默认地址
     base_url = (pdata.get("base_url") or "").strip()
     if not base_url:
         base_url = os.getenv("FLOODMIND_BASE_URL", "").strip()
+    if not base_url:
+        base_url = pdef.get("default_base_url", "")
 
     return ResolvedModel(
         provider=pid,

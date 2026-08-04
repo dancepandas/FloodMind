@@ -24,6 +24,7 @@ from floodmind.agent.native.types import ModelEvent
 from floodmind.tools.agent_tool import build_agent_tool, AgentTool
 from floodmind.skills.base import Skill, register_skill
 from floodmind.memory.dual_memory import DualMemory
+from floodmind.agent.runtime.contracts.workspace import Workspace
 
 
 # ---------------------------------------------------------------------------
@@ -97,9 +98,11 @@ class TestAgentCreation:
         agent = Agent(llm=llm, tools=sample_tools)
         registry = agent.raw._orchestrator_registry
         tool_names = [t.name for t in registry.all()]
-        assert len(registry.all()) == 2
+        assert len(registry.all()) == 4
         assert "Echo" in tool_names
         assert "Add" in tool_names
+        assert "SearchTools" in tool_names
+        assert "GetTool" in tool_names
 
     def test_create_with_system_prompt(self, llm):
         """自定义提示词。"""
@@ -120,6 +123,38 @@ class TestAgentCreation:
         agent = Agent(llm=llm)
         assert agent.raw.memory is not None
         assert agent.raw.memory.session_id == "sdk-agent"
+
+    def test_default_workspace_uses_current_cwd(self, llm, tmp_path, monkeypatch):
+        """SDK 默认以启动目录作为 folder-first workspace。"""
+        project = tmp_path / "project"
+        project.mkdir()
+        monkeypatch.chdir(project)
+
+        agent = Agent(llm=llm, session_id="sdk-default")
+        ws = agent.raw._effective_workspace()
+
+        assert ws is not None
+        assert ws.is_folder_first
+        assert ws.workspace_dir == project.resolve()
+        assert ws.default_cwd == project.resolve()
+        assert (project / ".floodmind" / "sessions").is_dir()
+        assert (project / ".floodmind" / "artifacts" / "sdk-default").is_dir()
+        assert (project / ".floodmind" / "tmp" / "sdk-default").is_dir()
+        assert (project / ".floodmind" / "scripts" / "sdk-default").is_dir()
+        assert (project / ".floodmind" / "sandboxes").is_dir()
+
+    def test_explicit_workspace_is_not_overridden(self, llm, tmp_path, monkeypatch):
+        """显式 workspace 仍保持最高优先级。"""
+        invocation = tmp_path / "invocation"
+        explicit_root = tmp_path / "explicit"
+        invocation.mkdir()
+        monkeypatch.chdir(invocation)
+        explicit = Workspace.from_folder(explicit_root, session_id="explicit").ensure()
+
+        agent = Agent(llm=llm, session_id="sdk-default", workspace=explicit)
+
+        assert agent.raw._effective_workspace() is explicit
+        assert agent.raw._effective_workspace().workspace_dir == explicit_root.resolve()
 
 
 # ---------------------------------------------------------------------------
@@ -142,7 +177,10 @@ class TestToolRegistration:
             description="A test tool",
         )
         agent = Agent(llm=llm, tools=[tool])
-        schemas = agent.raw._orchestrator_registry.tools_schema()
+        schemas = [
+            s for s in agent.raw._orchestrator_registry.tools_schema()
+            if s["function"]["name"] == "TestTool"
+        ]
         assert len(schemas) == 1
         schema = schemas[0]
         assert schema["type"] == "function"
@@ -170,7 +208,8 @@ class TestToolRegistration:
     def test_empty_tools(self, llm):
         """不传工具 — 零工具注册。"""
         agent = Agent(llm=llm)
-        assert len(agent.raw._orchestrator_registry.all()) == 0
+        names = agent.raw._orchestrator_registry.names()
+        assert names == ["SearchTools", "GetTool"]
 
 
 # ---------------------------------------------------------------------------
@@ -227,12 +266,19 @@ class TestAgentStream:
         """流式输出包含工具调用事件。"""
         from floodmind.agent.native.types import ToolCall
 
+        calls = {"count": 0}
+
         def tool_then_text(self, messages, **kwargs):
-            yield ModelEvent(type="token", content="Let me check...")
-            yield ModelEvent(
-                type="tool_call_done",
-                tool_call=ToolCall(id="tc1", name="Echo", arguments={"text": "hello"}),
-            )
+            calls["count"] += 1
+            if calls["count"] == 1:
+                yield ModelEvent(type="token", content="Let me check...")
+                yield ModelEvent(
+                    type="tool_call_done",
+                    tool_call=ToolCall(id="tc1", name="Echo", arguments={"text": "hello"}),
+                )
+                yield ModelEvent(type="done")
+                return
+            yield ModelEvent(type="token", content="Done")
             yield ModelEvent(type="done")
 
         with patch.object(ModelClient, "stream_chat", tool_then_text):
@@ -336,7 +382,7 @@ class TestEdgeCases:
         agent = Agent(llm=llm, tools=sample_tools)
         rep = repr(agent)
         assert "Agent" in rep
-        assert "tools=2" in rep
+        assert "tools=4" in rep
 
     def test_raw_property_access(self, llm):
         agent = Agent(llm=llm)
@@ -474,3 +520,69 @@ class TestSdkEnhancements:
         assert agent.raw._max_iterations == 7
         assert agent.raw._orchestrator_executor.max_iterations == 7
         assert agent.raw._specialist_executor.max_iterations == 7
+
+
+# ---------------------------------------------------------------------------
+# 10. SDK public exports / tool loading / provider routing
+# ---------------------------------------------------------------------------
+
+    def test_import_floodmind_does_not_import_legacy_web_or_tui(self):
+        import sys
+        for name in ("floodmind.server", "floodmind.tui", "flask", "textual"):
+            sys.modules.pop(name, None)
+
+        import floodmind
+
+        assert floodmind.Agent is Agent
+        assert "floodmind.server" not in sys.modules
+        assert "floodmind.tui" not in sys.modules
+        assert "flask" not in sys.modules
+        assert "textual" not in sys.modules
+
+    def test_top_level_exports_include_provider_and_tool_loading(self):
+        from floodmind import (
+            ProviderPipeline,
+            MiniMaxPipeline,
+            ToolLoadingConfig,
+            ToolLoader,
+            route_pipeline,
+        )
+
+        pipeline = route_pipeline("minimax", "MiniMax-M3", "https://api.minimaxi.com/v1")
+        assert isinstance(pipeline, ProviderPipeline)
+        assert isinstance(pipeline, MiniMaxPipeline)
+        assert ToolLoader(ToolLoadingConfig(mode="eager")).mode == "eager"
+
+    def test_route_pipeline_exposes_route_context(self):
+        from floodmind import route_pipeline
+
+        pipeline = route_pipeline("minimax", "MiniMax-M3", "https://api.minimaxi.com/v1")
+        assert pipeline.name == "minimax"
+        assert pipeline.provider_id == "minimax"
+        assert pipeline.model_id == "MiniMax-M3"
+        assert pipeline.base_url == "https://api.minimaxi.com/v1"
+
+    def test_agent_tool_loading_false_uses_eager_mode(self, llm, sample_tools):
+        agent = Agent(llm=llm, tools=sample_tools, tool_loading=False)
+        assert agent.raw._tool_loading_config.mode == "eager"
+        assert agent.raw._orchestrator_tool_loader.mode == "eager"
+
+    def test_agent_tool_loading_true_registers_catalog_tools(self, llm, sample_tools):
+        agent = Agent(llm=llm, tools=sample_tools, tool_loading=True)
+        names = agent.raw._orchestrator_registry.names()
+        assert agent.raw._tool_loading_config.mode == "progressive"
+        assert "SearchTools" in names
+        assert "GetTool" in names
+
+    def test_agent_accepts_tool_loading_config(self, llm, sample_tools):
+        from floodmind import ToolLoadingConfig
+
+        cfg = ToolLoadingConfig(
+            mode="progressive",
+            core_tools=["SearchTools", "GetTool"],
+            max_loaded_tools=3,
+        )
+        agent = Agent(llm=llm, tools=sample_tools, tool_loading=cfg)
+        assert agent.raw._tool_loading_config is cfg
+        assert agent.raw._orchestrator_tool_loader.config.max_loaded_tools == 3
+        assert agent.raw._specialist_tool_loader.config.core_tools == ["SearchTools", "GetTool"]

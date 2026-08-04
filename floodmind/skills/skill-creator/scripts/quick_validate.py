@@ -91,11 +91,11 @@ def validate_skill(skill_path):
         if len(compatibility) > 500:
             return False, f"Compatibility is too long ({len(compatibility)} characters). Maximum is 500 characters."
 
-    # body 行数软限制提示（对齐 base.py _SKILL_BODY_SOFT_LIMIT=500，超了不 fail，只提示精简）
+    # body 行数软限制提示（对齐 base.py _SKILL_BODY_SOFT_LIMIT=1500，超了不 fail，只提示精简）
     body_text = content[match.end():]
     body_lines = [l for l in body_text.split('\n') if l.strip()]
-    if len(body_lines) > 500:
-        return True, f"Skill is valid!（提示：body {len(body_lines)} 行超过 500 建议上限，建议把详细内容移至 references/）"
+    if len(body_lines) > 1500:
+        return True, f"Skill is valid!（提示：body {len(body_lines)} 行超过 1500 建议上限，建议把详细内容移至 references/）"
 
     return True, "Skill is valid!"
 

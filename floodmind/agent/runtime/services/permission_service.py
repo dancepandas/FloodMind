@@ -73,6 +73,17 @@ class PermissionService:
             re.compile(r'\bpowershell\s+-enc', re.IGNORECASE),
             re.compile(r'\bpwsh\s+-enc\b', re.IGNORECASE),
         ]
+        self._mutating_command_patterns = [
+            re.compile(r'(^|[^>])>{1,2}(?!\s*&)', re.IGNORECASE),
+            re.compile(r'\b(rm|del|rmdir|rd)\b', re.IGNORECASE),
+            re.compile(r'\b(mv|move)\b', re.IGNORECASE),
+            re.compile(r'\b(cp|copy|xcopy|robocopy)\b', re.IGNORECASE),
+            re.compile(r'\b(Set-Content|Out-File|Move-Item|Copy-Item|Remove-Item)\b', re.IGNORECASE),
+        ]
+        self._network_or_credential_command_patterns = [
+            re.compile(r'\b(curl|wget|Invoke-WebRequest|iwr)\b', re.IGNORECASE),
+            re.compile(r'\b(KEY|TOKEN|SECRET|PASSWORD|API_KEY)\b', re.IGNORECASE),
+        ]
         self._content_threat_patterns: List[tuple] = [
             ("prompt_injection", re.compile(r'忽略.{0,20}(之前|所有|上述|以上).{0,20}指令', re.IGNORECASE)),
             ("prompt_injection", re.compile(r'system\s*prompt\s*(override|覆盖|泄露)', re.IGNORECASE)),
@@ -96,7 +107,7 @@ class PermissionService:
         "network",  # 所有 network 类工具（子代理不能联网/爬虫）
     })
     _SUB_ALLOWED_POLICY_TYPES = frozenset({
-        "readonly", "read_path", "write", "exec", "internal",
+        "readonly", "read_path", "write", "delete", "move", "patch", "exec", "internal",
     })
     # 子代理禁止的 AGENTS.md 写入 etc. —— 通过 tool_name 匹配
     _SUB_DENIED_GLOBAL_STATE_TOOLS = frozenset({
@@ -191,7 +202,7 @@ class PermissionService:
     # 放行 readonly/read_path/ask(=exit_plan_mode)/非破坏性 internal。
     # 仅主代理持 mode，子代理恒 execution（由 _resolve_mode 保证）。
 
-    _PLANNING_DENIED_POLICY_TYPES = frozenset({"write", "exec", "state_write"})
+    _PLANNING_DENIED_POLICY_TYPES = frozenset({"write", "delete", "move", "patch", "exec", "state_write"})
 
     def _check_planning_mode_gate(
         self, request: PermissionRequest, policy_result: PermissionDecision
@@ -227,6 +238,15 @@ class PermissionService:
         if policy.policy_type == "write":
             return self._check_write_policy(normalized, policy.path_field, session_id)
 
+        if policy.policy_type == "delete":
+            return self._check_risky_path_policy(normalized, policy.path_field, session_id, "删除文件")
+
+        if policy.policy_type == "move":
+            return self._check_risky_path_policy(normalized, policy.path_field, session_id, "移动文件")
+
+        if policy.policy_type == "patch":
+            return PermissionDecision(behavior=PermissionBehavior.ALLOW)
+
         if policy.policy_type == "exec":
             return self._check_exec_policy(normalized, policy.command_field, policy.path_fields, session_id)
 
@@ -261,6 +281,24 @@ class PermissionService:
                 return PermissionDecision(
                     behavior=PermissionBehavior.DENY,
                     reason=f"检测到危险命令模式: {pattern.pattern}",
+                )
+        return PermissionDecision(behavior=PermissionBehavior.ALLOW)
+
+    def check_shell_command_risk(self, command: str) -> PermissionDecision:
+        danger = self.check_dangerous_command(command)
+        if danger.behavior == PermissionBehavior.DENY:
+            return danger
+        for pattern in self._mutating_command_patterns:
+            if pattern.search(command):
+                return PermissionDecision(
+                    behavior=PermissionBehavior.ASK,
+                    reason=f"Bash 命令包含明显文件副作用，需要用户确认: {pattern.pattern}",
+                )
+        for pattern in self._network_or_credential_command_patterns:
+            if pattern.search(command):
+                return PermissionDecision(
+                    behavior=PermissionBehavior.ASK,
+                    reason=f"Bash 命令可能涉及网络或凭证，需要用户确认: {pattern.pattern}",
                 )
         return PermissionDecision(behavior=PermissionBehavior.ALLOW)
 
@@ -362,9 +400,9 @@ class PermissionService:
     def _check_exec_policy(self, normalized: Dict[str, Any], command_field: str, path_fields: List[str], session_id: str = "") -> PermissionDecision:
         command = str(normalized.get(command_field, "")).strip() if command_field else ""
         if command:
-            danger = self.check_dangerous_command(command)
-            if danger.behavior == PermissionBehavior.DENY:
-                return danger
+            risk = self.check_shell_command_risk(command)
+            if risk.behavior != PermissionBehavior.ALLOW:
+                return risk
 
         if self._path_service is None:
             from floodmind.agent.runtime.services.path_service import get_path_service
@@ -377,6 +415,16 @@ class PermissionService:
                 if not result.allowed:
                     return PermissionDecision(behavior=PermissionBehavior.DENY, reason=result.reason)
         return PermissionDecision(behavior=PermissionBehavior.ALLOW)
+
+    def _check_risky_path_policy(self, normalized: Dict[str, Any], path_field: str, session_id: str, operation: str) -> PermissionDecision:
+        write_decision = self._check_write_policy(normalized, path_field, session_id)
+        if write_decision.behavior != PermissionBehavior.ALLOW:
+            return write_decision
+        raw_path = str(normalized.get(path_field, "")).strip()
+        reason = f"{operation}属于高风险文件操作"
+        if raw_path:
+            reason += f": {raw_path}"
+        return PermissionDecision(behavior=PermissionBehavior.ASK, reason=reason)
 
     def _check_skill_script_policy(self, normalized: Dict[str, Any]) -> PermissionDecision:
         from pathlib import Path as _Path

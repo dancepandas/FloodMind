@@ -12,7 +12,7 @@ from floodmind.agent.native.types import AgentResult, ModelEvent, RunContext, To
 
 
 class TestNativeAgentExecutor:
-    def _make_executor(self, model_client, tool_executor=None, tools_schema=None, tool_registry=None, max_iterations=5):
+    def _make_executor(self, model_client, tool_executor=None, tools_schema=None, tool_registry=None, tool_loader=None, max_iterations=5):
         if tool_executor is None:
             tool_executor = MagicMock()
         if tool_registry is None:
@@ -31,6 +31,7 @@ class TestNativeAgentExecutor:
             system_prompt="test prompt",
             tools_schema=tools_schema,
             tool_registry=tool_registry,
+            tool_loader=tool_loader,
         )
 
     def _make_context(self):
@@ -89,6 +90,49 @@ class TestNativeAgentExecutor:
 
         assert tool_executor.execute.called
         assert "Done" in result.final_output
+
+    def test_executor_appends_provider_assistant_snapshot_for_tool_calls(self):
+        """工具调用轮优先使用 ModelClient 给出的 provider 原生 assistant message。"""
+        mc = MagicMock(spec=ModelClient)
+        snapshot = {
+            "role": "assistant",
+            "content": "我来查天气",
+            "reasoning_content": "需要调用天气工具",
+            "reasoning_details": [{"type": "reasoning.text", "text": "需要调用天气工具"}],
+            "tool_calls": [{
+                "id": "t1",
+                "type": "function",
+                "function": {"name": "test_tool", "arguments": '{"key":"val"}'},
+            }],
+        }
+        mc.stream_chat.side_effect = [
+            [
+                ModelEvent(type="reasoning", content="需要调用天气工具"),
+                ModelEvent(
+                    type="tool_call_done",
+                    tool_call=ToolCall(id="t1", name="test_tool", arguments={"key": "val"}),
+                ),
+                ModelEvent(type="assistant_message_done", raw={"message": snapshot, "provider": "minimax"}),
+                ModelEvent(type="done"),
+            ],
+            [ModelEvent(type="token", content="Done."), ModelEvent(type="done")],
+        ]
+
+        from floodmind.agent.runtime.contracts.tools import ToolResult as NativeToolResult
+        tool_executor = MagicMock()
+        tool_executor.execute.return_value = NativeToolResult(
+            tool_call_id="t1", name="test_tool", content="tool output", status="completed"
+        )
+
+        executor = self._make_executor(
+            mc,
+            tool_executor=tool_executor,
+            tools_schema=[{"type": "function", "function": {"name": "test_tool"}}],
+        )
+        executor.run(self._make_context(), "call tool")
+
+        second_call_messages = mc.stream_chat.call_args_list[1].kwargs["messages"]
+        assert snapshot in second_call_messages
 
     def test_executor_hits_max_iterations(self):
         """Agent loop stops when max_iterations reached."""
@@ -229,6 +273,67 @@ class TestNativeAgentExecutor:
         # Consecutive failure (5) fires: stops before max_iterations
         assert tool_executor.execute.call_count < 10
         assert tool_executor.execute.call_count == 5
+    def test_progressive_loader_filters_request_tools_and_blocks_unloaded_call(self):
+        """progressive 模式只暴露 loaded tools，未加载工具不能直接执行。"""
+        from floodmind.agent.native.tool_loading import ToolLoader, ToolLoadingConfig
+        from floodmind.agent.runtime.contracts.tools import ToolSpec
+
+        read_spec = ToolSpec(
+            name="Read",
+            description="读取文件",
+            parameters={"type": "object", "properties": {"path": {"type": "string"}}, "required": ["path"]},
+            func=lambda **kw: "ok",
+        )
+        reg = MagicMock()
+        reg.get.side_effect = lambda name: read_spec if name == "Read" else None
+        reg.all.return_value = [read_spec]
+        reg.tools_schema.return_value = [read_spec.to_openai_tool()]
+
+        loader = ToolLoader(ToolLoadingConfig(mode="progressive", core_tools=[]))
+        mc = MagicMock(spec=ModelClient)
+        mc.stream_chat.return_value = [
+            ModelEvent(type="tool_call_done", tool_call=ToolCall(id="t1", name="Read", arguments={"path": "a.txt"})),
+            ModelEvent(type="done"),
+        ]
+        tool_executor = MagicMock()
+        executor = self._make_executor(
+            mc,
+            tool_executor=tool_executor,
+            tools_schema=[read_spec.to_openai_tool()],
+            tool_registry=reg,
+            tool_loader=loader,
+        )
+        result = executor.run(self._make_context(), "read file")
+
+        first_tools = mc.stream_chat.call_args.kwargs["tools"]
+        assert first_tools is None
+        tool_executor.execute.assert_not_called()
+        assert result.tool_results[0].status == "error"
+        assert "未加载" in result.tool_results[0].content
+
+    def test_progressive_loader_exposes_tool_after_get_tool_loads_it(self):
+        from floodmind.agent.native.tool_loading import ToolLoader, ToolLoadingConfig
+        from floodmind.agent.runtime.contracts.tools import ToolSpec
+
+        read_spec = ToolSpec(
+            name="Read",
+            description="读取文件",
+            parameters={"type": "object", "properties": {"path": {"type": "string"}}, "required": ["path"]},
+            func=lambda **kw: "ok",
+        )
+        reg = MagicMock()
+        reg.get.side_effect = lambda name: read_spec if name == "Read" else None
+        reg.all.return_value = [read_spec]
+        loader = ToolLoader(ToolLoadingConfig(mode="progressive", core_tools=[]))
+        loader.get_tool_detail(reg, "Read")
+
+        mc = MagicMock(spec=ModelClient)
+        mc.stream_chat.return_value = [ModelEvent(type="token", content="ok"), ModelEvent(type="done")]
+        executor = self._make_executor(mc, tool_registry=reg, tool_loader=loader)
+        executor.run(self._make_context(), "hello")
+
+        names = [t["function"]["name"] for t in mc.stream_chat.call_args.kwargs["tools"]]
+        assert names == ["Read"]
 
 
 class TestExecutorPlaceholderStates:

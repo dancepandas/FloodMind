@@ -40,21 +40,21 @@ def _debug_only(func):
 
 @checkpoints_bp.route('/api/sessions/<session_id>/checkpoints', methods=['GET'])
 def list_checkpoints_api(session_id: str):
-    from floodmind.agent.runtime.adapters.flask_checkpoint_api import handle_list_checkpoints
+    from floodmind.agent.runtime.adapters.checkpoint_api import handle_list_checkpoints
     result, status_code = handle_list_checkpoints(session_id, _checkpoints_base_dir())
     return jsonify(result), status_code
 
 
 @checkpoints_bp.route('/api/sessions/<session_id>/checkpoints/<checkpoint_id>', methods=['GET'])
 def get_checkpoint_manifest_api(session_id: str, checkpoint_id: str):
-    from floodmind.agent.runtime.adapters.flask_checkpoint_api import handle_get_checkpoint_manifest
+    from floodmind.agent.runtime.adapters.checkpoint_api import handle_get_checkpoint_manifest
     result, status_code = handle_get_checkpoint_manifest(session_id, checkpoint_id, _checkpoints_base_dir())
     return jsonify(result), status_code
 
 
 @checkpoints_bp.route('/api/sessions/<session_id>/checkpoints/<checkpoint_id>/rollback', methods=['POST'])
 def rollback_checkpoint_api(session_id: str, checkpoint_id: str):
-    from floodmind.agent.runtime.adapters.flask_checkpoint_api import handle_rollback_checkpoint
+    from floodmind.agent.runtime.adapters.checkpoint_api import handle_rollback_checkpoint
     result, status_code = handle_rollback_checkpoint(session_id, checkpoint_id, _checkpoints_base_dir())
     return jsonify(result), status_code
 
@@ -64,7 +64,7 @@ def rollback_checkpoint_api(session_id: str, checkpoint_id: str):
 @checkpoints_bp.route('/api/sessions/<session_id>/traces', methods=['GET'])
 @_debug_only
 def list_trace_events_api(session_id: str):
-    from floodmind.agent.runtime.adapters.flask_tracing_api import handle_list_trace_events
+    from floodmind.agent.runtime.adapters.tracing_api import handle_list_trace_events
     limit = request.args.get('limit', 200, type=int)
     result, status_code = handle_list_trace_events(session_id, _checkpoints_base_dir(), limit=limit)
     return jsonify(result), status_code
@@ -73,7 +73,7 @@ def list_trace_events_api(session_id: str):
 @checkpoints_bp.route('/api/sessions/<session_id>/traces/download', methods=['GET'])
 @_debug_only
 def download_trace_api(session_id: str):
-    from floodmind.agent.runtime.adapters.flask_tracing_api import handle_get_trace_file_path
+    from floodmind.agent.runtime.adapters.tracing_api import handle_get_trace_file_path
     try:
         path = handle_get_trace_file_path(session_id, _checkpoints_base_dir())
         if not path.exists():

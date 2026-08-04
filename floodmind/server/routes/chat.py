@@ -65,6 +65,7 @@ def _generate_session_title(message: str, model_key: str = "") -> str:
                 model_name=preset["model_name"],
                 base_url=resolve_base_url(preset),
                 temperature=0.2, max_tokens=60, enable_thinking=False,
+                provider=preset.get("provider", ""),
             )
         else:
             llm = ModelClient.from_settings(temperature=0.2, max_tokens=60, enable_thinking=False)

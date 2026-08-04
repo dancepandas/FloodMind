@@ -1,57 +1,55 @@
-# FloodMind 架构总览（知识图谱）v3
+# FloodMind 架构总览（SDK-first）v4.1
 
-> **更新日期**: 2026-07-14
-> **变更摘要**: 自 v2 (2026-07-04) 以来: workspace 实例属性修复（桌面端跨线程 contextvar 丢失）、Web 后端模块化拆分 (web_server.py → floodmind/server/)、SessionManager worktree 会话隔离、Chronos 外置为 MCP (→ contrib/)、_warmup_chronos 退化为 pass、file_utils 预览重构 (去 pandas)。
-> 详细评估见 [`ASSESSMENT.md`](./ASSESSMENT.md)。
+> **更新日期**: 2026-08-04
+> **变更摘要**: SDK v1.0.1；FloodMind 产品边界收敛为 Python SDK + 最小 `floodmind run`；folder-first Workspace / `.floodmind` 收纳落地；Checkpoint 改为 state-only（不复制 workspace 文件）；Web/TUI 进入 legacy adapter 隔离路径，不再作为核心架构入口。
+> 详细评估见 [`ASSESSMENT.md`](./ASSESSMENT.md)；CC 风格文件管理差距与改造方案见 [`CC_FILE_MANAGEMENT_GAP_ANALYSIS.md`](./CC_FILE_MANAGEMENT_GAP_ANALYSIS.md)。
 
 ## 1. 系统定位
 
-FloodMind 是一个**中文水文预报 AI Agent**：用户用自然语言下达预报任务，Agent 规划→调用工具/技能（读数据、跑模型、出图、写报告）→交付产物。底层是自研 native agent runtime（已移除 LangChain），上层是 Flask + React。
+FloodMind 是一个 **SDK-first 中文水文预报 AI Agent Runtime**：宿主系统通过 Python SDK 创建 `Agent`，注入 `ModelClient`、业务工具、Skill/MCP 能力和 `Workspace`，由 Agent 完成规划→调用工具/技能（读数据、跑模型、出图、写报告）→交付产物。Web/TUI 代码仅作为 legacy adapter 保留；新平台、桌面助手或服务端集成应直接嵌入 SDK。
 
 ## 2. 进程拓扑
 
 ```
 ┌──────────────────────────────────────────────────────────────────────┐
-│  floodmind serve / web                                               │
-│  ├─ web_server.py（入口：日志/SessionManager/create_app/waitress）      │
-│  └─ floodmind/server/（Flask 模块化）                                  │
-│     ├─ __init__.py            create_app() 工厂 + 注册蓝图             │
-│     ├─ routes/chat.py         POST /api/chat → pump 线程 → SSE/NDJSON │
-│     ├─ routes/sessions.py     会话 CRUD                               │
-│     ├─ routes/files.py        文件上传/产物                            │
-│     ├─ routes/models.py       模型配置接口                             │
-│     ├─ routes/memory.py       记忆读写接口                             │
-│     ├─ routes/permission.py   权限审批接口                             │
-│     ├─ routes/checkpoints.py  检查点接口                               │
-│     ├─ routes/tasks.py        定时任务接口                             │
-│     ├─ agent_factory.py       get_or_create_agent（配置漂移则重建）    │
-│     ├─ session_state.py       运行时配置 + 流控/中断标志               │
-│     ├─ sanitize.py            SSE 脱敏                                │
-│     ├─ config.py              常量 & 配置                             │
-│     └─ file_utils.py          文件工具 & 产物提取                      │
-├──────────────────────────────────────────────────────────────────────┤
-│  scheduler.py（独立轮询进程）                                         │
-│  └─ claim_due_tasks → _inject_workspace → agent.run()（非流式）        │
-├──────────────────────────────────────────────────────────────────────┤
-│  floodmind chat / tui  →  floodmind/cli/（进程内直接 agent.stream()）  │
-└──────────────────────────────────────────────────────────────────────┘
-                       ↕ 共享磁盘 ↕
-  data/sessions/<sid>/{memory/chat_history.json, outputs/, uploads/, journal/, checkpoints/, trace.jsonl, session.json}
-  data/scheduled_tasks.json   data/task_experience/tree_index.json
-  ~/.floodmind/{settings.json, SOUL.md, mcp.json, AGENTS.md}
+│  Python 宿主 / Desktop Assistant / Platform Service / floodmind run   │
+│                                                                      │
+│  from floodmind import Agent, ModelClient, Workspace, build_agent_tool │
+│    ├─ ModelClient → ProviderPipeline（厂商方言/流式 reasoning/usage）  │
+│    ├─ Workspace(folder_first) → <workspace>/.floodmind/*              │
+│    ├─ custom tools / MCP ToolSpec / Skill                             │
+│    └─ Agent.run() / Agent.stream() → 事件协议                         │
+└──────────────────────────────┬───────────────────────────────────────┘
+                               │
+┌──────────────────────────────▼───────────────────────────────────────┐
+│  NativeFloodAgent（advanced runtime，被 Agent SDK 封装）               │
+│    ├─ NativeAgentExecutor 状态机                                      │
+│    ├─ ToolExecutionService / PathService / PermissionService          │
+│    ├─ DualMemory / Journal / Checkpoint / Trace                       │
+│    ├─ SkillRegistry / SkillCurator                                    │
+│    └─ McpClientPool                                                   │
+└──────────────────────────────┬───────────────────────────────────────┘
+                               │
+        folder-first: <workspace>/.floodmind/{sessions,artifacts,tmp,scripts,sandboxes}
+        web legacy:   data/sessions/<sid>/{outputs,uploads,memory,journal,checkpoints,trace}
+
+Legacy adapter（迁移期保留，不属于 SDK 核心依赖）:
+  floodmind/server/ + web_server.py + web/React
+  floodmind/tui/ Textual
 ```
 
 ## 3. 六大子系统（更新后）
 
 | 子系统 | 位置 | 职责 | **v2 变更** |
 |---|---|---|---|
-| **Agent 执行核心** | `floodmind/agent/native/` | 状态机 executor + NativeFloodAgent（prompt 分层、工具注册、MCP/Skill 管理、委派、流式） | 新增 MCP 管理工具 (3 个)、Skill CRUD 工具 (5 个)；Chronos 迁出为 MCP 服务 (→ contrib/)；_warmup_chronos 退化为 pass |
-| **Runtime 服务** | `floodmind/agent/runtime/{contracts,services,adapters}/` | 工具执行/权限/询问/路径/检查点/日志/追踪/沙箱/工作区 | 新增 workspace 实例属性 (NativeFloodAgent/Agent.bind_workspace)，修复桌面端跨线程 contextvar 丢失 |
+| **SDK API** | `floodmind/__init__.py`, `floodmind/agent/api.py` | 顶层公共入口：`Agent` / `ModelClient` / `Workspace` / `build_agent_tool` / Provider Pipeline / MCP helpers | SDK-first 主入口；base install 不依赖 Web/TUI |
+| **Agent 执行核心** | `floodmind/agent/native/` | 状态机 executor + NativeFloodAgent（prompt 分层、工具注册、MCP/Skill 管理、委派、流式） | `Agent` 封装普通用法；`NativeFloodAgent` 为 advanced runtime |
+| **Runtime 服务** | `floodmind/agent/runtime/{contracts,services,adapters}/` | 工具执行/权限/询问/路径/检查点/日志/追踪/沙箱/工作区 | Harness 级 Workspace；folder-first cwd-first 路径解析；`.floodmind` 收纳；Checkpoint state-only，不复制 workspace 文件 |
 | **记忆与会话** | `floodmind/memory/` | DualMemory（扁平 _turns）+ SessionManager + session_store(SQLite) + task_experience | 删除 SimpleMemory、遗留压缩子系统 (b)；SessionManager 新增 git worktree 会话隔离 (create/remove/fork) |
 | **工具与技能** | `floodmind/tools/` + `floodmind/skills/` + `contrib/` | AgentTool↔ToolSpec 双抽象 + SkillRegistry 单例 + SkillCurator 生命周期 | **重写**: AgentTool.to_tool_spec() 唯一转换点；SkillRegistry 替代双 registry；Curator 整合；chronos 迁至 contrib/ |
 | **MCP 集成** | `floodmind/agent/mcp_client.py` | McpClientPool 单例 + build_mcp_tool_specs + 生命周期原语 | **重写**: 连接/注册解耦；list/disconnect 原语；Agent 工具暴露 |
-| **Web 后端** | `web_server.py` + `floodmind/server/` | 入口 + 模块化路由（chat/sessions/files/models/memory/permission/checkpoints/tasks）、agent 工厂、流控、脱敏 | 从单块 `web_server.py` 拆分为 factory/route/state；P0 修复（前端序列化、streaming flag、排队逻辑） |
-| **Web 前端** | `web/src/` | React SPA：useChatStream（SSE 消费）、消息块渲染、权限/产物 | 死组件清理（NotFound/CheckboxGroup/resumeSession） |
+| **Legacy Web Adapter** | `web_server.py` + `floodmind/server/` + `web/` | 旧 HTTP/React 适配层 | 迁移期保留；SDK 核心不得依赖 |
+| **Legacy TUI Adapter** | `floodmind/tui/` | 旧 Textual 终端界面 | 迁移期保留；命令行入口仅输出 legacy 提示 |
 
 ## 4. 核心调用图（一次用户轮次，更新后）
 
@@ -261,7 +259,7 @@ data/sessions/<sid>/
   ├─ outputs/                         Agent 产物
   ├─ uploads/                         用户上传
   ├─ journal/{turns.jsonl, full_results/}
-  ├─ checkpoints/<ckpt_id>/{state.json, files/}
+  ├─ checkpoints/<ckpt_id>/{state.json, manifest.json}   # state-only，不含 files/ 快照
   └─ trace.jsonl
 data/worktrees/<sid>-<branch>/         git worktree 会话隔离 (SessionManager)
 data/scheduled_tasks.json
@@ -272,6 +270,8 @@ skills/                               ⭐ Skill 写入根 (PROJECT_ROOT/skills)
   └─ <skill_name>/SKILL.md            CreateSkill 产出
 contrib/                              chronos 等已外置为 MCP 服务的脚本（迁移出 floodmind/skills/）
 ```
+
+Checkpoint 在 v1.0.1 中只保存 Agent runtime state：`state.json` 是 `AgentLoopState` 序列化，`manifest.json` 记录 checkpoint 元数据和父 checkpoint 链。它不复制 workspace 文件，也不承担文件回滚职责；产物通过 artifact/journal 记录引用，文件版本化或回滚如需支持应由独立 change journal / artifact versioning 能力承担。
 
 ## 13. 线程模型
 
@@ -309,7 +309,7 @@ contrib/                              chronos 等已外置为 MCP 服务的脚�
 | 技能发现 | `floodmind/skills/base.py` |
 | ⭐ 技能注册表 | `floodmind/skills/registry.py` (单例 SkillRegistry) |
 | ⭐ 技能策展 | `floodmind/skills/skill_curator.py` (SkillCurator + 巡检) |
-| Web 入口 | `web_server.py`（日志 + SessionManager + waitress） |
+| Web 入口 | `web_server.py`（legacy Flask 入口；core package 不依赖） |
 | Web 路由 | `floodmind/server/routes/{chat,sessions,files,models,memory,permission,checkpoints,tasks}.py` |
 | Web Agent 工厂 | `floodmind/server/agent_factory.py` (get_or_create_agent) |
 | Web 运行时状态 | `floodmind/server/session_state.py` (流控/中断标志/token 用量) |

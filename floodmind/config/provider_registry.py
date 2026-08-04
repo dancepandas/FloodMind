@@ -40,6 +40,11 @@ PROVIDER_DEFS: Dict[str, Dict[str, Any]] = {
         "env": ["DEEPSEEK_API_KEY"],
         "default_base_url": "https://api.deepseek.com",
     },
+    "minimax": {
+        "name": "MiniMax",
+        "env": ["MINIMAX_API_KEY"],
+        "default_base_url": "https://api.minimaxi.com/v1",
+    },
     "anthropic": {
         "name": "Anthropic",
         "env": ["ANTHROPIC_API_KEY"],
@@ -114,6 +119,11 @@ KNOWN_MODELS: Dict[str, List[str]] = {
     ],
     "deepseek": [
         "deepseek-chat", "deepseek-reasoner",
+    ],
+    "minimax": [
+        "MiniMax-M3",
+        "MiniMax-M2.7", "MiniMax-M2.7-highspeed",
+        "MiniMax-M2.5", "MiniMax-M2.5-highspeed",
     ],
     "anthropic": [
         "claude-sonnet-4-5", "claude-haiku-4-5",
@@ -274,6 +284,7 @@ def get_llm_client(provider_id: str = "", model_id: str = "", **kwargs):
         model_name=model_id,
         temperature=kwargs.get("temperature", rm.temperature),
         max_tokens=kwargs.get("max_tokens", rm.max_tokens),
+        provider=provider_id,
     )
     _client_cache[ck] = client
     logger.info("Created LLM client: %s/%s @ %s", provider_id, model_id, base_url)

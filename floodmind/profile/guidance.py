@@ -41,9 +41,7 @@ WORKFLOW_GUIDANCE = """## 任务规划与工作流
 6. 执行中发现规划不足（缺步骤/某步无需再做/需要拆分），用 update_plan 增删改步骤，不要重发整个 create_plan
 7. 自己（非委派）完成某个步骤后，可用 update_plan 标记该步 completed；否则系统会在产出文件时乐观推进
 8. 如需记录某步骤下的具体动作，可在 create_plan/update_plan 的 step 中写入 subtasks 字段
-9. 最终总结：已完成什么、生成的文件、还需什么
-
-注意：TodoWrite / TodoList 已移除，不要再使用。"""
+9. 最终总结：已完成什么、生成的文件、还需什么"""
 
 # ── 定时任务 ──
 

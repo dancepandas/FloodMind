@@ -21,11 +21,14 @@ _ARTIFACT_EXTENSIONS: Set[str] = {
 
 _IMAGE_EXTENSIONS: Set[str] = {".png", ".jpg", ".jpeg", ".webp"}
 
+_MANAGED_DIR_NAMES: Set[str] = {".floodmind"}
+
 
 class ArtifactWatcher:
-    def __init__(self, output_dir: str, upload_dir: str = ""):
+    def __init__(self, output_dir: str, upload_dir: str = "", *, ignore_managed_dirs: bool = True):
         self._output_dir = output_dir
         self._upload_dir = upload_dir
+        self._ignore_managed_dirs = ignore_managed_dirs
         self._snapshot: Set[str] = set()
         self._snapshot_time: float = 0.0
 
@@ -64,6 +67,8 @@ class ArtifactWatcher:
                 source_tool="",
                 verified=True,
                 metadata={
+                    "source": "artifact_dir_watcher",
+                    "relative_path": relative_path,
                     "size": file_path.stat().st_size,
                     "mtime": datetime.fromtimestamp(mtime).isoformat(),
                 },
@@ -74,6 +79,8 @@ class ArtifactWatcher:
         if not self._output_dir:
             return None
         target = Path(self._output_dir) / file_name
+        if self._ignore_managed_dirs and self._is_managed_path(target):
+            return None
         if not target.exists() or not target.is_file():
             return None
         ext = target.suffix.lower()
@@ -93,7 +100,9 @@ class ArtifactWatcher:
             return set()
         result = set()
         try:
-            for dirpath, _dirnames, filenames in os.walk(self._output_dir):
+            for dirpath, dirnames, filenames in os.walk(self._output_dir):
+                if self._ignore_managed_dirs:
+                    dirnames[:] = [d for d in dirnames if d not in _MANAGED_DIR_NAMES]
                 for filename in filenames:
                     full_path = os.path.join(dirpath, filename)
                     if os.path.isfile(full_path):
@@ -110,6 +119,13 @@ class ArtifactWatcher:
             return True
         except ValueError:
             return False
+
+    def _is_managed_path(self, path: Path) -> bool:
+        try:
+            rel = path.resolve().relative_to(Path(self._output_dir).resolve())
+        except ValueError:
+            return False
+        return any(part in _MANAGED_DIR_NAMES for part in rel.parts)
 
     @staticmethod
     def _now() -> float:

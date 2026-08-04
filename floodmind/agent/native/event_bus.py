@@ -167,11 +167,19 @@ class EventBus:
 
     def emit_context_compress_start(self) -> None:
         """发送上下文压缩开始事件"""
-        self.emit({"type": "context_compress_start", "content": "正在压缩历史对话..."})
+        self.emit_compaction_start(reason="auto")
 
     def emit_context_compress_done(self, summary: str) -> None:
         """发送上下文压缩完成事件，附带结构化摘要"""
-        self.emit({"type": "context_compress_done", "content": summary})
+        self.emit_compaction_end(summary_preview=summary)
+
+    def emit_compaction_start(self, reason: str = "auto") -> None:
+        """上下文压缩开始事件（OpenCode-compatible alias）。"""
+        self.emit({"type": "context_compress_start", "content": "正在压缩历史对话...", "reason": reason})
+
+    def emit_compaction_end(self, summary_preview: str = "") -> None:
+        """上下文压缩完成事件（OpenCode-compatible alias）。"""
+        self.emit({"type": "context_compress_done", "content": summary_preview, "summary_preview": summary_preview[:200]})
 
     def emit_token_usage(self, prompt_tokens: int = 0, completion_tokens: int = 0, total_tokens: int = 0) -> None:
         """发送 token 用量统计事件"""
@@ -321,10 +329,16 @@ class StepEventBus:
         self.emit(event)
 
     def emit_context_compress_start(self) -> None:
-        self.emit({"type": "context_compress_start", "content": "正在压缩历史对话..."})
+        self.emit_compaction_start(reason="auto")
 
     def emit_context_compress_done(self, summary: str) -> None:
-        self.emit({"type": "context_compress_done", "content": summary})
+        self.emit_compaction_end(summary_preview=summary)
+
+    def emit_compaction_start(self, reason: str = "auto") -> None:
+        self.emit({"type": "context_compress_start", "content": "正在压缩历史对话...", "reason": reason})
+
+    def emit_compaction_end(self, summary_preview: str = "") -> None:
+        self.emit({"type": "context_compress_done", "content": summary_preview, "summary_preview": summary_preview[:200]})
 
     def emit_token_usage(self, prompt_tokens: int = 0, completion_tokens: int = 0, total_tokens: int = 0) -> None:
         self.emit({

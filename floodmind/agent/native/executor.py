@@ -24,7 +24,7 @@ from floodmind.agent.runtime.contracts.tools import ToolCall, ToolResult
 from floodmind.agent.native.event_bus import EventBus
 from floodmind.agent.native.message_builder import MessageBuilder
 from floodmind.agent.native.model_client import ModelClient
-from floodmind.agent.native.retry import is_retryable_error
+from floodmind.agent.native.retry import RetryPolicy, is_retryable_error
 
 from floodmind.agent.runtime.services.execution_journal_service import ExecutionJournalService
 from floodmind.agent.runtime.services.tracing_service import TracingService
@@ -62,6 +62,7 @@ class NativeAgentExecutor:
         system_prompts: Optional[List[str]] = None,
         tools_schema: Optional[List[dict]] = None,
         tool_registry: Optional[Any] = None,
+        tool_loader: Optional[Any] = None,
         checkpoint_service: Optional[Any] = None,
         execution_journal_service: Optional[ExecutionJournalService] = None,
         tracing_service: Optional[TracingService] = None,
@@ -83,6 +84,7 @@ class NativeAgentExecutor:
             self._system_prompts = []
         self._tools_schema = tools_schema
         self._tool_registry = tool_registry
+        self._tool_loader = tool_loader
         self._checkpoint_service = checkpoint_service
         self._journal_service = execution_journal_service
         self._tracing_service = tracing_service
@@ -280,8 +282,15 @@ class NativeAgentExecutor:
             state.status = "context_compress"
             return state
 
-        tools_param = self._tools_schema if self._tools_schema else None
+        if self._tool_loader is not None:
+            tools_param = self._tool_loader.request_tools(
+                self._tool_registry,
+                fallback_schema=self._tools_schema,
+            )
+        else:
+            tools_param = self._tools_schema if self._tools_schema else None
         state.current_answer = ""
+        state.round_assistant_message = None
         tool_calls: List[ToolCall] = []
         step_tokens = TokenUsage()
         # 记录本轮开始前 reasoning 长度，重试时截断本轮残片，避免两段拼接
@@ -293,7 +302,8 @@ class NativeAgentExecutor:
         )
 
         # LLM 流消费（带自动重试）
-        retry_remaining = 3
+        retry_policy = RetryPolicy(max_retries=3, base_delay=2.0, max_delay=30.0)
+        attempt = 0
         while True:
             try:
                 for event in self.model_client.stream_chat(
@@ -306,27 +316,29 @@ class NativeAgentExecutor:
                 break  # stream completed successfully
 
             except Exception as e:
-                if retry_remaining <= 0 or not is_retryable_error(e):
+                if attempt >= retry_policy.max_retries or not is_retryable_error(e):
                     self.event_bus.emit_error(str(e)[:500])
                     self.event_bus.emit_llm_step_end(reason="error")
                     state.final_output = f"模型调用失败: {str(e)[:300]}"
                     state.status = "failed"
                     return state
-                retry_remaining -= 1
-                delay = min(2.0 * (2 ** (2 - retry_remaining)), 30.0)
+                attempt += 1
+                delay = retry_policy.delay_for(attempt)
                 logger.warning(
-                    "[EXEC] LLM stream error, retrying in %.1fs (%d left): %s",
-                    delay, retry_remaining, str(e)[:200],
+                    "[EXEC] LLM stream error, retrying in %.1fs (%d/%d): %s",
+                    delay, attempt, retry_policy.max_retries, str(e)[:200],
                 )
                 self.event_bus.emit({
                     "type": "retry_attempt",
-                    "attempt": 3 - retry_remaining,
+                    "attempt": attempt,
                     "error": str(e)[:200],
+                    "delay": delay,
                 })
                 # 清空本轮已收集的内容，重试重新生成
                 state.current_answer = ""
                 state.reasoning = state.reasoning[:reasoning_before]
                 tool_calls = []
+                step_tokens = TokenUsage()
                 time.sleep(delay)
 
         # 中断（用户暂停）在 LLM 流式阶段生效：ModelClient 收到 abort 信号后会干净返回，
@@ -379,10 +391,15 @@ class NativeAgentExecutor:
             state.status = "completed"
             return state
 
-        # 记录本轮模型给出的答案片段，并追加 assistant message
-        state.messages.append(
-            self.message_builder.build_assistant_tool_calls_message(tool_calls, state.current_answer)
-        )
+        # 记录本轮模型给出的完整 assistant message，并追加到 API 历史。
+        # MiniMax 等厂商要求多轮 Function Call 原样回传 reasoning_details / <think> content。
+        assistant_message = getattr(state, "round_assistant_message", None)
+        if not assistant_message:
+            assistant_message = self.message_builder.build_assistant_tool_calls_message(
+                tool_calls,
+                state.current_answer,
+            )
+        state.messages.append(assistant_message)
         state.pending_tool_calls = tool_calls
         state.status = "awaiting_tool"
         return state
@@ -390,12 +407,6 @@ class NativeAgentExecutor:
     def _on_awaiting_tool(self, state: AgentLoopState, context: RunContext) -> AgentLoopState:
         """顺序执行 pending_tool_calls，检测 DOOM LOOP / 连续失败。"""
         tool_calls = state.pending_tool_calls
-
-        # 文件快照：在执行写操作前保存当前工作区状态
-        self._snapshot_files_if_needed(state, context)
-
-        # 记录本轮开始时的 artifact 集合，用于乐观自动推进
-        state._round_artifacts_before = list(state.artifacts)
 
         # 本轮工具结果 journal 条目
         tool_result_entries = []
@@ -428,10 +439,21 @@ class NativeAgentExecutor:
             self.event_bus.emit_tool_status(call.name, "running", tool_input=tool_input_str, call_id=call.id)
             logger.info("[EXEC] executing tool: name=%s, call_id=%s, input_len=%d", call.name, call.id, len(tool_input_str))
 
-            # 执行工具
+            # 执行工具。progressive 模式下 fail-closed：未加载工具不能绕过目录直接执行。
             # 阶段E：将 state.mode 注入 context（_resolve_mode 优先读 context.mode）
             context.mode = getattr(state, "mode", "execution")
-            result = self.tool_executor.execute(call, context, registry=self._tool_registry)
+            if self._tool_loader is not None and not self._tool_loader.is_executable(call.name):
+                result = ToolResult(
+                    tool_call_id=call.id,
+                    name=call.name,
+                    content=(
+                        f"工具 `{call.name}` 当前未加载，不能执行。"
+                        "请先调用 SearchTools 查找能力，再调用 GetTool 查看参数并加载工具。"
+                    ),
+                    status="error",
+                )
+            else:
+                result = self.tool_executor.execute(call, context, registry=self._tool_registry)
             logger.info("[EXEC] tool done: name=%s, status=%s, result_len=%d", call.name, result.status, len(result.content) if result.content else 0)
 
             state.tool_results.append(result)
@@ -743,6 +765,11 @@ class NativeAgentExecutor:
         elif event.type == "tool_call_done":
             if event.tool_call is not None:
                 tool_calls_ref.append(event.tool_call)
+        elif event.type == "assistant_message_done":
+            payload = event.raw or {}
+            message = payload.get("message") if isinstance(payload, dict) else None
+            if isinstance(message, dict):
+                state.round_assistant_message = message
         elif event.type == "error":
             self.event_bus.emit_error(event.content)
             self.event_bus.emit_llm_step_end(reason="error")
@@ -788,40 +815,17 @@ class NativeAgentExecutor:
         )
         state.messages.append(self.message_builder.build_tool_result_message(call.id, msg))
 
-    def _snapshot_files_if_needed(self, state: AgentLoopState, context: RunContext) -> None:
-        """在工具执行前对会话工作区做文件快照。"""
-        if self._checkpoint_service is None:
-            return
-        files_dirs = []
-        if context.output_dir:
-            files_dirs.append(context.output_dir)
-        if context.upload_dir:
-            files_dirs.append(context.upload_dir)
-        if not files_dirs:
-            return
-        # 快照会在 save checkpoint 时一并写入；这里只是触发一次保存
-        self._save_checkpoint(state, context, files_dirs=files_dirs)
-
     def _save_checkpoint(
         self,
         state: AgentLoopState,
         context: RunContext,
-        files_dirs: Optional[List[str]] = None,
     ) -> None:
         """保存 checkpoint，失败不阻塞执行。"""
         if self._checkpoint_service is None:
             return
         try:
-            files_dirs = files_dirs or []
-            # 只有在 awaiting_tool 进入时才需要文件快照
-            if state.status == "awaiting_tool" and not files_dirs:
-                if context.output_dir:
-                    files_dirs.append(context.output_dir)
-                if context.upload_dir:
-                    files_dirs.append(context.upload_dir)
             self._checkpoint_service.save(
                 state,
-                files_dirs=files_dirs if files_dirs else None,
                 metadata={
                     "model_name": getattr(self.model_client, 'model_name', ''),
                     "status": state.status,

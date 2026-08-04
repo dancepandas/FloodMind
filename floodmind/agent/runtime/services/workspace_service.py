@@ -48,7 +48,7 @@ def build_workspace(
     readable_roots: tuple = (),
     overwrite_protection: Optional[bool] = None,
 ) -> Workspace:
-    """构造 Workspace。
+    """构造 Web/session 兼容 Workspace。
 
     显式参数优先；缺省时从 settings.workspace 取；再缺省回退到网页版默认布局。
 
@@ -99,5 +99,32 @@ def build_workspace(
         sandbox_base=sandbox_base,
         writable_roots=tuple(Path(p).resolve() for p in writable_roots),
         readable_roots=tuple(Path(p).resolve() for p in readable_roots),
+        overwrite_protection=overwrite_protection,
+        mode="web_session",
+        primary_dir=user_dir,
+        cwd=user_dir,
+    )
+
+
+def build_folder_workspace(
+    session_id: str,
+    *,
+    primary_dir: Optional[Path] = None,
+    writable_roots: tuple = (),
+    readable_roots: tuple = (),
+    overwrite_protection: bool = False,
+) -> Workspace:
+    """构造 folder-first Workspace。
+
+    用户启动/打开的 ``primary_dir`` 即工作区根和默认 cwd。FloodMind 自身状态
+    收纳到 ``primary_dir/.floodmind``，不依赖 git，也不触碰 Web ``data/sessions``
+    布局。额外 roots 表示用户显式授权的工作区外目录。
+    """
+    root = Path(primary_dir or Path.cwd()).resolve()
+    return Workspace.from_folder(
+        root,
+        session_id=session_id,
+        writable_roots=writable_roots,
+        readable_roots=readable_roots,
         overwrite_protection=overwrite_protection,
     )

@@ -2,10 +2,10 @@
 FloodMind CLI
 
 用法:
-  floodmind                           交互菜单 (选 TUI/Web/Chat)
-  floodmind tui                       启动 TUI（后台 web server）
-  floodmind web                       启动 Web server 并打开浏览器
-  floodmind serve                     启动 Web server (不自动开浏览器，部署用)
+  floodmind                           交互菜单 (Run/Chat/legacy 提示)
+  floodmind tui                       Legacy TUI 迁移提示
+  floodmind web                       Legacy Web 迁移提示
+  floodmind serve                     Legacy Web 服务迁移提示
   floodmind chat                      纯文本终端对话
   floodmind run "任务描述"             单次任务执行
   floodmind init                      初始化配置
@@ -17,8 +17,6 @@ FloodMind CLI
 
 import logging
 import os
-import sys
-import webbrowser
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -59,7 +57,7 @@ def _validate_api_key() -> None:
     dashscope_fallback = "  或  DASHSCOPE_API_KEY" if provider == "dashscope" else ""
 
     click.echo(f"""
-  FloodMind v1.0.0
+  FloodMind v1.0.1
 
   [!] 未配置 API Key
 
@@ -94,23 +92,23 @@ _BANNER = r"""
 ╚═╝      ╚══════╝  ╚═════╝   ╚═════╝  ╚═════╝  ╚═╝     ╚═╝ ╚═╝ ╚═╝  ╚═══╝ ╚═════╝
 """
 
-_BANNER_SUB = "基于大语言模型的智能洪水预报系统  |  v1.0.0"
+_BANNER_SUB = "基于大语言模型的智能洪水预报系统  |  v1.0.1"
 
 
 @click.group(invoke_without_command=True)
-@click.option("--tui", is_flag=True, help="启动 TUI 界面（后台 web server）")
-@click.option("--web", "web_mode", is_flag=True, help="启动 Web server 并打开浏览器")
-@click.option("--port", default=13014, type=int, help="Web server 端口 (默认 13014)")
-@click.option("--host", default="0.0.0.0", help="Web server 监听地址")
+@click.option("--tui", is_flag=True, help="显示 TUI legacy 迁移提示")
+@click.option("--web", "web_mode", is_flag=True, help="显示 Web legacy 迁移提示")
+@click.option("--port", default=13014, type=int, help="Legacy Web 端口参数（仅兼容提示）")
+@click.option("--host", default="0.0.0.0", help="Legacy Web 监听地址参数（仅兼容提示）")
 @click.option("--model", "-m", help="模型名称 (provider:model)", hidden=True)
 @click.option("--reasoning/--no-reasoning", default=None, help="启用推理模式", hidden=True)
 @click.option("--verbose", "-v", is_flag=True, help="显示详细日志", hidden=True)
-@click.version_option(version="1.0.0", prog_name="floodmind")
+@click.version_option(version="1.0.1", prog_name="floodmind")
 @click.pass_context
 def main(ctx, tui, web_mode, port, host, model, reasoning, verbose):
     """FloodMind — 智能洪水预报 Agent 系统
 
-    无参数时弹出交互菜单；可用 --tui / --web 直接启动对应界面。
+    无参数时弹出交互菜单；--tui / --web 仅输出 legacy 迁移提示。
     """
     if ctx.invoked_subcommand is not None:
         return
@@ -119,12 +117,10 @@ def main(ctx, tui, web_mode, port, host, model, reasoning, verbose):
     os.environ.setdefault("DASHSCOPE_API_KEY", os.getenv("FLOODMIND_API_KEY", ""))
 
     if tui:
-        _validate_api_key()
-        return _run_tui(model=model or "", port=port, host=host)
+        return _legacy_ui_notice("tui")
 
     if web_mode:
-        _validate_api_key()
-        return _run_web(host=host, port=port, open_browser=True)
+        return _legacy_ui_notice("web")
 
     # 无参数：显示交互菜单
     _validate_api_key()
@@ -136,28 +132,25 @@ def main(ctx, tui, web_mode, port, host, model, reasoning, verbose):
 
 @main.command()
 @click.option("--model", "-m", default="", help="模型名称")
-@click.option("--port", default=13014, type=int, help="Web server 端口")
-@click.option("--host", default="localhost", help="Web server 监听地址")
+@click.option("--port", default=13014, type=int, help="Legacy Web 端口参数（仅兼容提示）")
+@click.option("--host", default="localhost", help="Legacy Web 监听地址参数（仅兼容提示）")
 def tui(model, port, host):
-    """启动 TUI 交互界面（后台自动启动 web server）"""
+    """Legacy TUI 入口（已迁移到 SDK-first 路线）"""
     _setup_logging()
-    os.environ.setdefault("DASHSCOPE_API_KEY", os.getenv("FLOODMIND_API_KEY", ""))
-    _validate_api_key()
-    raise SystemExit(_run_tui(model=model, port=port, host=host))
+    raise SystemExit(_legacy_ui_notice("tui"))
 
 
 # ── web ─────────────────────────────────────────────────────
 
 @main.command("web")
-@click.option("--host", default="0.0.0.0", help="监听地址")
-@click.option("--port", default=13014, type=int, help="监听端口")
-@click.option("--no-browser", is_flag=True, help="不自动打开浏览器")
-@click.option("--no-scheduler", is_flag=True, help="不启动定时调度器")
+@click.option("--host", default="0.0.0.0", help="Legacy Web 监听地址参数（仅兼容提示）")
+@click.option("--port", default=13014, type=int, help="Legacy Web 端口参数（仅兼容提示）")
+@click.option("--no-browser", is_flag=True, help="Legacy 兼容参数（仅兼容提示）")
+@click.option("--no-scheduler", is_flag=True, help="Legacy 兼容参数（仅兼容提示）")
 def web_cmd(host, port, no_browser, no_scheduler):
-    """启动 Web server 并打开浏览器"""
+    """Legacy Web 入口（已迁移到 SDK-first 路线）"""
     _setup_logging()
-    _validate_api_key()
-    raise SystemExit(_run_web(host=host, port=port, open_browser=not no_browser, no_scheduler=no_scheduler))
+    raise SystemExit(_legacy_ui_notice("web"))
 
 
 # ── chat (纯文本) ───────────────────────────────────────────
@@ -172,13 +165,13 @@ def chat(model, reasoning, use_tui, use_web, verbose):
     """启动交互式对话（纯文本终端模式）"""
     _setup_logging(verbose=verbose)
     os.environ.setdefault("DASHSCOPE_API_KEY", os.getenv("FLOODMIND_API_KEY", ""))
-    _validate_api_key()
 
     if use_tui:
-        return _run_tui(model=model or "")
+        return _legacy_ui_notice("tui")
     if use_web:
-        return _run_web(open_browser=True)
+        return _legacy_ui_notice("web")
 
+    _validate_api_key()
     return _run_chat_legacy(model=model, reasoning=reasoning)
 
 
@@ -215,7 +208,8 @@ def run(task, model, resume_session_id, resume_checkpoint_id, verbose):
         context_window=settings.model.context_window,
         llm=llm,
     )
-    agent = create_flood_agent(llm_service=llm, memory=memory, session_id=sid)
+    workspace = _build_cli_workspace(sid)
+    agent = create_flood_agent(llm_service=llm, memory=memory, session_id=sid, workspace=workspace)
 
     result = agent.run_with_resume(
         task,
@@ -275,14 +269,13 @@ def pause_session(session_id):
 # ── serve ───────────────────────────────────────────────────
 
 @main.command()
-@click.option("--host", default="0.0.0.0", help="监听地址")
-@click.option("--port", default=13014, type=int, help="监听端口")
-@click.option("--no-scheduler", is_flag=True, help="不启动定时调度器")
+@click.option("--host", default="0.0.0.0", help="Legacy Web 监听地址参数（仅兼容提示）")
+@click.option("--port", default=13014, type=int, help="Legacy Web 端口参数（仅兼容提示）")
+@click.option("--no-scheduler", is_flag=True, help="Legacy 兼容参数（仅兼容提示）")
 def serve(host, port, no_scheduler):
-    """启动 Web 服务（不自动开浏览器，适合部署）"""
+    """Legacy Web 服务入口（已迁移到 SDK-first 路线）"""
     _setup_logging()
-    _validate_api_key()
-    return _run_web(host=host, port=int(port), open_browser=False, no_scheduler=no_scheduler)
+    return _legacy_ui_notice("serve")
 
 
 # ── init ────────────────────────────────────────────────────
@@ -450,91 +443,21 @@ def config_set(key, value):
 
 # ── 实际入口函数（被 click 命令和交互菜单共用）────────────────
 
-def _run_tui(model: str = "", port: int = 13014, host: str = "localhost") -> int:
-    """启动 TUI（后台自动启动 web server）"""
-    from floodmind.tui import run_tui
-    try:
-        run_tui(host=host, port=port, model=model)
-        return 0
-    except KeyboardInterrupt:
-        click.echo("\n再见！")
-        return 0
-    finally:
-        from floodmind.tui.server_manager import stop_web_server
-        stop_web_server()
+def _build_cli_workspace(session_id: str):
+    """CLI/native 入口：当前启动目录即 folder-first workspace。"""
+    from floodmind.agent.runtime.services.workspace_service import build_folder_workspace
+
+    return build_folder_workspace(session_id, primary_dir=Path.cwd())
 
 
-def _find_project_root() -> Path:
-    """定位项目根目录（floodmind 包所在的位置）"""
-    pkg_dir = Path(__file__).resolve().parent
-    # floodmind 包在 <project_root>/floodmind/ 目录下
-    return pkg_dir.parent
-
-
-def _run_web(host: str = "0.0.0.0", port: int = 13014, open_browser: bool = False, no_scheduler: bool = False) -> int:
-    """启动 web server，可选打开浏览器。返回退出码。"""
-    import subprocess
-    project_root = _find_project_root()
-    start_script = project_root / "start.py"
-
-    if not start_script.exists():
-        # pip 安装模式：直接启动内置 web server
-        if os.environ.get("_FLOODMIND_WEB_PIP", "") == "1":
-            # 已在子进程中，直接启动避免递归
-            from floodmind.config.settings import settings as _s
-            import logging
-            logging.basicConfig(level=logging.INFO,
-                              format='[web] %(asctime)s - %(name)s - %(levelname)s - %(message)s')
-            from web_server import app
-            if not no_scheduler:
-                import threading, scheduler
-                t = threading.Thread(target=scheduler.main, daemon=True, name="scheduler")
-                t.start()
-            click.echo(f"  Web server 启动: http://{host}:{port}")
-            try:
-                from waitress import serve
-                serve(app, host=host, port=port, threads=8, channel_timeout=300)
-            except ImportError:
-                app.run(host=host, port=port, threaded=True)
-            return 0
-        # 首次调用，通过子进程递归一次
-        import subprocess
-        env = os.environ.copy()
-        env["_FLOODMIND_WEB_PIP"] = "1"
-        cmd = [sys.executable, "-m", "floodmind.cli", "serve", "--host", host, "--port", str(port)]
-        if no_scheduler:
-            cmd.append("--no-scheduler")
-        click.echo(f"  Web server 启动: http://{host}:{port}")
-        return subprocess.call(cmd, env=env)
-
-    if open_browser:
-        import threading
-        url = f"http://localhost:{port}"
-
-        def _open_later():
-            import time
-            time.sleep(2.0)
-            try:
-                webbrowser.open(url)
-            except Exception:
-                pass
-
-        threading.Thread(target=_open_later, daemon=True, name="open-browser").start()
-        click.echo(f"  Web server 启动中: {url}")
-        click.echo("  浏览器将在 2 秒后自动打开...")
-    else:
-        click.echo(f"  Web server 启动: http://{host}:{port}")
-        click.echo("  按 Ctrl+C 停止")
-
-    cmd = [sys.executable, str(start_script), "--host", host, "--port", str(port)]
-    if no_scheduler:
-        cmd.append("--no-scheduler")
-
-    try:
-        return subprocess.call(cmd, cwd=str(project_root))
-    except KeyboardInterrupt:
-        click.echo("\n再见！")
-        return 0
+def _legacy_ui_notice(entrypoint: str) -> int:
+    """提示 Web/TUI 入口已进入 legacy 迁移路径。"""
+    click.echo(
+        f"FloodMind {entrypoint} 已进入 legacy 迁移路径：当前版本以 Python SDK 和 `floodmind run` 为核心入口。"
+    )
+    click.echo("请使用 `floodmind run \"任务描述\"`，或在 Python 中通过 `from floodmind import Agent, Workspace` 使用 SDK。")
+    click.echo("如需临时使用旧 Web/TUI，请切换到 legacy 分支/兼容包，或直接启动旧版适配器。")
+    return 0
 
 
 def _run_chat_legacy(model=None, reasoning=None) -> int:
@@ -549,7 +472,7 @@ def _run_chat_legacy(model=None, reasoning=None) -> int:
     if reasoning is not None:
         settings.model.enable_reasoning = reasoning
 
-    click.echo(f"\n  FloodMind v1.0.0  —  {settings.model.model_name}")
+    click.echo(f"\n  FloodMind v1.0.1  —  {settings.model.model_name}")
     click.echo("  输入 'exit' 退出, 'clear' 清空记忆, 'memory' 查看记忆\n")
 
     llm = ModelClient.from_settings(
@@ -563,7 +486,8 @@ def _run_chat_legacy(model=None, reasoning=None) -> int:
         context_window=settings.model.context_window,
         llm=llm,
     )
-    agent = create_flood_agent(llm_service=llm, memory=memory, session_id=sid)
+    workspace = _build_cli_workspace(sid)
+    agent = create_flood_agent(llm_service=llm, memory=memory, session_id=sid, workspace=workspace)
 
     while True:
         try:

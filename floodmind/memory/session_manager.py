@@ -5,6 +5,7 @@
 支持本地化部署场景，确保数据安全和服务稳定。
 """
 
+import base64
 import json
 import logging
 import os
@@ -483,12 +484,46 @@ class SessionManager:
     
     def get_session_messages(self, session_id: str) -> List[Dict[str, str]]:
         """获取会话的对话历史（用于前端恢复）"""
+        return self.get_messages_page(session_id, limit=0)["items"]
+
+    def get_messages_page(
+        self,
+        session_id: str,
+        limit: int = 50,
+        before_cursor: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Cursor-based 分页读取前端消息历史。
+
+        当前权威历史源是 memory/chat_history.json（DualMemory._turns），不是
+        SQLite messages 表；接口语义仍按 IMPLEMENTATION_PLAN.md 提供：返回
+        items/more/cursor。limit <= 0 表示兼容旧 get_session_messages 路径。
+        """
+        session_id = validate_session_id(session_id)
+        all_items = self._load_frontend_messages(session_id)
+        if limit <= 0:
+            return {"items": all_items, "more": False, "cursor": None}
+
+        limit = max(1, min(int(limit), 200))
+        end = len(all_items)
+        if before_cursor:
+            try:
+                end = min(end, self._decode_message_cursor(before_cursor))
+            except Exception:
+                end = len(all_items)
+
+        start = max(0, end - (limit + 1))
+        window = all_items[start:end]
+        more = len(window) > limit
+        page_items = window[-limit:] if more else window
+        cursor = self._encode_message_cursor(start + len(window) - len(page_items)) if more else None
+        return {"items": page_items, "more": more, "cursor": cursor}
+
+    def _load_frontend_messages(self, session_id: str) -> List[Dict[str, str]]:
+        """从 chat_history.json 加载并转换为前端消息列表。"""
         session_id = validate_session_id(session_id)
 
-        # 会话目录下 memory/chat_history.json（DualMemory._turns 持久化）
         history_file = self.get_memory_dir(session_id) / "chat_history.json"
         if not history_file.exists():
-            # 兼容旧路径：memory/chat_history/chat_{session_id}_*.json
             old_dir = Path.cwd() / "data" / "chat_history"
             old_files = sorted(old_dir.glob(f"chat_{session_id}_*.json")) if old_dir.exists() else []
             if old_files:
@@ -498,17 +533,24 @@ class SessionManager:
 
         try:
             data = json.loads(history_file.read_text(encoding="utf-8"))
-            # 新格式：{"turns": [...], "short_term": [...], ...}
-            if "turns" in data:
+            if isinstance(data, dict) and "turns" in data:
                 return self._turns_to_frontend(data["turns"])
-            # 旧格式：{"messages": [...]} 或 [...]
-            messages = data.get("full_messages", data.get("messages", []))
-            if isinstance(data, list):
-                messages = data
-            return self._legacy_messages_to_frontend(messages)
+            messages = data.get("full_messages", data.get("messages", [])) if isinstance(data, dict) else data
+            return self._legacy_messages_to_frontend(messages or [])
         except Exception as e:
             logger.error(f"获取会话消息失败: {e}")
             return []
+
+    @staticmethod
+    def _encode_message_cursor(index: int) -> str:
+        payload = json.dumps({"index": max(0, int(index))}, separators=(",", ":"))
+        return base64.urlsafe_b64encode(payload.encode("utf-8")).decode("ascii").rstrip("=")
+
+    @staticmethod
+    def _decode_message_cursor(cursor: str) -> int:
+        padding = "=" * (-len(cursor) % 4)
+        payload = json.loads(base64.urlsafe_b64decode((cursor + padding).encode("ascii")).decode("utf-8"))
+        return max(0, int(payload.get("index", 0)))
 
     @staticmethod
     def _turns_to_frontend(turns: List[Dict[str, Any]]) -> List[Dict[str, str]]:

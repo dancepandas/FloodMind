@@ -13,6 +13,12 @@ FloodMind — 基于大语言模型的智能 Agent 框架
         Agent,                # SDK 嵌入式 Agent
         ModelClient,          # LLM 客户端
         resolve_model,        # 模型配置解析（单一入口，SDK 稳定契约）
+        route_pipeline,       # 厂商 Pipeline 路由（llm.pipeline 内省/自检）
+        ProviderPipeline,     # 厂商 Pipeline 扩展基类
+        ToolLoadingConfig,    # 渐进式工具加载配置
+        ToolLoader,           # 渐进式工具加载状态（高级）
+        Workspace,            # Harness 工作区契约
+        build_folder_workspace, # folder-first 工作区工厂
         build_agent_tool,     # 工具构造器
         DualMemory,           # 记忆系统
         AgentTool,            # 工具基类
@@ -26,7 +32,7 @@ FloodMind — 基于大语言模型的智能 Agent 框架
     )
 """
 
-__version__ = "1.0.0"
+__version__ = "1.0.1"
 
 # ── SDK 公共 API ──
 
@@ -37,6 +43,21 @@ def __getattr__(name):
         "ModelClient": "floodmind.agent.native.model_client",
         "resolve_model": "floodmind.config.model_resolver",
         "ResolvedModel": "floodmind.config.model_resolver",
+        "route_pipeline": "floodmind.agent.native.providers",
+        "ProviderPipeline": "floodmind.agent.native.providers",
+        "StreamState": "floodmind.agent.native.providers",
+        "TokenUsage": "floodmind.agent.native.providers",
+        "OpenAICompatiblePipeline": "floodmind.agent.native.providers",
+        "DashScopePipeline": "floodmind.agent.native.providers",
+        "DeepSeekPipeline": "floodmind.agent.native.providers",
+        "KimiPipeline": "floodmind.agent.native.providers",
+        "MiniMaxPipeline": "floodmind.agent.native.providers",
+        "ToolLoadingConfig": "floodmind.agent.native.tool_loading",
+        "ToolCatalogEntry": "floodmind.agent.native.tool_loading",
+        "ToolLoader": "floodmind.agent.native.tool_loading",
+        "compact_prompt_catalog": "floodmind.agent.native.tool_loading",
+        "Workspace": "floodmind.agent.runtime.contracts.workspace",
+        "build_folder_workspace": "floodmind.agent.runtime.services.workspace_service",
         "build_agent_tool": "floodmind.tools.agent_tool",
         "DualMemory": "floodmind.memory.dual_memory",
         "AgentTool": "floodmind.tools.agent_tool",
@@ -62,6 +83,21 @@ __all__ = [
     "ModelClient",
     "resolve_model",
     "ResolvedModel",
+    "route_pipeline",
+    "ProviderPipeline",
+    "StreamState",
+    "TokenUsage",
+    "OpenAICompatiblePipeline",
+    "DashScopePipeline",
+    "DeepSeekPipeline",
+    "KimiPipeline",
+    "MiniMaxPipeline",
+    "ToolLoadingConfig",
+    "ToolCatalogEntry",
+    "ToolLoader",
+    "compact_prompt_catalog",
+    "Workspace",
+    "build_folder_workspace",
     "build_agent_tool",
     "DualMemory",
     "AgentTool",

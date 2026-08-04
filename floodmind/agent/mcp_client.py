@@ -198,7 +198,7 @@ class McpClientConnection:
         result = self._send_jsonrpc("initialize", {
             "protocolVersion": "2024-11-05",
             "capabilities": {},
-            "clientInfo": {"name": "FloodMind", "version": "1.0.0"},
+            "clientInfo": {"name": "FloodMind", "version": "1.0.1"},
         })
         if "error" in result:
             raise McpConnectionError(f"MCP {self.name} initialize 失败: {result['error']}")

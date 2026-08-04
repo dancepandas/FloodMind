@@ -66,9 +66,11 @@ class Agent:
             信息）。bare 模式默认放行所有调用，此钩子提供可选的安全网关。
         max_iterations: Agent 循环最大迭代轮数（默认 999，有 auto-compact + DOOM LOOP 兜底）。
         workspace: 工作区对象（``floodmind.agent.runtime.contracts.workspace.Workspace``）。
-            嵌入式宿主（如桌面端）显式注入，避免跨线程 contextvar 丢失。未传时回退到
-            ``set_workspace()`` 注入的 contextvar（网页版用法）。运行期可用 ``bind_workspace``
-            切换。
+            嵌入式宿主（如桌面端）可显式注入，避免跨线程 contextvar 丢失。未传时 SDK
+            默认使用当前进程 cwd 创建 folder-first workspace；底层 contextvar 仅作为 legacy
+            adapter 回退。运行期可用 ``bind_workspace`` 切换。
+        tool_loading: 工具加载策略。``None`` 使用 settings 默认；``False`` 为 eager 旧行为；
+            ``True`` 为 progressive 默认；也可传 ``floodmind.ToolLoadingConfig``。
 
     Attributes:
         last_usage: 最近一次 run()/stream() 的 token 用量累加
@@ -91,12 +93,17 @@ class Agent:
         permission_handler: Optional[Callable[[str, Dict[str, Any]], bool]] = None,
         max_iterations: int = 999,
         workspace: Optional[Any] = None,
+        tool_loading: Optional[Any] = None,
     ):
+        sid = session_id or "sdk-agent"
         if memory is None:
             from floodmind.memory.dual_memory import DualMemory
             from floodmind.config.model_resolver import resolve_model
-            sid = session_id or "sdk-agent"
             memory = DualMemory(session_id=sid, context_window=resolve_model().context_window)
+
+        if workspace is None:
+            from floodmind.agent.runtime.contracts.workspace import Workspace
+            workspace = Workspace.from_cwd(session_id=sid).ensure()
 
         self._on_event = on_event
         self._last_usage: Dict[str, int] = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
@@ -105,7 +112,7 @@ class Agent:
         self._agent = NativeFloodAgent(
             llm_service=llm,
             memory=memory,
-            session_id=session_id or "sdk-agent",
+            session_id=sid,
             enable_search=enable_search,
             enable_reasoning=enable_reasoning,
             bare=True,
@@ -114,6 +121,7 @@ class Agent:
             permission_handler=permission_handler,
             max_iterations=max_iterations,
             workspace=workspace,
+            tool_loading=tool_loading,
         )
 
     def bind_workspace(self, ws: Any) -> None:
