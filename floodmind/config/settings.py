@@ -136,6 +136,13 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         "enabled": True,
         "min_message_count": 3,
     },
+    "tool_loading": {
+        "mode": "progressive",
+        "core_tools": ["SearchTools", "GetTool", "GetSkill"],
+        "max_search_results": 8,
+        "max_loaded_tools": 12,
+        "get_tool_loads_tool": True,
+    },
     "api": {
         "base_url": "http://127.0.0.1:8000",
         "timeout": 60,
@@ -553,6 +560,20 @@ class BackgroundReviewConfig:
         self.min_message_count = int(raw.get("min_message_count", 3))
 
 
+class ToolLoadingConfig:
+    def __init__(self, cfg: dict):
+        raw = cfg.get("tool_loading", {})
+        if not isinstance(raw, dict):
+            raw = {}
+        mode = str(raw.get("mode", "progressive") or "progressive").lower()
+        self.mode = mode if mode in {"eager", "catalog", "progressive"} else "progressive"
+        core = raw.get("core_tools", ["SearchTools", "GetTool", "GetSkill"])
+        self.core_tools = list(core) if isinstance(core, list) else ["SearchTools", "GetTool", "GetSkill"]
+        self.max_search_results = int(raw.get("max_search_results", 8) or 8)
+        self.max_loaded_tools = int(raw.get("max_loaded_tools", 12) or 12)
+        self.get_tool_loads_tool = bool(raw.get("get_tool_loads_tool", True))
+
+
 # ── MCP 配置 (独立文件 mcp.json) ─────────────────────────
 
 def _mcp_config_path() -> Path:
@@ -664,6 +685,7 @@ class Settings:
         self.agent = AgentConfig(cfg)
         self.task_experience = TaskExperienceConfig(cfg)
         self.background_review = BackgroundReviewConfig(cfg)
+        self.tool_loading = ToolLoadingConfig(cfg)
         self.mcp = McpServerConfig()
         self.workspace = WorkspaceConfig(cfg)
 

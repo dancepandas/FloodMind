@@ -97,6 +97,26 @@ def get_session(session_id: str):
         return jsonify({'status': 'error', 'message': sanitize_output(str(e)) or '服务器内部错误'}), 500
 
 
+# ── 会话消息分页 ────────────────────────────────────────
+
+@sessions_bp.route('/api/sessions/<session_id>/messages', methods=['GET'])
+def get_session_messages_page(session_id: str):
+    try:
+        session_id = _require_session_id(session_id)
+        limit = request.args.get('limit', 50, type=int)
+        cursor = request.args.get('cursor', None, type=str)
+        result = _sm().get_messages_page(session_id, limit=limit, before_cursor=cursor)
+        return jsonify({
+            'status': 'success',
+            'messages': sanitize_deep(result['items']),
+            'more': result['more'],
+            'cursor': result['cursor'],
+        })
+    except Exception as e:
+        logger.error("获取会话消息分页失败: %s", e)
+        return jsonify({'status': 'error', 'message': sanitize_output(str(e)) or '服务器内部错误'}), 500
+
+
 # ── 删除会话 ──────────────────────────────────────────
 
 @sessions_bp.route('/api/sessions/<session_id>', methods=['DELETE'])
@@ -104,7 +124,7 @@ def delete_session_route(session_id: str):
     try:
         session_id = _require_session_id(session_id)
         sm = _sm()
-        from floodmind.agent.runtime.adapters.flask_permission_api import handle_permission_cancel_session
+        from floodmind.agent.runtime.adapters.permission_api import handle_permission_cancel_session
         cancelled = handle_permission_cancel_session(session_id)
         if cancelled:
             logger.info("删除会话 %s: 已取消 %s 个 pending ASK", session_id, cancelled)
@@ -172,7 +192,7 @@ def pause_session():
         with session_abort_flags_lock:
             session_abort_flags[session_id] = True
         try:
-            from floodmind.agent.runtime.adapters.flask_permission_api import handle_permission_cancel_session
+            from floodmind.agent.runtime.adapters.permission_api import handle_permission_cancel_session
             cancelled = handle_permission_cancel_session(session_id)
             if cancelled:
                 logger.info("暂停会话 %s: 已取消 %s 个 pending ASK", session_id, cancelled)

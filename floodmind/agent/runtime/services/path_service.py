@@ -78,23 +78,45 @@ class PathService:
         except Exception:
             return None
 
+    def _is_folder_first(self) -> bool:
+        ws = self._effective_workspace()
+        return bool(ws is not None and getattr(ws, "is_folder_first", False))
+
     def _dynamic_write_roots(self) -> list:
-        """当前 workspace 提供的额外写根（user_dir / sandbox_base / writable_roots）。"""
+        """当前 workspace 提供的额外写根。"""
         ws = self._effective_workspace()
         if ws is None:
             return []
-        return [ws.user_dir, ws.sandbox_base, *ws.writable_roots]
+        if getattr(ws, "is_folder_first", False):
+            roots = [ws.workspace_dir, ws.state_dir, *ws.writable_roots]
+        else:
+            roots = [ws.user_dir, ws.sandbox_base, *ws.writable_roots]
+            if getattr(ws, "primary_dir", None) is not None:
+                roots.append(ws.primary_dir)
+            if getattr(ws, "state_dir", None) is not None:
+                roots.append(ws.state_dir)
+        return [r for r in roots if r is not None]
 
     def _dynamic_read_roots(self) -> list:
         ws = self._effective_workspace()
         if ws is None:
             return []
-        return [ws.user_dir, ws.sandbox_base, *ws.readable_roots]
+        if getattr(ws, "is_folder_first", False):
+            roots = [ws.workspace_dir, ws.state_dir, *ws.readable_roots, *ws.writable_roots]
+        else:
+            roots = [ws.user_dir, ws.sandbox_base, *ws.readable_roots]
+            if getattr(ws, "primary_dir", None) is not None:
+                roots.append(ws.primary_dir)
+            if getattr(ws, "state_dir", None) is not None:
+                roots.append(ws.state_dir)
+        return [r for r in roots if r is not None]
 
     def resolve(self, request: PathResolveRequest) -> PathResolveResult:
         raw = str(request.raw_path).strip().strip('"').strip("'")
         normalized = self._strip_session_prefix(raw)
         p = Path(normalized)
+        ws = self._effective_workspace()
+        is_folder_first = bool(ws is not None and getattr(ws, "is_folder_first", False))
 
         if p.is_absolute():
             resolved = p.resolve()
@@ -103,7 +125,20 @@ class PathService:
                 raw_path=raw,
                 normalized_path=normalized,
                 resolved_path=str(resolved),
-                source="absolute",
+                source="absolute" if allowed else "rejected_external",
+                allowed=allowed,
+                reason=reason,
+            )
+
+        if is_folder_first:
+            base = ws.default_cwd
+            resolved = (base / p).resolve()
+            allowed, reason = self._check_path_allowed(resolved, request.access, request.session_id)
+            return PathResolveResult(
+                raw_path=raw,
+                normalized_path=normalized,
+                resolved_path=str(resolved),
+                source="workspace" if allowed else "rejected_external",
                 allowed=allowed,
                 reason=reason,
             )
@@ -126,9 +161,9 @@ class PathService:
                 raw_path=raw,
                 normalized_path=normalized,
                 resolved_path=str((self._project_root / p).resolve()),
-                source="no_context_rejected",
+                source="no_workspace_rejected",
                 allowed=False,
-                reason="无会话上下文时相对路径写入被拒绝。正确做法：只写文件名（如 result.py），系统会自动写入当前工作区。不要传 data/sessions/... 等目录前缀。",
+                reason="无 workspace/cwd 上下文时相对路径写入或执行被拒绝。请在工作区内启动 SDK，或显式注入 Workspace。",
             )
 
         output_dir = self._get_user_dir(request.session_id)
@@ -144,15 +179,13 @@ class PathService:
                 reason=reason,
             )
 
-        resolved = (self._project_root / p).resolve()
-        allowed, reason = self._check_path_allowed(resolved, request.access, request.session_id)
         return PathResolveResult(
             raw_path=raw,
             normalized_path=normalized,
-            resolved_path=str(resolved),
-            source="project_root_fallback",
-            allowed=allowed,
-            reason=reason,
+            resolved_path=str((self._project_root / p).resolve()),
+            source="no_workspace_rejected",
+            allowed=False,
+            reason="无 workspace/cwd 上下文时相对路径读取被拒绝。请在工作区内启动 SDK，或显式注入 Workspace。",
         )
 
     def resolve_simple(self, raw_path: str, access: str = "read", session_id: str = "") -> PathResolveResult:
@@ -173,21 +206,22 @@ class PathService:
             if self._is_relative_to(resolved, prefix):
                 return True
 
-        for prefix in self._static_write_allowed_prefixes:
-            if self._is_relative_to(resolved, prefix):
-                return True
+        if not self._is_folder_first():
+            for prefix in self._static_write_allowed_prefixes:
+                if self._is_relative_to(resolved, prefix):
+                    return True
 
-        project_root = self._project_root.resolve()
-        if self._is_relative_to(resolved, project_root):
-            rel = str(resolved.relative_to(project_root))
-            if not rel:
+            project_root = self._project_root.resolve()
+            if self._is_relative_to(resolved, project_root):
+                rel = str(resolved.relative_to(project_root))
+                if not rel:
+                    return False
+                if rel in self._static_write_allowed_toplevel_files:
+                    return True
+                top_dir = rel.split(os.sep)[0].split("/")[0]
+                if top_dir in ("data", "scripts"):
+                    return True
                 return False
-            if rel in self._static_write_allowed_toplevel_files:
-                return True
-            top_dir = rel.split(os.sep)[0].split("/")[0]
-            if top_dir in ("data", "scripts"):
-                return True
-            return False
         return False
 
     def is_forbidden_path(self, resolved: Path) -> bool:
@@ -263,18 +297,19 @@ class PathService:
             if self._is_relative_to(resolved, prefix):
                 return True
 
-        for prefix in self._static_read_allowed_prefixes:
-            if self._is_relative_to(resolved, prefix):
-                return True
+        if not self._is_folder_first():
+            for prefix in self._static_read_allowed_prefixes:
+                if self._is_relative_to(resolved, prefix):
+                    return True
 
-        for prefix in self._static_read_allowed_outside_prefixes:
-            if self._is_relative_to(resolved, prefix):
-                return True
+            for prefix in self._static_read_allowed_outside_prefixes:
+                if self._is_relative_to(resolved, prefix):
+                    return True
 
-        # 兼容：无 workspace 时回退到 SESSION_CONTEXT 的 output_dir
-        session_output = self._get_user_dir()
-        if session_output and self._is_relative_to(resolved, Path(session_output)):
-            return True
+            # 兼容：无 workspace 时回退到 SESSION_CONTEXT 的 output_dir
+            session_output = self._get_user_dir()
+            if session_output and self._is_relative_to(resolved, Path(session_output)):
+                return True
 
         return False
 
@@ -294,7 +329,16 @@ class PathService:
         网页版 build_workspace 不传 user_dir 时回退到 session_root/<sid>/outputs，
         与 session_manager.get_output_dir 等价 → 网页版零回归。
         """
-        # 1. SESSION_CONTEXT["output_dir"] 优先（区分主/子）
+        # 1. folder-first 下 cwd 是相对路径解析基准；子代理 delegate_cwd 已被注入 cwd。
+        try:
+            from floodmind.tools.session_context import SESSION_CONTEXT
+            ws = self._effective_workspace()
+            cwd = SESSION_CONTEXT.get("cwd", "")
+            if ws is not None and getattr(ws, "is_folder_first", False) and cwd:
+                return cwd
+        except Exception:
+            pass
+        # 2. SESSION_CONTEXT["output_dir"] 兼容旧语义（区分 Web 主/子）
         try:
             from floodmind.tools.session_context import get_current_session_output_dir
             d = get_current_session_output_dir()
@@ -302,11 +346,11 @@ class PathService:
                 return d
         except Exception:
             pass
-        # 2. workspace.user_dir 回退
+        # 3. workspace.user_dir 回退
         ws = self._effective_workspace()
         if ws is not None:
             return str(ws.user_dir)
-        # 3. 兼容回退：未注入 workspace 且无 SESSION_CONTEXT 时，按旧 session_id 推导
+        # 4. 兼容回退：未注入 workspace 且无 SESSION_CONTEXT 时，按旧 session_id 推导
         if session_id:
             data_dir = os.environ.get('DATA_DIR', str(self._project_root / "data"))
             output_dir = os.path.join(data_dir, "sessions", session_id, "outputs")

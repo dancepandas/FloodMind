@@ -13,7 +13,7 @@ import yaml
 
 logger = logging.getLogger(__name__)
 
-_SKILL_BODY_SOFT_LIMIT = 500
+_SKILL_BODY_SOFT_LIMIT = 1500
 
 
 @dataclass

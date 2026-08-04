@@ -3,10 +3,11 @@ Runtime Contracts — Checkpoint 协议模型
 
 Checkpoint 是 Agent 执行状态的可恢复快照，包含：
 - AgentLoopState 完整序列化
-- 文件系统快照（写操作前的文件状态）
 - 父 checkpoint 引用，形成恢复链
+- 可选 metadata（如模型名、状态摘要、artifact 引用）
 
-所有 checkpoint 相关数据结构集中定义，不依赖业务实现。
+Checkpoint 不复制 workspace 文件。文件产物应通过 artifact/journal 记录引用；
+文件回滚/备份如需支持，应由独立的 change journal / artifact versioning 能力承担。
 """
 
 from datetime import datetime
@@ -53,6 +54,7 @@ class CheckpointManifest(BaseModel):
     iteration: int
     created_at: datetime
     state_file: str = "state.json"
+    # Legacy fields retained for old manifests/routes. New SDK-first checkpoints leave these empty.
     files_snapshot_dir: Optional[str] = None
     files_snapshot_base_dirs: List[str] = Field(default_factory=list)
     metadata: Dict[str, Any] = Field(default_factory=dict)

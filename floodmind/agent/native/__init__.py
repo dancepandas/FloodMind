@@ -30,6 +30,14 @@ from floodmind.agent.native.executor import NativeAgentExecutor
 from floodmind.agent.native.event_bus import EventBus
 from floodmind.agent.native.artifact_watcher import ArtifactWatcher
 
+from floodmind.agent.native.tool_loading import (
+    ToolCatalogEntry,
+    ToolLoader,
+    ToolLoadingConfig,
+    compact_prompt_catalog,
+    resolve_tool_loading_config,
+)
+
 __all__ = [
     "AgentLoopState",
     "AgentResult",
@@ -50,6 +58,11 @@ __all__ = [
     "NativeAgentExecutor",
     "EventBus",
     "ArtifactWatcher",
+    "ToolCatalogEntry",
+    "ToolLoader",
+    "ToolLoadingConfig",
+    "compact_prompt_catalog",
+    "resolve_tool_loading_config",
 ]
 
 

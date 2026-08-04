@@ -18,7 +18,7 @@ def _require_session_id(raw):
 @permission_bp.route('/api/permission/respond', methods=['POST'])
 def permission_respond():
     try:
-        from floodmind.agent.runtime.adapters.flask_permission_api import handle_permission_respond
+        from floodmind.agent.runtime.adapters.permission_api import handle_permission_respond
         data = request.get_json() or {}
         result, status_code = handle_permission_respond(data)
         return jsonify(result), status_code
@@ -30,7 +30,7 @@ def permission_respond():
 @permission_bp.route('/api/permission/pending', methods=['GET'])
 def permission_pending():
     try:
-        from floodmind.agent.runtime.adapters.flask_permission_api import handle_permission_pending
+        from floodmind.agent.runtime.adapters.permission_api import handle_permission_pending
         session_id = _require_session_id(request.args.get('session_id', 'default'))
         result, status_code = handle_permission_pending(session_id)
         return jsonify(result), status_code

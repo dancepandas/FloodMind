@@ -63,9 +63,12 @@ def route_pipeline(
             best_cls, best_score = cls, score
 
     if best_cls is None:
-        return OpenAICompatiblePipeline()
-
-    pipeline = best_cls()
-    if best_score <= _CONSERVATIVE_THRESHOLD:
-        pipeline.conservative = True
+        pipeline = OpenAICompatiblePipeline()
+    else:
+        pipeline = best_cls()
+        if best_score <= _CONSERVATIVE_THRESHOLD:
+            pipeline.conservative = True
+    pipeline.provider_id = provider_id
+    pipeline.model_id = model_id
+    pipeline.base_url = base_url
     return pipeline

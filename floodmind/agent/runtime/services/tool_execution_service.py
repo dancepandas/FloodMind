@@ -18,6 +18,7 @@ ToolExecutionService — 统一工具执行管线
 - ToolFeedback 统一由 service 生成
 """
 
+import contextvars
 import json
 import logging
 import threading
@@ -75,6 +76,12 @@ class ToolExecutionService:
 
         session_id = getattr(context, "session_id", "") if context else ""
         output_dir = getattr(context, "output_dir", "") if context else ""
+        cwd = getattr(context, "cwd", "") if context else ""
+        workspace_dir = getattr(context, "workspace_dir", "") if context else ""
+        state_dir = getattr(context, "state_dir", "") if context else ""
+        artifact_dir = getattr(context, "artifact_dir", "") if context else ""
+        tmp_dir = getattr(context, "tmp_dir", "") if context else ""
+        scripts_dir = getattr(context, "scripts_dir", "") if context else ""
         # 阶段C：子代理 delegate_cwd 经 SESSION_CONTEXT 注入，供 PathService 子代理写范围检查
         delegate_cwd = getattr(context, "delegate_cwd", "") if context else ""
         # 阶段D：agent 身份（主/子），阶段E：运行模式（规划/执行）
@@ -83,10 +90,23 @@ class ToolExecutionService:
 
         if self._set_session_context_fn is not None and session_id:
             try:
-                self._set_session_context_fn(session_id, output_dir, delegate_cwd=delegate_cwd or None)
+                self._set_session_context_fn(
+                    session_id,
+                    output_dir,
+                    delegate_cwd=delegate_cwd or None,
+                    cwd=cwd or None,
+                    workspace_dir=workspace_dir or None,
+                    state_dir=state_dir or None,
+                    artifact_dir=artifact_dir or None,
+                    tmp_dir=tmp_dir or None,
+                    scripts_dir=scripts_dir or None,
+                )
             except TypeError:
-                # 回调签名不支持 delegate_cwd（旧签名），降级兼容
-                self._set_session_context_fn(session_id, output_dir)
+                # 回调签名不支持 harness 字段或 delegate_cwd（旧签名），降级兼容
+                try:
+                    self._set_session_context_fn(session_id, output_dir, delegate_cwd=delegate_cwd or None)
+                except TypeError:
+                    self._set_session_context_fn(session_id, output_dir)
 
         perm_input = dict(call.arguments) if call.arguments else {}
         perm_input["__call_id"] = call.id
@@ -230,8 +250,9 @@ class ToolExecutionService:
 
         try:
             import concurrent.futures
+            ctx = contextvars.copy_context()
             executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
-            future = executor.submit(tool.func, **validated_args)
+            future = executor.submit(lambda: ctx.run(tool.func, **validated_args))
             try:
                 output = future.result(timeout=300)
             except concurrent.futures.TimeoutError:

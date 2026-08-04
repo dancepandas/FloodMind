@@ -118,6 +118,9 @@ class ProviderPipeline:
 
     name: str = "base"
     conservative: bool = False
+    provider_id: str = ""
+    model_id: str = ""
+    base_url: str = ""
 
     # ── 路由 ────────────────────────────────────────────────────────
 
@@ -147,6 +150,59 @@ class ProviderPipeline:
     def prepare_messages(self, messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         """消息适配（思维链回传策略 + 多模态 block 校验）。默认原样通过。"""
         return messages
+
+    # ── assistant message 回传快照（流式）────────────────────────────
+
+    def capture_assistant_delta(
+        self,
+        delta: Any,
+        state: "StreamState",
+        accumulator: Dict[str, Any],
+    ) -> None:
+        """收集 provider 原生 assistant delta，用于构造后续 API 回传消息。
+
+        这条路径服务于 provider 协议对齐：UI 可展示过滤后的 answer/reasoning，
+        但发给下一轮 API 的 assistant message 应尽量保留模型原始返回字段。
+        默认 OpenAI 方言只保留 role/content/reasoning_content。
+        """
+        role = getattr(delta, "role", None)
+        if role:
+            accumulator["role"] = str(role)
+
+        content = getattr(delta, "content", None)
+        if content:
+            accumulator["content"] = accumulator.get("content", "") + str(content)
+
+        reasoning_content = getattr(delta, "reasoning_content", None)
+        if reasoning_content:
+            # extract_reasoning 已经维护了累积式去重 buffer；优先用 buffer 的全量。
+            accumulator["reasoning_content"] = state.reasoning_buffer or str(reasoning_content)
+
+    def build_assistant_message(
+        self,
+        accumulator: Dict[str, Any],
+        tool_call_accumulators: List[Dict[str, str]],
+    ) -> Dict[str, Any]:
+        """把流式累积结果转为可回传给 provider 的 assistant message。"""
+        msg: Dict[str, Any] = {"role": accumulator.get("role") or "assistant"}
+        # MiniMax 等 schema 将 assistant.content 标为 required；工具调用轮即使为空也保留。
+        msg["content"] = accumulator.get("content", "")
+        if accumulator.get("reasoning_content"):
+            msg["reasoning_content"] = accumulator["reasoning_content"]
+
+        if tool_call_accumulators:
+            msg["tool_calls"] = [
+                {
+                    "id": acc.get("id") or "",
+                    "type": "function",
+                    "function": {
+                        "name": acc.get("name") or "",
+                        "arguments": acc.get("arguments") or "{}",
+                    },
+                }
+                for acc in tool_call_accumulators
+            ]
+        return msg
 
     # ── 解析侧（流式）───────────────────────────────────────────────
 

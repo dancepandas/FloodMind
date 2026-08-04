@@ -7,7 +7,7 @@ import pytest
 
 from floodmind.agent.runtime.contracts.workspace import Workspace
 from floodmind.agent.runtime.services.path_service import PathService
-from floodmind.agent.runtime.services.workspace_service import set_workspace, reset_workspace
+from floodmind.agent.runtime.services.workspace_service import build_folder_workspace, set_workspace, reset_workspace
 
 
 @pytest.fixture
@@ -33,8 +33,9 @@ class TestPathServiceDynamicRoots:
         f.write_text("hi")
         assert svc.is_write_allowed(f)
 
-    def test_write_allowed_in_project_data(self, tmp_workspace):
+    def test_write_allowed_in_project_data_for_legacy_workspace(self, tmp_workspace):
         root, ws = tmp_workspace
+        assert not ws.is_folder_first
         svc = PathService(project_root=root, workspace=ws)
         d = root / "data" / "outputs"
         d.mkdir(parents=True, exist_ok=True)
@@ -105,6 +106,111 @@ class TestSubAgentWriteRange:
         assert not allowed
         # 可能被 is_write_allowed 或子代理范围检查拒绝
         assert ("不在允许目录" in reason) or ("子代理" in reason)
+
+
+class TestFolderFirstPathResolution:
+    def test_relative_write_resolves_to_cwd(self, tmp_path):
+        from floodmind.agent.runtime.services.path_service import PathResolveRequest
+        from floodmind.tools.session_context import set_session_context
+
+        ws = build_folder_workspace("s1", primary_dir=tmp_path / "project")
+        ws.ensure()
+        svc = PathService(project_root=tmp_path, workspace=ws)
+        set_session_context("s1", output_dir=str(ws.user_dir), cwd=str(ws.default_cwd), workspace_dir=str(ws.workspace_dir))
+        try:
+            result = svc.resolve(PathResolveRequest(raw_path="report.md", access="write", session_id="s1"))
+            assert result.allowed
+            assert Path(result.resolved_path) == ws.default_cwd / "report.md"
+        finally:
+            set_session_context("", output_dir="")
+
+    def test_relative_read_resolves_to_cwd(self, tmp_path):
+        from floodmind.agent.runtime.services.path_service import PathResolveRequest
+        from floodmind.tools.session_context import set_session_context
+
+        ws = build_folder_workspace("s1", primary_dir=tmp_path / "project")
+        ws.ensure()
+        target = ws.default_cwd / "report.md"
+        target.write_text("hello", encoding="utf-8")
+        svc = PathService(project_root=tmp_path, workspace=ws)
+        set_session_context("s1", output_dir=str(ws.user_dir), cwd=str(ws.default_cwd), workspace_dir=str(ws.workspace_dir))
+        try:
+            result = svc.resolve(PathResolveRequest(raw_path="report.md", access="read", session_id="s1"))
+            assert result.allowed
+            assert result.source == "workspace"
+            assert Path(result.resolved_path) == target
+        finally:
+            set_session_context("", output_dir="")
+
+    def test_folder_first_disables_project_root_static_write_allowlist(self, tmp_path):
+        ws = build_folder_workspace("s1", primary_dir=tmp_path / "project")
+        ws.ensure()
+        svc = PathService(project_root=tmp_path, workspace=ws)
+        project_data = tmp_path / "data" / "outputs" / "file.txt"
+        project_data.parent.mkdir(parents=True)
+        project_data.write_text("x")
+        assert not svc.is_write_allowed(project_data)
+
+    def test_no_workspace_relative_read_rejected(self, tmp_path):
+        from floodmind.agent.runtime.services.path_service import PathResolveRequest
+
+        target = tmp_path / "file.txt"
+        target.write_text("x")
+        svc = PathService(project_root=tmp_path, workspace=None)
+        result = svc.resolve(PathResolveRequest(raw_path="file.txt", access="read", session_id=""))
+        assert not result.allowed
+        assert result.source == "no_workspace_rejected"
+
+    def test_readable_root_does_not_allow_write(self, tmp_path):
+        outside_root = tmp_path / "outside"
+        ws = build_folder_workspace("s1", primary_dir=tmp_path / "project", readable_roots=(outside_root,))
+        ws.ensure()
+        outside_root.mkdir()
+        outside = outside_root / "data.csv"
+        outside.write_text("x")
+        svc = PathService(project_root=tmp_path, workspace=ws)
+        assert svc.is_read_allowed(outside)
+        assert not svc.is_write_allowed(outside)
+
+    def test_writable_root_allows_write_and_read(self, tmp_path):
+        outside_root = tmp_path / "outside"
+        ws = build_folder_workspace("s1", primary_dir=tmp_path / "project", writable_roots=(outside_root,))
+        ws.ensure()
+        outside_root.mkdir()
+        outside = outside_root / "data.csv"
+        outside.write_text("x")
+        svc = PathService(project_root=tmp_path, workspace=ws)
+        assert svc.is_write_allowed(outside)
+        assert svc.is_read_allowed(outside)
+    def test_external_absolute_path_denied_by_default(self, tmp_path):
+        ws = build_folder_workspace("s1", primary_dir=tmp_path / "project")
+        ws.ensure()
+        outside = tmp_path / "outside" / "data.csv"
+        outside.parent.mkdir()
+        outside.write_text("x")
+        svc = PathService(project_root=tmp_path, workspace=ws)
+        assert not svc.is_read_allowed(outside)
+
+    def test_external_read_root_allows_absolute_path(self, tmp_path):
+        outside_root = tmp_path / "outside"
+        ws = build_folder_workspace("s1", primary_dir=tmp_path / "project", readable_roots=(outside_root,))
+        ws.ensure()
+        outside_root.mkdir()
+        outside = outside_root / "data.csv"
+        outside.write_text("x")
+        svc = PathService(project_root=tmp_path, workspace=ws)
+        assert svc.is_read_allowed(outside)
+
+    def test_project_agents_md_uses_workspace_root_in_folder_first(self, tmp_path):
+        from floodmind.tools.agent_tool import get_agents_md_path
+
+        ws = build_folder_workspace("s1", primary_dir=tmp_path / "project")
+        ws.ensure()
+        token = set_workspace(ws)
+        try:
+            assert get_agents_md_path("project") == ws.workspace_dir / "AGENTS.md"
+        finally:
+            reset_workspace(token)
 
 
 class TestSubAgentRelativePathIsolation:

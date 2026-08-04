@@ -56,11 +56,15 @@ def create_agent_for_session(
         llm=llm_service,
     )
 
+    # Web/session 模式显式绑定 workspace，保持 data/sessions/<sid>/outputs 旧布局。
+    ws = build_workspace(session_id, session_root=session_manager.sessions_dir)
+    set_workspace(ws)
     agent = create_flood_agent(
         llm_service=llm_service,
         memory=memory,
         session_id=session_id,
         enable_search=enable_search,
+        workspace=ws,
     )
 
     # 记录创建该 agent 时绑定的会话配置，供后续复用前比对
@@ -69,9 +73,6 @@ def create_agent_for_session(
     agent._session_enable_rag = enable_rag
     agent._session_enable_reasoning = enable_reasoning
 
-    # 注入 Workspace
-    ws = build_workspace(session_id, session_root=session_manager.sessions_dir)
-    set_workspace(ws)
     set_session_context(
         session_id=session_id,
         output_dir=str(ws.user_dir),

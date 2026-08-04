@@ -64,5 +64,12 @@
         }
       ]
     }
+  },
+  "tool_loading": {
+    "mode": "progressive",
+    "core_tools": ["SearchTools", "GetTool", "GetSkill"],
+    "max_search_results": 8,
+    "max_loaded_tools": 12,
+    "get_tool_loads_tool": true
   }
 }

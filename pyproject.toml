@@ -23,15 +23,9 @@ dependencies = [
     "pydantic-settings>=2.0",
     "openai>=1.0",
     "httpx>=0.24",
-    "httpx-sse>=0.4",
     "tiktoken>=0.5",
-    "websockets>=12.0",
     # MCP
     "mcp>=1.0",
-    # Web
-    "flask>=3.0",
-    "flask-cors>=4.0",
-    "werkzeug>=3.0",
     # RAG
     "chromadb>=0.4",
     "sentence-transformers>=2.2",
@@ -43,12 +37,8 @@ dependencies = [
     # Viz
     "matplotlib>=3.7",
     "pillow>=10.0",
-    # UI
-    "rich>=13.0",
-    "textual>=0.52",
     # Utils
     "psutil>=5.9",
-    "schedule>=1.2",
     "requests>=2.31",
     "tenacity>=8.0",
     "tqdm>=4.65",
@@ -66,9 +56,22 @@ gpu = [
     "chronos-forecasting>=2.0",
 ]
 web = [
+    "flask>=3.0",
+    "flask-cors>=4.0",
+    "werkzeug>=3.0",
     "waitress>=2.1",
     "aiofiles>=23.0",
     "gunicorn>=21.0",
+    "schedule>=1.2",
+    "websockets>=12.0",
+    "httpx-sse>=0.4",
+]
+tui = [
+    "rich>=13.0",
+    "textual>=0.52",
+]
+legacy = [
+    "floodmind[web,tui]",
 ]
 doc = [
     "pypdf>=3.0",
@@ -81,7 +84,7 @@ doc = [
     "lxml>=4.9",
 ]
 all = [
-    "floodmind[gpu,web,doc]",
+    "floodmind[gpu,doc]",
 ]
 
 [project.scripts]
@@ -94,15 +97,15 @@ build-backend = "setuptools.build_meta"
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["floodmind*"]
+exclude = ["floodmind.server*", "floodmind.tui*"]
 
 [tool.setuptools]
-py-modules = ["web_server", "start", "scheduler", "main", "sitecustomize"]
+py-modules = ["sitecustomize"]
 
 [tool.setuptools.package-data]
 floodmind = [
     "config/settings_template.json",
     "MCP/**/*.py",
-    "server/*.py",
     "skills/**/SKILL.md",
     "skills/**/scripts/**",
     "skills/**/templates/**",

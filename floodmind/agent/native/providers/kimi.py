@@ -67,11 +67,10 @@ class KimiPipeline(ProviderPipeline):
 
         extra = dict(params.get("extra_body") or {})
         if gen == "k3":
-            pass  # 始终思考，不传 thinking
+            # 始终思考，不传 thinking；reasoning_effort 是顶层字段（默认 max）。
+            params.setdefault("reasoning_effort", "max")
         elif gen == "k2.7":
-            # 强制思考，仅允许 enabled；关闭请求只省略
-            if enable_thinking:
-                extra.setdefault("thinking", {"type": "enabled"})
+            pass  # 始终思考，不传 thinking；disabled/required tool_choice 均会被拒
         elif gen == "k2.6":
             thinking: Dict[str, Any] = {"type": "enabled" if enable_thinking else "disabled"}
             if enable_thinking:
@@ -79,7 +78,13 @@ class KimiPipeline(ProviderPipeline):
             extra.setdefault("thinking", thinking)
         elif gen == "k2.5":
             extra.setdefault("thinking", {"type": "enabled" if enable_thinking else "disabled"})
-        # unknown：不发 thinking，避免新模型拒绝未知参数
+        # thinking 模式下 Kimi 拒绝 tool_choice='required'（实测 400）。
+        # 保持工具可用，但让模型 auto 选择，避免多步工具调用首轮直接失败。
+        if params.get("tool_choice") == "required" and gen in ("k3", "k2.7"):
+            params["tool_choice"] = "auto"
+        elif params.get("tool_choice") == "required" and gen == "k2.6" and enable_thinking:
+            params["tool_choice"] = "auto"
+
         if extra:
             params["extra_body"] = extra
         return params

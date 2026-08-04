@@ -111,7 +111,20 @@ class PermissionRule(BaseModel):
 
 
 class ToolPermissionPolicy(BaseModel):
-    policy_type: Literal["readonly", "write", "exec", "ask", "read_path", "skill_script", "internal", "state_write", "network"] = "readonly"
+    policy_type: Literal[
+        "readonly",
+        "write",
+        "delete",
+        "move",
+        "patch",
+        "exec",
+        "ask",
+        "read_path",
+        "skill_script",
+        "internal",
+        "state_write",
+        "network",
+    ] = "readonly"
     reason: str = ""
     path_field: str = "file_path"
     command_field: str = "command"

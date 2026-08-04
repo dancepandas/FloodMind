@@ -205,6 +205,8 @@ class ModelClient:
         )
 
         tool_call_accumulators: Dict[int, Dict[str, str]] = {}
+        completed_tool_call_accumulators: List[Dict[str, str]] = []
+        assistant_accumulator: Dict[str, Any] = {"role": "assistant", "content": ""}
         state = self.pipeline.new_stream_state()
 
         try:
@@ -234,6 +236,7 @@ class ModelClient:
                 delta = choice.delta
 
                 reasoning_inc = self.pipeline.extract_reasoning(delta, state)
+                self.pipeline.capture_assistant_delta(delta, state, assistant_accumulator)
                 if reasoning_inc:
                     yield ModelEvent(type="reasoning", content=reasoning_inc)
                     continue
@@ -302,6 +305,7 @@ class ModelClient:
                         if not json_ok and arguments_str:
                             tool_call._raw_arguments = arguments_str
                         yield ModelEvent(type="tool_call_done", content="", tool_call=tool_call)
+                        completed_tool_call_accumulators.append(dict(acc))
                     tool_call_accumulators.clear()
 
                 if finish_reason in ("stop", "length", "content_filter"):
@@ -334,7 +338,19 @@ class ModelClient:
                     if not json_ok and arguments_str:
                         tool_call._raw_arguments = arguments_str
                     yield ModelEvent(type="tool_call_done", content="", tool_call=tool_call)
+                    completed_tool_call_accumulators.append(dict(acc))
 
+            assistant_message = self.pipeline.build_assistant_message(
+                assistant_accumulator,
+                completed_tool_call_accumulators,
+            )
+            yield ModelEvent(
+                type="assistant_message_done",
+                raw={
+                    "message": assistant_message,
+                    "provider": self.pipeline.name,
+                },
+            )
             yield ModelEvent(type="done", content="")
 
         except openai.APIError as e:

@@ -156,7 +156,8 @@ class TestPrepareRequest:
     def test_kimi_k3_no_thinking_param(self):
         p = KimiPipeline()
         out = p.prepare_request(_base_params("kimi-k3"), enable_thinking=True, stream=True)
-        assert "extra_body" not in out  # k3 始终思考，无开关
+        assert "extra_body" not in out  # k3 始终思考，无 thinking 开关
+        assert out["reasoning_effort"] == "max"  # K3 顶层推理强度，默认 max
         assert "temperature" not in out  # k 系列 temperature 锁死，统一剥离
 
     def test_kimi_k25_temperature_stripped(self):
@@ -170,6 +171,48 @@ class TestPrepareRequest:
         out = p.prepare_request(_base_params("kimi-k2.7-code"), enable_thinking=False, stream=True)
         assert "extra_body" not in out  # 强制思考，关闭只省略
         assert "temperature" not in out
+
+    def test_kimi_k27_thinking_on_no_param(self):
+        p = KimiPipeline()
+        out = p.prepare_request(_base_params("kimi-k2.7-code"), enable_thinking=True, stream=True)
+        assert "extra_body" not in out  # 实测 k2.7-code 无需 thinking 参数
+
+    def test_kimi_thinking_downgrades_required_tool_choice(self):
+        p = KimiPipeline()
+        params = _base_params("kimi-k2.6")
+        params["tools"] = [{"type": "function", "function": {"name": "f"}}]
+        params["tool_choice"] = "required"
+        out = p.prepare_request(params, enable_thinking=True, stream=True)
+        assert out["tool_choice"] == "auto"
+
+        params = _base_params("kimi-k2.7-code")
+        params["tools"] = [{"type": "function", "function": {"name": "f"}}]
+        params["tool_choice"] = "required"
+        out = p.prepare_request(params, enable_thinking=True, stream=True)
+        assert out["tool_choice"] == "auto"
+
+    def test_kimi_reasoning_content_passback_snapshot(self):
+        p = KimiPipeline()
+        state = p.new_stream_state()
+        acc = {"role": "assistant", "content": ""}
+        d1 = _ns(role="assistant", reasoning_content="先分析", content=None)
+        d2 = _ns(reasoning_content="先分析再调用", content=None)
+        assert p.extract_reasoning(d1, state) == "先分析"
+        p.capture_assistant_delta(d1, state, acc)
+        assert p.extract_reasoning(d2, state) == "再调用"
+        p.capture_assistant_delta(d2, state, acc)
+        p.capture_assistant_delta(_ns(content="我来调用工具"), state, acc)
+        msg = p.build_assistant_message(acc, [{"id": "c1", "name": "search", "arguments": '{"q":"x"}'}])
+        assert msg["role"] == "assistant"
+        assert msg["content"] == "我来调用工具"
+        assert msg["reasoning_content"] == "先分析再调用"
+        assert msg["tool_calls"][0]["function"]["arguments"] == '{"q":"x"}'
+
+    def test_kimi_pipeline_records_routing_context(self):
+        p = route_pipeline("moonshot", "kimi-k3", "https://api.moonshot.cn/v1")
+        assert p.provider_id == "moonshot"
+        assert p.model_id == "kimi-k3"
+        assert p.base_url == "https://api.moonshot.cn/v1"
 
     def test_minimax_thinking_split(self):
         p = MiniMaxPipeline()
@@ -235,10 +278,33 @@ class TestStreamParsing:
     def test_minimax_reasoning_details_cumulative(self):
         p = MiniMaxPipeline()
         state = p.new_stream_state()
-        d1 = _ns(reasoning_content=None, reasoning_details=[{"text": "步骤一"}])
-        d2 = _ns(reasoning_content=None, reasoning_details=[{"text": "步骤一，步骤二"}])
+        acc = {"role": "assistant", "content": ""}
+        d1 = _ns(reasoning_content=None, reasoning_details=[{"type": "reasoning.text", "text": "步骤一"}])
+        d2 = _ns(reasoning_content=None, reasoning_details=[{"type": "reasoning.text", "text": "步骤一，步骤二"}])
         assert p.extract_reasoning(d1, state) == "步骤一"
+        p.capture_assistant_delta(d1, state, acc)
         assert p.extract_reasoning(d2, state) == "，步骤二"
+        p.capture_assistant_delta(d2, state, acc)
+        msg = p.build_assistant_message(acc, [])
+        assert msg["reasoning_content"] == "步骤一，步骤二"
+        assert msg["reasoning_details"] == [{"type": "reasoning.text", "text": "步骤一，步骤二"}]
+
+    def test_minimax_preserves_raw_think_content_for_passback(self):
+        p = MiniMaxPipeline()
+        state = p.new_stream_state()
+        acc = {"role": "assistant", "content": ""}
+        chunks = ["<think>想", "一下</think>答"]
+        answer, reasoning = "", ""
+        for c in chunks:
+            delta = _ns(content=c, reasoning_content=None, reasoning_details=None)
+            a, r = p.filter_content(c, state)
+            p.capture_assistant_delta(delta, state, acc)
+            answer += a
+            reasoning += r
+        assert answer == "答"
+        assert reasoning == "想一下"
+        msg = p.build_assistant_message(acc, [])
+        assert msg["content"] == "<think>想一下</think>答"
 
     def test_minimax_think_tag_streaming(self):
         """content 内 <think> 标签跨 chunk 剥离：思考进 reasoning，回答干净。"""

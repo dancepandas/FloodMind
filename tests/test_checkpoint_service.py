@@ -1,5 +1,6 @@
 """Tests for CheckpointService and AgentLoopState serialization."""
 
+import inspect
 import tempfile
 from pathlib import Path
 
@@ -79,53 +80,42 @@ class TestCheckpointService:
         assert summaries[1].iteration == 3
         assert summaries[2].iteration == 2
 
-    def test_files_snapshot_and_rollback(self):
+    def test_save_signature_has_no_file_snapshot_parameter(self):
+        sig = inspect.signature(CheckpointService.save)
+        assert "files_dirs" not in sig.parameters
+
+    def test_save_does_not_create_files_snapshot(self):
         svc, base_dir = self._make_service()
         session_id = "test-session"
-        session_dir = Path(base_dir) / session_id / "outputs"
-        session_dir.mkdir(parents=True, exist_ok=True)
+        state = self._make_state(session_id=session_id)
+        record = svc.save(state)
 
-        original_file = session_dir / "data.txt"
+        checkpoint_dir = Path(base_dir) / session_id / "checkpoints" / record.checkpoint_id
+        assert (checkpoint_dir / "state.json").exists()
+        assert (checkpoint_dir / "manifest.json").exists()
+        assert not (checkpoint_dir / "files").exists()
+        assert record.files_snapshot_path is None
+
+        manifest = svc.load_manifest(session_id, record.checkpoint_id)
+        assert manifest.files_snapshot_dir is None
+        assert manifest.files_snapshot_base_dirs == []
+        assert svc.list(session_id)[0].has_files_snapshot is False
+
+    def test_rollback_files_noops_for_state_only_checkpoint(self):
+        svc, base_dir = self._make_service()
+        session_id = "test-session"
+        workspace = Path(base_dir) / "workspace"
+        workspace.mkdir(parents=True, exist_ok=True)
+        original_file = workspace / "data.txt"
         original_file.write_text("version 1", encoding="utf-8")
 
         state = self._make_state(session_id=session_id)
-        svc.save(state, files_dirs=[str(session_dir)])
+        record = svc.save(state)
 
-        # 修改文件
         original_file.write_text("version 2", encoding="utf-8")
-        assert original_file.read_text() == "version 2"
-
-        # 回滚
-        record = svc.list(session_id)[0]
         restored = svc.rollback_files(session_id, record.checkpoint_id)
-        assert len(restored) == 1
-        assert original_file.read_text() == "version 1"
-
-    def test_files_snapshot_skips_symlinks(self):
-        svc, base_dir = self._make_service()
-        session_id = "test-session"
-        session_dir = Path(base_dir) / session_id / "outputs"
-        session_dir.mkdir(parents=True, exist_ok=True)
-
-        # 在 session_dir 外创建敏感文件，并在内部创建指向它的符号链接
-        outside = Path(base_dir) / "outside_secret.txt"
-        outside.write_text("secret", encoding="utf-8")
-        link = session_dir / "link_to_secret.txt"
-        try:
-            link.symlink_to(outside)
-        except OSError:
-            pytest.skip("当前环境不支持创建符号链接")
-
-        real_file = session_dir / "real.txt"
-        real_file.write_text("ok", encoding="utf-8")
-
-        state = self._make_state(session_id=session_id)
-        record = svc.save(state, files_dirs=[str(session_dir)])
-
-        snapshot_dir = Path(base_dir) / session_id / "checkpoints" / record.checkpoint_id / "files"
-        assert (snapshot_dir / "real.txt").exists()
-        assert not (snapshot_dir / "link_to_secret.txt").exists()
-        assert not (snapshot_dir / "outside_secret.txt").exists()
+        assert restored == []
+        assert original_file.read_text(encoding="utf-8") == "version 2"
 
     def test_execution_plan_in_state(self):
         svc, _ = self._make_service()

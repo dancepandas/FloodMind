@@ -287,7 +287,7 @@ class GetSkillInput(BaseModel):
 class ExecBashInput(BaseModel):
     """执行 Bash 命令的输入参数"""
     command: str = Field(description="[必填] 要执行的 shell 命令（不要嵌套 powershell/bash 前缀）")
-    workdir: str = Field(default="", description="[可选] 工作目录（绝对路径），默认当前会话输出目录")
+    workdir: str = Field(default="", description="[可选] 工作目录：相对当前 workspace 的目录，或已授权 roots 内的绝对目录；默认 workspace cwd")
     timeout: int = Field(default=120, description="[可选] 超时时间（秒），默认 120")
     env: str = Field(default="{}", description="[可选] 额外环境变量，JSON 对象格式")
 
@@ -606,18 +606,34 @@ def _impl_exec_bash(command: str = "", workdir: str = "", timeout: int = 120, en
         # 子代理 cwd 选择优先级：
         # 1. delegate_cwd（阶段C：主代理委派指定的工作目录，桌面版并行写 user_dir 子目录）
         # 2. process_sandbox.workspace_dir（子代理默认 sandbox 隔离）
-        # 3. workdir 参数（显式指定，经权限解析）
-        # 4. SESSION_CONTEXT["output_dir"]（主代理产物目录）
+        # 3. workdir 参数（显式指定，经 cwd 权限解析）
+        # 4. SESSION_CONTEXT["cwd"]（folder-first / harness 默认 cwd）
+        # 5. SESSION_CONTEXT["output_dir"]（Web/旧模式兼容）
         if delegate_cwd and Path(delegate_cwd).is_dir():
             cwd = Path(delegate_cwd)
         elif process_sandbox is not None and process_sandbox.workspace_dir:
             cwd = process_sandbox.workspace_dir
         elif workdir and workdir.strip():
-            cwd = resolve_tool_path(workdir.strip(), access="read").resolved
+            path_result = resolve_tool_path(workdir.strip(), access="cwd")
+            if not path_result.allowed:
+                return _finalize_tool_output("exec_bash", f"错误：{path_result.reason or 'workdir 不在允许目录内'}", command=command, timeout=timeout)
+            cwd = path_result.resolved
             if not cwd.is_dir():
-                cwd = Path(SESSION_CONTEXT.get("output_dir", str(_PROJECT_ROOT)))
+                return _finalize_tool_output("exec_bash", f"错误：workdir 不存在或不是目录: {cwd}", command=command, timeout=timeout)
         else:
-            cwd = Path(SESSION_CONTEXT.get("output_dir", str(_PROJECT_ROOT)))
+            cwd_raw = SESSION_CONTEXT.get("cwd", "") or SESSION_CONTEXT.get("output_dir", "")
+            if not cwd_raw:
+                try:
+                    ws = get_workspace()
+                    if ws is not None:
+                        cwd_raw = str(ws.default_cwd)
+                except Exception:
+                    cwd_raw = ""
+            if not cwd_raw:
+                return _finalize_tool_output("exec_bash", "错误：缺少 workspace cwd，拒绝执行 Bash。请在工作区内启动 SDK，或显式传入已授权 workdir。", command=command, timeout=timeout)
+            cwd = Path(cwd_raw)
+            if not cwd.is_dir():
+                return _finalize_tool_output("exec_bash", f"错误：默认 cwd 不存在或不是目录: {cwd}", command=command, timeout=timeout)
 
         if process_sandbox is not None:
             run_env = process_sandbox.restrict_env(run_env, process_sandbox.workspace_dir or cwd)
@@ -711,7 +727,7 @@ exec_bash = build_agent_tool(
     description=(
         "[必填] command: 要执行的 shell 命令。"
         "不要在 command 中嵌套 powershell -Command、pwsh -Command、bash -lc 或 sh -lc。"
-        "[可选] workdir: 工作目录（绝对路径），默认当前会话输出目录。"
+        "[可选] workdir: 工作目录，相对当前 workspace，或已授权 roots 内的绝对路径；默认 workspace cwd，通常无需传。"
         "[可选] timeout: 超时秒数，默认 120。[可选] env: 额外环境变量（JSON格式）。"
         "自动选择可用 shell。Python 用 python，Node.js 用 node 或 npm。"
     ),
@@ -720,8 +736,8 @@ exec_bash = build_agent_tool(
     is_readonly=False,
     is_destructive=True,
     is_concurrency_safe=False,
-    check_permissions_fn=make_exec_permission_fn("command"),
-    permission_policy=ToolPermissionPolicy(policy_type="exec", command_field="command"),
+    check_permissions_fn=make_exec_permission_fn("command", path_fields=["workdir"]),
+    permission_policy=ToolPermissionPolicy(policy_type="exec", command_field="command", path_fields=["workdir"]),
 )
 
 

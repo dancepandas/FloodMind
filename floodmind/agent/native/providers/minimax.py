@@ -10,7 +10,7 @@
 - 多模态：image_url/video_url 原样放行（detail/fps/mm_file:// 透传）
 """
 
-from typing import Any, Dict, Tuple
+from typing import Any, Dict, List, Tuple
 
 from .base import ProviderPipeline, StreamState, incremental, split_think_tags
 
@@ -61,6 +61,52 @@ class MiniMaxPipeline(ProviderPipeline):
         if extra:
             params["extra_body"] = extra
         return params
+
+    def capture_assistant_delta(
+        self,
+        delta: Any,
+        state: StreamState,
+        accumulator: Dict[str, Any],
+    ) -> None:
+        """保留 MiniMax 原生 assistant message 字段，供多轮工具调用回传。
+
+        MiniMax 文档要求 Function Call 历史中完整保留 response_message：
+        - reasoning_split=True 时保留 reasoning_content / reasoning_details；
+        - reasoning_split=False 时 content 内 <think>...</think> 也必须原样保留。
+        """
+        super().capture_assistant_delta(delta, state, accumulator)
+
+        details = getattr(delta, "reasoning_details", None)
+        if details:
+            normalized: List[Dict[str, Any]] = []
+            for detail in details:
+                if isinstance(detail, dict):
+                    normalized.append(dict(detail))
+                elif hasattr(detail, "model_dump"):
+                    normalized.append(detail.model_dump())
+                else:
+                    item: Dict[str, Any] = {}
+                    for key in ("type", "id", "format", "index", "text"):
+                        value = getattr(detail, key, None)
+                        if value is not None:
+                            item[key] = value
+                    if item:
+                        normalized.append(item)
+            if normalized:
+                # MiniMax 流式 reasoning_details 的 text 是累积式全量；回传时保留最新完整结构。
+                accumulator["reasoning_details"] = normalized
+                if state.reasoning_buffer:
+                    accumulator["reasoning_content"] = state.reasoning_buffer
+
+    def build_assistant_message(
+        self,
+        accumulator: Dict[str, Any],
+        tool_call_accumulators: List[Dict[str, str]],
+    ) -> Dict[str, Any]:
+        msg = super().build_assistant_message(accumulator, tool_call_accumulators)
+        if accumulator.get("reasoning_details"):
+            msg["reasoning_details"] = accumulator["reasoning_details"]
+        return msg
 
     def extract_reasoning(self, delta: Any, state: StreamState):
         """reasoning_content 优先；reasoning_details 的 text 为累积式 → 差分。"""

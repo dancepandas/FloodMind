@@ -46,6 +46,12 @@ class RunContext:
     attachments: List[Attachment] = field(default_factory=list)
     output_dir: str = ""
     upload_dir: str = ""
+    cwd: str = ""
+    workspace_dir: str = ""
+    state_dir: str = ""
+    artifact_dir: str = ""
+    tmp_dir: str = ""
+    scripts_dir: str = ""
     model_key: str = ""
     enable_reasoning: bool = False
     enable_search: bool = False
@@ -68,6 +74,7 @@ class ModelEvent:
         "token",
         "tool_call_delta",
         "tool_call_done",
+        "assistant_message_done",
         "done",
         "usage",
         "error",

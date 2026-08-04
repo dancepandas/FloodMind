@@ -3,16 +3,15 @@ CheckpointService — Agent 执行状态持久化与恢复
 
 职责：
 1. 保存 AgentLoopState 到 checkpoint 目录
-2. 对会话工作区做文件快照，支持按 checkpoint 回滚
-3. 加载指定或最新 checkpoint
-4. 列出、清理 checkpoint
+2. 加载指定或最新 checkpoint
+3. 列出、清理 checkpoint
 
 设计原则：
-- 与业务逻辑解耦，只负责序列化/反序列化和文件 I/O
+- checkpoint 只保存 Agent runtime state，不复制 workspace 文件
+- 与业务逻辑解耦，只负责状态序列化/反序列化和 checkpoint 文件 I/O
 - checkpoint 目录结构：data/sessions/<session_id>/checkpoints/<checkpoint_id>/
   - manifest.json: 元数据
   - state.json: AgentLoopState 序列化
-  - files/: 文件快照目录（可选）
 - 原子写入：先写 .tmp 目录，成功后 rename
 - 自动保留最近 N 个 checkpoint，避免磁盘无限增长
 """
@@ -70,14 +69,12 @@ class CheckpointService:
     def save(
         self,
         state: Any,
-        files_dirs: Optional[List[str]] = None,
         metadata: Optional[Dict[str, Any]] = None,
     ) -> CheckpointRecord:
         """保存一个 checkpoint。
 
         Args:
             state: AgentLoopState 实例（需要可序列化为 JSON）
-            files_dirs: 需要快照的目录列表（如 output_dir, upload_dir）
             metadata: 额外元数据
 
         Returns:
@@ -104,16 +101,7 @@ class CheckpointService:
             state_data = self._serialize_state(state)
             state_path.write_text(json.dumps(state_data, ensure_ascii=False, sort_keys=True, default=self._json_default), encoding="utf-8")
 
-            # 2. 文件快照
-            files_snapshot_path = None
-            snapshot_files: List[str] = []
-            if files_dirs:
-                files_dir = tmp_dir / _FILES_DIR
-                snapshot_files = self._snapshot_files(files_dirs, files_dir)
-                if snapshot_files:
-                    files_snapshot_path = str(files_dir.relative_to(checkpoint_dir.parent))
-
-            # 3. manifest
+            # 2. manifest（checkpoint 只保存 runtime state，不复制文件系统）
             manifest = CheckpointManifest(
                 checkpoint_id=checkpoint_id,
                 session_id=session_id,
@@ -123,8 +111,8 @@ class CheckpointService:
                 iteration=getattr(state, "iteration", 0),
                 created_at=state.updated_at,
                 state_file=_STATE_FILE,
-                files_snapshot_dir=str(Path(_FILES_DIR)) if snapshot_files else None,
-                files_snapshot_base_dirs=files_dirs if files_dirs else [],
+                files_snapshot_dir=None,
+                files_snapshot_base_dirs=[],
                 metadata=metadata or {},
             )
             manifest_path = tmp_dir / _MANIFEST_FILE
@@ -157,7 +145,7 @@ class CheckpointService:
                 iteration=manifest.iteration,
                 created_at=manifest.created_at,
                 state_path=str(state_path),
-                files_snapshot_path=files_snapshot_path,
+                files_snapshot_path=None,
                 metadata=manifest.metadata,
             )
             logger.info(
@@ -245,13 +233,10 @@ class CheckpointService:
         checkpoint_id: str,
         target_base_dirs: Optional[List[str]] = None,
     ) -> List[str]:
-        """将文件快照恢复到原始位置。
+        """Legacy 文件快照回滚入口。
 
-        Args:
-            target_base_dirs: 可选，指定恢复到哪些目录。默认使用 checkpoint 中记录的 base_dirs。
-
-        Returns:
-            被恢复的文件路径列表
+        SDK-first checkpoint 不再创建文件快照；此方法仅兼容读取历史 checkpoint
+        中已经存在的 files/ 目录，不会触发新的文件复制。
         """
         checkpoint_dir = self._checkpoint_dir(session_id, checkpoint_id)
         files_dir = checkpoint_dir / _FILES_DIR
@@ -346,33 +331,6 @@ class CheckpointService:
                 logger.info("CheckpointService: cleaned up old checkpoint %s", old.checkpoint_id)
             except Exception as e:
                 logger.warning("CheckpointService: 清理旧 checkpoint %s 失败: %s", old.checkpoint_id, e)
-
-    def _snapshot_files(self, dirs: List[str], dest_dir: Path) -> List[str]:
-        """把 dirs 中的文件复制到 dest_dir，返回相对路径列表。"""
-        copied: List[str] = []
-        dest_resolved = dest_dir.resolve()
-        for base_dir in dirs:
-            if not base_dir or not Path(base_dir).is_dir():
-                continue
-            base_path = Path(base_dir)
-            for src_path in base_path.rglob("*"):
-                # 跳过符号链接，防止跟随到允许目录外
-                if src_path.is_symlink():
-                    continue
-                if not src_path.is_file():
-                    continue
-                rel = src_path.relative_to(base_path)
-                dst_path = dest_dir / rel
-                # 路径遍历防护：目标必须落在 dest_dir 内
-                try:
-                    dst_path.resolve().relative_to(dest_resolved)
-                except ValueError:
-                    logger.warning("CheckpointService: skip snapshot path traversal %s", dst_path)
-                    continue
-                dst_path.parent.mkdir(parents=True, exist_ok=True)
-                shutil.copy2(src_path, dst_path)
-                copied.append(str(rel.as_posix()))
-        return copied
 
     def _serialize_state(self, state: Any) -> Dict[str, Any]:
         """把状态对象序列化为 dict。优先使用 Pydantic model_dump，其次 __dict__。"""

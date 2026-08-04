@@ -7,6 +7,7 @@ import pytest
 
 from floodmind.agent.runtime.contracts.workspace import Workspace
 from floodmind.agent.runtime.services.workspace_service import (
+    build_folder_workspace,
     build_workspace,
     set_workspace,
     get_workspace,
@@ -68,6 +69,47 @@ class TestBuildWorkspace:
             user = Path(tmp) / "project"
             ws = Workspace(user_dir=user, session_root=Path(tmp), sandbox_base=Path(tmp))
             assert ws.default_cwd == user
+
+    def test_folder_workspace_uses_primary_dir(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            primary = Path(tmp) / "project"
+            ws = build_folder_workspace("sess1", primary_dir=primary)
+            assert ws.mode == "folder_first"
+            assert ws.is_folder_first is True
+            assert ws.user_dir == primary.resolve()
+            assert ws.primary_dir == primary.resolve()
+            assert ws.cwd == primary.resolve()
+            assert ws.default_cwd == primary.resolve()
+            assert ws.session_root == primary.resolve() / ".floodmind" / "sessions"
+            assert ws.sandbox_base == primary.resolve() / ".floodmind" / "sandboxes"
+            assert ws.artifact_dir == primary.resolve() / ".floodmind" / "artifacts" / "sess1"
+            assert ws.tmp_dir == primary.resolve() / ".floodmind" / "tmp" / "sess1"
+            assert ws.scripts_dir == primary.resolve() / ".floodmind" / "scripts" / "sess1"
+
+    def test_folder_workspace_ensure_creates_managed_dirs(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            ws = build_folder_workspace("sess1", primary_dir=Path(tmp) / "project")
+            ws.ensure()
+            assert ws.user_dir.exists()
+            assert ws.session_root.exists()
+            assert ws.sandbox_base.exists()
+            assert ws.artifact_dir.exists()
+            assert ws.tmp_dir.exists()
+            assert ws.scripts_dir.exists()
+
+    def test_workspace_from_folder_contract(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            ws = Workspace.from_folder(Path(tmp) / "project", session_id="sdk")
+            assert ws.mode == "folder_first"
+            assert ws.default_cwd == (Path(tmp) / "project").resolve()
+            assert ws.session_root == (Path(tmp) / "project" / ".floodmind" / "sessions").resolve()
+            assert ws.artifact_dir == (Path(tmp) / "project" / ".floodmind" / "artifacts" / "sdk").resolve()
+
+    def test_top_level_workspace_exports(self):
+        from floodmind import Workspace as PublicWorkspace, build_folder_workspace as public_build_folder_workspace
+        assert PublicWorkspace is Workspace
+        ws = public_build_folder_workspace("sess1", primary_dir=Path(tempfile.gettempdir()) / "fm-sdk-ws")
+        assert ws.mode == "folder_first"
 
 
 class TestWorkspaceContextvar:

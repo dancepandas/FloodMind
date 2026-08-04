@@ -8,9 +8,9 @@ Plugin Loader — 从配置目录自动发现和加载 FloodmindPlugin。
 """
 
 import importlib
+import importlib.util
 import json
 import logging
-import sys
 from pathlib import Path
 from typing import List
 
@@ -30,6 +30,7 @@ class PluginLoader:
     def __init__(self, plugin_dirs: List[Path] | None = None):
         self._dirs = plugin_dirs or DEFAULT_PLUGIN_DIRS
         self._loaded: List[FloodmindPlugin] = []
+        self._loaded_sources: set[str] = set()
 
     @property
     def loaded(self) -> List[FloodmindPlugin]:
@@ -77,18 +78,24 @@ class PluginLoader:
             except Exception as e:
                 logger.warning("Plugin %s on_unload error: %s", plugin.name, e)
         self._loaded.clear()
+        self._loaded_sources.clear()
 
     def _load_module(self, filepath: Path) -> None:
         """从 .py 文件加载插件。"""
         try:
-            # Add parent dir to path for import
-            parent = str(filepath.parent)
-            if parent not in sys.path:
-                sys.path.insert(0, parent)
+            source = str(filepath.resolve())
+            if source in self._loaded_sources:
+                return
 
-            mod_name = filepath.stem
-            mod = importlib.import_module(mod_name)
+            mod_name = "floodmind_user_plugin_" + str(abs(hash(source))).replace("-", "_")
+            spec = importlib.util.spec_from_file_location(mod_name, filepath)
+            if spec is None or spec.loader is None:
+                logger.warning("Failed to create plugin spec for %s", filepath)
+                return
+            mod = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(mod)
 
+            loaded_any = False
             for attr_name in dir(mod):
                 attr = getattr(mod, attr_name)
                 if (
@@ -99,7 +106,10 @@ class PluginLoader:
                     plugin = attr()
                     plugin.on_load()
                     self._loaded.append(plugin)
+                    loaded_any = True
                     logger.info("Loaded plugin: %s v%s from %s", plugin.name, plugin.version, filepath)
+            if loaded_any:
+                self._loaded_sources.add(source)
 
         except Exception as e:
             logger.warning("Failed to load plugin module %s: %s", filepath, e)
@@ -107,7 +117,10 @@ class PluginLoader:
     def _load_package(self, pkg_name: str) -> None:
         """从 Python 包加载插件。"""
         try:
+            if pkg_name in self._loaded_sources:
+                return
             mod = importlib.import_module(pkg_name)
+            loaded_any = False
             for attr_name in dir(mod):
                 attr = getattr(mod, attr_name)
                 if (
@@ -118,6 +131,9 @@ class PluginLoader:
                     plugin = attr()
                     plugin.on_load()
                     self._loaded.append(plugin)
+                    loaded_any = True
                     logger.info("Loaded package plugin: %s v%s", plugin.name, plugin.version)
+            if loaded_any:
+                self._loaded_sources.add(pkg_name)
         except Exception as e:
             logger.warning("Failed to load plugin package %s: %s", pkg_name, e)
