@@ -56,6 +56,45 @@ class TestNativeAgentExecutor:
         assert "Hello" in result.final_output
         assert not result.is_timeout
 
+    def test_is_retryable_error_recognizes_peer_closed_connection(self):
+        """流式中断（peer closed connection / chunked read / remote protocol）可重试。"""
+        from floodmind.agent.native.retry import is_retryable_error
+
+        cases = [
+            "流式输出异常: peer closed connection without sending complete message body (incomplete chunked read)",
+            "remote protocol error: connection lost",
+            "chunked read error: peer disconnected",
+        ]
+        for msg in cases:
+            assert is_retryable_error(RuntimeError(msg)), msg
+
+    def test_executor_retries_stream_error_on_peer_closed_connection(self):
+        """流式中断（SDK 包装成 error 事件）被识别为可重试 → executor 自动重试 LLM 请求。"""
+        mc = MagicMock(spec=ModelClient)
+        calls = {"n": 0}
+
+        def stream_chat(*args, **kwargs):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                # 第一次：中途断流，SDK 包装成"流式输出异常" error 事件
+                return iter([
+                    ModelEvent(type="token", content="Hel"),
+                    ModelEvent(type="error", content="流式输出异常: peer closed connection without sending complete message body (incomplete chunked read)"),
+                ])
+            # 第二次：成功
+            return iter([
+                ModelEvent(type="token", content="Hello world"),
+                ModelEvent(type="done"),
+            ])
+
+        mc.stream_chat.side_effect = stream_chat
+        executor = self._make_executor(mc, tools_schema=[])
+        result = executor.run(self._make_context(), "hello")
+
+        assert calls["n"] == 2  # 断流后自动重试了一次
+        assert "Hello world" in result.final_output
+        assert not result.is_timeout
+
     def test_executor_calls_tools_and_resumes_loop(self):
         """Agent loop executes tool call then continues."""
         mc = MagicMock(spec=ModelClient)

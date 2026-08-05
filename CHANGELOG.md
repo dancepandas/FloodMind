@@ -2,6 +2,17 @@
 
 All notable changes to FloodMind are documented in this file.
 
+## [1.1.3] - 2026-08-05
+
+### Fixed
+
+- LLM streaming disconnections are now retried: `is_retryable_error` recognizes `closed connection` / `chunked` / `remote protocol` / `peer closed` patterns (e.g. `httpx.RemoteProtocolError: peer closed connection` mid-chunked-read). The executor's existing retry loop already re-invokes `ModelClient.stream_chat` on raised errors and clears partial state, so a network blip no longer fails the whole agent round.
+
+### Verification
+
+- Full core-only test suite: `571 passed, 1 skipped`.
+- The single skipped test is legacy Web adapter compatibility that requires optional `floodmind[web]` / Flask extra.
+
 ## [1.1.2] - 2026-08-05
 
 ### Fixed

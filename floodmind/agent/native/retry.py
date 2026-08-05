@@ -20,6 +20,7 @@ _RETRYABLE_PATTERNS = [
     "503", "502", "500",
     "service unavailable", "server error",
     "connection reset", "connection refused",
+    "closed connection", "chunked", "remote protocol", "peer closed",
     "network", "temporary failure",
     "busy", "overloaded",
     "internal error",
