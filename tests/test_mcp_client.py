@@ -5,7 +5,15 @@ point, the runtime hot-plug lifecycle (list / get / disconnect), and the scoped
 registry unregister used to clean up a disconnected server's tools.
 """
 
-from floodmind.agent.mcp_client import McpClientPool, build_mcp_tool_specs
+import re
+from unittest.mock import MagicMock
+
+from floodmind.agent.mcp_client import (
+    McpClientPool,
+    _mcp_tool_spec_name,
+    build_mcp_tool_specs,
+    mcp_tool_prefix,
+)
 from floodmind.agent.native.native_flood_agent import NativeFloodAgent, _InstanceToolRegistry
 from floodmind.agent.runtime.contracts.tools import ToolSpec
 
@@ -13,12 +21,13 @@ from floodmind.agent.runtime.contracts.tools import ToolSpec
 class FakeConn:
     """Stand-in for McpClientConnection — no network, records disconnect."""
 
-    def __init__(self, name, tools, transport="sse"):
+    def __init__(self, name, tools, transport="sse", call_result="ok"):
         self.name = name
         self.transport = transport
         self._tools = tools
         self._connected = True
         self.disconnected = False
+        self.call_result = call_result
 
     def list_tools(self):
         return list(self._tools)
@@ -26,6 +35,9 @@ class FakeConn:
     @property
     def is_connected(self):
         return self._connected
+
+    def call_tool(self, tool_name, arguments):
+        return self.call_result
 
     def disconnect(self):
         self._connected = False
@@ -39,12 +51,14 @@ class TestBuildMcpToolSpecs:
         specs = build_mcp_tool_specs(conn, "srv", lambda fn, kw: calls.append((fn, kw)) or "ok")
         assert len(specs) == 1
         s = specs[0]
-        assert s.name == "mcp:srv:t1"
+        # model-visible name 经 sanitize（OpenAI 兼容端点要求 ^[a-zA-Z0-9_-]+$）
+        assert s.name == "mcp_srv_t1"
+        assert re.fullmatch(r"[a-zA-Z0-9_-]+", s.name)
         assert s.description == "[MCP:srv] d1"
         assert s.parameters["required"] == ["a"]
         assert s.permission_policy.policy_type == "network"
         assert s.is_destructive is True
-        # closure dispatches to call_tool_fn with full name + kwargs
+        # closure 仍以原始冒号分隔 full name 调用 call_tool_fn
         assert s.func(a="x") == "ok"
         assert calls == [("mcp:srv:t1", {"a": "x"})]
 
@@ -52,6 +66,32 @@ class TestBuildMcpToolSpecs:
         conn = FakeConn("srv", [{"name": "t1"}, {"name": "t2"}])
         specs = build_mcp_tool_specs(conn, "srv", lambda fn, kw: fn)
         assert sorted(s.func() for s in specs) == ["mcp:srv:t1", "mcp:srv:t2"]
+
+    def test_sanitize_supports_colon_in_tool_name(self):
+        # MCP 工具名本身可含冒号：`mcp:hydro-rag:search:docs`
+        conn = FakeConn("hydro-rag", [{"name": "search:docs"}])
+        specs = build_mcp_tool_specs(conn, "hydro-rag", lambda fn, kw: fn)
+        assert specs[0].name == "mcp_hydro-rag_search_docs"
+        assert re.fullmatch(r"[a-zA-Z0-9_-]+", specs[0].name)
+        # bound function 仍调用原始 full name
+        assert specs[0].func() == "mcp:hydro-rag:search:docs"
+
+    def test_mcp_tool_prefix_matches_sanitized_names(self):
+        # 断开清理前缀与 _mcp_tool_spec_name 生成的 model-visible 名对齐
+        assert _mcp_tool_spec_name("hydro-rag", "search:docs").startswith(mcp_tool_prefix("hydro-rag"))
+        assert mcp_tool_prefix("hydro-rag") == "mcp_hydro-rag_"
+        assert mcp_tool_prefix("srv") == "mcp_srv_"
+
+    def test_disconnect_cleans_sanitized_tools(self):
+        # 断开时 unregister_prefix 用 sanitized 前缀，能清掉 sanitized ToolSpec
+        conn = FakeConn("hydro-rag", [{"name": "search:docs"}, {"name": "t2"}])
+        reg = _InstanceToolRegistry()
+        for spec in build_mcp_tool_specs(conn, "hydro-rag", lambda fn, kw: "ok"):
+            reg.register(spec)
+        assert len(reg.all()) == 2
+        removed = reg.unregister_prefix(mcp_tool_prefix("hydro-rag"))
+        assert removed == 2
+        assert len(reg.all()) == 0
 
 
 class TestPoolLifecycle:
@@ -156,3 +196,120 @@ class TestMcpManagementHandlers:
         assert h._orchestrator_registry.all() == []
         assert h._specialist_registry.all() == []
         assert pool.get_server_info("srv") is None
+
+
+class TestMcpConnectionLiveness:
+    def _conn(self, transport="stdio"):
+        from floodmind.agent.mcp_client import McpClientConnection
+        return McpClientConnection(name="a", transport=transport)
+
+    def test_uninitialized_returns_false(self):
+        assert self._conn().is_connected is False
+
+    def test_stdio_alive_process_returns_true(self):
+        conn = self._conn()
+        conn._initialized = True
+        conn._process = MagicMock()
+        conn._process.poll.return_value = None
+        assert conn.is_connected is True
+
+    def test_stdio_dead_process_returns_false(self):
+        conn = self._conn()
+        conn._initialized = True
+        conn._process = MagicMock()
+        conn._process.poll.return_value = 1
+        assert conn.is_connected is False
+
+    def test_sse_initialized_returns_true(self):
+        conn = self._conn(transport="sse")
+        conn._initialized = True
+        assert conn.is_connected is True
+
+
+class TestMcpCallHealth:
+    def _pool_with(self, conns):
+        pool = McpClientPool()
+        for c in conns:
+            pool._connections[c.name] = c
+        return pool
+
+    def test_missing_connection_records_failure(self):
+        pool = McpClientPool()
+        out = pool.call_tool("mcp:missing:t", {})
+        assert "未连接" in out
+        h = pool.call_health()["missing"]
+        assert h["ok"] is False
+        assert "未连接" in h["error"]
+
+    def test_success_records_ok(self):
+        conn = FakeConn("a", [{"name": "t1"}], call_result="ok result")
+        pool = self._pool_with([conn])
+        assert pool.call_tool("mcp:a:t1", {}) == "ok result"
+        assert pool.call_health()["a"] == {"ok": True, "error": None}
+
+    def test_fail_marker_records_failure(self):
+        conn = FakeConn("a", [{"name": "t1"}], call_result="工具调用失败: backend down")
+        pool = self._pool_with([conn])
+        pool.call_tool("mcp:a:t1", {})
+        h = pool.call_health()["a"]
+        assert h["ok"] is False
+        assert "backend down" in h["error"]
+
+    def test_exception_records_failure_and_reraises(self):
+        import pytest
+
+        class BoomConn:
+            name = "a"
+
+            def call_tool(self, tool_name, arguments):
+                raise ConnectionError("ECONNREFUSED")
+
+        pool = self._pool_with([BoomConn()])
+        with pytest.raises(ConnectionError):
+            pool.call_tool("mcp:a:t1", {})
+        h = pool.call_health()["a"]
+        assert h["ok"] is False
+        assert "ECONNREFUSED" in h["error"]
+
+
+class TestMcpServerConnectedListener:
+    def _make_pool_with_fake_connect(self, monkeypatch, fake_conn):
+        import floodmind.agent.mcp_client as mcp_mod
+        monkeypatch.setattr(mcp_mod, "McpClientConnection", lambda name, transport, **kw: fake_conn)
+        return McpClientPool()
+
+    def test_listener_notified_with_config_and_conn(self, monkeypatch):
+        fake = MagicMock()
+        fake.list_tools.return_value = []
+        pool = self._make_pool_with_fake_connect(monkeypatch, fake)
+        seen = []
+        pool.add_server_connected_listener(lambda cfg, conn: seen.append((cfg, conn)))
+        cfg = {"name": "srv-a", "transport": "sse", "url": "http://x"}
+        conn = pool.connect_server(cfg)
+        assert conn is fake
+        assert len(seen) == 1
+        assert seen[0][0] == cfg
+        assert seen[0][1] is fake
+
+    def test_listener_registration_is_idempotent(self):
+        pool = McpClientPool()
+        l = lambda cfg, conn: None
+        pool.add_server_connected_listener(l)
+        pool.add_server_connected_listener(l)
+        assert len(pool._server_connected_listeners) == 1
+        pool.remove_server_connected_listener(l)
+        assert pool._server_connected_listeners == []
+
+    def test_listener_exception_does_not_block_connect(self, monkeypatch):
+        fake = MagicMock()
+        fake.list_tools.return_value = []
+        pool = self._make_pool_with_fake_connect(monkeypatch, fake)
+        seen = []
+
+        def boom(cfg, conn):
+            raise RuntimeError("boom")
+
+        pool.add_server_connected_listener(boom)
+        pool.add_server_connected_listener(lambda cfg, conn: seen.append(cfg))
+        pool.connect_server({"name": "srv", "transport": "sse"})
+        assert seen == [{"name": "srv", "transport": "sse"}]

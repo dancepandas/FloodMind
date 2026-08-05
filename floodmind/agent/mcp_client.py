@@ -20,6 +20,7 @@ SDK 入口:
 import json
 import logging
 import os
+import re
 import subprocess
 import threading
 import time
@@ -35,6 +36,38 @@ from floodmind.agent.runtime.contracts.tools import ToolSpec
 logger = logging.getLogger(__name__)
 
 _SSE_CONNECT_TIMEOUT = 15.0
+
+# MCP 工具 model-visible 名 sanitize：OpenAI 兼容端点要求工具名匹配 ^[a-zA-Z0-9_-]+$。
+# SDK 构造 ToolSpec 时统一把 `mcp:<server>:<tool>` 转成下划线分隔的安全名，
+# 实际调用仍用原始冒号分隔 full name（bound function 不变）。
+_MCP_NAME_RE = re.compile(r"[^a-zA-Z0-9_-]+")
+
+# MCP 调用失败标记：命中任一即记录 call health ok=False。
+_MCP_FAIL_MARKERS = (
+    "调用失败",
+    "无法连接",
+    "连接失败",
+    "ConnectionError",
+    "ECONNREFUSED",
+    "connection refused",
+)
+
+
+def _mcp_tool_spec_name(server_name: str, tool_name: str) -> str:
+    """Model-visible sanitized name（OpenAI 兼容端点要求 ^[a-zA-Z0-9_-]+$）。
+
+    ``mcp:hydro-rag:search:docs`` → ``mcp_hydro-rag_search_docs``。
+    """
+    return _MCP_NAME_RE.sub("_", f"mcp:{server_name}:{tool_name}")
+
+
+def mcp_tool_prefix(server_name: str) -> str:
+    """Sanitized 命名空间下某 server 的工具前缀，用于断开时按前缀清理 registry。
+
+    server ``hydro-rag`` → ``mcp_hydro-rag_``（与 ``_mcp_tool_spec_name`` 生成的
+    model-visible 名对齐）。
+    """
+    return _MCP_NAME_RE.sub("_", f"mcp:{server_name}:")
 
 
 class McpConnectionError(Exception):
@@ -198,7 +231,7 @@ class McpClientConnection:
         result = self._send_jsonrpc("initialize", {
             "protocolVersion": "2024-11-05",
             "capabilities": {},
-            "clientInfo": {"name": "FloodMind", "version": "1.0.2"},
+            "clientInfo": {"name": "FloodMind", "version": "1.1.0"},
         })
         if "error" in result:
             raise McpConnectionError(f"MCP {self.name} initialize 失败: {result['error']}")
@@ -262,7 +295,11 @@ class McpClientConnection:
 
     @property
     def is_connected(self) -> bool:
-        return self._initialized
+        if not self._initialized:
+            return False
+        if self._process is not None:   # stdio：进程还活着才算已连接
+            return self._process.poll() is None
+        return True                     # SSE：无廉价探针，best-effort
 
 
 # ── MCP 工具 → ToolSpec 构造（唯一权威点） ────────────────
@@ -287,16 +324,17 @@ def build_mcp_tool_specs(
 
     specs: List[ToolSpec] = []
     for mt in conn.list_tools():
+        tool_name = mt.get("name", "")
         input_schema = mt.get("inputSchema", {})
         specs.append(ToolSpec(
-            name=f"mcp:{server_name}:{mt.get('name', '')}",
+            name=_mcp_tool_spec_name(server_name, tool_name),
             description=f"[MCP:{server_name}] {mt.get('description', '')}",
             parameters={
                 "type": "object",
                 "properties": input_schema.get("properties", {}),
                 "required": input_schema.get("required", []),
             },
-            func=_make_func(mt.get("name", "")),
+            func=_make_func(tool_name),
             is_readonly=False,
             is_destructive=True,
             is_concurrency_safe=True,
@@ -313,6 +351,10 @@ class McpClientPool:
     def __init__(self):
         self._connections: Dict[str, McpClientConnection] = {}
         self._lock = threading.Lock()
+        # 最近一次每 server 的调用结果，供 UI 展示"调用异常"（线程安全由 _lock 保护）
+        self._call_health: Dict[str, Dict[str, Any]] = {}
+        # server-connected 事件监听器：连接成功且已入池后逐个触发
+        self._server_connected_listeners: List[Callable[[dict, McpClientConnection], None]] = []
 
     def connect_server(self, server_config: dict) -> "McpClientConnection":
         """连接单个 MCP Server（运行时热插拔入口），存入池并返回连接。
@@ -334,8 +376,37 @@ class McpClientPool:
         conn.connect()
         with self._lock:
             self._connections[name] = conn
+            listeners = list(self._server_connected_listeners)
+        # 连接成功且已入池后触发 server-connected 监听器（异常不阻断连接）
+        for listener in listeners:
+            try:
+                listener(dict(server_config), conn)
+            except Exception:
+                logger.warning("MCP server connected listener failed: server=%s", name, exc_info=True)
         logger.info("MCP 接入: server=%s transport=%s tools=%d", name, transport, len(conn.list_tools()))
         return conn
+
+    def add_server_connected_listener(
+        self,
+        listener: Callable[[dict, "McpClientConnection"], None],
+    ) -> None:
+        """注册 MCP server 连接成功监听器（幂等）。
+
+        listener 收到 ``(server_config, conn)``；异常不会阻断连接（log + 继续）。
+        """
+        with self._lock:
+            if listener not in self._server_connected_listeners:
+                self._server_connected_listeners.append(listener)
+
+    def remove_server_connected_listener(
+        self,
+        listener: Callable[[dict, "McpClientConnection"], None],
+    ) -> None:
+        """移除 MCP server 连接成功监听器。"""
+        with self._lock:
+            self._server_connected_listeners = [
+                l for l in self._server_connected_listeners if l is not listener
+            ]
 
     def connect_all(self, servers: List[dict]) -> int:
         """连接所有配置的 MCP Server（init 批量），返回成功数。"""
@@ -370,8 +441,29 @@ class McpClientPool:
         with self._lock:
             conn = self._connections.get(server_name)
         if not conn:
-            return f"MCP Server '{server_name}' 未连接"
-        return conn.call_tool(tool_name, arguments)
+            result = f"MCP Server '{server_name}' 未连接"
+            self._record_call_health(server_name, False, result)
+            return result
+        try:
+            result = conn.call_tool(tool_name, arguments)
+        except Exception as e:
+            self._record_call_health(server_name, False, str(e)[:200])
+            raise
+        if isinstance(result, str) and any(m in result for m in _MCP_FAIL_MARKERS):
+            self._record_call_health(server_name, False, result[:200])
+        else:
+            self._record_call_health(server_name, True, None)
+        return result
+
+    def _record_call_health(self, server_name: str, ok: bool, error: Optional[str]) -> None:
+        """记录最近一次每 server 的调用结果（线程安全）。"""
+        with self._lock:
+            self._call_health[server_name] = {"ok": ok, "error": error}
+
+    def call_health(self) -> Dict[str, Dict[str, Any]]:
+        """最近一次 MCP 工具调用结果（name -> {ok, error}），供 UI 展示"调用异常"。"""
+        with self._lock:
+            return {name: dict(value) for name, value in self._call_health.items()}
 
     def disconnect_all(self) -> None:
         with self._lock:

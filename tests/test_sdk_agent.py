@@ -578,6 +578,51 @@ class TestSdkEnhancements:
         assert len(ask_events) == 1
         assert ask_events[0]["tool_name"] == "Echo"
 
+    # ── v1.1.0 desktop-driven capabilities（#1 bare=False / #2 proxies / #3 kwargs） ──
+
+    def test_bare_false_loads_full_runtime_builtin_tools(self, llm):
+        """bare=False → 公共 Agent 走完整 runtime，注册表含内置工具。"""
+        agent = Agent(llm=llm, bare=False)
+        names = {t.name for t in agent.raw._orchestrator_registry.all()}
+        assert any(n in names for n in ("Read", "Write", "Bash", "Glob", "Grep"))
+
+    def test_bare_true_default_keeps_legacy_behavior(self, llm, sample_tools):
+        """默认 bare=True 行为不变：不含内置工具（仅自定义 + catalog 工具）。"""
+        agent = Agent(llm=llm, tools=sample_tools)
+        names = {t.name for t in agent.raw._orchestrator_registry.all()}
+        assert "Read" not in names and "Write" not in names
+        assert any("Echo" == n for n in names)
+
+    def test_memory_session_id_clear_memory_proxies(self, llm):
+        agent = Agent(llm=llm)
+        assert agent.memory is agent.raw.memory
+        assert agent.session_id == "sdk-agent"
+        agent.clear_memory()  # 委托底层，不抛异常
+
+    def test_stream_forwards_kwargs_to_native(self, llm):
+        from floodmind.agent.native.native_flood_agent import NativeFloodAgent
+
+        agent = Agent(llm=llm)
+        captured = {}
+
+        def fake_stream(self, msg, **kwargs):
+            captured.update(kwargs)
+            return iter([{"type": "final_text", "content": "ok"}])
+
+        with patch.object(NativeFloodAgent, "stream", fake_stream):
+            events = list(agent.stream("hi", abort_check=lambda: False, attachments=[]))
+        assert events == [{"type": "final_text", "content": "ok"}]
+        assert "abort_check" in captured
+        assert captured["attachments"] == []
+
+    def test_build_model_info_names_agent_model_client(self, llm):
+        """#8：_build_model_info 优先使用 agent 已路由的 ModelClient.model_name。"""
+        agent = Agent(llm=llm)
+        agent.raw._model_client.model_name = "kimi-k2.7-code"
+        info = agent.raw._build_model_info()
+        assert "kimi-k2.7-code" in info
+        assert info.startswith("当前模型:")
+
     def test_permission_handler_denies_tool(self, llm):
         from floodmind.agent.native.types import ToolCall
         called = {"count": 0}

@@ -77,6 +77,9 @@ class Agent:
             adapter 回退。运行期可用 ``bind_workspace`` 切换。
         tool_loading: 工具加载策略。``None`` 使用 settings 默认；``False`` 为 eager 旧行为；
             ``True`` 为 progressive 默认；也可传 ``floodmind.ToolLoadingConfig``。
+        bare: 是否为 bare 嵌入模式（默认 True）。``True`` 仅注册自定义工具；``False`` 走
+            NativeFloodAgent 完整 runtime（内置工具、MCP、Skill、权限 ASK 事件、workspace 绑定）。
+            完整 runtime 下 ``tools=None`` 保留原生默认工具集。
 
     Attributes:
         last_usage: 最近一次 run()/stream() 的 token 用量累加
@@ -101,6 +104,7 @@ class Agent:
         max_iterations: int = 999,
         workspace: Optional[Any] = None,
         tool_loading: Optional[Any] = None,
+        bare: bool = True,
     ):
         sid = session_id or "sdk-agent"
         if memory is None:
@@ -122,8 +126,8 @@ class Agent:
             session_id=sid,
             enable_search=enable_search,
             enable_reasoning=enable_reasoning,
-            bare=True,
-            tools=tools or [],
+            bare=bare,
+            tools=tools,
             system_prompt=system_prompt,
             permission_handler=permission_handler,
             permission_decision_hook=permission_decision_hook,
@@ -140,6 +144,22 @@ class Agent:
         """
         self._agent.bind_workspace(ws)
 
+    # ── 底层只读/操作代理（避免宿主直接访问 raw 内部） ──────────────
+    @property
+    def memory(self) -> Any:
+        """底层 NativeFloodAgent 使用的 memory 对象。"""
+        return self._agent.memory
+
+    @property
+    def session_id(self) -> str:
+        """底层 NativeFloodAgent 的 session_id。"""
+        return self._agent.session_id
+
+    def clear_memory(self) -> None:
+        """清空底层 NativeFloodAgent 的会话记忆。"""
+        if hasattr(self._agent, "clear_memory"):
+            self._agent.clear_memory()
+
     # ── 事件迭代与收集 ──────────────────────────────────────────────
     def _collect_event(self, event: Dict[str, Any]) -> None:
         """从事件中收集 token 用量与产物（维护 last_usage / artifacts）。"""
@@ -151,14 +171,15 @@ class Agent:
         elif etype in ("file_generated", "image_generated"):
             self._artifacts.append(event)
 
-    def _iter(self, message: str) -> Iterator[Dict[str, Any]]:
+    def _iter(self, message: str, **stream_kwargs: Any) -> Iterator[Dict[str, Any]]:
         """统一事件迭代器：重置本次结果 → 收集 → 触发 on_event → yield。
 
         run() 与 stream() 都走这里，保证两者都触发 on_event 并维护 last_usage/artifacts。
+        ``stream_kwargs`` 透传给底层 ``NativeFloodAgent.stream``（如 abort_check / attachments）。
         """
         self._last_usage = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
         self._artifacts = []
-        for event in self._agent.stream(message):
+        for event in self._agent.stream(message, **stream_kwargs):
             self._collect_event(event)
             if self._on_event is not None:
                 try:
@@ -183,10 +204,11 @@ class Agent:
                 full_answer += event.get("content", "")
         return full_answer or "抱歉，处理您的请求时未能生成回答。"
 
-    def stream(self, message: str) -> Iterator[Dict[str, Any]]:
+    def stream(self, message: str, **stream_kwargs: Any) -> Iterator[Dict[str, Any]]:
         """流式执行，产出结构化事件 dict。
 
-        事件按类别（bare 模式下部分事件如 permission_ask 默认不触发）：
+        ``**stream_kwargs`` 透传给底层 NativeFloodAgent.stream（如 ``abort_check``、
+        ``attachments``），供宿主中断或传附件。
 
         思考 / 回答:
           - answer_delta:  回答文本增量      {"type": "answer_delta", "content": "..."}
@@ -220,7 +242,7 @@ class Agent:
 
         产物也可在执行后通过 ``agent.artifacts`` 获取；token 用量通过 ``agent.last_usage`` 获取。
         """
-        yield from self._iter(message)
+        yield from self._iter(message, **stream_kwargs)
 
     def chat(self, message: str) -> str:
         """run() 的别名。"""

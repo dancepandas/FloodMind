@@ -207,14 +207,32 @@ class NativeFloodAgent:
         ]
         return "\n\n".join(parts)
 
-    @staticmethod
-    def _build_model_info() -> str:
-        """每次 LLM 调用前动态读取模型配置，文件不变则内容不变（KV cache 命中）。"""
-        from floodmind.config.model_presets import get_default_model_key, get_preset, reload_presets
-        reload_presets()
-        current_key = get_default_model_key()
-        preset = get_preset(current_key) or {}
-        current_label = preset.get("label") or preset.get("name") or current_key
+    def _build_model_info(self) -> str:
+        """每次 LLM 调用前动态读取"当前模型"提示，文件不变则内容不变（KV cache 命中）。
+
+        优先使用 agent 已路由的 ``ModelClient.model_name``（宿主切换模型后提示与实际
+        路由一致）；无 ``model_name`` 时回退 SDK 默认模型解析（保持旧行为）。
+        """
+        from floodmind.config.model_presets import get_preset, reload_presets
+
+        current_key = getattr(self._model_client, "model_name", None) or ""
+        if current_key:
+            try:
+                reload_presets()
+                preset = get_preset(current_key) or {}
+                current_label = preset.get("label") or preset.get("name") or current_key
+            except Exception:
+                current_label = current_key
+        else:
+            try:
+                from floodmind.config.model_presets import get_default_model_key
+                reload_presets()
+                current_key = get_default_model_key()
+                preset = get_preset(current_key) or {}
+                current_label = preset.get("label") or preset.get("name") or current_key
+            except Exception:
+                current_key = "unknown"
+                current_label = current_key
         return f"当前模型: {current_label} (key: {current_key})"
 
 
@@ -1244,7 +1262,10 @@ class NativeFloodAgent:
         tool_count = len(info["tools"])
         if not pool.disconnect_server(name):
             return f"错误: 断开 '{name}' 失败"
-        prefix = f"mcp:{name}:"
+        # MCP 工具 model-visible 名经 _mcp_tool_spec_name sanitize 为 `mcp_<server>_<tool>`，
+        # 清理前缀必须同步 sanitize，否则 `mcp:<name>:` 匹配不到已注册的 ToolSpec。
+        from floodmind.agent.mcp_client import mcp_tool_prefix
+        prefix = mcp_tool_prefix(name)
         orch_removed = self._orchestrator_registry.unregister_prefix(prefix)
         spec_removed = self._specialist_registry.unregister_prefix(prefix)
         logger.info("MCP 断开清理: server=%s orchestrator=%d specialist=%d", name, orch_removed, spec_removed)
