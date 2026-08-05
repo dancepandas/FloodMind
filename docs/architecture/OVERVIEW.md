@@ -1,7 +1,7 @@
 # FloodMind 架构总览（SDK-first）v4.1
 
 > **更新日期**: 2026-08-05
-> **变更摘要**: SDK v1.1.1；公共 `Agent` 新增 `bare=False` 完整 runtime 入口、`memory`/`session_id`/`clear_memory` 代理、`stream(**kwargs)` 转发；MCP 层新增 tool-name sanitize（OpenAI 兼容端点）、stdio liveness、call health、server-connected listener；`_build_model_info` 读取宿主已路由的 `ModelClient.model_name`；**bare 模式自动加载 MCP server（`_load_mcp_tools` 共享路径）**。
+> **变更摘要**: SDK v1.1.1；公共 `Agent` 新增 `bare=False` 完整 runtime 入口、`memory`/`session_id`/`clear_memory` 代理、`stream(**kwargs)` 转发；MCP 层新增 tool-name sanitize（OpenAI 兼容端点）、stdio liveness、call health、server-connected listener；`_build_model_info` 读取宿主已路由的 `ModelClient.model_name`；**bare 模式自动加载 MCP server（`_load_mcp_tools`）与 skill（`_load_skills`）共享路径**。
 > 详细评估见 [`ASSESSMENT.md`](./ASSESSMENT.md)；CC 风格文件管理差距与改造方案见 [`CC_FILE_MANAGEMENT_GAP_ANALYSIS.md`](./CC_FILE_MANAGEMENT_GAP_ANALYSIS.md)。
 
 ## 1. 系统定位
