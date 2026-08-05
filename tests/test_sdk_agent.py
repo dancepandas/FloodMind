@@ -639,6 +639,36 @@ class TestSdkEnhancements:
         assert "## 可用 skills" in prompt
         assert "## 可用工具" in prompt
 
+    def test_create_scheduled_task_description_not_misleading(self):
+        """CreateScheduledTask 描述不把『后台』误导为立即运行进程，并指向 Bash。"""
+        from floodmind.tools.base_tools import create_scheduled_task
+        desc = create_scheduled_task.description
+        assert "到点调度" in desc
+        assert "Bash" in desc
+        assert not desc.startswith("创建后台")
+
+    def test_effective_workspace_auto_creates_folder_first(self):
+        """无注入 workspace 时懒创建 folder-first cwd workspace（修复调度 workspace unknown）。"""
+        from floodmind.agent.runtime.services.workspace_service import reset_workspace, set_workspace
+        from floodmind.agent.native.native_flood_agent import NativeFloodAgent
+        from floodmind.agent.native.model_client import ModelClient
+
+        token = set_workspace(None)  # 确保 contextvar 无 workspace
+        try:
+            agent = NativeFloodAgent(
+                llm_service=ModelClient(api_key="k", base_url="http://mock/v1", model_name="m"),
+                memory=None,
+                session_id="sched-1",
+                bare=False,
+                workspace=None,
+            )
+            ws = agent._effective_workspace()  # 无注入时解析到 folder-first workspace
+            assert ws is not None
+            assert ws.mode == "folder_first"
+            assert ".floodmind" in str(ws.state_dir)
+        finally:
+            reset_workspace(token)
+
     def test_permission_handler_denies_tool(self, llm):
         from floodmind.agent.native.types import ToolCall
         called = {"count": 0}
