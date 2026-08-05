@@ -98,9 +98,10 @@ class TestAgentCreation:
         agent = Agent(llm=llm, tools=sample_tools)
         registry = agent.raw._orchestrator_registry
         tool_names = [t.name for t in registry.all()]
-        assert len(registry.all()) == 4
+        assert len(registry.all()) == 5
         assert "Echo" in tool_names
         assert "Add" in tool_names
+        assert "GetSkill" in tool_names
         assert "SearchTools" in tool_names
         assert "GetTool" in tool_names
 
@@ -206,10 +207,10 @@ class TestToolRegistration:
         assert "ToolB" in names
 
     def test_empty_tools(self, llm):
-        """不传工具 — 零工具注册。"""
+        """不传工具 — 只注册 catalog 与 skill 基础工具。"""
         agent = Agent(llm=llm)
         names = agent.raw._orchestrator_registry.names()
-        assert names == ["SearchTools", "GetTool"]
+        assert set(names) == {"GetSkill", "SearchTools", "GetTool"}
 
 
 # ---------------------------------------------------------------------------
@@ -382,7 +383,7 @@ class TestEdgeCases:
         agent = Agent(llm=llm, tools=sample_tools)
         rep = repr(agent)
         assert "Agent" in rep
-        assert "tools=4" in rep
+        assert "tools=5" in rep
 
     def test_raw_property_access(self, llm):
         agent = Agent(llm=llm)
@@ -622,6 +623,21 @@ class TestSdkEnhancements:
         info = agent.raw._build_model_info()
         assert "kimi-k2.7-code" in info
         assert info.startswith("当前模型:")
+
+    def test_bare_mode_loads_skill_catalog_and_getskill(self, llm):
+        """bare 模式也感知 skill：catalog 非空 + GetSkill 可用（CRUD 管理工具不进 bare）。"""
+        agent = Agent(llm=llm)  # bare=True default
+        assert agent.raw._skill_catalog  # 内置 skills 被发现
+        names = {t.name for t in agent.raw._orchestrator_registry.all()}
+        assert "GetSkill" in names
+        assert "ListSkills" not in names  # skill CRUD 管理工具仅完整 runtime
+
+    def test_bare_prompt_includes_skill_catalog(self, llm):
+        """bare 模式 system prompt 注入"可用 skills"，与完整 runtime 一致。"""
+        agent = Agent(llm=llm)
+        prompt = agent.raw._orchestrator_executor.system_prompts[0]
+        assert "## 可用 skills" in prompt
+        assert "## 可用工具" in prompt
 
     def test_permission_handler_denies_tool(self, llm):
         from floodmind.agent.native.types import ToolCall

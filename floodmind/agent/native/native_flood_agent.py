@@ -369,10 +369,9 @@ class NativeFloodAgent:
         # MCP 外部工具接入（与完整 runtime 同一共享方法）：注册进 mcp.json 的 server 自动接入。
         # 放在 _register_tool_catalog_tools() 之前，让 MCP 工具也进入后续的工具目录/描述构建。
         self._load_mcp_tools()
+        # Skill catalog + GetSkill（与完整 runtime 同一共享方法）：bare 模式同样感知可用 skill。
+        self._load_skills()
         self._register_tool_catalog_tools()
-
-        # 构建 skill catalog（bare 模式下通常为空）
-        self._skill_catalog = ""
 
         # 工具描述
         tool_descriptions = self._build_tool_descriptions(
@@ -382,6 +381,12 @@ class NativeFloodAgent:
 
         # 提示词：用户自定义 or 最小默认
         prompt = system_prompt or "你是一个智能助手，使用可用工具帮助用户完成任务。"
+
+        # 组装 orchestrator system prompt：用户 prompt + 可用 skills（如有）+ 工具目录
+        _sys_prompt = prompt
+        if self._skill_catalog:
+            _sys_prompt += "\n\n## 可用 skills\n" + self._skill_catalog
+        _sys_prompt += "\n\n## 可用工具\n" + tool_descriptions
 
         # 初始化 model client：如果传入的已是 ModelClient 实例则直接复用
         # （思考开关语义由 model_client.enable_thinking 承载，厂商方言由 pipeline 翻译）
@@ -412,7 +417,7 @@ class NativeFloodAgent:
             event_bus=self._event_bus,
             message_builder=self._message_builder,
             max_iterations=self._max_iterations,
-            system_prompts=[prompt + "\n\n## 可用工具\n" + tool_descriptions],
+            system_prompts=[_sys_prompt],
             tools_schema=self._orchestrator_registry.tools_schema(),
             tool_registry=self._orchestrator_registry,
             tool_loader=self._orchestrator_tool_loader,
@@ -469,6 +474,25 @@ class NativeFloodAgent:
                 logger.info("MCP: %d 个外部工具已注册（orchestrator + specialist）", mcp_tools_registered)
         except Exception as e:
             logger.warning("MCP 外部工具加载失败: %s", e)
+
+    def _load_skills(self) -> None:
+        """构建 skill catalog 并注册 GetSkill 读取工具（bare 与完整 runtime 共用）。
+
+        bare 与完整模式一致：从唯一权威源 ``SkillRegistry`` 生成 catalog（供 system prompt
+        注入"可用 skills"），并保证 ``GetSkill`` 可用（幂等注册，完整模式下与 all_tools
+        重复注册无害——``_InstanceToolRegistry`` 按名覆盖）。
+        """
+        try:
+            self._skill_catalog = get_skill_registry().catalog()
+        except Exception as e:
+            logger.warning("skill catalog 构建失败: %s", e)
+            self._skill_catalog = ""
+        try:
+            from floodmind.tools.base_tools import get_skill
+            self._orchestrator_registry.register(get_skill)
+            self._specialist_registry.register(get_skill)
+        except Exception as e:
+            logger.warning("GetSkill 工具注册失败: %s", e)
 
     @staticmethod
     def _build_tool_descriptions(registry, mode: str = "eager") -> str:
@@ -592,7 +616,7 @@ class NativeFloodAgent:
             all_tools.append(web_search)
             all_tools.append(fetch_webpage)
 
-        self._skill_catalog = get_skill_registry().catalog()
+        self._load_skills()
 
         # 注册经验→Skill 自动生成回调：auto-gen 写盘后触发 refresh_skills（热插拔闭环）。
         # 在 _init_tools 注册（而非 refresh_skills 内部），避免旧代码 chicken-and-egg 死循环。

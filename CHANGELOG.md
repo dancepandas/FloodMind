@@ -8,11 +8,12 @@ All notable changes to FloodMind are documented in this file.
 
 - Bare mode (`Agent(bare=True)`) now auto-loads MCP servers configured in `mcp.json`, matching full-runtime behavior. Previously `_init_bare` short-circuited before the MCP block in `_init_tools`, so configured servers were never connected and `_mcp_pool` was never initialized.
 - Extracted MCP auto-connect + tool registration into a shared `NativeFloodAgent._load_mcp_tools()` called from both `_init_bare` (before tool catalog registration) and `_init_tools`; failure is non-fatal (logged warning).
+- Bare mode now loads skills too: shared `NativeFloodAgent._load_skills()` populates the skill catalog and registers `GetSkill` in both `_init_bare` and `_init_tools`; the bare orchestrator system prompt includes a `## 可用 skills` section. (Skill CRUD management tools remain full-runtime only.)
 - Added an autouse test fixture defaulting `settings.mcp.servers` to empty so the SDK suite stays hermetic/portable and does not depend on machine-local MCP scripts.
 
 ### Verification
 
-- Full core-only test suite: `565 passed, 1 skipped`.
+- Full core-only test suite: `567 passed, 1 skipped`.
 - The single skipped test is legacy Web adapter compatibility that requires optional `floodmind[web]` / Flask extra.
 
 ## [1.1.0] - 2026-08-05
