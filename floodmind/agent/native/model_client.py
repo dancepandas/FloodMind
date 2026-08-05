@@ -19,6 +19,7 @@ import openai
 
 from floodmind.agent.native.types import ModelEvent, ToolCall
 from floodmind.agent.runtime.contracts.messages import ai_message, Message
+from floodmind.agent.native.retry import is_retryable_error
 
 logger = logging.getLogger(__name__)
 
@@ -212,6 +213,11 @@ class ModelClient:
         try:
             stream = self._client.chat.completions.create(**request_params)
         except openai.APIError as e:
+            # 可重试错误（如连接阶段的网络抖动）直接抛给调用方（executor 重试循环），
+            # 保留异常链（APIConnectionError 的 str() 恒为 "Connection error."，
+            # 真实原因在 __cause__，is_retryable_error 会递归检查）。
+            if is_retryable_error(e):
+                raise
             logger.error("ModelClient API error: %s", e)
             yield ModelEvent(type="error", content=str(e))
             return
@@ -354,11 +360,20 @@ class ModelClient:
             yield ModelEvent(type="done", content="")
 
         except openai.APIError as e:
+            # 可重试错误抛给调用方（executor 重试循环），保留异常链
+            if is_retryable_error(e):
+                raise
             logger.error("ModelClient stream error: %s", e)
             yield ModelEvent(type="error", content=str(e))
         except httpx.ReadTimeout as e:
+            # 超时属可重试（"timed out"），抛给调用方重试
+            if is_retryable_error(e):
+                raise
             logger.error("ModelClient stream timeout: %s", e)
             yield ModelEvent(type="timeout", content="调用超时，请切换模型或重试")
         except Exception as e:
+            # 可重试错误抛给调用方（executor 重试循环），保留异常链
+            if is_retryable_error(e):
+                raise
             logger.error("ModelClient unexpected stream error: %s", e, exc_info=True)
             yield ModelEvent(type="error", content=f"流式输出异常: {str(e)}")

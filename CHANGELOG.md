@@ -2,6 +2,17 @@
 
 All notable changes to FloodMind are documented in this file.
 
+## [1.1.4] - 2026-08-05
+
+### Fixed
+
+- LLM retry now also covers the `create()` connection-establishment stage. `is_retryable_error` recurses into the `__cause__`/`__context__` chain (e.g. `openai.APIConnectionError`'s `str()` is always "Connection error." but the real retryable cause such as "peer closed connection" lives in `__cause__`), and `ModelClient.stream_chat` re-raises retryable errors in all exception handlers (connection + mid-stream) so the original exception chain survives to the executor's retry loop. Non-retryable errors still emit error/timeout events as before.
+
+### Verification
+
+- Full core-only test suite: `573 passed, 1 skipped`.
+- The single skipped test is legacy Web adapter compatibility that requires optional `floodmind[web]` / Flask extra.
+
 ## [1.1.3] - 2026-08-05
 
 ### Fixed
