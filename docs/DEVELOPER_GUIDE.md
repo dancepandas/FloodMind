@@ -1,6 +1,6 @@
 # FloodMind SDK 开发指南 v3.1
 
-> **更新**: 2026-08-05 — SDK v1.1.0；公共 Agent 完整 runtime 入口（bare=False）+ 代理 memory/session_id/clear_memory + stream(**kwargs) 转发 + MCP 能力（tool-name sanitize / stdio liveness / call health / server-connected listener）+ _build_model_info 读取 ModelClient.model_name
+> **更新**: 2026-08-05 — SDK v1.1.1；公共 Agent 完整 runtime 入口（bare=False）+ 代理 memory/session_id/clear_memory + stream(**kwargs) 转发 + MCP 能力（tool-name sanitize / stdio liveness / call health / server-connected listener）+ _build_model_info 读取 ModelClient.model_name + **bare 模式自动加载 MCP server（_load_mcp_tools 共享路径）**
 
 FloodMind 正在收敛为 **Python SDK + 最小 CLI run**：开发者通过 `Agent`、`ModelClient`、`Workspace`、`build_agent_tool`、Provider Pipeline、MCP 与 Skill API 将能力嵌入自己的平台、桌面助手或业务系统。Web / TUI 代码仅作为迁移期 legacy adapter 保留，不再是 SDK 核心公共面。
 
@@ -316,7 +316,7 @@ agent = Agent(llm=llm, tools=tools, permission_decision_hook=desktop_permission_
 - 最终决策在 tracing 记录前生效，日志与实际行为一致。
 - 桌面端可用该钩子替代对 `_orchestrator_registry` / `ToolSpec.check_permissions_fn` 的 monkey patch。
 
-**公共 Agent 完整 runtime 与桌面能力（v1.1.0）：**
+**公共 Agent 完整 runtime 与桌面能力（v1.1.1）：**
 
 1. **`Agent(..., bare=False)` 完整 runtime**：`bare` 默认 `True`（裸嵌入，仅自定义工具）；`False` 走
    NativeFloodAgent 完整 runtime（内置工具、MCP、Skill、权限 ASK、workspace 绑定）。完整 runtime 下
@@ -533,7 +533,7 @@ response = llm.chat([
 
 ### 3.7 Checkpoint 与恢复语义
 
-Checkpoint 在 SDK v1.1.0 中只表示 **Agent runtime state**，用于断点恢复执行状态，不负责复制或回滚 workspace 文件。
+Checkpoint 在 SDK v1.1.1 中只表示 **Agent runtime state**，用于断点恢复执行状态，不负责复制或回滚 workspace 文件。
 
 当前 checkpoint 目录只包含：
 
@@ -1122,7 +1122,7 @@ assert len(reg.list_skills()) == 0
 ### 11.4 运行全部测试
 
 ```bash
-pytest tests/ -q          # v1.1.0 core-only: 563 passed, 1 skipped
+pytest tests/ -q          # v1.1.1 core-only: 565 passed, 1 skipped
 pytest tests/test_sdk_agent.py -v   # SDK 相关
 pytest tests/test_skill_registry.py tests/test_skill_curator.py -v  # Skill 系统
 pytest tests/test_sdk_purity.py -q  # SDK import/package purity
@@ -1203,7 +1203,7 @@ FloodMind/
 ├── web/                              # React 19 + TypeScript 前端
 ├── web_server.py                     # Flask 入口（日志 + SessionManager + waitress）
 ├── scheduler.py                      # 定时任务调度
-├── tests/                            # 测试（v1.1.0 core-only: 563 passed, 1 skipped）
+├── tests/                            # 测试（v1.1.1 core-only: 565 passed, 1 skipped）
 ├── docs/                             # 文档
 │   ├── DEVELOPER_GUIDE.md            #   本文档
 │   └── architecture/                 #   架构 Wiki
