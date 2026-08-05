@@ -495,6 +495,89 @@ class TestSdkEnhancements:
         agent = Agent(llm=llm, tools=sample_tools, permission_handler=handler)
         assert agent.raw._tool_executor._permission_handler is handler
 
+    def test_permission_decision_hook_passthrough(self, llm, sample_tools):
+        hook = lambda name, inp, decision, policy: decision
+        agent = Agent(llm=llm, tools=sample_tools, permission_decision_hook=hook)
+        assert agent.raw._tool_executor._permission_decision_hook is hook
+
+    def test_permission_decision_hook_upgrades_allow_to_ask(self, llm):
+        """bare 模式：hook 把 ALLOW 升级为 ASK → 工具不执行，走 permission_ask 流程。
+
+        后台线程模拟宿主（desktop）拒绝授权；executor 收到拒绝后回到 LLM，
+        第二轮 mock 只出文本，流正常结束。
+        """
+        import threading
+        import time
+
+        from floodmind.agent.native.types import ToolCall
+        from floodmind.agent.runtime.contracts.permissions import (
+            PermissionAskResponse,
+            PermissionBehavior,
+            PermissionDecision,
+        )
+        from floodmind.agent.runtime.services.ask_service import get_ask_service
+
+        called = {"count": 0}
+
+        def echo(text=""):
+            called["count"] += 1
+            return f"Echo: {text}"
+
+        def force_ask(tool_name, tool_input, sdk_decision, policy):
+            if sdk_decision.behavior == PermissionBehavior.DENY:
+                return sdk_decision
+            return PermissionDecision(behavior=PermissionBehavior.ASK, reason="需要用户确认")
+
+        tool = build_agent_tool(func=echo, name="Echo", description="echo")
+        # tool_loading=False（eager）：避免 progressive fail-closed 先于权限层拦截工具，
+        # 使本测试聚焦 permission_decision_hook 行为本身。
+        agent = Agent(
+            llm=llm,
+            tools=[tool],
+            permission_decision_hook=force_ask,
+            max_iterations=5,
+            tool_loading=False,
+        )
+
+        llm_calls = {"n": 0}
+
+        def tool_then_text(self, messages, **kwargs):
+            llm_calls["n"] += 1
+            if llm_calls["n"] == 1:
+                yield ModelEvent(type="token", content="checking")
+                yield ModelEvent(type="tool_call_done", tool_call=ToolCall(id="tc1", name="Echo", arguments={"text": "hi"}))
+                yield ModelEvent(type="done")
+            else:
+                yield ModelEvent(type="token", content="done without tool")
+                yield ModelEvent(type="done")
+
+        # 模拟宿主 UI：发现 pending ASK 后拒绝
+        def _deny_pending():
+            svc = get_ask_service()
+            for _ in range(200):
+                pending = svc.pending(session_id="sdk-agent")
+                if pending:
+                    svc.respond(PermissionAskResponse(
+                        session_id=pending[0].session_id,
+                        ask_id=pending[0].ask_id,
+                        approved=False,
+                    ))
+                    return
+                time.sleep(0.05)
+
+        responder = threading.Thread(target=_deny_pending, daemon=True)
+        responder.start()
+
+        with patch.object(ModelClient, "stream_chat", tool_then_text):
+            events = list(agent.stream("echo"))
+
+        responder.join(timeout=2)
+
+        assert called["count"] == 0  # ASK 挂起 → 用户拒绝 → 工具未执行
+        ask_events = [e for e in events if e.get("type") == "permission_ask"]
+        assert len(ask_events) == 1
+        assert ask_events[0]["tool_name"] == "Echo"
+
     def test_permission_handler_denies_tool(self, llm):
         from floodmind.agent.native.types import ToolCall
         called = {"count": 0}

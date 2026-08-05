@@ -270,6 +270,7 @@ class NativeFloodAgent:
         tracing_service: Optional[TracingService] = None,
         max_iterations: int = 10000,
         permission_handler: Optional[Callable[[str, Dict[str, Any]], bool]] = None,
+        permission_decision_hook: Optional[Callable] = None,
         workspace: Optional["Workspace"] = None,
         tool_loading: Optional[Any] = None,
         **kwargs,
@@ -320,6 +321,9 @@ class NativeFloodAgent:
         # SDK 可配置项（bare 模式由 _init_bare 消费）
         self._max_iterations = max_iterations
         self._permission_handler = permission_handler
+        # Host-level 权限决策钩子：SDK 基础判断后调整最终决策（只能收紧不能放开）。
+        # bare 与完整 runtime 均透传给 ToolExecutionService。
+        self._permission_decision_hook = permission_decision_hook
         self._sandbox_service = SandboxService(workspace=self._workspace)
         service_base_dir = str(self._workspace.session_root) if self._workspace is not None else None
         self._checkpoint_service = CheckpointService(base_dir=service_base_dir, tracing_service=self._tracing_service)
@@ -366,10 +370,15 @@ class NativeFloodAgent:
             self._init_model_client()
 
         # 初始化 tool executor（bare 模式：默认允许所有调用；可选 permission_handler 钩子）
+        # 接入全局 AskService，使 permission_decision_hook 升级出的 ASK 能在 bare 模式
+        # 走 permission_ask → respond 流程（emit_fn 由 _run_loop 统一挂载）。
         from floodmind.agent.runtime.services.tool_execution_service import ToolExecutionService
+        from floodmind.agent.runtime.services.ask_service import get_ask_service
         self._tool_executor = ToolExecutionService(
             tracing_service=self._tracing_service,
             permission_handler=self._permission_handler,
+            permission_decision_hook=self._permission_decision_hook,
+            ask_service=get_ask_service(),
         )
 
         context_compressor = self._make_context_compressor()
@@ -891,6 +900,8 @@ class NativeFloodAgent:
             ask_service=ask_service,
             set_session_context_fn=self._set_session_context,
             tracing_service=self._tracing_service,
+            permission_handler=self._permission_handler,
+            permission_decision_hook=self._permission_decision_hook,
         )
 
         # ── Plugin 系统集成 ──

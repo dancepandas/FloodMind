@@ -2,6 +2,24 @@
 
 All notable changes to FloodMind are documented in this file.
 
+## [1.0.2] - 2026-08-05
+
+### Added
+
+- Added host-level `permission_decision_hook` to the public `Agent`, `NativeFloodAgent` (bare and full runtime), and `ToolExecutionService`.
+  - Signature: `permission_decision_hook(tool_name, tool_input, sdk_decision, permission_policy) -> PermissionDecision`.
+  - Runs after the SDK's base permission decision; host can keep DENY/ASK, or upgrade ALLOW to ASK (interactive `permission_ask`) / DENY.
+  - Monotonic guard: the hook can only tighten, never loosen, SDK security decisions (path/dangerous-command/sub-agent tier/planning hard gates cannot be bypassed).
+  - Fail-safe: hook exceptions or invalid return values preserve the SDK's original decision.
+  - Traces record the post-hook final decision so logs match behavior.
+- Wired the global `AskService` into bare-mode `ToolExecutionService` so hook-upgraded ASK can run the `permission_ask` → respond flow in bare mode.
+- Passed `permission_handler` through to full-runtime `ToolExecutionService` too, so `Agent(permission_handler=...)` behaves consistently in bare and full modes.
+
+### Verification
+
+- Full core-only test suite: `544 passed, 1 skipped`.
+- The single skipped test is legacy Web adapter compatibility that requires optional `floodmind[web]` / Flask extra.
+
 ## [1.0.1] - 2026-08-04
 
 ### Added
