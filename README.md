@@ -1,6 +1,6 @@
 # FloodMind
 
-**SDK-first 的智能水文 Agent Runtime — v1.0.2**
+**SDK-first 的智能水文 Agent Runtime — v1.1.0**
 
 FloodMind 正在收敛为面向 Python 宿主系统的纯 SDK：以 `Agent` / `ModelClient` / `Workspace` / `build_agent_tool` 为公共入口，把水文模型、数据分析、文档生成、MCP 工具与 Skill 体系嵌入到业务平台或桌面助手中。Web / TUI 入口已进入 legacy 迁移路径，不再作为核心产品形态推进。
 
@@ -242,6 +242,10 @@ for event in agent.stream("查一下霍口水库水位"):
 **构造参数**：`llm`（必填）、`tools`、`system_prompt`、`memory`、`session_id`、`enable_search`、`enable_reasoning`、`on_event`（事件回调）、`permission_handler`（工具审批钩子）、`permission_decision_hook`（host-level 权限决策钩子，见下）、`max_iterations`（默认 999）、`workspace`（嵌入式工作区注入）、`tool_loading`（工具加载策略：`None` 用配置默认，`False` 为 eager 旧行为，`True` 或 `ToolLoadingConfig` 为渐进式加载）。
 
 **Host-level 权限决策钩子**：`permission_decision_hook(tool_name, tool_input, sdk_decision, permission_policy) -> PermissionDecision`。SDK 完成基础权限判断后调用，宿主可基于 SDK 原始决策调整最终行为——保留 DENY/ASK、把 ALLOW 升级为 ASK（走 `permission_ask` 事件交互确认）或 DENY。钩子只能收紧不能放开：SDK 的安全拒绝（路径越界 / 危险命令 / 子代理分层 / planning 硬门）不可被覆盖；钩子异常或返回非法值时保留 SDK 原决策。桌面端可借此实现 always-trust / trust-once / always-ask 权限模式，无需 patch 内部 registry。
+
+**公共 Agent 完整 runtime**：`Agent(..., bare=False)` 走 NativeFloodAgent 完整 runtime（内置工具、MCP、Skill、权限 ASK、workspace 绑定），`bare` 默认 `True` 保持裸嵌入行为不变。公共入口还提供 `agent.memory` / `agent.session_id` / `agent.clear_memory()` 代理，以及 `agent.stream(msg, abort_check=..., attachments=...)` 透传，宿主无需访问 `raw` 内部。
+
+**MCP 运行时能力**：`build_mcp_tool_specs` 对 model-visible 工具名统一 sanitize（`mcp:<server>:<tool>` → `mcp_<server>_<tool>`，满足 OpenAI 兼容端点 `^[a-zA-Z0-9_-]+$`），实际调用仍用原始冒号全名；`McpClientConnection.is_connected` 对 stdio 做进程存活探测；`McpClientPool.call_health()` 记录最近一次每 server 调用结果；`add_server_connected_listener()` 感知运行时 MCP 连接成功事件。
 
 **SDK 工作区**：嵌入式宿主推荐显式传入 `Workspace`，不要依赖进程 cwd；CLI/桌面入口可用 folder-first 模式把启动/打开目录作为工作区。
 
@@ -650,7 +654,7 @@ FloodMind/
 │   └── cli.py                     # CLI 入口
 ├── contrib/                       # 已外置为 MCP 服务的脚本（chronos/hydro_case_client）
 ├── web/                           # React 前端
-├── tests/                         # 544 passed / 1 legacy Web optional skip（v1.0.2 core-only 环境）
+├── tests/                         # 563 passed / 1 legacy Web optional skip（v1.1.0 core-only 环境）
 ├── web_server.py                  # Flask 入口（日志 + SessionManager + waitress）
 ├── scheduler.py                   # 后台调度
 ├── main.py                        # CLI 交互入口
@@ -696,7 +700,7 @@ cd web && npm run dev      # Vite 开发服务器 (:5173)
 
 # 运行测试
 python -m pytest tests/ -q
-# v1.0.2 core-only 验证结果：544 passed, 1 skipped
+# v1.1.0 core-only 验证结果：563 passed, 1 skipped
 # skipped = legacy Web adapter 需要可选 floodmind[web] / Flask extra
 
 # 前端构建（legacy Web，仅迁移期参考）
