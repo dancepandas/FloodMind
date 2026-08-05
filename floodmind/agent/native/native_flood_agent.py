@@ -362,10 +362,13 @@ class NativeFloodAgent:
         logger.info("NativeFloodAgent 初始化成功")
 
     def _init_bare(self, tools: list, system_prompt: Optional[str]) -> None:
-        """bare 模式精简初始化：只注册用户提供的工具，跳过内置工具/权限/MCP/Plugin。"""
+        """bare 模式精简初始化：只注册用户提供的工具 + MCP 外部工具，跳过内置工具/Plugin。"""
         # 注册用户工具（支持 AgentTool 和 ToolSpec 两种格式）
         self._orchestrator_registry.register_tools(tools)
         self._specialist_registry.register_tools(tools)
+        # MCP 外部工具接入（与完整 runtime 同一共享方法）：注册进 mcp.json 的 server 自动接入。
+        # 放在 _register_tool_catalog_tools() 之前，让 MCP 工具也进入后续的工具目录/描述构建。
+        self._load_mcp_tools()
         self._register_tool_catalog_tools()
 
         # 构建 skill catalog（bare 模式下通常为空）
@@ -438,6 +441,35 @@ class NativeFloodAgent:
             context_window=context_window,
         )
 
+    def _load_mcp_tools(self) -> None:
+        """接入配置的 MCP 外部工具（bare 与完整 runtime 共用）。
+
+        统一接入路径：connect_all → build_mcp_tool_specs → 注册到 orchestrator + specialist。
+        MCP 工具不经 AgentTool 编写层（业界标准协议运行时接入），直造 ToolSpec。
+        注册进 mcp.json（``get_floodmind_home()/mcp.json``，或 FLOODMIND_HOME / 活跃 profile）
+        的 server 会在两种模式下自动接入；失败不阻塞初始化（log warning）。
+        """
+        from floodmind.config.settings import settings as _settings
+        _mcp_servers = _settings.mcp.servers if hasattr(_settings, 'mcp') else []
+        self._mcp_pool = None
+        self._mcp_pool_lock = threading.Lock()
+        if not _mcp_servers:
+            return
+        try:
+            from floodmind.agent.mcp_client import get_mcp_client_pool, build_mcp_tool_specs
+            self._mcp_pool = get_mcp_client_pool()
+            connected = self._mcp_pool.connect_all(_mcp_servers)
+            if connected > 0:
+                mcp_tools_registered = 0
+                for server_name, conn in self._mcp_pool.connections().items():
+                    for spec in build_mcp_tool_specs(conn, server_name, self._mcp_pool.call_tool):
+                        self._orchestrator_registry.register(spec)
+                        self._specialist_registry.register(spec)
+                        mcp_tools_registered += 1
+                logger.info("MCP: %d 个外部工具已注册（orchestrator + specialist）", mcp_tools_registered)
+        except Exception as e:
+            logger.warning("MCP 外部工具加载失败: %s", e)
+
     @staticmethod
     def _build_tool_descriptions(registry, mode: str = "eager") -> str:
         """从工具注册表生成紧凑工具目录；完整参数通过 GetTool 按需查看。"""
@@ -467,7 +499,6 @@ class NativeFloodAgent:
         from floodmind.agent.runtime.services.path_service import PathService, set_path_service
         from floodmind.agent.runtime.services.tool_execution_service import ToolExecutionService
         from floodmind.skills.registry import get_skill_registry
-        from floodmind.config.settings import settings as _settings
 
         if self.memory is not None:
             set_memory_instance(self.memory)
@@ -593,26 +624,8 @@ class NativeFloodAgent:
         self._specialist_registry.register_tools(specialist_tools)
 
         # ── MCP 外部工具接入 ────────────────────────────
-        # 统一接入路径：connect_all → build_mcp_tool_specs → 注册到 orchestrator + specialist。
-        # MCP 工具不经 AgentTool 编写层（业界标准协议运行时接入），直造 ToolSpec。
-        _mcp_servers = _settings.mcp.servers if hasattr(_settings, 'mcp') else []
-        self._mcp_pool = None
-        self._mcp_pool_lock = threading.Lock()
-        if _mcp_servers:
-            try:
-                from floodmind.agent.mcp_client import get_mcp_client_pool, build_mcp_tool_specs
-                self._mcp_pool = get_mcp_client_pool()
-                connected = self._mcp_pool.connect_all(_mcp_servers)
-                if connected > 0:
-                    mcp_tools_registered = 0
-                    for server_name, conn in self._mcp_pool.connections().items():
-                        for spec in build_mcp_tool_specs(conn, server_name, self._mcp_pool.call_tool):
-                            self._orchestrator_registry.register(spec)
-                            self._specialist_registry.register(spec)
-                            mcp_tools_registered += 1
-                    logger.info("MCP: %d 个外部工具已注册（orchestrator + specialist）", mcp_tools_registered)
-            except Exception as e:
-                logger.warning("MCP 外部工具加载失败: %s", e)
+        # 与 bare 模式共用同一接入路径（_load_mcp_tools），保证两模式行为一致。
+        self._load_mcp_tools()
 
         # LoadMcpServer: 运行时动态接入 MCP Server
         self._orchestrator_registry.register(AgentTool(

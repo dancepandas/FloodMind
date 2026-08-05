@@ -313,3 +313,60 @@ class TestMcpServerConnectedListener:
         pool.add_server_connected_listener(lambda cfg, conn: seen.append(cfg))
         pool.connect_server({"name": "srv", "transport": "sse"})
         assert seen == [{"name": "srv", "transport": "sse"}]
+
+
+class TestBareModeMcpLoading:
+    """Agent(bare=True) 也自动接入 mcp.json 配置的 MCP server（desktop 反馈修复）。"""
+
+    def test_bare_init_auto_loads_configured_mcp_servers(self, monkeypatch):
+        from floodmind.config.settings import settings
+        from floodmind.agent.native.native_flood_agent import NativeFloodAgent
+        from floodmind.agent.native.model_client import ModelClient
+
+        # 注入假配置：settings.mcp.servers 含一个 server
+        monkeypatch.setattr(settings.mcp, "servers", [
+            {"name": "srv", "transport": "sse", "url": "http://x"},
+        ])
+
+        fake_conn = FakeConn("srv", [{"name": "t1"}])
+        fake_pool = MagicMock()
+        fake_pool.connect_all.return_value = 1
+        fake_pool.connections.return_value = {"srv": fake_conn}
+        fake_pool.call_tool.return_value = "ok"
+        # _load_mcp_tools 内从 floodmind.agent.mcp_client import get_mcp_client_pool
+        monkeypatch.setattr("floodmind.agent.mcp_client.get_mcp_client_pool", lambda: fake_pool)
+
+        agent = NativeFloodAgent(
+            llm_service=ModelClient(api_key="k", base_url="http://mock/v1", model_name="m"),
+            memory=None,
+            session_id="s1",
+            bare=True,
+            tools=[],
+        )
+        names = {t.name for t in agent._orchestrator_registry.all()}
+        assert "mcp_srv_t1" in names  # MCP 工具已注册（sanitized model-visible 名）
+        assert agent._mcp_pool is fake_pool  # _mcp_pool 已初始化
+        assert "SearchTools" in names  # catalog 工具仍在
+
+    def test_full_init_also_loads_mcp_via_shared_method(self, monkeypatch):
+        """完整 runtime 走同一 _load_mcp_tools，两模式一致。"""
+        from floodmind.config.settings import settings
+        from floodmind.agent.native.native_flood_agent import NativeFloodAgent
+        from floodmind.agent.native.model_client import ModelClient
+
+        called = {"n": 0}
+        orig = NativeFloodAgent._load_mcp_tools
+
+        def spy(self):
+            called["n"] += 1
+            return orig(self)
+
+        monkeypatch.setattr(NativeFloodAgent, "_load_mcp_tools", spy)
+        monkeypatch.setattr(settings.mcp, "servers", [])
+        NativeFloodAgent(
+            llm_service=ModelClient(api_key="k", base_url="http://mock/v1", model_name="m"),
+            memory=None,
+            session_id="s1",
+            bare=False,
+        )
+        assert called["n"] == 1
