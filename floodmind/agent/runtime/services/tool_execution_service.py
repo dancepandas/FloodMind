@@ -39,6 +39,16 @@ from floodmind.agent.runtime.services.tracing_service import TracingService
 logger = logging.getLogger(__name__)
 
 
+# Host-level 权限决策钩子签名：
+#   (tool_name, tool_input, sdk_decision, permission_policy) -> PermissionDecision
+# 在 SDK 完成基础权限判断后调用，允许宿主把 ALLOW 升级为 ASK/DENY、保留 SDK 的 DENY/ASK。
+# 返回值必须是带 behavior 字段的 PermissionDecision（否则保留 SDK 原决策）。
+PermissionDecisionHook = Callable[
+    [str, Dict[str, Any], PermissionDecision, Optional[Any]],
+    PermissionDecision,
+]
+
+
 class ToolExecutionService:
     def __init__(
         self,
@@ -48,6 +58,7 @@ class ToolExecutionService:
         set_session_context_fn: Optional[Callable] = None,
         tracing_service: Optional[TracingService] = None,
         permission_handler: Optional[Callable[[str, Dict[str, Any]], bool]] = None,
+        permission_decision_hook: Optional[PermissionDecisionHook] = None,
     ):
         self._permission_service = permission_service
         self._path_service = path_service
@@ -57,6 +68,9 @@ class ToolExecutionService:
         # SDK 嵌入钩子：工具调用前同步回调 (tool_name, tool_input) -> bool，False 即拒绝。
         # 默认 None 不影响完整模式（走 permission_service）与 bare 模式（默认放行）。
         self._permission_handler = permission_handler
+        # Host-level 权限决策钩子：SDK 基础判断后调用，可调整最终决策（见 PermissionDecisionHook）。
+        # 异常时 fail-safe：保留 SDK 原决策。仅能收紧不能放开（DENY 不可被翻成 ALLOW/ASK）。
+        self._permission_decision_hook = permission_decision_hook
 
     def execute(
         self,
@@ -112,6 +126,9 @@ class ToolExecutionService:
         perm_input["__call_id"] = call.id
 
         perm_decision = self._check_permissions(tool, perm_input, session_id, agent_tier, mode)
+        # Host-level 决策钩子：基础 SDK decision → hook → tracing 记录最终 decision → 执行，
+        # 保证日志与实际行为一致。
+        perm_decision = self._apply_permission_decision_hook(tool, perm_input, perm_decision)
 
         if self._tracing_service is not None:
             self._tracing_service.record_event(
@@ -353,6 +370,65 @@ class ToolExecutionService:
         if hasattr(result, "behavior"):
             return PermissionDecision(behavior=result.behavior, reason=getattr(result, "reason", ""))
         return PermissionDecision(behavior=PermissionBehavior.ALLOW)
+
+    # 行为严格度排序：用于保证 hook 只能收紧决策、不能放开。
+    _BEHAVIOR_SEVERITY = {
+        PermissionBehavior.ALLOW: 0,
+        PermissionBehavior.ASK: 1,
+        PermissionBehavior.DENY: 2,
+    }
+
+    def _apply_permission_decision_hook(
+        self,
+        tool: ToolSpec,
+        perm_input: Dict[str, Any],
+        decision: PermissionDecision,
+    ) -> PermissionDecision:
+        """应用 host-level 权限决策钩子（在 SDK 基础判断之后）。
+
+        hook 收到 SDK 原始 decision 与工具 permission_policy，可返回调整后的决策。
+        约束：
+        - 只能收紧，不能放开：DENY 不可被改成 ALLOW/ASK，ASK 不可被改成 ALLOW，
+          防止宿主绕过 SDK 的 path / 危险命令 / 子代理分层 / planning 模式等安全判断。
+        - hook 抛异常或返回非法值时 fail-safe：保留 SDK 原决策。
+        """
+        if self._permission_decision_hook is None:
+            return decision
+
+        clean_input = {k: v for k, v in perm_input.items() if k != "__call_id"}
+        policy = getattr(tool, "permission_policy", None)
+
+        try:
+            next_decision = self._permission_decision_hook(tool.name, clean_input, decision, policy)
+        except Exception as e:
+            logger.warning("permission_decision_hook 执行异常（保留 SDK 原决策）: %s", e)
+            return decision
+
+        if next_decision is None or not hasattr(next_decision, "behavior"):
+            logger.warning(
+                "permission_decision_hook 返回非法决策（保留 SDK 原决策）: %r", next_decision
+            )
+            return decision
+
+        behavior = next_decision.behavior
+        if not isinstance(behavior, PermissionBehavior):
+            try:
+                behavior = PermissionBehavior(behavior)
+            except (ValueError, KeyError):
+                logger.warning(
+                    "permission_decision_hook 返回未知 behavior（保留 SDK 原决策）: %r", behavior
+                )
+                return decision
+
+        if self._BEHAVIOR_SEVERITY[behavior] < self._BEHAVIOR_SEVERITY[decision.behavior]:
+            logger.warning(
+                "permission_decision_hook 试图放宽 SDK 决策（%s -> %s），已忽略",
+                decision.behavior.value,
+                behavior.value,
+            )
+            return decision
+
+        return PermissionDecision(behavior=behavior, reason=getattr(next_decision, "reason", ""))
 
     def _make_permission_feedback(self, decision: PermissionDecision) -> ToolFeedback:
         if self._permission_service is not None:

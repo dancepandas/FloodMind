@@ -1,6 +1,6 @@
 # FloodMind SDK 开发指南 v3.1
 
-> **更新**: 2026-08-04 — SDK v1.0.1；SDK-first 产品边界 + folder-first Workspace + state-only checkpoint + Web/TUI legacy 隔离
+> **更新**: 2026-08-05 — SDK v1.0.2；SDK-first 产品边界 + folder-first Workspace + state-only checkpoint + Web/TUI legacy 隔离 + permission_decision_hook
 
 FloodMind 正在收敛为 **Python SDK + 最小 CLI run**：开发者通过 `Agent`、`ModelClient`、`Workspace`、`build_agent_tool`、Provider Pipeline、MCP 与 Skill API 将能力嵌入自己的平台、桌面助手或业务系统。Web / TUI 代码仅作为迁移期 legacy adapter 保留，不再是 SDK 核心公共面。
 
@@ -237,7 +237,8 @@ for event in agent.stream("查一下霍口水库水位"):
 | `enable_search` | `bool` | `False` | 启用 WebSearch |
 | `enable_reasoning` | `bool` | `False` | 启用推理模式 |
 | `on_event` | `Callable[[dict], None]` | `None` | 流式事件回调 |
-| `permission_handler` | `Callable[[str, dict], bool]` | `None` | 工具审批钩子 |
+| `permission_handler` | `Callable[[str, dict], bool]` | `None` | 工具审批钩子（同步 allow/deny，bare 与 full runtime 均生效） |
+| `permission_decision_hook` | `Callable[[str, dict, PermissionDecision, ToolPermissionPolicy], PermissionDecision]` | `None` | host-level 权限决策钩子：SDK 基础判断后调整最终决策（只能收紧不能放开），见下文 |
 | `max_iterations` | `int` | `999` | 最大循环轮数 |
 | `workspace` | `Workspace` | `None` | 工作区对象。嵌入式宿主（桌面端）可显式注入；未传时 SDK 默认构造 `Workspace.from_cwd(session_id="sdk-agent")`，保持启动目录即工作区。构造时或通过 `bind_workspace()` 传入均可。 |
 | `tool_loading` | `ToolLoadingConfig\|bool\|None` | `None` | 工具加载策略；`None` 使用 settings 默认，`False` 为 eager 旧行为，`True` 为默认 progressive，或传入自定义 `ToolLoadingConfig` |
@@ -269,6 +270,50 @@ Folder-first 模式下，相对路径默认相对 `ws.default_cwd`，FloodMind �
 
 > `bind_workspace()` 存为普通实例属性（非 contextvar），确保 SDK 内部子线程（`_run_loop`）不受
 > 宿主线程上下文影响。桌面端 sidecar 推荐使用此 API 替代模块级 `set_workspace()`。
+
+**Host-level 权限决策钩子（permission_decision_hook）：**
+
+`permission_handler` 只能做同步 allow/deny；需要“把 SDK 默认放行的写/执行类调用升级为交互确认（ASK）”
+这类产品策略时，使用 `permission_decision_hook`。它在 SDK 完成基础权限判断**之后**调用，收到 SDK 原始
+决策与该工具的 `permission_policy`，返回最终决策：
+
+```python
+from floodmind import Agent
+from floodmind.agent.runtime.contracts.permissions import (
+    PermissionBehavior,
+    PermissionDecision,
+)
+
+def desktop_permission_hook(tool_name, tool_input, sdk_decision, permission_policy):
+    # SDK 的安全拒绝（路径越界/危险命令/子代理分层/planning 硬门）必须保留
+    if sdk_decision.behavior == PermissionBehavior.DENY:
+        return sdk_decision
+    # SDK 已要求确认的保持确认
+    if sdk_decision.behavior == PermissionBehavior.ASK:
+        return sdk_decision
+    # 只读/内部工具直接放行
+    policy_type = getattr(permission_policy, "policy_type", None)
+    if policy_type in {"readonly", "internal", "read_path"}:
+        return sdk_decision
+    # 产品策略：其余非只读调用一律交互确认（走 permission_ask 事件）
+    return PermissionDecision(
+        behavior=PermissionBehavior.ASK,
+        reason=f"需要用户确认此操作（{tool_name}）",
+    )
+
+agent = Agent(llm=llm, tools=tools, permission_decision_hook=desktop_permission_hook)
+```
+
+约束与语义：
+
+- 钩子只能**收紧**不能放开：`DENY` 不可被改成 `ALLOW/ASK`，`ASK` 不可被改成 `ALLOW`；
+  试图放宽时 SDK 忽略钩子结果并记录告警，保证 SDK 安全判断不被宿主绕过。
+- 钩子抛异常或返回非法值（无 `behavior` 字段）时 fail-safe：保留 SDK 原决策，不影响执行。
+- 钩子升级为 `ASK` 时，SDK 通过 `AskService` 发射 `permission_ask` 事件并在
+  `awaiting_permission` 状态等待；宿主收到事件后经 `AskService.respond()`（或桌面端自己的
+  `respond_to_permission_ask` 封装）批准/拒绝，执行循环自动续上。bare 与 full runtime 均支持。
+- 最终决策在 tracing 记录前生效，日志与实际行为一致。
+- 桌面端可用该钩子替代对 `_orchestrator_registry` / `ToolSpec.check_permissions_fn` 的 monkey patch。
 
 **渐进式工具加载：**
 
@@ -454,7 +499,7 @@ response = llm.chat([
 
 ### 3.7 Checkpoint 与恢复语义
 
-Checkpoint 在 SDK v1.0.1 中只表示 **Agent runtime state**，用于断点恢复执行状态，不负责复制或回滚 workspace 文件。
+Checkpoint 在 SDK v1.0.2 中只表示 **Agent runtime state**，用于断点恢复执行状态，不负责复制或回滚 workspace 文件。
 
 当前 checkpoint 目录只包含：
 
@@ -1043,7 +1088,7 @@ assert len(reg.list_skills()) == 0
 ### 11.4 运行全部测试
 
 ```bash
-pytest tests/ -q          # v1.0.1 core-only: 532 passed, 1 skipped
+pytest tests/ -q          # v1.0.2 core-only: 544 passed, 1 skipped
 pytest tests/test_sdk_agent.py -v   # SDK 相关
 pytest tests/test_skill_registry.py tests/test_skill_curator.py -v  # Skill 系统
 pytest tests/test_sdk_purity.py -q  # SDK import/package purity
@@ -1124,7 +1169,7 @@ FloodMind/
 ├── web/                              # React 19 + TypeScript 前端
 ├── web_server.py                     # Flask 入口（日志 + SessionManager + waitress）
 ├── scheduler.py                      # 定时任务调度
-├── tests/                            # 测试（v1.0.1 core-only: 532 passed, 1 skipped）
+├── tests/                            # 测试（v1.0.2 core-only: 544 passed, 1 skipped）
 ├── docs/                             # 文档
 │   ├── DEVELOPER_GUIDE.md            #   本文档
 │   └── architecture/                 #   架构 Wiki

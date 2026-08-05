@@ -1,7 +1,7 @@
 # FloodMind 架构总览（SDK-first）v4.1
 
-> **更新日期**: 2026-08-04
-> **变更摘要**: SDK v1.0.1；FloodMind 产品边界收敛为 Python SDK + 最小 `floodmind run`；folder-first Workspace / `.floodmind` 收纳落地；Checkpoint 改为 state-only（不复制 workspace 文件）；Web/TUI 进入 legacy adapter 隔离路径，不再作为核心架构入口。
+> **更新日期**: 2026-08-05
+> **变更摘要**: SDK v1.0.2；FloodMind 产品边界收敛为 Python SDK + 最小 `floodmind run`；folder-first Workspace / `.floodmind` 收纳落地；Checkpoint 改为 state-only（不复制 workspace 文件）；Web/TUI 进入 legacy adapter 隔离路径，不再作为核心架构入口；新增 host-level permission_decision_hook 供桌面端实现 always-trust/trust-once/always-ask。
 > 详细评估见 [`ASSESSMENT.md`](./ASSESSMENT.md)；CC 风格文件管理差距与改造方案见 [`CC_FILE_MANAGEMENT_GAP_ANALYSIS.md`](./CC_FILE_MANAGEMENT_GAP_ANALYSIS.md)。
 
 ## 1. 系统定位
@@ -271,7 +271,7 @@ skills/                               ⭐ Skill 写入根 (PROJECT_ROOT/skills)
 contrib/                              chronos 等已外置为 MCP 服务的脚本（迁移出 floodmind/skills/）
 ```
 
-Checkpoint 在 v1.0.1 中只保存 Agent runtime state：`state.json` 是 `AgentLoopState` 序列化，`manifest.json` 记录 checkpoint 元数据和父 checkpoint 链。它不复制 workspace 文件，也不承担文件回滚职责；产物通过 artifact/journal 记录引用，文件版本化或回滚如需支持应由独立 change journal / artifact versioning 能力承担。
+Checkpoint 在 v1.0.2 中只保存 Agent runtime state：`state.json` 是 `AgentLoopState` 序列化，`manifest.json` 记录 checkpoint 元数据和父 checkpoint 链。它不复制 workspace 文件，也不承担文件回滚职责；产物通过 artifact/journal 记录引用，文件版本化或回滚如需支持应由独立 change journal / artifact versioning 能力承担。
 
 ## 13. 线程模型
 

@@ -64,6 +64,12 @@ class Agent:
         permission_handler: 工具调用审批钩子 ``Callable[[tool_name, tool_input], bool]``。
             每次工具执行前同步调用，返回 False 则拒绝该次调用（工具不执行，模型收到拒绝
             信息）。bare 模式默认放行所有调用，此钩子提供可选的安全网关。
+        permission_decision_hook: host-level 权限决策钩子
+            ``Callable[[tool_name, tool_input, sdk_decision, permission_policy], PermissionDecision]``。
+            在 SDK 完成基础权限判断后调用，宿主可基于 SDK 原始决策调整最终行为：保留 DENY/ASK、
+            把 ALLOW 升级为 ASK（走 permission_ask 交互确认）或 DENY。钩子只能收紧不能放开——
+            SDK 的安全拒绝（路径越界/危险命令/子代理分层/planning 硬门）不可被覆盖；钩子异常或
+            返回非法值时保留 SDK 原决策。desktop 可用它替代对内部 registry 的 monkey patch。
         max_iterations: Agent 循环最大迭代轮数（默认 999，有 auto-compact + DOOM LOOP 兜底）。
         workspace: 工作区对象（``floodmind.agent.runtime.contracts.workspace.Workspace``）。
             嵌入式宿主（如桌面端）可显式注入，避免跨线程 contextvar 丢失。未传时 SDK
@@ -91,6 +97,7 @@ class Agent:
         enable_reasoning: bool = False,
         on_event: Optional[Callable[[Dict[str, Any]], None]] = None,
         permission_handler: Optional[Callable[[str, Dict[str, Any]], bool]] = None,
+        permission_decision_hook: Optional[Callable] = None,
         max_iterations: int = 999,
         workspace: Optional[Any] = None,
         tool_loading: Optional[Any] = None,
@@ -119,6 +126,7 @@ class Agent:
             tools=tools or [],
             system_prompt=system_prompt,
             permission_handler=permission_handler,
+            permission_decision_hook=permission_decision_hook,
             max_iterations=max_iterations,
             workspace=workspace,
             tool_loading=tool_loading,
