@@ -1510,8 +1510,12 @@ def _impl_create_scheduled_task(
 create_scheduled_task = build_agent_tool(
     name="CreateScheduledTask",
     description=(
-        "创建后台定时任务。[必填] command: 未来执行的业务任务描述，不要包含定时表达。"
-        "每日任务用 repeat=daily + run_time=HH:MM，一次性任务用 repeat=none + scheduled_at。[可选] timezone/enabled。"
+        "创建定时任务：在未来某个时间点（或按日重复）自动执行任务。"
+        "[必填] command: 到点时交给 Agent 执行的任务描述，不要包含定时表达。"
+        "每日用 repeat=daily + run_time=HH:MM，一次性用 repeat=none + scheduled_at。"
+        "[可选] timezone/enabled。"
+        "注意：这用于『到点调度』，不是立即启动/运行后台进程——需要现在运行脚本或"
+        "程序请用 Bash 等 shell 工具。"
     ),
     args_schema=CreateScheduledTaskInput,
     func=_impl_create_scheduled_task,

@@ -2321,8 +2321,24 @@ class NativeFloodAgent:
 
     def _effective_workspace(self):
         """当前生效的 Workspace：优先实例属性（宿主 bind_workspace / 构造传入），
-        回退到 contextvar（网页版 set_workspace 注入）。与 PathService 同模式。"""
-        return self._workspace or get_workspace()
+        回退到 contextvar（网页版 set_workspace 注入）。与 PathService 同模式。
+
+        两者都没有时（如调度运行时用 create_flood_agent 创建、未注入 workspace）懒创建
+        folder-first cwd workspace，与 ``Agent`` 包装层的默认一致——修复"无 workspace 上下文
+        时工具（Bash/Write 等）被 PathService fail-closed 拒绝"的问题。创建失败保持 None。
+        """
+        if self._workspace is not None:
+            return self._workspace
+        ws = get_workspace()
+        if ws is not None:
+            return ws
+        try:
+            from floodmind.agent.runtime.contracts.workspace import Workspace
+            self._workspace = Workspace.from_cwd(session_id=self.session_id or "sdk-agent").ensure()
+        except Exception:
+            logger.warning("Workspace 自动创建失败，保持无 workspace（工具将 fail-closed）", exc_info=True)
+            self._workspace = None
+        return self._workspace
 
     def _get_output_dir(self, session_id: Optional[str] = None) -> str:
         """主代理产物目录：优先 workspace.user_dir；回退到 session_manager 旧路径。"""
