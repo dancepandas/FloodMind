@@ -407,7 +407,7 @@ class NativeFloodAgent:
         )
 
         context_compressor = self._make_context_compressor()
-        context_window = settings.model.context_window
+        context_window = self._resolve_context_window()
 
         # 构建 executor
         self._orchestrator_executor = NativeAgentExecutor(
@@ -1002,6 +1002,27 @@ class NativeFloodAgent:
         except Exception as e:
             logger.warning("Plugin loading failed (non-fatal): %s", e)
 
+    def _resolve_context_window(self) -> int:
+        """解析压缩触发的上下文窗口，跟随注入模型的 preset，而非全局默认模型。
+
+        此前硬编码 settings.model.context_window（catalog 第一个模型的窗口），
+        与宿主注入的 ModelClient 实际模型不一致——例如默认是 deepseek-v4-pro(131072)
+        而注入 MiniMax-M3(1M) 时，压缩在本不该发生的体量就触发，放大结构破坏风险。
+        """
+        model_name = getattr(self._model_client, "model_name", None) if self._model_client else None
+        if model_name:
+            try:
+                from floodmind.config.model_presets import get_preset
+
+                preset = get_preset(model_name)
+                if preset:
+                    cw = preset.get("max_context_tokens")
+                    if cw:
+                        return int(cw)
+            except Exception as e:
+                logger.debug("resolve context_window for %s failed: %s", model_name, e)
+        return settings.model.context_window
+
     def _make_context_compressor(self) -> Optional[ContextCompressor]:
         """创建上下文压缩器，供 orchestrator executor 使用。"""
         if self._model_client is None:
@@ -1118,7 +1139,7 @@ class NativeFloodAgent:
         ]
 
         context_compressor = self._make_context_compressor()
-        context_window = settings.model.context_window
+        context_window = self._resolve_context_window()
 
         self._orchestrator_executor = NativeAgentExecutor(
             model_client=self._model_client,

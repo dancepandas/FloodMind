@@ -106,6 +106,54 @@ class ContextCompressor:
         logger.debug("[Compressor] estimated=%d, max=%d, ratio=%.2f", estimated, max_context_tokens, ratio)
         return ratio >= self.trigger_threshold
 
+    # ── 工具调用原子组对齐 ────────────────────────────────────────
+
+    @staticmethod
+    def _group_start(messages: List[Dict[str, Any]], i: int) -> int:
+        """返回索引 i 所在工具调用原子组的首条消息索引（自身即组首）。
+
+        原子组 = assistant(tool_calls) + 紧随其后的连续 tool 结果。
+        组首 = assistant(tool_calls) 消息，或不带 tool_calls 的消息。
+        """
+        if i <= 0:
+            return 0
+        role = messages[i].get("role")
+        if role != "tool":
+            return i
+        # tool 消息：向前扫描连续的 tool 消息
+        j = i - 1
+        while j > 0 and messages[j].get("role") == "tool":
+            j -= 1
+        # j 现在指向第一个非 tool 消息，应为 assistant(tool_calls)
+        if messages[j].get("role") == "assistant" and messages[j].get("tool_calls"):
+            return j
+        return j  # 无配对 assistant（异常），返回最后一个 tool 的位置
+
+    def _aligned_split_points(self, messages: List[Dict[str, Any]]) -> tuple:
+        """计算对齐到工具调用原子组边界的 head_end / tail_start。
+
+        保证 assistant(tool_calls) 与其 tool 结果不被切开（否则厂商校验报
+        tool id not found）。两个切分点都前移到所在组的首条消息。
+
+        head 保证至少保留到首条 user 消息（若 head_keep 落在此前）。
+        """
+        n = len(messages)
+        head_end = min(self.head_keep, n)
+
+        # head 至少保留到首条 user 消息（含），避免把用户最初需求切进摘要
+        for i, msg in enumerate(messages[: self.head_keep + 3]):
+            if msg.get("role") == "user":
+                head_end = max(head_end, i + 1)
+                break
+
+        head_end = self._group_start(messages, head_end) if head_end < n else n
+
+        tail_start = max(n - self.tail_keep, head_end)
+        if tail_start < n:
+            tail_start = max(self._group_start(messages, tail_start), head_end)
+
+        return head_end, tail_start
+
     def compress(
         self,
         messages: List[Dict[str, Any]],
@@ -128,9 +176,11 @@ class ContextCompressor:
                 saved_tokens=0,
             )
 
-        head = messages[:self.head_keep]
-        tail = messages[-self.tail_keep:]
-        middle = messages[self.head_keep:-self.tail_keep]
+        head_end, tail_start = self._aligned_split_points(messages)
+
+        head = messages[:head_end]
+        tail = messages[tail_start:]
+        middle = messages[head_end:tail_start]
 
         if not middle:
             return CompressionResult(

@@ -2,6 +2,18 @@
 
 All notable changes to FloodMind are documented in this file.
 
+## [1.1.8] - 2026-08-06
+
+### Fixed
+
+- **ContextCompressor 保持工具调用原子组（MiniMax 400 `tool id not found (2013)` 的真正主因）**：此前 `compress()` 用 `head[:2] + tail[-4:]` 机械切分——当尾部 `tail_keep` 条恰好全是 tool 结果、声明它们的 `assistant(tool_calls)` 消息落在倒数第 `tail_keep+1` 条时，该 assistant 被切进 middle 摘要，留下 4 条孤儿 tool 消息；MiniMax 校验 tool 结果的 `tool_call_id` 找不到对应 assistant `tool_calls` 即 400。现新增 `_aligned_split_points()`：切分点若落在 `assistant(tool_calls) + 紧随 tool 结果` 原子组中间，前移到组首（tail 保留整组、head 把整组并入 middle），保证配对不被拆散。同时 head 至少保留到首条 user 消息，不再把用户最初需求切进摘要。
+- **`context_window` 跟随注入模型（压缩放大器）**：executor 此前硬编码 `settings.model.context_window`（全局默认模型，即 catalog 第一个，如 deepseek-v4-pro 131072），而非宿主注入 `ModelClient` 实际模型的窗口（如 MiniMax-M3 1M）。导致压缩在本不该发生的体量就触发，放大上述结构破坏。现 `NativeFloodAgent._resolve_context_window()` 优先取注入模型 preset 的 `max_context_tokens`，查不到才回退全局默认。
+
+### Verification
+
+- Full core-only test suite: `607 passed, 1 skipped`.
+- The single skipped test is legacy Web adapter compatibility that requires optional `floodmind[web]` / Flask extra.
+
 ## [1.1.7] - 2026-08-06
 
 ### Fixed

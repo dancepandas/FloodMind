@@ -56,7 +56,7 @@ class SessionSidebar(VerticalScroll):
         version_text = Text()
         version_text.append("● ", style=get_color("success"))
         version_text.append("FloodMind ", style=f"bold {get_color('text')}")
-        version_text.append("v1.1.7", style=get_color("textMuted"))
+        version_text.append("v1.1.8", style=get_color("textMuted"))
 
         # 使用唯一 ID 避免重复
         import uuid
