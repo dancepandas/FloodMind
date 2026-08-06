@@ -120,3 +120,102 @@ class TestContextCompressor:
         c = ContextCompressor()
         tokens = c._estimate_tokens([{"role": "user", "content": "hello world"}])
         assert tokens > 0
+
+
+# ---------------------------------------------------------------------------
+# 工具调用原子组对齐（Bug A：压缩不得拆散 assistant(tool_calls)+tool 组）
+# ---------------------------------------------------------------------------
+
+def _asst_tc(*ids):
+    return {
+        "role": "assistant",
+        "content": "",
+        "tool_calls": [
+            {"id": i, "type": "function", "function": {"name": "t", "arguments": "{}"}}
+            for i in ids
+        ],
+    }
+
+
+def _tool(tcid, content="r" * 300):
+    return {"role": "tool", "tool_call_id": tcid, "content": content}
+
+
+class TestToolCallAtomicGroup:
+    def test_tail_does_not_orphan_tool_results(self):
+        """尾部 4 条恰为 tool 结果时，应前移保留其声明的 assistant 消息。
+
+        复现 MiniMax 2013：assistant(tool_calls) 被切进 middle，留下孤儿 tool。"""
+        c = ContextCompressor(head_keep=2, tail_keep=4)
+        messages = [
+            {"role": "system", "content": "s"},
+            {"role": "user", "content": "q"},
+            _asst_tc("a", "b", "c", "d"),
+            _tool("a"), _tool("b"), _tool("c"), _tool("d"),
+            {"role": "assistant", "content": "done"},
+        ] + [{"role": "user", "content": "x" * 2000}] * 40  # 撑大以触发压缩
+        result = c.compress(messages, 1000)
+        out = result.compressed_messages
+
+        # 不变量：每个 tool 消息的 tool_call_id 都能在更早的 assistant.tool_calls 找到
+        seen_call_ids = set()
+        for m in out:
+            if m.get("role") == "assistant" and m.get("tool_calls"):
+                seen_call_ids.update(tc["id"] for tc in m["tool_calls"])
+            if m.get("role") == "tool":
+                assert m["tool_call_id"] in seen_call_ids, (
+                    f"孤儿 tool 消息 {m['tool_call_id']}：assistant 声明已被压缩切走"
+                )
+
+    def test_head_does_not_split_assistant_from_tools(self):
+        """head 切点落在 assistant(tool_calls) 与其 tool 结果之间时，整组并入 middle。"""
+        c = ContextCompressor(head_keep=3, tail_keep=2)
+        messages = [
+            {"role": "system", "content": "s"},
+            {"role": "user", "content": "q"},
+            _asst_tc("x"),
+            _tool("x"),   # head_keep=3 会把这条留在 head、assistant 在 head、tool 跨界
+            {"role": "assistant", "content": "a"},
+        ] + [{"role": "user", "content": "y" * 2000}] * 40
+        result = c.compress(messages, 1000)
+        out = result.compressed_messages
+
+        seen_call_ids = set()
+        for m in out:
+            if m.get("role") == "assistant" and m.get("tool_calls"):
+                seen_call_ids.update(tc["id"] for tc in m["tool_calls"])
+            if m.get("role") == "tool":
+                assert m["tool_call_id"] in seen_call_ids
+
+    def test_head_keeps_first_user_message(self):
+        """head 至少保留到首条 user 消息，不把用户最初需求切进摘要。"""
+        c = ContextCompressor(head_keep=2, tail_keep=2)
+        messages = [
+            {"role": "system", "content": "s1"},
+            {"role": "system", "content": "s2"},   # head_keep=2 只含两条 system
+            {"role": "user", "content": "我的最初需求"},
+            {"role": "assistant", "content": "a"},
+        ] + [{"role": "user", "content": "z" * 2000}] * 40
+        result = c.compress(messages, 1000)
+        head = result.compressed_messages[: result.compressed_messages.index(
+            next(m for m in result.compressed_messages if SUMMARY_PREFIX in m.get("content", ""))
+        )]
+        assert any(m.get("role") == "user" and "最初需求" in m.get("content", "") for m in head), \
+            "首条 user 消息被切进了摘要"
+
+    def test_aligned_split_returns_valid_group_boundaries(self):
+        """_aligned_split_points 切点均落在原子组边界（组首）。"""
+        c = ContextCompressor(head_keep=2, tail_keep=3)
+        messages = [
+            {"role": "system", "content": "s"},
+            {"role": "user", "content": "q"},
+            _asst_tc("a", "b"),
+            _tool("a"), _tool("b"),
+            {"role": "assistant", "content": "end"},
+        ]
+        head_end, tail_start = c._aligned_split_points(messages)
+        assert 0 <= head_end <= tail_start <= len(messages)
+        # tail_start 不应落在 tool 组中间
+        if tail_start < len(messages) and messages[tail_start].get("role") == "tool":
+            assert messages[tail_start - 1].get("role") != "tool"
+
