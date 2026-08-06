@@ -303,8 +303,13 @@ class ModelClient:
                                         arguments_str[:300],
                                     )
 
+                        # 流式偶发 tool_call id 为空/后到：用 fallback 生成并写回 acc，
+                        # 保证回传 assistant 消息的 tool_calls[].id 与工具结果消息的
+                        # tool_call_id 始终一致（MiniMax 校验不符会报 tool id not found 2013）。
+                        if not acc.get("id"):
+                            acc["id"] = f"call_{idx}_{time.time_ns()}"
                         tool_call = ToolCall(
-                            id=acc["id"] or f"call_{idx}_{time.time_ns()}",
+                            id=acc["id"],
                             name=acc["name"],
                             arguments=parsed_args,
                         )
@@ -336,8 +341,10 @@ class ModelClient:
                                 arguments_str.endswith("}"),
                                 arguments_str[:300],
                             )
+                    if not acc.get("id"):
+                        acc["id"] = f"call_{idx}_{time.time_ns()}"
                     tool_call = ToolCall(
-                        id=acc["id"] or f"call_{idx}_{time.time_ns()}",
+                        id=acc["id"],
                         name=acc["name"],
                         arguments=parsed_args,
                     )

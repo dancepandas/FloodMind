@@ -15,7 +15,7 @@ from floodmind.tui.theme import get_color
 class StatusBar(Widget):
     can_focus = False
     model_name = reactive("")
-    version = "v1.1.6"
+    version = "v1.1.7"
 
     DEFAULT_CSS = """
     StatusBar {

@@ -2,6 +2,17 @@
 
 All notable changes to FloodMind are documented in this file.
 
+## [1.1.7] - 2026-08-06
+
+### Fixed
+
+- **Tool-call id 对齐修复（MiniMax 400 `tool id not found (2013)`）**：流式解析中 `ToolCall` 与回传历史里的 assistant 消息对 `id` 使用了两套来源——构造 `ToolCall` 时 `acc["id"] or f"call_{idx}_{time.time_ns()}"` 生成 fallback id，而 `ProviderPipeline.build_assistant_message` 读原始 accumulator 的 `acc.get("id") or ""`。当 MiniMax 等厂商偶发在流里不发 tool call 的 `id`（或后到）时，历史 assistant 消息的 `tool_calls[].id` 为空、工具结果消息的 `tool_call_id` 却是 fallback id，二者对不上，下一次 LLM 调用即被校验拒绝（工具本身执行成功）。现改为在构造 `ToolCall` 前把 fallback id **写回 `acc["id"]`**（两处：`finish_reason=="tool_calls"` 分支 + 流结束兜底分支），accumulator 成为唯一 id 来源，assistant 消息与工具结果的 id 永远一致；provider 给了非空 id 时原样保留。
+
+### Verification
+
+- Full core-only test suite: `603 passed, 1 skipped`.
+- The single skipped test is legacy Web adapter compatibility that requires optional `floodmind[web]` / Flask extra.
+
 ## [1.1.6] - 2026-08-06
 
 ### Removed

@@ -22,7 +22,7 @@ class Sidebar(VerticalScroll):
 
     session_title = reactive("Session")
     model_name = reactive("")
-    version = reactive("v1.1.6")
+    version = reactive("v1.1.7")
     # Token 统计
     usage_total = reactive(0)
     usage_input = reactive(0)
