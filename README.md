@@ -1,6 +1,6 @@
 # FloodMind
 
-**SDK-first 的智能水文 Agent Runtime — v1.1.6**
+**SDK-first 的智能水文 Agent Runtime — v1.1.7**
 
 FloodMind 正在收敛为面向 Python 宿主系统的纯 SDK：以 `Agent` / `ModelClient` / `Workspace` / `build_agent_tool` 为公共入口，把水文模型、数据分析、文档生成、MCP 工具与 Skill 体系嵌入到业务平台或桌面助手中。Web / TUI 入口已进入 legacy 迁移路径，不再作为核心产品形态推进。
 
@@ -654,7 +654,7 @@ FloodMind/
 │   └── cli.py                     # CLI 入口
 ├── contrib/                       # 已外置为 MCP 服务的脚本（chronos/hydro_case_client）
 ├── web/                           # React 前端
-├── tests/                         # 601 passed / 1 legacy Web optional skip（v1.1.6 core-only 环境）
+├── tests/                         # 603 passed / 1 legacy Web optional skip（v1.1.7 core-only 环境）
 ├── web_server.py                  # Flask 入口（日志 + SessionManager + waitress）
 ├── scheduler.py                   # 后台调度
 ├── main.py                        # CLI 交互入口
@@ -700,7 +700,7 @@ cd web && npm run dev      # Vite 开发服务器 (:5173)
 
 # 运行测试
 python -m pytest tests/ -q
-# v1.1.6 core-only 验证结果：601 passed, 1 skipped
+# v1.1.7 core-only 验证结果：603 passed, 1 skipped
 # skipped = legacy Web adapter 需要可选 floodmind[web] / Flask extra
 
 # 前端构建（legacy Web，仅迁移期参考）

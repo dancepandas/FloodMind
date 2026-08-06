@@ -1,6 +1,7 @@
 """Tests for provider pipelines — 路由、请求翻译、流式解析（fake chunk，不打真实 API）。"""
 
 from types import SimpleNamespace
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -378,3 +379,88 @@ class TestPrepareMessages:
             "content": [{"type": "video_url", "video_url": {"url": "mm_file://fid", "fps": 1}}],
         }]
         assert p.prepare_messages(messages) is messages
+
+
+# ---------------------------------------------------------------------------
+# ToolCall id 对齐（流式 fallback id 写回 accumulator）
+# ---------------------------------------------------------------------------
+
+class TestToolCallIdAlignment:
+    def test_stream_empty_tool_call_id_aligns_with_assistant_message(self):
+        """流式 tool call id 为空时，fallback id 写回 accumulator，保证 assistant 消息
+        tool_calls[].id 与 ToolCall.id / 工具结果 tool_call_id 一致。
+        根因：此前 ToolCall 用 fallback id 但 assistant 消息仍读空 acc["id"]，
+        MiniMax 等厂商校验报 'tool result's tool id not found (2013)'。"""
+        from floodmind.agent.native.model_client import ModelClient
+
+        client = ModelClient(
+            api_key="k",
+            base_url="https://api.minimaxi.com/v1",
+            model_name="MiniMax-M3",
+            provider="minimax",
+        )
+        stream = [
+            _ns(choices=[_ns(
+                delta=_ns(
+                    role="assistant",
+                    content=None,
+                    reasoning_content=None,
+                    tool_calls=[_ns(
+                        index=0,
+                        id="",
+                        function=_ns(name="get_weather", arguments='{"city":"上海"}'),
+                    )],
+                ),
+                finish_reason=None,
+            )]),
+            _ns(choices=[_ns(delta=_ns(content=None, reasoning_content=None, tool_calls=None), finish_reason="tool_calls")]),
+        ]
+        mock_client = MagicMock()
+        mock_client.chat.completions.create.return_value = iter(stream)
+        client._client = mock_client
+
+        events = list(client.stream_chat(messages=[{"role": "user", "content": "hi"}]))
+        tool_call_event = next(e for e in events if e.type == "tool_call_done")
+        done_event = next(e for e in events if e.type == "assistant_message_done")
+
+        tc_id = tool_call_event.tool_call.id
+        assert tc_id.startswith("call_"), f"fallback id 未生成: {tc_id!r}"
+        hist_tc_id = done_event.raw["message"]["tool_calls"][0]["id"]
+        assert hist_tc_id == tc_id, "assistant 消息 tool_calls[].id 与 ToolCall.id 不一致"
+
+    def test_stream_with_provider_id_preserved(self):
+        """provider 给了非空 id 时保持原样，不生成 fallback。"""
+        from floodmind.agent.native.model_client import ModelClient
+
+        client = ModelClient(
+            api_key="k",
+            base_url="https://api.minimaxi.com/v1",
+            model_name="MiniMax-M3",
+            provider="minimax",
+        )
+        stream = [
+            _ns(choices=[_ns(
+                delta=_ns(
+                    role="assistant",
+                    content=None,
+                    reasoning_content=None,
+                    tool_calls=[_ns(
+                        index=0,
+                        id="real_id_42",
+                        function=_ns(name="get_weather", arguments='{"city":"上海"}'),
+                    )],
+                ),
+                finish_reason=None,
+            )]),
+            _ns(choices=[_ns(delta=_ns(content=None, reasoning_content=None, tool_calls=None), finish_reason="tool_calls")]),
+        ]
+        mock_client = MagicMock()
+        mock_client.chat.completions.create.return_value = iter(stream)
+        client._client = mock_client
+
+        events = list(client.stream_chat(messages=[{"role": "user", "content": "hi"}]))
+        tool_call_event = next(e for e in events if e.type == "tool_call_done")
+        done_event = next(e for e in events if e.type == "assistant_message_done")
+        assert tool_call_event.tool_call.id == "real_id_42"
+        assert done_event.raw["message"]["tool_calls"][0]["id"] == "real_id_42"
+
