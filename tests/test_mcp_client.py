@@ -346,7 +346,7 @@ class TestBareModeMcpLoading:
         names = {t.name for t in agent._orchestrator_registry.all()}
         assert "mcp_srv_t1" in names  # MCP 工具已注册（sanitized model-visible 名）
         assert agent._mcp_pool is fake_pool  # _mcp_pool 已初始化
-        assert "SearchTools" in names  # catalog 工具仍在
+        assert "GetTool" in names  # catalog 工具仍在
 
     def test_full_init_also_loads_mcp_via_shared_method(self, monkeypatch):
         """完整 runtime 走同一 _load_mcp_tools，两模式一致。"""

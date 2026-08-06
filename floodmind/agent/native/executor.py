@@ -448,7 +448,7 @@ class NativeAgentExecutor:
                     name=call.name,
                     content=(
                         f"工具 `{call.name}` 当前未加载，不能执行。"
-                        "请先调用 SearchTools 查找能力，再调用 GetTool 查看参数并加载工具。"
+                        "工具目录已列出全部可用工具；请调用 GetTool(tool_name=工具名) 查看参数并加载该工具。"
                     ),
                     status="error",
                 )

@@ -1,7 +1,7 @@
 # FloodMind 架构总览（SDK-first）v4.1
 
 > **更新日期**: 2026-08-06
-> **变更摘要**: SDK v1.1.6；`SearchTools` 输出改为目录风格（仅工具名 + 基本描述，参数统一 `GetTool` 返回），`short_description` 剥离 `[必填]/[可选]` 参数提示前缀。v1.1.5 含四项健壮性/权限收敛：① `ToolExecutionService` 统一清洗工具调用参数键名（模型偶发畸形键如 `{"tool_name"": ...}` 不再 `**kwargs` 崩，改走正常执行/清晰校验反馈）；② exec 命令体写目标检查（`>`/`Set-Content`/`Copy-Item` 等越权写被 DENY，堵住"只读授权被 Bash 绕过"漏洞，`exec_write_scanner`）；③ folder-first 读白名单加入已装 skill 注册表（可直读 SKILL.md/references）；④ PathService 读取拒绝原因附可操作引导。v1.1.4 含 create() 连接阶段 LLM 流式重试；v1.1.3 含 mid-stream 断流重试关键词；v1.1.2 含 CreateScheduledTask 描述修正 + 调度 workspace unknown 修复。
+> **变更摘要**: SDK v1.1.6；移除 `SearchTools` 工具，工具发现与 skill 一致——`## 可用工具` 提示目录直接列出全部工具名称与基本描述，参数统一由 `GetTool` 查看并加载，模型无需搜索；`short_description` 剥离 `[必填]/[可选]` 参数提示前缀。v1.1.5 含四项健壮性/权限收敛：① `ToolExecutionService` 统一清洗工具调用参数键名（模型偶发畸形键如 `{"tool_name"": ...}` 不再 `**kwargs` 崩，改走正常执行/清晰校验反馈）；② exec 命令体写目标检查（`>`/`Set-Content`/`Copy-Item` 等越权写被 DENY，堵住"只读授权被 Bash 绕过"漏洞，`exec_write_scanner`）；③ folder-first 读白名单加入已装 skill 注册表（可直读 SKILL.md/references）；④ PathService 读取拒绝原因附可操作引导。v1.1.4 含 create() 连接阶段 LLM 流式重试；v1.1.3 含 mid-stream 断流重试关键词；v1.1.2 含 CreateScheduledTask 描述修正 + 调度 workspace unknown 修复。
 > 详细评估见 [`ASSESSMENT.md`](./ASSESSMENT.md)；CC 风格文件管理差距与改造方案见 [`CC_FILE_MANAGEMENT_GAP_ANALYSIS.md`](./CC_FILE_MANAGEMENT_GAP_ANALYSIS.md)。
 
 ## 1. 系统定位

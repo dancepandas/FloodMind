@@ -472,7 +472,7 @@ class ToolExecutionService:
 
         背景：模型偶发生成键名带尾引号/首尾空白/控制字符的参数（如
         ``{"tool_name"": ...}``）。对无 pydantic args_schema 的裸 JSON Schema 工具
-        （GetTool/SearchTools、系统工具、MCP 工具），旧逻辑原样放行后 ``**kwargs``
+        （GetTool、系统工具、MCP 工具），旧逻辑原样放行后 ``**kwargs``
         直接崩成 ``TypeError: unexpected keyword argument 'tool_name"'``，模型看不懂
         不会自纠。这里在权限/校验/执行之前统一归一化键名：去边缘引号/空白、去键内
         控制字符与引号、丢弃空键。只改键名，不改值、不丢合法参数。

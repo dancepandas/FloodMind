@@ -4,14 +4,20 @@ All notable changes to FloodMind are documented in this file.
 
 ## [1.1.6] - 2026-08-06
 
+### Removed
+
+- **移除 `SearchTools` 工具**：工具发现改为与 skill 完全一致的模型——`## 可用工具` 提示目录直接列出全部工具的名称与基本描述（模型无需搜索就知道有哪些可用），需要具体参数、required 与用法时调用 `GetTool(tool_name=...)` 查看并加载。此前 `SearchTools` 要求模型先凭空猜一个关键词再拿子集，模型对工具目录一无所知，只能瞎碰。移除后：
+  - `DEFAULT_CORE_TOOLS` / `settings.tool_loading.core_tools` 默认只含 `GetTool`/`GetSkill`；
+  - `make_search_tools_tool` 工厂删除，`NativeFloodAgent._register_tool_catalog_tools` 只注册 `GetTool`；
+  - progressive 提示目录与未加载工具的错误提示不再引导「先调用 SearchTools」。
+
 ### Changed
 
-- **`SearchTools` 输出改为目录风格**：只列出工具名 + 基本描述（`- \`Bash\` [destructive]：要执行的 shell 命令`），去掉 `required=[...]`、`match=...`、`not-loaded` 等噪音；具体参数、required 与用法统一由 `GetTool(tool_name=...)` 返回。这样模型先通过搜索确定工具、再 `GetTool` 拿参数，不再需要猜工具。
-- **`short_description` 剥离参数提示前缀**：`[必填] command: 要执行的 shell 命令。` 这类描述在目录/搜索结果中现在显示为 `要执行的 shell 命令`（剥离 `[必填]/[可选] xxx:` 前缀），让「基本描述」直接读起来像「这个工具是什么」，同时作用于 progressive 系统提示工具目录与 SearchTools 结果。
+- **`short_description` 剥离参数提示前缀**：`[必填] command: 要执行的 shell 命令。` 这类描述在目录/提示中现在显示为 `要执行的 shell 命令`（剥离 `[必填]/[可选] xxx:` 前缀），让「基本描述」直接读起来像「这个工具是什么」，同时作用于 progressive 系统提示工具目录与 GetTool 结果。
 
 ### Verification
 
-- Full core-only test suite: `600 passed, 1 skipped`.
+- Full core-only test suite: `601 passed, 1 skipped`.
 - The single skipped test is legacy Web adapter compatibility that requires optional `floodmind[web]` / Flask extra.
 
 ## [1.1.5] - 2026-08-06

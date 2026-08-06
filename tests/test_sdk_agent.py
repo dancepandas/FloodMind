@@ -98,11 +98,10 @@ class TestAgentCreation:
         agent = Agent(llm=llm, tools=sample_tools)
         registry = agent.raw._orchestrator_registry
         tool_names = [t.name for t in registry.all()]
-        assert len(registry.all()) == 5
+        assert len(registry.all()) == 4
         assert "Echo" in tool_names
         assert "Add" in tool_names
         assert "GetSkill" in tool_names
-        assert "SearchTools" in tool_names
         assert "GetTool" in tool_names
 
     def test_create_with_system_prompt(self, llm):
@@ -210,7 +209,7 @@ class TestToolRegistration:
         """不传工具 — 只注册 catalog 与 skill 基础工具。"""
         agent = Agent(llm=llm)
         names = agent.raw._orchestrator_registry.names()
-        assert set(names) == {"GetSkill", "SearchTools", "GetTool"}
+        assert set(names) == {"GetSkill", "GetTool"}
 
 
 # ---------------------------------------------------------------------------
@@ -383,7 +382,7 @@ class TestEdgeCases:
         agent = Agent(llm=llm, tools=sample_tools)
         rep = repr(agent)
         assert "Agent" in rep
-        assert "tools=5" in rep
+        assert f"tools={len(agent.raw._orchestrator_registry.all())}" in rep
 
     def test_raw_property_access(self, llm):
         agent = Agent(llm=llm)
@@ -745,7 +744,6 @@ class TestSdkEnhancements:
         agent = Agent(llm=llm, tools=sample_tools, tool_loading=True)
         names = agent.raw._orchestrator_registry.names()
         assert agent.raw._tool_loading_config.mode == "progressive"
-        assert "SearchTools" in names
         assert "GetTool" in names
 
     def test_agent_accepts_tool_loading_config(self, llm, sample_tools):
@@ -753,10 +751,10 @@ class TestSdkEnhancements:
 
         cfg = ToolLoadingConfig(
             mode="progressive",
-            core_tools=["SearchTools", "GetTool"],
+            core_tools=["GetTool"],
             max_loaded_tools=3,
         )
         agent = Agent(llm=llm, tools=sample_tools, tool_loading=cfg)
         assert agent.raw._tool_loading_config is cfg
         assert agent.raw._orchestrator_tool_loader.config.max_loaded_tools == 3
-        assert agent.raw._specialist_tool_loader.config.core_tools == ["SearchTools", "GetTool"]
+        assert agent.raw._specialist_tool_loader.config.core_tools == ["GetTool"]
