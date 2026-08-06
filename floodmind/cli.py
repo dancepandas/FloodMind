@@ -57,7 +57,7 @@ def _validate_api_key() -> None:
     dashscope_fallback = "  或  DASHSCOPE_API_KEY" if provider == "dashscope" else ""
 
     click.echo(f"""
-  FloodMind v1.1.8
+  FloodMind v1.1.7
 
   [!] 未配置 API Key
 
@@ -92,7 +92,7 @@ _BANNER = r"""
 ╚═╝      ╚══════╝  ╚═════╝   ╚═════╝  ╚═════╝  ╚═╝     ╚═╝ ╚═╝ ╚═╝  ╚═══╝ ╚═════╝
 """
 
-_BANNER_SUB = "基于大语言模型的智能洪水预报系统  |  v1.1.8"
+_BANNER_SUB = "基于大语言模型的智能洪水预报系统  |  v1.1.7"
 
 
 @click.group(invoke_without_command=True)
@@ -103,7 +103,7 @@ _BANNER_SUB = "基于大语言模型的智能洪水预报系统  |  v1.1.8"
 @click.option("--model", "-m", help="模型名称 (provider:model)", hidden=True)
 @click.option("--reasoning/--no-reasoning", default=None, help="启用推理模式", hidden=True)
 @click.option("--verbose", "-v", is_flag=True, help="显示详细日志", hidden=True)
-@click.version_option(version="1.1.8", prog_name="floodmind")
+@click.version_option(version="1.1.7", prog_name="floodmind")
 @click.pass_context
 def main(ctx, tui, web_mode, port, host, model, reasoning, verbose):
     """FloodMind — 智能洪水预报 Agent 系统
@@ -472,7 +472,7 @@ def _run_chat_legacy(model=None, reasoning=None) -> int:
     if reasoning is not None:
         settings.model.enable_reasoning = reasoning
 
-    click.echo(f"\n  FloodMind v1.1.8  —  {settings.model.model_name}")
+    click.echo(f"\n  FloodMind v1.1.7  —  {settings.model.model_name}")
     click.echo("  输入 'exit' 退出, 'clear' 清空记忆, 'memory' 查看记忆\n")
 
     llm = ModelClient.from_settings(
