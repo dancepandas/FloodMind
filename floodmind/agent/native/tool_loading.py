@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass, field
 from typing import Any, Dict, Iterable, List, Optional, Set
 
@@ -99,10 +100,18 @@ class ToolCatalogEntry:
         )
 
 
+_BRACKET_HINT_RE = re.compile(r"^\s*\[(?:必填|可选)\]\s*[^:：]*[:：]\s*")
+
+
 def short_description(description: str, limit: int = 80) -> str:
     desc = (description or "").strip().replace("\n", " ")
     if not desc:
         return ""
+    # 去掉开头的 [必填] xxx: / [可选] xxx: 参数提示前缀，让描述直接读起来像"是什么"
+    prev = None
+    while prev != desc:
+        prev = desc
+        desc = _BRACKET_HINT_RE.sub("", desc)
     first = desc.split("。")[0].split(".")[0].strip()
     return first[:limit]
 
@@ -330,17 +339,15 @@ def make_search_tools_tool(loader: ToolLoader, registry: Any):
                 flags.append("destructive")
             elif item["readonly"]:
                 flags.append("readonly")
-            flags.append("loaded" if item["loaded"] else "not-loaded")
-            lines.append(
-                f"- `{item['name']}` ({', '.join(flags)}): {item['description']} "
-                f"required={item['required_parameters']} match={item['match']}"
-            )
-        lines.append("需要完整参数和使用方法时，调用 GetTool(tool_name=工具名)。")
+            flag_text = f" [{', '.join(flags)}]" if flags else ""
+            desc = item["description"] or "（无描述）"
+            lines.append(f"- `{item['name']}`{flag_text}：{desc}")
+        lines.append("以上仅列出工具名称与基本描述。需要某个工具的具体参数、required 与用法时，调用 GetTool(tool_name=工具名)。")
         return "\n".join(lines)
 
     return AgentTool(
         name="SearchTools",
-        description="按能力、工具名、描述或参数名搜索可用工具。只返回简短目录；需要完整参数时再调用 GetTool。",
+        description="按能力、工具名、描述或参数名搜索可用工具，返回工具名与基本描述；需要具体参数和用法时再调用 GetTool。",
         parameters={
             "type": "object",
             "properties": {

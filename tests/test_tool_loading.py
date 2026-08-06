@@ -121,6 +121,45 @@ def test_progressive_request_tools_only_core_then_loaded():
     assert names == ["SearchTools", "GetTool", "Read"]
 
 
+def test_short_description_strips_param_hint_prefix():
+    from floodmind.agent.native.tool_loading import short_description
+
+    assert short_description("[必填] command: 要执行的 shell 命令。不要嵌套 shell。") == "要执行的 shell 命令"
+    assert short_description("[可选] workdir: 工作目录。用于指定路径。") == "工作目录"
+    assert short_description("网络搜索。[必填] query: 搜索关键词。") == "网络搜索"
+    assert short_description("读取文件内容，支持文本与二进制。用于查看本地文件。") == "读取文件内容，支持文本与二进制"
+
+
+def test_search_tools_output_clean_catalog_style():
+    reg = Registry([
+        _tool("Read", "读取文件内容。用于查看本地文件。"),
+        _tool("Bash", "[必填] command: 要执行的 shell 命令。不要嵌套 shell。", {
+            "type": "object",
+            "properties": {"command": {"type": "string"}},
+            "required": ["command"],
+        }, readonly=False, destructive=True),
+        _tool("WebSearch", "网络搜索。", {
+            "type": "object",
+            "properties": {"query": {"type": "string"}},
+            "required": ["query"],
+        }),
+    ])
+    loader = ToolLoader(ToolLoadingConfig(mode="progressive", core_tools=["SearchTools", "GetTool"]))
+    search_tool = make_search_tools_tool(loader, reg)
+    text = search_tool.func(query="", max_results=8)
+
+    # 只列工具名 + 基本描述，去掉 required= / match= / not-loaded 噪音
+    assert "=== 工具搜索结果 ===" in text
+    assert "- `Read`" in text
+    assert "读取文件内容" in text
+    assert "要执行的 shell 命令" in text
+    assert "required=" not in text
+    assert "match=" not in text
+    assert "not-loaded" not in text
+    # GetTool 指引仍保留
+    assert "GetTool" in text
+
+
 def test_synthetic_tools_use_registry_live():
     reg = Registry([_tool("Read", "读取文件内容。")])
     loader = ToolLoader(ToolLoadingConfig(mode="progressive", core_tools=["SearchTools", "GetTool"]))

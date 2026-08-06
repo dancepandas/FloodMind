@@ -2,6 +2,18 @@
 
 All notable changes to FloodMind are documented in this file.
 
+## [1.1.6] - 2026-08-06
+
+### Changed
+
+- **`SearchTools` 输出改为目录风格**：只列出工具名 + 基本描述（`- \`Bash\` [destructive]：要执行的 shell 命令`），去掉 `required=[...]`、`match=...`、`not-loaded` 等噪音；具体参数、required 与用法统一由 `GetTool(tool_name=...)` 返回。这样模型先通过搜索确定工具、再 `GetTool` 拿参数，不再需要猜工具。
+- **`short_description` 剥离参数提示前缀**：`[必填] command: 要执行的 shell 命令。` 这类描述在目录/搜索结果中现在显示为 `要执行的 shell 命令`（剥离 `[必填]/[可选] xxx:` 前缀），让「基本描述」直接读起来像「这个工具是什么」，同时作用于 progressive 系统提示工具目录与 SearchTools 结果。
+
+### Verification
+
+- Full core-only test suite: `600 passed, 1 skipped`.
+- The single skipped test is legacy Web adapter compatibility that requires optional `floodmind[web]` / Flask extra.
+
 ## [1.1.5] - 2026-08-06
 
 ### Fixed
