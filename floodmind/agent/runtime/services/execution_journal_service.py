@@ -71,6 +71,11 @@ class ExecutionJournalService:
     ) -> Tuple[str, ToolResultJournalEntry]:
         """处理一个工具结果，决定是 inline 还是归档。
 
+        模型始终看到完整工具结果（inline_content = 完整内容）；长结果会额外
+        归档到 journal/full_results 供 JournalSearch / JournalGetFullResult 回溯，
+        但不会用摘要替换模型可见内容——截断工具结果会显著拉低任务执行质量。
+        上下文上限由 token 级的 ContextCompressor 兜底，而非此处字符截断。
+
         Returns:
             (inline_content, journal_entry)
         """
@@ -86,7 +91,7 @@ class ExecutionJournalService:
             )
             return content, entry
 
-        # 长结果：归档 + 生成摘要
+        # 长结果：完整内容仍 inline 给模型，同时归档 + 生成摘要（供检索/回溯）
         ref_id = self.archive_tool_result(session_id, tool_call, tool_result)
         summary = self.summarize_tool_result(tool_result)
         entry = ToolResultJournalEntry(
@@ -98,11 +103,7 @@ class ExecutionJournalService:
             artifacts=tool_result.artifacts or [],
             inline=False,
         )
-        inline_content = (
-            f"[{tool_call.name}] 执行完成，结果已归档到 journal/full_results/{ref_id}.json\n"
-            f"摘要: {summary}"
-        )
-        return inline_content, entry
+        return content, entry
 
     def archive_tool_result(
         self,

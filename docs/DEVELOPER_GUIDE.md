@@ -1,6 +1,6 @@
 # FloodMind SDK 开发指南 v3.1
 
-> **更新**: 2026-08-06 — SDK v1.1.6；移除 `SearchTools` 工具：工具发现与 skill 一致——`## 可用工具` 提示目录直接列出全部工具名称与基本描述，参数统一由 `GetTool` 查看并加载，模型无需搜索；`short_description` 剥离 `[必填]/[可选]` 参数提示前缀。v1.1.5 含四项健壮性/权限收敛：① 工具调用参数键名统一清洗（模型偶发畸形键如 `{"tool_name"": ...}` 不再 `**kwargs` 崩）；② exec 命令体写目标检查（`>`/`Set-Content`/`Copy-Item` 等越权写 DENY，堵住"只读授权被 Bash 绕过"）；③ folder-first 读白名单加入已装 skill 注册表；④ PathService 读取拒绝原因附可操作引导。v1.1.4 含 create() 连接阶段 LLM 流式重试
+> **更新**: 2026-08-06 — SDK v1.1.6；移除 `SearchTools` 工具：工具发现与 skill 一致——`## 可用工具` 提示目录直接列出全部工具名称与基本描述，参数统一由 `GetTool` 查看并加载，模型无需搜索；移除工具输出静默字符截断（8000 字符 `_finalize_tool_output` 上限 + 1000 字符 journal 内联阈值），模型始终看到完整工具结果，上下文由 token 级 `ContextCompressor` 兜底；`short_description` 剥离 `[必填]/[可选]` 参数提示前缀。v1.1.5 含四项健壮性/权限收敛：① 工具调用参数键名统一清洗（模型偶发畸形键如 `{"tool_name"": ...}` 不再 `**kwargs` 崩）；② exec 命令体写目标检查（`>`/`Set-Content`/`Copy-Item` 等越权写 DENY，堵住"只读授权被 Bash 绕过"）；③ folder-first 读白名单加入已装 skill 注册表；④ PathService 读取拒绝原因附可操作引导。v1.1.4 含 create() 连接阶段 LLM 流式重试
 
 FloodMind 正在收敛为 **Python SDK + 最小 CLI run**：开发者通过 `Agent`、`ModelClient`、`Workspace`、`build_agent_tool`、Provider Pipeline、MCP 与 Skill API 将能力嵌入自己的平台、桌面助手或业务系统。Web / TUI 代码仅作为迁移期 legacy adapter 保留，不再是 SDK 核心公共面。
 
