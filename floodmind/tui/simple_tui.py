@@ -154,7 +154,7 @@ class SimpleTUI(App):
         log = self._chat_log()
         t = Text()
         t.append("FloodMind  ", style="bold #5f87ff")
-        t.append(f"v1.1.3  |  {self._model_name}", style="#808090")
+        t.append(f"v1.1.5  |  {self._model_name}", style="#808090")
         t.append("\nEnter 发送  /help 帮助  Ctrl+C 退出", style="#505060")
         log.mount(Static(t, classes="system-msg"))
         log.scroll_end(animate=False)

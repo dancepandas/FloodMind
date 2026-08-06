@@ -3,6 +3,7 @@
 from unittest.mock import MagicMock
 
 import pytest
+from pydantic import BaseModel, Field
 
 from floodmind.agent.native.types import RunContext
 from floodmind.agent.runtime.contracts.permissions import (
@@ -250,3 +251,192 @@ class TestPermissionDecisionHook:
         assert result.status == "completed"
         assert "wrote a.txt" in result.content
         ask_service.wait_response.assert_called_once_with("ask-123", timeout=0)
+
+
+class _PydToolInput(BaseModel):
+    """模拟 GetSkill 类带 pydantic args_schema 的工具输入。"""
+    skill_name: str = Field(description="[必填] 技能名")
+
+
+class TestExecPolicyWriteTarget:
+    """SDK 收敛项 ①：exec 命令体内写目标越权 → DENY（堵住只读授权被 Bash 绕过）。"""
+
+    def _make_svc(self, tmp_path):
+        from floodmind.agent.runtime.contracts.workspace import Workspace
+        from floodmind.agent.runtime.services.path_service import PathService
+
+        ws = Workspace.from_folder(tmp_path / "ws").ensure()
+        svc = PermissionService()
+        svc._path_service = PathService(project_root=tmp_path, workspace=ws)
+        return svc
+
+    def test_denies_out_of_roots_write_target(self, tmp_path):
+        svc = self._make_svc(tmp_path)
+        outside = tmp_path / "external" / "x.txt"
+        normalized = {"command": f'Set-Content -Path {outside} hi'}
+
+        decision = svc._check_exec_policy(normalized, "command", [], session_id="main-sess")
+
+        assert decision.behavior == PermissionBehavior.DENY
+        assert "写目标" in decision.reason
+
+    def test_denies_out_of_roots_redirect(self, tmp_path):
+        svc = self._make_svc(tmp_path)
+        outside = tmp_path / "external" / "x.txt"
+        normalized = {"command": f"echo hi > {outside}"}
+
+        decision = svc._check_exec_policy(normalized, "command", [], session_id="main-sess")
+
+        assert decision.behavior == PermissionBehavior.DENY
+        assert "写目标" in decision.reason
+
+    def test_allows_in_roots_write_target(self, tmp_path):
+        svc = self._make_svc(tmp_path)
+        inside = tmp_path / "ws" / "out.txt"
+        normalized = {"command": f"echo hi > {inside}"}
+
+        decision = svc._check_exec_policy(normalized, "command", [], session_id="main-sess")
+
+        # 写目标在允许目录内 → 不因写目标拒绝（可能因 mutating 模式返回 ASK，但非 DENY）
+        assert decision.behavior != PermissionBehavior.DENY
+
+    def test_exec_service_denies_write_target(self, tmp_path):
+        """经 ToolExecutionService 全链路：exec 工具命令体内越权写 → DENY 反馈。"""
+        from floodmind.agent.runtime.contracts.workspace import Workspace
+        from floodmind.agent.runtime.services.path_service import PathService
+
+        ws = Workspace.from_folder(tmp_path / "ws").ensure()
+        perm_svc = PermissionService()
+        perm_svc._path_service = PathService(project_root=tmp_path, workspace=ws)
+        svc = ToolExecutionService(permission_service=perm_svc)
+
+        reg = MagicMock()
+        tool = _make_exec_tool()
+        tool.permission_policy = ToolPermissionPolicy(policy_type="exec", command_field="command")
+        reg.get.return_value = tool
+
+        outside = tmp_path / "external" / "x.txt"
+        call = ToolCall(id="c1", name="TestExec", arguments={"command": f'Set-Content -Path {outside} hi'})
+
+        result = svc.execute(call, context=_ctx(), registry=reg)
+
+        assert result.status == "error"
+        assert "写目标" in result.content
+
+
+class TestMalformedArgumentKeys:
+    """MiniMax-M3 等模型偶发畸形参数键（键名带尾引号/空白/控制符）健壮性回归。
+
+    复现背景：GetTool/SearchTools、系统工具、MCP 工具都是无 pydantic args_schema
+    的裸 JSON Schema 工具。旧逻辑 _validate_schema 见 args_schema is None 原样放行，
+    模型发 {"tool_name"": "..."}（键带尾引号）→ **kwargs 崩成
+    TypeError: unexpected keyword argument 'tool_name"'，模型看不懂不会自纠。
+    """
+
+    def _make_no_schema_tool(self):
+        """模拟 GetTool：parameters 为裸 JSON Schema，无 pydantic args_schema。"""
+        tool = MagicMock()
+        tool.name = "GetTool"
+        tool.permission_policy = None
+        tool.check_permissions.return_value = True
+        tool.validate_input.return_value = MagicMock(valid=True)
+        tool.args_schema = None
+        tool.parameters = {
+            "type": "object",
+            "properties": {
+                "tool_name": {"type": "string"},
+                "include_schema": {"type": "boolean"},
+            },
+            "required": ["tool_name"],
+        }
+        tool.func = lambda tool_name="", include_schema=True: f"detail: {tool_name}"
+        return tool
+
+    def _make_pyd_schema_tool(self):
+        """模拟 GetSkill：带 pydantic args_schema 的工具。"""
+        tool = MagicMock()
+        tool.name = "GetSkill"
+        tool.permission_policy = None
+        tool.check_permissions.return_value = True
+        tool.validate_input.return_value = MagicMock(valid=True)
+        tool.args_schema = _PydToolInput
+        tool.parameters = {"type": "object", "properties": {"skill_name": {"type": "string"}}}
+        tool.func = lambda skill_name="": f"skill: {skill_name}"
+        return tool
+
+    def test_no_schema_tool_malformed_key_trailing_quote_executes(self):
+        # {"tool_name"": "..."} —— 键名带尾引号，应清洗成 tool_name 后正常执行
+        svc = ToolExecutionService()
+        reg = MagicMock()
+        reg.get.return_value = self._make_no_schema_tool()
+        call = ToolCall(
+            id="c1",
+            name="GetTool",
+            arguments={'tool_name"': "analyze_example_document"},
+        )
+
+        result = svc.execute(call, context=_ctx(), registry=reg)
+
+        assert result.status == "completed"
+        assert "detail: analyze_example_document" in result.content
+
+    def test_no_schema_tool_malformed_key_leading_quote_and_control_executes(self):
+        # {'"tool_name': 'x'} + 键内控制符：均应清洗成 tool_name
+        svc = ToolExecutionService()
+        reg = MagicMock()
+        reg.get.return_value = self._make_no_schema_tool()
+        call = ToolCall(
+            id="c2",
+            name="GetTool",
+            arguments={"\n\"tool_name": "demo"},
+        )
+
+        result = svc.execute(call, context=_ctx(), registry=reg)
+
+        assert result.status == "completed"
+        assert "detail: demo" in result.content
+
+    def test_pyd_schema_tool_malformed_key_recovers(self):
+        # GetSkill 类：pydantic 默认 extra=ignore，键清洗后 tool_name" → tool_name，
+        # 但 GetSkill 的合法键是 skill_name —— 键名互斥时仍应给出清晰的校验失败，
+        # 而不是 TypeError 崩溃。
+        svc = ToolExecutionService()
+        reg = MagicMock()
+        reg.get.return_value = self._make_pyd_schema_tool()
+        call = ToolCall(
+            id="c3",
+            name="GetSkill",
+            arguments={'skill_name"': "chronos"},
+        )
+
+        result = svc.execute(call, context=_ctx(), registry=reg)
+
+        # skill_name" → skill_name（正好是合法键）→ 正常执行
+        assert result.status == "completed"
+        assert "skill: chronos" in result.content
+
+    def test_pyd_schema_tool_missing_required_gives_clean_feedback(self):
+        svc = ToolExecutionService()
+        reg = MagicMock()
+        reg.get.return_value = self._make_pyd_schema_tool()
+        call = ToolCall(id="c4", name="GetSkill", arguments={"other": "x"})
+
+        result = svc.execute(call, context=_ctx(), registry=reg)
+
+        assert result.status == "error"
+        assert "INPUT_VALIDATION_FAILED" in result.content
+        assert "unexpected keyword argument" not in result.content
+
+    def test_unexpected_kwarg_feedback_hints_quote(self):
+        # 防御纵深：即便清洗后仍有未知键（如 tool_nam），TOOL_EXECUTION_ERROR
+        # 也要明示"参数名可能有多余引号/空白"，让模型能自纠。
+        svc = ToolExecutionService()
+        reg = MagicMock()
+        reg.get.return_value = self._make_no_schema_tool()
+        call = ToolCall(id="c5", name="GetTool", arguments={"tool_nam": "x"})
+
+        result = svc.execute(call, context=_ctx(), registry=reg)
+
+        assert result.status == "error"
+        assert "TOOL_EXECUTION_ERROR" in result.content
+        assert "引号" in result.content

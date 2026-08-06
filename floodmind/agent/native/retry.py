@@ -35,21 +35,41 @@ _NON_RETRYABLE_PATTERNS = [
 ]
 
 
+def _error_messages(error: Exception):
+    """迭代异常及其 ``__cause__``/``__context__`` 链上的消息（最外层优先，防环）。
+
+    某些 SDK 异常的 ``str()`` 不含真实原因，如 ``openai.APIConnectionError`` 恒为
+    "Connection error."，可重试的网络原因在 ``__cause__``（如 peer closed connection）。
+    """
+    seen = set()
+    cur: Optional[Exception] = error
+    while cur is not None and id(cur) not in seen:
+        seen.add(id(cur))
+        yield str(cur)
+        nxt = getattr(cur, "__cause__", None)
+        if nxt is None:
+            nxt = getattr(cur, "__context__", None)
+        cur = nxt
+
+
 def is_retryable_error(error: Exception) -> bool:
     """判断 LLM 调用错误是否可重试。
 
-    可重试: rate limit, timeout, 503, 网络波动
+    可重试: rate limit, timeout, 503, 网络波动（含异常链 __cause__/__context__ 里的
+    连接错误，如 openai.APIConnectionError 的 str() 恒为 "Connection error."）
     不可重试: 401, 403, 欠费, 模型不存在
     """
-    msg = str(error).lower()
-    # 先检查不可重试（优先级更高）
-    for pattern in _NON_RETRYABLE_PATTERNS:
-        if pattern in msg:
-            return False
-    # 再检查可重试
-    for pattern in _RETRYABLE_PATTERNS:
-        if pattern in msg:
-            return True
+    msgs = list(_error_messages(error))
+    # 不可重试优先级更高：任一消息命中即不重试
+    for m in msgs:
+        for pattern in _NON_RETRYABLE_PATTERNS:
+            if pattern in m:
+                return False
+    # 任一消息命中可重试关键词即可重试
+    for m in msgs:
+        for pattern in _RETRYABLE_PATTERNS:
+            if pattern in m:
+                return True
     return False
 
 

@@ -1,6 +1,6 @@
 # FloodMind SDK 开发指南 v3.1
 
-> **更新**: 2026-08-05 — SDK v1.1.3；LLM 流式中断自动重试（_RETRYABLE_PATTERNS 覆盖 peer closed / chunked / remote protocol）；v1.1.2 含 CreateScheduledTask 描述修正 + 调度 workspace unknown 修复；v1.1.1 含公共 Agent 完整 runtime / MCP 能力 / bare 模式加载 MCP 与 skill
+> **更新**: 2026-08-06 — SDK v1.1.5；四项健壮性/权限收敛：① 工具调用参数键名统一清洗（模型偶发畸形键如 `{"tool_name"": ...}` 不再 `**kwargs` 崩）；② exec 命令体写目标检查（`>`/`Set-Content`/`Copy-Item` 等越权写 DENY，堵住"只读授权被 Bash 绕过"）；③ folder-first 读白名单加入已装 skill 注册表；④ PathService 读取拒绝原因附可操作引导。v1.1.4 含 create() 连接阶段 LLM 流式重试
 
 FloodMind 正在收敛为 **Python SDK + 最小 CLI run**：开发者通过 `Agent`、`ModelClient`、`Workspace`、`build_agent_tool`、Provider Pipeline、MCP 与 Skill API 将能力嵌入自己的平台、桌面助手或业务系统。Web / TUI 代码仅作为迁移期 legacy adapter 保留，不再是 SDK 核心公共面。
 
@@ -316,7 +316,7 @@ agent = Agent(llm=llm, tools=tools, permission_decision_hook=desktop_permission_
 - 最终决策在 tracing 记录前生效，日志与实际行为一致。
 - 桌面端可用该钩子替代对 `_orchestrator_registry` / `ToolSpec.check_permissions_fn` 的 monkey patch。
 
-**公共 Agent 完整 runtime 与桌面能力（v1.1.3）：**
+**公共 Agent 完整 runtime 与桌面能力（v1.1.5）：**
 
 1. **`Agent(..., bare=False)` 完整 runtime**：`bare` 默认 `True`（裸嵌入，仅自定义工具）；`False` 走
    NativeFloodAgent 完整 runtime（内置工具、MCP、Skill、权限 ASK、workspace 绑定）。完整 runtime 下
@@ -348,6 +348,29 @@ agent = Agent(llm=llm, tools=tools, permission_decision_hook=desktop_permission_
 
 8. **`_build_model_info` 读取宿主路由模型**：优先 `self._model_client.model_name`（切换模型后提示与实际
    路由一致），无则回退 SDK 默认模型解析。
+
+**v1.1.5 健壮性 / 权限收敛（桌面反馈）：**
+
+1. **工具调用参数键名统一清洗**：`ToolExecutionService` 在权限/校验/执行之前把模型生成的参数键名
+   归一化（去边缘引号/空白、去键内控制符与引号、丢弃空键）。MiniMax-M3 等模型偶发畸形键
+   （如 `{"tool_name"": "..."}` 键带尾引号）此前会让无 pydantic args_schema 的工具（`GetTool`/
+   `SearchTools`、系统工具、MCP 工具）直接 `**kwargs` 崩成 `TypeError: unexpected keyword argument`；
+   现在清洗后正常执行。防御纵深：`TOOL_EXECUTION_ERROR` 对 `unexpected keyword argument` 明示
+   "参数名可能有多余引号/空白"，让模型能自纠。
+
+2. **exec 命令体写目标检查**（`floodmind/agent/runtime/services/exec_write_scanner.py`）：`exec_bash` 在
+   命令体内执行的 `>`/`>>` 重定向与 PowerShell `Set-Content`/`Out-File`/`New-Item`/`Copy-Item`/
+   `Move-Item`/`Remove-Item`/`Set-Item` 等写操作的目标路径，逐个按 `write` 权限解析；不在允许写目录
+   内即 `DENY`（堵住"只读授权被 Bash 绕过"漏洞）。保守原则：只认"像绝对/限定路径"的写目标，相对工作
+   区内文件名自然可写、字符串字面量里的 `>`/cmdlet 文本不误判；无法静态解析的（如 `$变量` 持绝对
+   路径）fail-open，宿主可经 `permission_decision_hook` 收紧。
+
+3. **folder-first 读白名单加入已装 skill 注册表**：`PathService` 允许读 `SkillRegistry` 的发现根 +
+   `site-packages/skills`（独立安装的 skill 包），agent 可直接读已装 skill 的 `SKILL.md`/`references/`/
+   `scripts/` 源文件，避免"读取已装 skill 反复被拒"的死循环重试。只放开读、不影响写。
+
+4. **PathService 读取拒绝原因附可操作引导**：拒绝文案追加"如为工作区外文件，请先在工作区附件中引用
+   该文件以完成授权"。
 
 **渐进式工具加载：**
 
@@ -533,7 +556,7 @@ response = llm.chat([
 
 ### 3.7 Checkpoint 与恢复语义
 
-Checkpoint 在 SDK v1.1.3 中只表示 **Agent runtime state**，用于断点恢复执行状态，不负责复制或回滚 workspace 文件。
+Checkpoint 在 SDK v1.1.5 中只表示 **Agent runtime state**，用于断点恢复执行状态，不负责复制或回滚 workspace 文件。
 
 当前 checkpoint 目录只包含：
 
@@ -1122,7 +1145,7 @@ assert len(reg.list_skills()) == 0
 ### 11.4 运行全部测试
 
 ```bash
-pytest tests/ -q          # v1.1.3 core-only: 571 passed, 1 skipped
+pytest tests/ -q          # v1.1.5 core-only: 598 passed, 1 skipped
 pytest tests/test_sdk_agent.py -v   # SDK 相关
 pytest tests/test_skill_registry.py tests/test_skill_curator.py -v  # Skill 系统
 pytest tests/test_sdk_purity.py -q  # SDK import/package purity
@@ -1203,7 +1226,7 @@ FloodMind/
 ├── web/                              # React 19 + TypeScript 前端
 ├── web_server.py                     # Flask 入口（日志 + SessionManager + waitress）
 ├── scheduler.py                      # 定时任务调度
-├── tests/                            # 测试（v1.1.3 core-only: 571 passed, 1 skipped）
+├── tests/                            # 测试（v1.1.5 core-only: 598 passed, 1 skipped）
 ├── docs/                             # 文档
 │   ├── DEVELOPER_GUIDE.md            #   本文档
 │   └── architecture/                 #   架构 Wiki

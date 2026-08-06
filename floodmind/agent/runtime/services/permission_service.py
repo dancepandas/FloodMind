@@ -34,6 +34,7 @@ from floodmind.agent.runtime.contracts.permissions import (
     ToolPermissionPolicy,
 )
 from floodmind.agent.runtime.contracts.paths import PathResolveResult
+from floodmind.agent.runtime.services.exec_write_scanner import check_exec_write_targets
 
 logger = logging.getLogger(__name__)
 
@@ -400,9 +401,10 @@ class PermissionService:
     def _check_exec_policy(self, normalized: Dict[str, Any], command_field: str, path_fields: List[str], session_id: str = "") -> PermissionDecision:
         command = str(normalized.get(command_field, "")).strip() if command_field else ""
         if command:
-            risk = self.check_shell_command_risk(command)
-            if risk.behavior != PermissionBehavior.ALLOW:
-                return risk
+            # 危险命令 → 硬拒
+            danger = self.check_dangerous_command(command)
+            if danger.behavior != PermissionBehavior.ALLOW:
+                return danger
 
         if self._path_service is None:
             from floodmind.agent.runtime.services.path_service import get_path_service
@@ -414,6 +416,22 @@ class PermissionService:
                 result = self._path_service.resolve_simple(raw_path, access="exec", session_id=session_id)
                 if not result.allowed:
                     return PermissionDecision(behavior=PermissionBehavior.DENY, reason=result.reason)
+
+        # 命令体写目标检查：> / Set-Content / Copy-Item 等写操作目标必须落在允许写目录内
+        # （堵住"只读授权被 Bash 绕过"漏洞）。保守静态扫描，详见 exec_write_scanner。
+        # 放在 mutating ASK 之前：越权写入是硬拒，不是"让用户确认"。
+        if command:
+            deny_reason = check_exec_write_targets(
+                command,
+                resolver=lambda t: self._path_service.resolve_simple(t, access="write", session_id=session_id),
+            )
+            if deny_reason:
+                return PermissionDecision(behavior=PermissionBehavior.DENY, reason=deny_reason)
+
+        if command:
+            risk = self.check_shell_command_risk(command)
+            if risk.behavior != PermissionBehavior.ALLOW:
+                return risk
         return PermissionDecision(behavior=PermissionBehavior.ALLOW)
 
     def _check_risky_path_policy(self, normalized: Dict[str, Any], path_field: str, session_id: str, operation: str) -> PermissionDecision:
