@@ -21,6 +21,7 @@ ToolExecutionService — 统一工具执行管线
 import contextvars
 import json
 import logging
+import re
 import threading
 from typing import Any, Callable, Dict, List, Optional
 
@@ -88,6 +89,10 @@ class ToolExecutionService:
                 status="error",
             )
 
+        # 统一参数键清洗（单点 chokepoint）：见 _sanitize_arguments docstring。
+        # 在权限/校验/执行之前归一化，保证下游（权限、tracing、schema、**kwargs）都看到干净键。
+        clean_arguments = self._sanitize_arguments(call.arguments)
+
         session_id = getattr(context, "session_id", "") if context else ""
         output_dir = getattr(context, "output_dir", "") if context else ""
         cwd = getattr(context, "cwd", "") if context else ""
@@ -122,7 +127,7 @@ class ToolExecutionService:
                 except TypeError:
                     self._set_session_context_fn(session_id, output_dir)
 
-        perm_input = dict(call.arguments) if call.arguments else {}
+        perm_input = dict(clean_arguments) if clean_arguments else {}
         perm_input["__call_id"] = call.id
 
         perm_decision = self._check_permissions(tool, perm_input, session_id, agent_tier, mode)
@@ -224,9 +229,9 @@ class ToolExecutionService:
                         status="error",
                     )
 
-        validation = tool.validate_input(call.arguments)
+        validation = tool.validate_input(clean_arguments)
         if hasattr(validation, "valid") and not validation.valid:
-            args_preview = json.dumps(call.arguments, ensure_ascii=False)[:500] if call.arguments else "EMPTY"
+            args_preview = json.dumps(clean_arguments, ensure_ascii=False)[:500] if clean_arguments else "EMPTY"
             reason = getattr(validation, "reason", "")
             feedback = ToolFeedback(
                 error_type="输入校验失败",
@@ -243,9 +248,9 @@ class ToolExecutionService:
                 status="error",
             )
 
-        validated_args = self._validate_schema(tool, call.arguments)
+        validated_args = self._validate_schema(tool, clean_arguments)
         if validated_args is None:
-            args_preview = json.dumps(call.arguments, ensure_ascii=False)[:500] if call.arguments else "EMPTY"
+            args_preview = json.dumps(clean_arguments, ensure_ascii=False)[:500] if clean_arguments else "EMPTY"
             raw_hint = ""
             if hasattr(call, "_raw_arguments") and call._raw_arguments:
                 ends_with_brace = call._raw_arguments.endswith("}")
@@ -291,11 +296,20 @@ class ToolExecutionService:
             )
         except Exception as exc:
             logger.error("ToolExecutionService tool %s execution error: %s", call.name, exc, exc_info=True)
+            err_msg = str(exc)
+            # 防御纵深：即便键清洗后仍有未知键（模型把键名写错），明示"可能有多余引号/空白"
+            # 让模型能理解并自纠，而不是收到看不懂的 TypeError 原文。
+            correct_usage = "检查参数是否正确，或查看工具文档。"
+            if "unexpected keyword argument" in err_msg:
+                correct_usage = (
+                    "参数名可能有多余引号/空白（模型偶发畸形键名）。请重新生成参数，"
+                    "确保参数名与工具 schema 完全一致，不要带引号或多余字符。"
+                )
             feedback = ToolFeedback(
                 error_type="执行失败",
                 error_code="TOOL_EXECUTION_ERROR",
-                what_went_wrong=str(exc),
-                correct_usage="检查参数是否正确，或查看工具文档。",
+                what_went_wrong=err_msg,
+                correct_usage=correct_usage,
                 retryable=True,
             )
             return ToolResult(
@@ -451,6 +465,32 @@ class ToolExecutionService:
             retryable=False,
             do_not_retry_same_call=True,
         )
+
+    @staticmethod
+    def _sanitize_arguments(arguments: Optional[dict]) -> dict:
+        """统一清洗模型生成的工具调用参数键名（MiniMax-M3 等偶发畸形键）。
+
+        背景：模型偶发生成键名带尾引号/首尾空白/控制字符的参数（如
+        ``{"tool_name"": ...}``）。对无 pydantic args_schema 的裸 JSON Schema 工具
+        （GetTool/SearchTools、系统工具、MCP 工具），旧逻辑原样放行后 ``**kwargs``
+        直接崩成 ``TypeError: unexpected keyword argument 'tool_name"'``，模型看不懂
+        不会自纠。这里在权限/校验/执行之前统一归一化键名：去边缘引号/空白、去键内
+        控制字符与引号、丢弃空键。只改键名，不改值、不丢合法参数。
+        """
+        if not isinstance(arguments, dict):
+            return dict(arguments) if arguments else {}
+        cleaned: Dict[str, Any] = {}
+        for key, value in arguments.items():
+            if not isinstance(key, str):
+                cleaned[key] = value
+                continue
+            clean_key = key.strip().strip('"').strip("'").strip()
+            # 键内残留引号与控制字符一并去除（合法键名恒为标识符，引号/控制符出现必为模型错误）
+            clean_key = re.sub(r"[\x00-\x1f\x7f\"']", "", clean_key).strip()
+            if not clean_key:
+                continue
+            cleaned[clean_key] = value
+        return cleaned
 
     def _validate_schema(self, tool: ToolSpec, arguments: dict) -> Optional[dict]:
         schema = getattr(tool, "args_schema", None)

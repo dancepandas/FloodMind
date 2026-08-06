@@ -53,7 +53,24 @@ def test_compact_prompt_catalog_omits_full_schema_in_eager_mode():
     assert "JSON Schema" not in text
 
 
-def test_compact_prompt_catalog_lists_tools_only_in_progressive_mode():
+def test_get_tool_real_end_to_end_malformed_key():
+    """真实 GetTool 工具 + 畸形键（键名带尾引号）端到端：应清洗后正常执行。"""
+    from floodmind.agent.runtime.contracts.tools import ToolCall
+    from floodmind.agent.runtime.services.tool_execution_service import ToolExecutionService
+
+    reg = Registry([])
+    loader = ToolLoader()
+    get_tool_spec = make_get_tool_tool(loader, reg).to_tool_spec()
+    reg.register(get_tool_spec)
+    reg.register(_tool("Read", "读取文件内容。"))
+
+    svc = ToolExecutionService()
+    call = ToolCall(id="c1", name="GetTool", arguments={'tool_name"': "Read"})
+
+    result = svc.execute(call, context=None, registry=reg)
+
+    assert result.status == "completed"
+    assert "`Read`" in result.content
     reg = Registry([_tool("Read", "读取文件内容。用于查看本地文件。")])
     text = compact_prompt_catalog(reg, mode="progressive")
     assert "`Read`" in text

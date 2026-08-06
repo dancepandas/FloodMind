@@ -1,7 +1,7 @@
 # FloodMind 架构总览（SDK-first）v4.1
 
-> **更新日期**: 2026-08-05
-> **变更摘要**: SDK v1.1.4；LLM 流式重试覆盖 create() 连接阶段（`is_retryable_error` 递归 `__cause__`/`__context__`，`stream_chat` 对可重试错误 re-raise 保留异常链）。v1.1.3 含 mid-stream 断流重试关键词；v1.1.2 含 CreateScheduledTask 描述修正 + 调度 workspace unknown 修复。
+> **更新日期**: 2026-08-06
+> **变更摘要**: SDK v1.1.5；四项健壮性/权限收敛：① `ToolExecutionService` 统一清洗工具调用参数键名（模型偶发畸形键如 `{"tool_name"": ...}` 不再 `**kwargs` 崩，改走正常执行/清晰校验反馈）；② exec 命令体写目标检查（`>`/`Set-Content`/`Copy-Item` 等越权写被 DENY，堵住"只读授权被 Bash 绕过"漏洞，`exec_write_scanner`）；③ folder-first 读白名单加入已装 skill 注册表（可直读 SKILL.md/references）；④ PathService 读取拒绝原因附可操作引导。v1.1.4 含 create() 连接阶段 LLM 流式重试；v1.1.3 含 mid-stream 断流重试关键词；v1.1.2 含 CreateScheduledTask 描述修正 + 调度 workspace unknown 修复。
 > 详细评估见 [`ASSESSMENT.md`](./ASSESSMENT.md)；CC 风格文件管理差距与改造方案见 [`CC_FILE_MANAGEMENT_GAP_ANALYSIS.md`](./CC_FILE_MANAGEMENT_GAP_ANALYSIS.md)。
 
 ## 1. 系统定位
@@ -271,7 +271,7 @@ skills/                               ⭐ Skill 写入根 (PROJECT_ROOT/skills)
 contrib/                              chronos 等已外置为 MCP 服务的脚本（迁移出 floodmind/skills/）
 ```
 
-Checkpoint 在 v1.1.4 中只保存 Agent runtime state：`state.json` 是 `AgentLoopState` 序列化，`manifest.json` 记录 checkpoint 元数据和父 checkpoint 链。它不复制 workspace 文件，也不承担文件回滚职责；产物通过 artifact/journal 记录引用，文件版本化或回滚如需支持应由独立 change journal / artifact versioning 能力承担。
+Checkpoint 在 v1.1.5 中只保存 Agent runtime state：`state.json` 是 `AgentLoopState` 序列化，`manifest.json` 记录 checkpoint 元数据和父 checkpoint 链。它不复制 workspace 文件，也不承担文件回滚职责；产物通过 artifact/journal 记录引用，文件版本化或回滚如需支持应由独立 change journal / artifact versioning 能力承担。
 
 ## 13. 线程模型
 

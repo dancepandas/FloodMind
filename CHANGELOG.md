@@ -2,6 +2,20 @@
 
 All notable changes to FloodMind are documented in this file.
 
+## [1.1.5] - 2026-08-06
+
+### Fixed
+
+- **Tool-call argument key sanitization**: `ToolExecutionService` now normalizes model-generated argument key names (strip edge quotes/whitespace, strip intra-key control chars/quotes, drop empty keys) before permission checks, input validation, and execution. MiniMax-M3 and similar models occasionally emit malformed keys like `{"tool_name"": "..."}` (trailing quote); previously tools without a pydantic `args_schema` (`GetTool`/`SearchTools`, system tools, MCP tools) passed them straight into `**kwargs` and crashed with `TypeError: unexpected keyword argument 'tool_name"'`, which models could not self-correct. Sanitized keys now execute normally (or fail with a clear validation feedback). Defense-in-depth: `TOOL_EXECUTION_ERROR` feedback now explicitly hints "参数名可能有多余引号/空白" when the error is `unexpected keyword argument`.
+- **exec command-body write-target enforcement**: new `floodmind/agent/runtime/services/exec_write_scanner.py` statically extracts high-confidence write targets from `exec_bash` command bodies (shell `>`/`>>` redirects; PowerShell `Set-Content`/`Add-Content`/`Out-File`/`New-Item`/`Copy-Item`/`Move-Item`/`Remove-Item`/`Set-Item`) and resolves each with `access="write"`; any target outside allowed writable roots is DENIED. This closes the "read-only authorization bypassed by Bash" hole. Wired into both `_impl_exec_bash` (all modes) and `PermissionService._check_exec_policy` (full runtime, hard-deny before the mutating-command ASK). Conservative by design: only absolute/qualified path-looking targets are checked, quoted string literals (`echo "x > y"`, echoed cmdlet text) are not misdetected, `/dev/null`/`NUL` are skipped, and unresolvable targets (e.g. variables) fail open for host tightening via `permission_decision_hook`.
+- **folder-first read whitelist includes installed skill registry**: `PathService` now allows reading the `SkillRegistry` discovery roots plus `site-packages/skills` (separately installed skill packages), so agents can directly read installed skill source files (`SKILL.md`/`references/`/`scripts/`) in folder-first mode instead of hitting repeated "not in allowed dir" denials that cause retry death-loops. Read-only; writes are unaffected.
+- **PathService read-deny reason now includes actionable guidance**: appended "如为工作区外文件，请先在工作区附件中引用该文件以完成授权".
+
+### Verification
+
+- Full core-only test suite: `598 passed, 1 skipped`.
+- The single skipped test is legacy Web adapter compatibility that requires optional `floodmind[web]` / Flask extra.
+
 ## [1.1.4] - 2026-08-05
 
 ### Fixed

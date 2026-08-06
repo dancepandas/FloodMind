@@ -111,6 +111,31 @@ class PathService:
                 roots.append(ws.state_dir)
         return [r for r in roots if r is not None]
 
+    def _skill_read_prefixes(self) -> list:
+        """SDK 已装 skill 注册表读白名单（folder-first 下也可读）。
+
+        agent 需直接读已装 skill 的源文件（SKILL.md / references/ / scripts/）以正确
+        执行技能；folder-first 模式只认 workspace + readable/writable_roots，导致读已装
+        skill 源文件反复被拒（死循环重试）。这里加入 SkillRegistry 的发现根 +
+        site-packages/skills（独立安装的 skill 包），只放开读、不影响写。
+        """
+        prefixes = []
+        try:
+            from floodmind.skills.registry import get_skill_registry
+            for root in get_skill_registry().roots:
+                if root not in prefixes:
+                    prefixes.append(root)
+        except Exception:
+            pass
+        try:
+            from floodmind import skills as _skills_mod
+            site_skills = Path(_skills_mod.__file__).resolve().parent.parent.parent / "skills"
+            if site_skills not in prefixes:
+                prefixes.append(site_skills)
+        except Exception:
+            pass
+        return prefixes
+
     def resolve(self, request: PathResolveRequest) -> PathResolveResult:
         raw = str(request.raw_path).strip().strip('"').strip("'")
         normalized = self._strip_session_prefix(raw)
@@ -253,7 +278,7 @@ class PathService:
         if access in ("write", "exec", "cwd") and not self.is_write_allowed(resolved):
             return False, f"写入路径 {resolved} 不在允许目录内"
         if access == "read" and not self.is_read_allowed(resolved):
-            return False, f"读取路径 {resolved} 不在允许目录内"
+            return False, f"读取路径 {resolved} 不在允许目录内。如为工作区外文件，请先在工作区附件中引用该文件以完成授权"
         # 子代理写范围：sandbox workspace / user_dir / delegate_cwd（阶段C放权）
         # delegate_cwd 由 ToolExecutionService 经 SESSION_CONTEXT 注入（主代理委派时指定）。
         if access in ("write", "exec", "cwd") and session_id.startswith("sub-"):
@@ -294,6 +319,12 @@ class PathService:
 
         # 动态根优先（workspace user_dir / sandbox_base / readable_roots）
         for prefix in self._dynamic_read_roots():
+            if self._is_relative_to(resolved, prefix):
+                return True
+
+        # SDK skill 注册表可读：folder-first 下也可直接读已装 skill 源文件，
+        # 避免"读取已装 skill 反复被拒"的死循环。
+        for prefix in self._skill_read_prefixes():
             if self._is_relative_to(resolved, prefix):
                 return True
 

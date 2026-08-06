@@ -52,6 +52,7 @@ from floodmind.tools.session_context import (
 )
 from floodmind.agent.runtime.services._runtime_root import PROJECT_ROOT as _PROJECT_ROOT
 from floodmind.agent.runtime.services.workspace_service import get_workspace
+from floodmind.agent.runtime.services.exec_write_scanner import check_exec_write_targets
 
 logger = logging.getLogger(__name__)
 
@@ -565,6 +566,15 @@ def _impl_exec_bash(command: str = "", workdir: str = "", timeout: int = 120, en
     _danger = _check_dangerous_command(command)
     if _danger:
         return _finalize_tool_output("exec_bash", _danger, command=command, timeout=timeout)
+
+    # 命令体写目标检查：> / Set-Content / Copy-Item 等写操作的目标必须落在允许写目录内，
+    # 否则拒绝（堵住"只读授权被 Bash 绕过"漏洞）。保守静态扫描，详见 exec_write_scanner。
+    _write_deny = check_exec_write_targets(
+        command,
+        resolver=lambda t: resolve_tool_path(t, access="write"),
+    )
+    if _write_deny:
+        return _finalize_tool_output("exec_bash", _write_deny, command=command, timeout=timeout)
 
     normalized_command = command.lower()
     if normalized_command.startswith("powershell ") or normalized_command.startswith("powershell.exe ") or normalized_command.startswith("pwsh ") or normalized_command.startswith("pwsh.exe ") or normalized_command.startswith("bash ") or normalized_command.startswith("sh "):

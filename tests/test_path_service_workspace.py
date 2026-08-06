@@ -108,6 +108,47 @@ class TestSubAgentWriteRange:
         assert ("不在允许目录" in reason) or ("子代理" in reason)
 
 
+class TestSkillRegistryReadWhitelist:
+    """SDK 收敛项 ②：folder-first 下 agent 可直接读已装 skill 注册表源文件。"""
+
+    def test_folder_first_can_read_skill_registry(self, tmp_path):
+        ws = build_folder_workspace("s1", primary_dir=tmp_path / "project")
+        ws.ensure()
+        svc = PathService(project_root=tmp_path, workspace=ws)
+
+        from floodmind.skills.registry import get_skill_registry
+        prefixes = svc._skill_read_prefixes()
+        assert prefixes  # 非空
+        skill_root = get_skill_registry().roots[0]
+        ref = skill_root / "some-skill" / "references" / "guide.md"
+        assert svc.is_read_allowed(ref)
+        # 只放开读、不影响写
+        assert not svc.is_write_allowed(ref)
+
+    def test_site_packages_skills_prefix_derived(self):
+        import floodmind.skills as skills_mod
+        from pathlib import Path as _P
+        svc = PathService(project_root=_P.cwd())
+        expected = _P(skills_mod.__file__).resolve().parent.parent.parent / "skills"
+        prefixes = [p.resolve() for p in svc._skill_read_prefixes()]
+        assert expected in prefixes
+
+
+class TestReadDenyGuidance:
+    """SDK 收敛项 ③：读取拒绝原因包含可操作引导。"""
+
+    def test_read_deny_reason_has_attachment_guidance(self, tmp_path):
+        ws = build_folder_workspace("s1", primary_dir=tmp_path / "project")
+        ws.ensure()
+        svc = PathService(project_root=tmp_path, workspace=ws)
+        outside = (tmp_path / "elsewhere" / "secret.txt").resolve()
+        outside.parent.mkdir(parents=True)
+        outside.write_text("x")
+        allowed, reason = svc._check_path_allowed(outside, "read", "s1")
+        assert not allowed
+        assert "在工作区附件中引用该文件" in reason
+
+
 class TestFolderFirstPathResolution:
     def test_relative_write_resolves_to_cwd(self, tmp_path):
         from floodmind.agent.runtime.services.path_service import PathResolveRequest
