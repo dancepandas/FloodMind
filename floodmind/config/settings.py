@@ -138,7 +138,7 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     },
     "tool_loading": {
         "mode": "progressive",
-        "core_tools": ["SearchTools", "GetTool", "GetSkill"],
+        "core_tools": ["GetTool", "GetSkill"],
         "max_search_results": 8,
         "max_loaded_tools": 12,
         "get_tool_loads_tool": True,
@@ -567,8 +567,8 @@ class ToolLoadingConfig:
             raw = {}
         mode = str(raw.get("mode", "progressive") or "progressive").lower()
         self.mode = mode if mode in {"eager", "catalog", "progressive"} else "progressive"
-        core = raw.get("core_tools", ["SearchTools", "GetTool", "GetSkill"])
-        self.core_tools = list(core) if isinstance(core, list) else ["SearchTools", "GetTool", "GetSkill"]
+        core = raw.get("core_tools", ["GetTool", "GetSkill"])
+        self.core_tools = list(core) if isinstance(core, list) else ["GetTool", "GetSkill"]
         self.max_search_results = int(raw.get("max_search_results", 8) or 8)
         self.max_loaded_tools = int(raw.get("max_loaded_tools", 12) or 12)
         self.get_tool_loads_tool = bool(raw.get("get_tool_loads_tool", True))

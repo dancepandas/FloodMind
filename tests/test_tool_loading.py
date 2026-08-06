@@ -1,11 +1,11 @@
 """Tests for progressive tool parameter loading."""
 
 from floodmind.agent.native.tool_loading import (
+    DEFAULT_CORE_TOOLS,
     ToolLoader,
     ToolLoadingConfig,
     compact_prompt_catalog,
     make_get_tool_tool,
-    make_search_tools_tool,
 )
 from floodmind.agent.runtime.contracts.tools import ToolSpec
 
@@ -98,7 +98,7 @@ def test_search_tools_matches_name_description_and_params_without_schema():
 
 def test_get_tool_returns_schema_and_marks_loaded_in_progressive():
     reg = Registry([_tool("Read", "读取文件内容。")])
-    loader = ToolLoader(ToolLoadingConfig(mode="progressive", core_tools=["SearchTools", "GetTool"]))
+    loader = ToolLoader(ToolLoadingConfig(mode="progressive", core_tools=["GetTool"]))
     detail = loader.get_tool_detail(reg, "Read")
     assert "工具 `Read` 完整说明" in detail
     assert "参数 JSON Schema" in detail
@@ -108,29 +108,60 @@ def test_get_tool_returns_schema_and_marks_loaded_in_progressive():
 
 def test_progressive_request_tools_only_core_then_loaded():
     reg = Registry([
-        _tool("SearchTools", "搜索工具。", {"type": "object", "properties": {}, "required": []}),
         _tool("GetTool", "获取工具详情。", {"type": "object", "properties": {}, "required": []}),
         _tool("Read", "读取文件内容。"),
     ])
-    loader = ToolLoader(ToolLoadingConfig(mode="progressive", core_tools=["SearchTools", "GetTool"]))
+    loader = ToolLoader(ToolLoadingConfig(mode="progressive", core_tools=["GetTool"]))
     names = [t["function"]["name"] for t in loader.request_tools(reg)]
-    assert names == ["SearchTools", "GetTool"]
+    assert names == ["GetTool"]
 
     loader.get_tool_detail(reg, "Read")
     names = [t["function"]["name"] for t in loader.request_tools(reg)]
-    assert names == ["SearchTools", "GetTool", "Read"]
+    assert names == ["GetTool", "Read"]
+
+
+def test_short_description_strips_param_hint_prefix():
+    from floodmind.agent.native.tool_loading import short_description
+
+    assert short_description("[必填] command: 要执行的 shell 命令。不要嵌套 shell。") == "要执行的 shell 命令"
+    assert short_description("[可选] workdir: 工作目录。用于指定路径。") == "工作目录"
+    assert short_description("网络搜索。[必填] query: 搜索关键词。") == "网络搜索"
+    assert short_description("读取文件内容，支持文本与二进制。用于查看本地文件。") == "读取文件内容，支持文本与二进制"
+
+
+def test_default_core_tools_exclude_searchtools():
+    """SearchTools 已移除：默认 core tools 只含 GetTool/GetSkill，工具发现完全靠提示目录 + GetTool。"""
+    assert "SearchTools" not in DEFAULT_CORE_TOOLS
+    assert "GetTool" in DEFAULT_CORE_TOOLS
+    assert "GetSkill" in DEFAULT_CORE_TOOLS
+
+
+def test_progressive_catalog_lists_tools_and_guides_get_tool():
+    """progressive 提示目录直接列全量工具名 + 基本描述，并引导用 GetTool 取参数；不再引导 SearchTools。"""
+    reg = Registry([
+        _tool("Read", "读取文件内容。用于查看本地文件。"),
+        _tool("Bash", "[必填] command: 要执行的 shell 命令。不要嵌套 shell。", {
+            "type": "object",
+            "properties": {"command": {"type": "string"}},
+            "required": ["command"],
+        }, readonly=False, destructive=True),
+    ])
+    text = compact_prompt_catalog(reg, mode="progressive")
+    assert "- `Read`" in text
+    assert "读取文件内容" in text
+    assert "- `Bash` [destructive]" in text
+    assert "要执行的 shell 命令" in text
+    assert "GetTool" in text
+    assert "SearchTools" not in text
+    assert "required=" not in text
 
 
 def test_synthetic_tools_use_registry_live():
     reg = Registry([_tool("Read", "读取文件内容。")])
-    loader = ToolLoader(ToolLoadingConfig(mode="progressive", core_tools=["SearchTools", "GetTool"]))
-    search_tool = make_search_tools_tool(loader, reg)
+    loader = ToolLoader(ToolLoadingConfig(mode="progressive", core_tools=["GetTool"]))
     get_tool = make_get_tool_tool(loader, reg)
-    reg.register(search_tool)
     reg.register(get_tool)
 
-    search_text = search_tool.func(query="读取", max_results=5)
-    assert "Read" in search_text
     detail = get_tool.func(tool_name="Read", include_schema=True)
     assert "参数 JSON Schema" in detail
     assert loader.is_executable("Read") is True

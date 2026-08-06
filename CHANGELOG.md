@@ -2,6 +2,28 @@
 
 All notable changes to FloodMind are documented in this file.
 
+## [1.1.6] - 2026-08-06
+
+### Removed
+
+- **移除 `SearchTools` 工具**：工具发现改为与 skill 完全一致的模型——`## 可用工具` 提示目录直接列出全部工具的名称与基本描述（模型无需搜索就知道有哪些可用），需要具体参数、required 与用法时调用 `GetTool(tool_name=...)` 查看并加载。此前 `SearchTools` 要求模型先凭空猜一个关键词再拿子集，模型对工具目录一无所知，只能瞎碰。移除后：
+  - `DEFAULT_CORE_TOOLS` / `settings.tool_loading.core_tools` 默认只含 `GetTool`/`GetSkill`；
+  - `make_search_tools_tool` 工厂删除，`NativeFloodAgent._register_tool_catalog_tools` 只注册 `GetTool`；
+  - progressive 提示目录与未加载工具的错误提示不再引导「先调用 SearchTools」。
+
+### Changed
+
+- **移除工具输出的静默字符截断**（任务质量急转直下的根因）：此前两层截断会先于模型看到结果之前砍掉长工具输出——
+  - `base_tools._finalize_tool_output` 对所有工具输出设 8000 字符硬上限，超长即截断为预览 + 文件指针；
+  - `ExecutionJournalService.process_tool_result` 对超过 1000 字符的结果只回灌 800 字符摘要 + 归档指针，模型拿不到完整内容。
+  现在两层均移除/改造：`_finalize_tool_output` 返回完整输出；`process_tool_result` 模型始终看到完整工具结果（长结果仍额外归档供 `JournalSearch`/`JournalGetFullResult` 回溯，但不再用摘要替换模型可见内容）。上下文上限由 token 级 `ContextCompressor` 兜底（超阈值才压缩中段、保留头部与最近轮次），而非字符数硬截断。
+- **`short_description` 剥离参数提示前缀**：`[必填] command: 要执行的 shell 命令。` 这类描述在目录/提示中现在显示为 `要执行的 shell 命令`（剥离 `[必填]/[可选] xxx:` 前缀），让「基本描述」直接读起来像「这个工具是什么」，同时作用于 progressive 系统提示工具目录与 GetTool 结果。
+
+### Verification
+
+- Full core-only test suite: `601 passed, 1 skipped`.
+- The single skipped test is legacy Web adapter compatibility that requires optional `floodmind[web]` / Flask extra.
+
 ## [1.1.5] - 2026-08-06
 
 ### Fixed

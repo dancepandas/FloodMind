@@ -39,7 +39,6 @@ from floodmind.agent.native.tool_loading import (
     ToolLoader,
     compact_prompt_catalog,
     make_get_tool_tool,
-    make_search_tools_tool,
     resolve_tool_loading_config,
 )
 from floodmind.tools.agent_tool import AgentTool
@@ -962,22 +961,14 @@ class NativeFloodAgent:
         # ── Plugin 系统集成 ──
         self._load_plugins()
 
-        # Tool catalog 自省工具最后注册，确保能搜索到内置、MCP 与 plugin 工具。
+        # Tool catalog 自省工具最后注册，确保能通过 GetTool 查到内置、MCP 与 plugin 工具。
         self._register_tool_catalog_tools()
 
     def _register_tool_catalog_tools(self) -> None:
-        """注册 SearchTools/GetTool：像 GetSkill 一样按需查看工具参数。"""
-        self._orchestrator_registry.register(make_search_tools_tool(
-            self._orchestrator_tool_loader,
-            self._orchestrator_registry,
-        ))
+        """注册 GetTool：像 GetSkill 一样按需查看工具参数。工具目录已由 system prompt 全量列出，无需 SearchTools。"""
         self._orchestrator_registry.register(make_get_tool_tool(
             self._orchestrator_tool_loader,
             self._orchestrator_registry,
-        ))
-        self._specialist_registry.register(make_search_tools_tool(
-            self._specialist_tool_loader,
-            self._specialist_registry,
         ))
         self._specialist_registry.register(make_get_tool_tool(
             self._specialist_tool_loader,

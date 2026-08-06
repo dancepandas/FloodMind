@@ -35,9 +35,10 @@ class TestExecutionJournalService:
 
         inline_content, entry = svc.process_tool_result("s1", tool_call, tool_result)
 
+        # 模型始终看到完整内容（不因过长被替换成摘要/归档指针）
+        assert inline_content == long_content
         assert entry.inline is False
         assert entry.full_ref is not None
-        assert "已归档" in inline_content
         assert "共 100 行" in entry.summary or "字符" in entry.summary
 
         # 验证归档文件存在且可读取

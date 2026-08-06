@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass, field
 from typing import Any, Dict, Iterable, List, Optional, Set
 
@@ -14,7 +15,7 @@ from floodmind.agent.runtime.contracts.tools import ToolSpec
 
 
 TOOL_LOADING_MODES = {"eager", "catalog", "progressive"}
-DEFAULT_CORE_TOOLS = ["SearchTools", "GetTool", "GetSkill"]
+DEFAULT_CORE_TOOLS = ["GetTool", "GetSkill"]
 
 
 @dataclass
@@ -99,10 +100,18 @@ class ToolCatalogEntry:
         )
 
 
+_BRACKET_HINT_RE = re.compile(r"^\s*\[(?:必填|可选)\]\s*[^:：]*[:：]\s*")
+
+
 def short_description(description: str, limit: int = 80) -> str:
     desc = (description or "").strip().replace("\n", " ")
     if not desc:
         return ""
+    # 去掉开头的 [必填] xxx: / [可选] xxx: 参数提示前缀，让描述直接读起来像"是什么"
+    prev = None
+    while prev != desc:
+        prev = desc
+        desc = _BRACKET_HINT_RE.sub("", desc)
     first = desc.split("。")[0].split(".")[0].strip()
     return first[:limit]
 
@@ -138,8 +147,8 @@ def compact_prompt_catalog(registry: Any, *, mode: str = "eager") -> str:
         return "工具已通过请求的 tools schema 提供；本段不重复列工具目录或参数。"
 
     lines = [
-        "progressive 模式：本段只列未完整加载工具的名称和简短说明。",
-        "未加载工具不能直接调用；需要某项能力时先调用 `SearchTools`，再调用 `GetTool` 查看参数并加载工具。",
+        "progressive 模式：本段直接列出全部可用工具的名称和简短说明。",
+        "未加载工具不能直接调用；需要某个工具的具体参数和用法时，调用 `GetTool(tool_name=工具名)` 查看并加载该工具。",
     ]
 
     for entry in entries:
@@ -266,7 +275,7 @@ class ToolLoader:
         if spec is None:
             candidates = self.search(registry, name, max_results=5)
             if not candidates:
-                return f"未找到工具 `{name}`。请调用 SearchTools 用能力关键词搜索可用工具。"
+                return f"未找到工具 `{name}`。请参考系统提示中的工具目录确认工具名。"
             lines = [f"未找到工具 `{name}`。相近候选："]
             lines.extend(f"- `{c['name']}`：{c['description']}" for c in candidates)
             return "\n".join(lines)
@@ -313,48 +322,6 @@ class ToolLoader:
             if name in available and name not in names:
                 names.append(name)
         return names
-
-
-def make_search_tools_tool(loader: ToolLoader, registry: Any):
-    from floodmind.tools.agent_tool import AgentTool
-    from floodmind.agent.runtime.contracts.permissions import ToolPermissionPolicy
-
-    def _search_tools(query: str = "", max_results: int = 8) -> str:
-        results = loader.search(registry, query, max_results=max_results)
-        if not results:
-            return "未找到匹配工具。请换一个能力关键词搜索。"
-        lines = ["=== 工具搜索结果 ==="]
-        for item in results:
-            flags = []
-            if item["destructive"]:
-                flags.append("destructive")
-            elif item["readonly"]:
-                flags.append("readonly")
-            flags.append("loaded" if item["loaded"] else "not-loaded")
-            lines.append(
-                f"- `{item['name']}` ({', '.join(flags)}): {item['description']} "
-                f"required={item['required_parameters']} match={item['match']}"
-            )
-        lines.append("需要完整参数和使用方法时，调用 GetTool(tool_name=工具名)。")
-        return "\n".join(lines)
-
-    return AgentTool(
-        name="SearchTools",
-        description="按能力、工具名、描述或参数名搜索可用工具。只返回简短目录；需要完整参数时再调用 GetTool。",
-        parameters={
-            "type": "object",
-            "properties": {
-                "query": {"type": "string", "description": "要搜索的能力或关键词，如 文件读取、MCP、记忆、网页搜索"},
-                "max_results": {"type": "integer", "description": "最多返回多少个候选，默认 8"},
-            },
-            "required": ["query"],
-        },
-        func=_search_tools,
-        is_readonly=True,
-        is_destructive=False,
-        is_concurrency_safe=True,
-        permission_policy=ToolPermissionPolicy(policy_type="readonly"),
-    )
 
 
 def make_get_tool_tool(loader: ToolLoader, registry: Any):

@@ -250,33 +250,9 @@ def _apply_retry_guard(tool_name: str, signature: str, output: str) -> str:
     return output
 
 
-_MAX_INLINE_OUTPUT_CHARS = 8000
-_TRUNCATED_OUTPUT_DIR = _PROJECT_ROOT / "data" / "truncated_outputs"
-
-
-def _save_truncated_output(tool_name: str, output: str) -> Optional[str]:
-    try:
-        _TRUNCATED_OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-        safe_name = re.sub(r'[^\w]', '_', tool_name)
-        filename = f"{safe_name}_{ts}.txt"
-        path = _TRUNCATED_OUTPUT_DIR / filename
-        path.write_text(output, encoding="utf-8")
-        return str(path)
-    except Exception as e:
-        logger.warning(f"保存截断输出失败: {e}")
-        return None
-
-
 def _finalize_tool_output(tool_name: str, output: str, **signature_parts: Any) -> str:
     signature = _build_call_signature(tool_name, **signature_parts)
-    result = _apply_retry_guard(tool_name, signature, output)
-    if len(result) > _MAX_INLINE_OUTPUT_CHARS:
-        saved_path = _save_truncated_output(tool_name, result)
-        if saved_path:
-            preview = result[:_MAX_INLINE_OUTPUT_CHARS]
-            result = f"{preview}\n\n... [输出过长，已截断。完整结果已保存至: {saved_path}]"
-    return result
+    return _apply_retry_guard(tool_name, signature, output)
 
 
 class GetSkillInput(BaseModel):

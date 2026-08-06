@@ -1,6 +1,6 @@
 # FloodMind SDK 开发指南 v3.1
 
-> **更新**: 2026-08-06 — SDK v1.1.5；四项健壮性/权限收敛：① 工具调用参数键名统一清洗（模型偶发畸形键如 `{"tool_name"": ...}` 不再 `**kwargs` 崩）；② exec 命令体写目标检查（`>`/`Set-Content`/`Copy-Item` 等越权写 DENY，堵住"只读授权被 Bash 绕过"）；③ folder-first 读白名单加入已装 skill 注册表；④ PathService 读取拒绝原因附可操作引导。v1.1.4 含 create() 连接阶段 LLM 流式重试
+> **更新**: 2026-08-06 — SDK v1.1.6；移除 `SearchTools` 工具：工具发现与 skill 一致——`## 可用工具` 提示目录直接列出全部工具名称与基本描述，参数统一由 `GetTool` 查看并加载，模型无需搜索；移除工具输出静默字符截断（8000 字符 `_finalize_tool_output` 上限 + 1000 字符 journal 内联阈值），模型始终看到完整工具结果，上下文由 token 级 `ContextCompressor` 兜底；`short_description` 剥离 `[必填]/[可选]` 参数提示前缀。v1.1.5 含四项健壮性/权限收敛：① 工具调用参数键名统一清洗（模型偶发畸形键如 `{"tool_name"": ...}` 不再 `**kwargs` 崩）；② exec 命令体写目标检查（`>`/`Set-Content`/`Copy-Item` 等越权写 DENY，堵住"只读授权被 Bash 绕过"）；③ folder-first 读白名单加入已装 skill 注册表；④ PathService 读取拒绝原因附可操作引导。v1.1.4 含 create() 连接阶段 LLM 流式重试
 
 FloodMind 正在收敛为 **Python SDK + 最小 CLI run**：开发者通过 `Agent`、`ModelClient`、`Workspace`、`build_agent_tool`、Provider Pipeline、MCP 与 Skill API 将能力嵌入自己的平台、桌面助手或业务系统。Web / TUI 代码仅作为迁移期 legacy adapter 保留，不再是 SDK 核心公共面。
 
@@ -78,7 +78,7 @@ FloodMind 正在收敛为 **Python SDK + 最小 CLI run**：开发者通过 `Age
 | **NativeAgentExecutor** | `floodmind/agent/native/executor.py` | 状态机驱动的 LLM↔Tool 循环、排队消息注入、上下文压缩 |
 | **ModelClient** | `floodmind/agent/native/model_client.py` | 统一的 LLM 服务接口（stream_chat / chat / invoke），构造时经 `route_pipeline()` 自动绑定厂商 pipeline |
 | **Provider Pipelines** | `floodmind/agent/native/providers/` | 厂商调用方言适配（dashscope/deepseek/kimi/minimax + OpenAI 兜底），详见 §8.1 |
-| **Tool Loading** | `floodmind/agent/native/tool_loading.py` | 渐进式工具目录、`SearchTools`/`GetTool` 按需 schema 加载、未加载工具 fail-closed |
+| **Tool Loading** | `floodmind/agent/native/tool_loading.py` | 渐进式工具目录、`GetTool` 按需 schema 加载、未加载工具 fail-closed |
 | **Workspace / Harness Paths** | `floodmind/agent/runtime/contracts/workspace.py`, `floodmind/agent/runtime/services/workspace_service.py`, `floodmind/agent/runtime/services/path_service.py` | Harness 级工作区、cwd-first 路径解析、Web session 兼容与 folder-first `.floodmind` 收纳；所有 path/cwd/workdir 统一经 PathService 判权 |
 | **DualMemory** | `floodmind/memory/dual_memory.py` | 扁平 `_turns` 对话历史 + LLM 压缩 + 持久化 |
 | **SkillRegistry** | `floodmind/skills/registry.py` | Skill 单例注册表（3 发现根、CWD 无关、线程安全） |
@@ -316,7 +316,7 @@ agent = Agent(llm=llm, tools=tools, permission_decision_hook=desktop_permission_
 - 最终决策在 tracing 记录前生效，日志与实际行为一致。
 - 桌面端可用该钩子替代对 `_orchestrator_registry` / `ToolSpec.check_permissions_fn` 的 monkey patch。
 
-**公共 Agent 完整 runtime 与桌面能力（v1.1.5）：**
+**公共 Agent 完整 runtime 与桌面能力（v1.1.0 起，v1.1.6 前均为该清单）：**
 
 1. **`Agent(..., bare=False)` 完整 runtime**：`bare` 默认 `True`（裸嵌入，仅自定义工具）；`False` 走
    NativeFloodAgent 完整 runtime（内置工具、MCP、Skill、权限 ASK、workspace 绑定）。完整 runtime 下
@@ -353,8 +353,8 @@ agent = Agent(llm=llm, tools=tools, permission_decision_hook=desktop_permission_
 
 1. **工具调用参数键名统一清洗**：`ToolExecutionService` 在权限/校验/执行之前把模型生成的参数键名
    归一化（去边缘引号/空白、去键内控制符与引号、丢弃空键）。MiniMax-M3 等模型偶发畸形键
-   （如 `{"tool_name"": "..."}` 键带尾引号）此前会让无 pydantic args_schema 的工具（`GetTool`/
-   `SearchTools`、系统工具、MCP 工具）直接 `**kwargs` 崩成 `TypeError: unexpected keyword argument`；
+   （如 `{"tool_name"": "..."}` 键带尾引号）此前会让无 pydantic args_schema 的工具（`GetTool`、
+   系统工具、MCP 工具）直接 `**kwargs` 崩成 `TypeError: unexpected keyword argument`；
    现在清洗后正常执行。防御纵深：`TOOL_EXECUTION_ERROR` 对 `unexpected keyword argument` 明示
    "参数名可能有多余引号/空白"，让模型能自纠。
 
@@ -395,7 +395,7 @@ legacy_agent = Agent(llm=llm, tools=tools, tool_loading=False)
 |------|------|
 | `eager` | 每轮请求暴露全部工具 schema，兼容旧行为 |
 | `catalog` | 提示词不重复列完整工具参数，但请求仍暴露全部工具 schema |
-| `progressive` | 初始只暴露 `SearchTools` / `GetTool` 等 core tools；模型先搜索能力，再 `GetTool` 加载目标工具，下一轮请求才携带该工具 schema；未加载工具 fail-closed |
+| `progressive` | 初始只暴露 `GetTool` / `GetSkill` 等 core tools；提示目录列出全部工具名称与基本描述，模型读目录后调用 `GetTool` 查看并加载目标工具，下一轮请求才携带该工具 schema；未加载工具 fail-closed |
 
 完整配置可写入 `settings.json` 的高级 `tool_loading` 块，也可在 SDK 构造时显式传入；显式参数优先。
 
@@ -556,7 +556,7 @@ response = llm.chat([
 
 ### 3.7 Checkpoint 与恢复语义
 
-Checkpoint 在 SDK v1.1.5 中只表示 **Agent runtime state**，用于断点恢复执行状态，不负责复制或回滚 workspace 文件。
+Checkpoint 在 SDK v1.1.6 中只表示 **Agent runtime state**，用于断点恢复执行状态，不负责复制或回滚 workspace 文件。
 
 当前 checkpoint 目录只包含：
 
@@ -1145,7 +1145,7 @@ assert len(reg.list_skills()) == 0
 ### 11.4 运行全部测试
 
 ```bash
-pytest tests/ -q          # v1.1.5 core-only: 598 passed, 1 skipped
+pytest tests/ -q          # v1.1.6 core-only: 601 passed, 1 skipped
 pytest tests/test_sdk_agent.py -v   # SDK 相关
 pytest tests/test_skill_registry.py tests/test_skill_curator.py -v  # Skill 系统
 pytest tests/test_sdk_purity.py -q  # SDK import/package purity
@@ -1226,7 +1226,7 @@ FloodMind/
 ├── web/                              # React 19 + TypeScript 前端
 ├── web_server.py                     # Flask 入口（日志 + SessionManager + waitress）
 ├── scheduler.py                      # 定时任务调度
-├── tests/                            # 测试（v1.1.5 core-only: 598 passed, 1 skipped）
+├── tests/                            # 测试（v1.1.6 core-only: 601 passed, 1 skipped）
 ├── docs/                             # 文档
 │   ├── DEVELOPER_GUIDE.md            #   本文档
 │   └── architecture/                 #   架构 Wiki

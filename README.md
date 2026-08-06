@@ -1,6 +1,6 @@
 # FloodMind
 
-**SDK-first 的智能水文 Agent Runtime — v1.1.5**
+**SDK-first 的智能水文 Agent Runtime — v1.1.6**
 
 FloodMind 正在收敛为面向 Python 宿主系统的纯 SDK：以 `Agent` / `ModelClient` / `Workspace` / `build_agent_tool` 为公共入口，把水文模型、数据分析、文档生成、MCP 工具与 Skill 体系嵌入到业务平台或桌面助手中。Web / TUI 入口已进入 legacy 迁移路径，不再作为核心产品形态推进。
 
@@ -30,7 +30,7 @@ FloodMind 正在收敛为面向 Python 宿主系统的纯 SDK：以 `Agent` / `M
 - **最小 CLI** — `floodmind run` 作为 SDK-oriented 本地执行入口；Web/TUI 命令仅保留 legacy 提示
 - **多模型支持** — 配置即用：任意 OpenAI 兼容接口均可接入
 - **厂商 Pipeline 自动路由** — 按 base_url / provider / 模型名自动选择厂商专属调用管线（DashScope/DeepSeek/Kimi/MiniMax + OpenAI 兜底），翻译思考开关方言、流式 reasoning 解析、`<think>` 标签剥离、usage 位置兼容
-- **渐进式工具加载** — 大工具集默认先暴露 `SearchTools` / `GetTool` 目录检索能力，按需加载完整 schema，减少请求体与提示词膨胀；未加载工具 fail-closed
+- **渐进式工具加载** — 提示目录直接列出全部工具名称与基本描述，`GetTool` 按需加载目标工具完整 schema，减少请求体与提示词膨胀；未加载工具 fail-closed
 - **DOOM LOOP 检测** — 连续相同工具+相同参数 3 次自动终止
 - **自动重试** — LLM 调用失败（网络/503）指数退避重试
 - **Plugin 系统** — Python 原生插件扩展，注册工具/hook/Agent 初始化
@@ -258,7 +258,7 @@ agent = Agent(llm=llm, tools=tools, workspace=workspace)
 
 Folder-first 下相对路径默认相对 `workspace.default_cwd`，FloodMind 内部状态收纳到 `<workspace>/.floodmind/`；如需访问工作区外目录，请通过 `readable_roots` / `writable_roots` 显式授权。SDK 未显式传入 `workspace` 时会默认绑定 `Workspace.from_cwd(session_id="sdk-agent")`，保持“在哪个路径启动，就在哪个路径工作”的语义。
 
-**渐进式工具加载**：SDK 默认跟随 `settings.tool_loading`，当前默认 `progressive`。大工具集会先暴露 `SearchTools` / `GetTool`，模型按能力搜索并加载目标工具；未加载工具不会被执行。
+**渐进式工具加载**：SDK 默认跟随 `settings.tool_loading`，当前默认 `progressive`。提示目录直接列出全部工具名称与基本描述，模型看到目录后调用 `GetTool` 查看并加载目标工具的完整参数；未加载工具不会被执行。
 
 ```python
 from floodmind import Agent, ToolLoadingConfig
@@ -654,7 +654,7 @@ FloodMind/
 │   └── cli.py                     # CLI 入口
 ├── contrib/                       # 已外置为 MCP 服务的脚本（chronos/hydro_case_client）
 ├── web/                           # React 前端
-├── tests/                         # 598 passed / 1 legacy Web optional skip（v1.1.5 core-only 环境）
+├── tests/                         # 601 passed / 1 legacy Web optional skip（v1.1.6 core-only 环境）
 ├── web_server.py                  # Flask 入口（日志 + SessionManager + waitress）
 ├── scheduler.py                   # 后台调度
 ├── main.py                        # CLI 交互入口
@@ -700,7 +700,7 @@ cd web && npm run dev      # Vite 开发服务器 (:5173)
 
 # 运行测试
 python -m pytest tests/ -q
-# v1.1.5 core-only 验证结果：598 passed, 1 skipped
+# v1.1.6 core-only 验证结果：601 passed, 1 skipped
 # skipped = legacy Web adapter 需要可选 floodmind[web] / Flask extra
 
 # 前端构建（legacy Web，仅迁移期参考）

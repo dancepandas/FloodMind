@@ -327,7 +327,7 @@ class TestExecPolicyWriteTarget:
 class TestMalformedArgumentKeys:
     """MiniMax-M3 等模型偶发畸形参数键（键名带尾引号/空白/控制符）健壮性回归。
 
-    复现背景：GetTool/SearchTools、系统工具、MCP 工具都是无 pydantic args_schema
+    复现背景：GetTool、系统工具、MCP 工具都是无 pydantic args_schema
     的裸 JSON Schema 工具。旧逻辑 _validate_schema 见 args_schema is None 原样放行，
     模型发 {"tool_name"": "..."}（键带尾引号）→ **kwargs 崩成
     TypeError: unexpected keyword argument 'tool_name"'，模型看不懂不会自纠。
