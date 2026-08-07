@@ -19,6 +19,9 @@ from floodmind.tools.base_tools import (
     set_session_context,
     get_current_session_output_dir,
     _register_all_tools,
+    task_output,
+    task_list,
+    task_kill,
 )
 from floodmind.tools.agent_tool import (
     AgentTool,
@@ -50,6 +53,9 @@ __all__ = [
     'set_session_context',
     'get_current_session_output_dir',
     '_register_all_tools',
+    'task_output',
+    'task_list',
+    'task_kill',
     'AgentTool',
     'ToolRegistry',
     'PermissionBehavior',

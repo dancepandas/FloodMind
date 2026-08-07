@@ -69,6 +69,7 @@ class NativeAgentExecutor:
         context_compressor: Optional[ContextCompressor] = None,
         context_window: int = 128000,
         memory: Optional[Any] = None,
+        background_task_service: Optional[Any] = None,
     ):
         self.model_client = model_client
         self.tool_executor = tool_executor
@@ -92,6 +93,8 @@ class NativeAgentExecutor:
         self.context_window = context_window
         # 唯一历史源：每轮原子完成后写入 memory（add_assistant_round）；中断时不写。
         self._memory = memory
+        # 后台任务服务：任务完成通知注入（None 时回退全局单例 getter）
+        self._background_task_service = background_task_service
         self._compressor_session_id: Optional[str] = None
         self._state_handlers: Dict[AgentLoopStatus, Callable[[AgentLoopState, RunContext], AgentLoopState]] = {
             "created": self._on_created,
@@ -268,6 +271,8 @@ class NativeAgentExecutor:
         # 检测运行中追加的排队指令：若 memory 中出现了尚未并入 state.messages 的用户新消息，
         # 在本次 LLM 调用前注入（= 排队到下一次 LLM 调用）。
         self._inject_queued_user_messages(state)
+        # 后台任务完成通知注入（loop 活跃时；已终态的留给宿主唤醒路径）
+        self._inject_background_notifications(state)
 
         # 主动上下文压缩：达到阈值时先进入 context_compress 状态
         if (
@@ -566,6 +571,39 @@ class NativeAgentExecutor:
             )
         except Exception as e:
             logger.warning("[EXEC] write round to memory failed: %s", e)
+
+    def _inject_background_notifications(self, state: AgentLoopState) -> int:
+        """把本会话已完成的后台任务作为 user 消息注入，使下一次 LLM 调用感知其完成。
+
+        与排队用户消息同通道（user 角色 + 方括号前缀，厂商兼容性最好——system 角色
+        插在会话中间有的厂商不认）。只在 loop 活跃（awaiting_llm）时调用；loop 已
+        终态的由宿主经 subscribe/EventBus 唤醒路径自行决定开新回合。
+        """
+        svc = self._background_task_service
+        if svc is None:
+            try:
+                from floodmind.agent.runtime.services.background_task_service import get_background_task_service
+                svc = get_background_task_service()
+            except Exception:
+                return 0
+        try:
+            tasks = svc.drain_completions(state.session_id)
+        except Exception as e:
+            logger.warning("[EXEC] drain background completions failed: %s", e)
+            return 0
+        injected = 0
+        for task in tasks:
+            outcome = "完成" if task.exit_code == 0 else "失败"
+            tail = (task.tail or "").strip()
+            text = (
+                f"[后台任务{outcome}] {task.command!r} exit={task.exit_code}\n"
+                + (f"输出尾部:\n{tail}\n" if tail else "")
+                + f"完整输出: {task.stdout_path}"
+            )
+            state.messages.append(self.message_builder.build_user_message(text))
+            logger.info("[EXEC] injected background completion: task=%s status=%s", task.task_id, task.status)
+            injected += 1
+        return injected
 
     def _inject_queued_user_messages(self, state: AgentLoopState) -> int:
         """检测运行中追加的排队指令并注入 state.messages。返回本次注入的条数。

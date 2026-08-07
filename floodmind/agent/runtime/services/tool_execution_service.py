@@ -372,6 +372,7 @@ class ToolExecutionService:
                 tool_name=tool.name,
                 tool_input=perm_input,
                 permission_policy=getattr(tool, "permission_policy", None),
+                is_readonly=bool(getattr(tool, "is_readonly", False)),
                 agent_tier=agent_tier,
                 mode=mode,
             )

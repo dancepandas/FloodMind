@@ -160,6 +160,20 @@ class Agent:
         if hasattr(self._agent, "clear_memory"):
             self._agent.clear_memory()
 
+    def cleanup(self) -> None:
+        """释放资源：kill 本会话存活的后台任务（meta.json 保留供审计）。幂等。"""
+        if hasattr(self._agent, "cleanup"):
+            self._agent.cleanup()
+
+    def __del__(self) -> None:
+        """析构时兜底清理存活后台任务（不抛异常）。"""
+        try:
+            if hasattr(self, "_agent") and self._agent is not None:
+                if hasattr(self._agent, "cleanup"):
+                    self._agent.cleanup()
+        except Exception:
+            pass
+
     # ── 事件迭代与收集 ──────────────────────────────────────────────
     def _collect_event(self, event: Dict[str, Any]) -> None:
         """从事件中收集 token 用量与产物（维护 last_usage / artifacts）。"""

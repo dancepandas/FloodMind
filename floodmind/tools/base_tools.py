@@ -263,10 +263,11 @@ class GetSkillInput(BaseModel):
 
 class ExecBashInput(BaseModel):
     """执行 Bash 命令的输入参数"""
-    command: str = Field(description="[必填] 要执行的 shell 命令（不要嵌套 powershell/bash 前缀）")
+    command: str = Field(description="[必填] 要执行的 shell 命令（不要嵌套 powershell/bash 前缀；stdin 已关闭，禁交互/读标准输入命令，Python 先写文件再执行）")
     workdir: str = Field(default="", description="[可选] 工作目录：相对当前 workspace 的目录，或已授权 roots 内的绝对目录；默认 workspace cwd")
     timeout: int = Field(default=120, description="[可选] 超时时间（秒），默认 120")
     env: str = Field(default="{}", description="[可选] 额外环境变量，JSON 对象格式")
+    run_in_background: bool = Field(default=False, description="[可选] true 则作为后台任务启动：立即返回 task_id，不受同步超时限制（默认最长存活 30 分钟，可用 timeout 覆盖）；用 TaskOutput/TaskKill 查询与终止。默认 false 同步执行。")
 
 
 def _strip_session_prefix(path_str: str) -> str:
@@ -522,13 +523,14 @@ def _check_dangerous_command(command: str) -> str:
     return ""
 
 
-def _impl_exec_bash(command: str = "", workdir: str = "", timeout: int = 120, env: str = "{}") -> str:
+def _impl_exec_bash(command: str = "", workdir: str = "", timeout: int = 120, env: str = "{}", run_in_background: bool = False) -> str:
     parsed = _parse_json_if_needed(command)
     if parsed:
         command = parsed.get('command', command)
         workdir = parsed.get('workdir', workdir)
         timeout = parsed.get('timeout', timeout)
         env = parsed.get('env', env)
+        run_in_background = parsed.get('run_in_background', run_in_background)
 
     command = str(command).strip()
 
@@ -626,7 +628,41 @@ def _impl_exec_bash(command: str = "", workdir: str = "", timeout: int = 120, en
 
         Path(run_env.get('MPLCONFIGDIR', str(_PROJECT_ROOT / 'data' / 'matplotlib'))).mkdir(parents=True, exist_ok=True)
 
+        # ── 后台运行分支 ──
+        # 已走完全部安全管线（危险命令/写目标/workdir/sandbox env），只是不 Popen+wait，
+        # 改交 BackgroundTaskService 托管：立即返回 task_id，不受同步 120s 超时限制。
+        if run_in_background:
+            from floodmind.agent.runtime.services.background_task_service import get_background_task_service
+
+            base_kwargs: Dict[str, Any] = {}
+            if process_sandbox is not None:
+                base_kwargs = process_sandbox.wrap_popen_kwargs(base_kwargs)
+            try:
+                task = get_background_task_service().start(
+                    session_id=session_id,
+                    command=command,
+                    shell_cmd=shell_cmd,
+                    cwd=str(cwd),
+                    env=run_env,
+                    popen_kwargs=base_kwargs,
+                    max_lifetime_seconds=timeout if timeout != 120 else None,
+                )
+            except Exception as e:
+                return _finalize_tool_output("exec_bash", f"启动后台任务失败: {str(e)}", command=command, timeout=timeout)
+            return _finalize_tool_output(
+                "exec_bash",
+                f"后台任务已启动 task_id={task.task_id}（pid={task.pid}，会话 {session_id}）\n"
+                f"stdout: {task.stdout_path}\n"
+                f"stderr: {task.stderr_path}\n"
+                f"用 TaskOutput(task_id={task.task_id!r}) 查看状态与输出尾部；TaskKill(task_id={task.task_id!r}) 终止进程树。",
+                command=command,
+                timeout=timeout,
+            )
+
         popen_kwargs = {
+            # 一次性执行工具不支持交互输入：关闭 stdin，避免模型发出读标准输入的
+            # 命令（裸 python / python - / 交互程序）时子进程永久挂起直到超时。
+            "stdin": subprocess.DEVNULL,
             "stdout": subprocess.PIPE,
             "stderr": subprocess.PIPE,
             "env": run_env,
@@ -708,6 +744,25 @@ def _impl_exec_bash(command: str = "", workdir: str = "", timeout: int = 120, en
         return _finalize_tool_output("exec_bash", f"命令执行失败：{str(e)}", command=command, timeout=timeout)
 
 
+def _bash_shell_hint() -> str:
+    """动态生成 shell 类型提示（含语法约束 + stdin 已关闭声明）。"""
+    try:
+        _, shell_name = _detect_shell_command()
+    except FileNotFoundError:
+        shell_name = "unknown"
+    if shell_name in ("powershell", "pwsh"):
+        syntax = "PowerShell 语法：用 `;` 连接多条命令，勿用 bash 方言（`2>/dev/null`、`&&`、heredoc、$(...)）。"
+    elif shell_name in ("bash", "sh"):
+        syntax = f"{shell_name} 语法。"
+    else:
+        syntax = ""
+    return (
+        f"当前 shell：{shell_name}。{syntax}"
+        "stdin 已关闭，禁止交互式/读标准输入的命令（如裸 `python`）；"
+        "运行 Python 请先写入 .py 文件再 `python xxx.py`。"
+    )
+
+
 exec_bash = build_agent_tool(
     name="Bash",
     description=(
@@ -715,7 +770,8 @@ exec_bash = build_agent_tool(
         "不要在 command 中嵌套 powershell -Command、pwsh -Command、bash -lc 或 sh -lc。"
         "[可选] workdir: 工作目录，相对当前 workspace，或已授权 roots 内的绝对路径；默认 workspace cwd，通常无需传。"
         "[可选] timeout: 超时秒数，默认 120。[可选] env: 额外环境变量（JSON格式）。"
-        "自动选择可用 shell。Python 用 python，Node.js 用 node 或 npm。"
+        "Python 用 python，Node.js 用 node 或 npm。"
+        + _bash_shell_hint()
     ),
     args_schema=ExecBashInput,
     func=_impl_exec_bash,
@@ -724,6 +780,108 @@ exec_bash = build_agent_tool(
     is_concurrency_safe=False,
     check_permissions_fn=make_exec_permission_fn("command", path_fields=["workdir"]),
     permission_policy=ToolPermissionPolicy(policy_type="exec", command_field="command", path_fields=["workdir"]),
+)
+
+
+# ── 后台任务查询/控制工具 ──────────────────────────────────────────
+# 配合 Bash run_in_background=True 使用：TaskOutput 查看状态+输出尾部，
+# TaskList 列出本会话任务，TaskKill 杀进程树。全部经 BackgroundTaskService。
+
+def _get_bg_task_service():
+    from floodmind.agent.runtime.services.background_task_service import get_background_task_service
+    return get_background_task_service()
+
+
+def _impl_task_output(task_id: str = "", tail_lines: int = 200) -> str:
+    session_id = get_current_session_id() or SESSION_CONTEXT.get("session_id", "") or ""
+    task = _get_bg_task_service().get(session_id, task_id) if task_id else None
+    if task is None:
+        return f"未找到后台任务 {task_id!r}（会话 {session_id}）。用 TaskList() 查看本会话任务。"
+    lines = [
+        f"task_id={task.task_id} status={task.status} exit={task.exit_code}",
+        f"stdout: {task.stdout_path}",
+        f"stderr: {task.stderr_path}",
+    ]
+    if task.error:
+        lines.append(f"error: {task.error}")
+    for path, label in ((task.stdout_path, "stdout"), (task.stderr_path, "stderr")):
+        try:
+            p = Path(path)
+            if not p.exists():
+                continue
+            text = p.read_text(encoding="utf-8", errors="replace")
+            tl = text.splitlines()[-max(tail_lines, 0):] if tail_lines > 0 else []
+            if tl:
+                lines.append(f"--- {label} 尾部 ---")
+                lines.extend(tl)
+        except Exception as e:
+            lines.append(f"--- {label} 读取失败: {e}")
+    return "\n".join(lines)
+
+
+def _impl_task_list() -> str:
+    session_id = get_current_session_id() or SESSION_CONTEXT.get("session_id", "") or ""
+    tasks = _get_bg_task_service().list(session_id)
+    if not tasks:
+        return "本会话暂无后台任务。"
+    lines = ["本会话后台任务（task_id | status | exit | command）："]
+    for t in reversed(tasks):
+        lines.append(f"{t.task_id} | {t.status} | {t.exit_code} | {t.command[:80]}")
+    return "\n".join(lines)
+
+
+def _impl_task_kill(task_id: str = "") -> str:
+    session_id = get_current_session_id() or SESSION_CONTEXT.get("session_id", "") or ""
+    if not task_id:
+        return "错误：task_id 必填。用 TaskList() 查看本会话任务。"
+    ok = _get_bg_task_service().kill(session_id, task_id)
+    if not ok:
+        return f"未找到运行中的后台任务 {task_id!r}（会话 {session_id}）。"
+    return f"后台任务 {task_id} 已终止（进程树已 kill，meta.json 保留供审计）。"
+
+
+class TaskOutputInput(BaseModel):
+    """查询后台任务输出的输入参数"""
+    task_id: str = Field(description="[必填] 后台任务 task_id（Bash run_in_background=True 返回）")
+    tail_lines: int = Field(default=200, description="[可选] 返回日志尾部行数，默认 200")
+
+
+class TaskKillInput(BaseModel):
+    """终止后台任务的输入参数"""
+    task_id: str = Field(description="[必填] 后台任务 task_id（Bash run_in_background=True 返回）")
+
+
+task_output = build_agent_tool(
+    name="TaskOutput",
+    description="查询后台任务（Bash run_in_background=True 启动）的状态与输出尾部。返回 status/exit/文件路径 + 日志尾部，完整输出可用 Read 读文件。",
+    args_schema=TaskOutputInput,
+    func=_impl_task_output,
+    is_readonly=True,
+    is_destructive=False,
+    is_concurrency_safe=True,
+    permission_policy=ToolPermissionPolicy(policy_type="readonly"),
+)
+
+task_list = build_agent_tool(
+    name="TaskList",
+    description="列出本会话全部后台任务及状态（Bash run_in_background=True 启动的任务）。",
+    parameters={"type": "object", "properties": {}},
+    func=_impl_task_list,
+    is_readonly=True,
+    is_destructive=False,
+    is_concurrency_safe=True,
+    permission_policy=ToolPermissionPolicy(policy_type="readonly"),
+)
+
+task_kill = build_agent_tool(
+    name="TaskKill",
+    description="终止一个运行中的后台任务（杀整棵进程树；meta.json 保留供审计）。",
+    args_schema=TaskKillInput,
+    func=_impl_task_kill,
+    is_readonly=False,
+    is_destructive=True,
+    is_concurrency_safe=False,
+    permission_policy=ToolPermissionPolicy(policy_type="exec"),
 )
 
 

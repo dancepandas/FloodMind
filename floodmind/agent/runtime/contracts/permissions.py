@@ -51,6 +51,9 @@ class PermissionRequest(BaseModel):
     tool_name: str = ""
     tool_input: dict = {}
     permission_policy: Optional["ToolPermissionPolicy"] = None
+    # 未显式声明 permission_policy 时的回退依据：is_readonly=True 视为只读工具放行，
+    # False 走 ASK/DENY。此前一律 DENY，宿主用 build_agent_tool 标了 is_readonly 仍被一刀切拒绝。
+    is_readonly: bool = False
     # 阶段D：agent 身份。"main"=主代理（权限宽），"sub"=子代理（主代理权限的严格子集）。
     # 子代理禁用 network/交互 exec/ask 类工具，ASK 降级 DENY，全局 allow 不翻盘。
     agent_tier: str = "main"

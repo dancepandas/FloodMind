@@ -98,11 +98,13 @@ class TestAgentCreation:
         agent = Agent(llm=llm, tools=sample_tools)
         registry = agent.raw._orchestrator_registry
         tool_names = [t.name for t in registry.all()]
-        assert len(registry.all()) == 4
+        # 4 = Echo/Add + GetSkill/GetTool；+3 后台任务工具（TaskOutput/TaskList/TaskKill）
+        assert len(registry.all()) == 7
         assert "Echo" in tool_names
         assert "Add" in tool_names
         assert "GetSkill" in tool_names
         assert "GetTool" in tool_names
+        assert {"TaskOutput", "TaskList", "TaskKill"} <= set(tool_names)
 
     def test_create_with_system_prompt(self, llm):
         """自定义提示词。"""
@@ -206,10 +208,10 @@ class TestToolRegistration:
         assert "ToolB" in names
 
     def test_empty_tools(self, llm):
-        """不传工具 — 只注册 catalog 与 skill 基础工具。"""
+        """不传工具 — 只注册 catalog/skill 基础工具 + 后台任务工具。"""
         agent = Agent(llm=llm)
         names = agent.raw._orchestrator_registry.names()
-        assert set(names) == {"GetSkill", "GetTool"}
+        assert set(names) == {"GetSkill", "GetTool", "TaskOutput", "TaskList", "TaskKill"}
 
 
 # ---------------------------------------------------------------------------
@@ -585,6 +587,26 @@ class TestSdkEnhancements:
         agent = Agent(llm=llm, bare=False)
         names = {t.name for t in agent.raw._orchestrator_registry.all()}
         assert any(n in names for n in ("Read", "Write", "Bash", "Glob", "Grep"))
+
+    def test_bare_false_registers_host_custom_tools(self, llm, sample_tools):
+        """P1-1：完整模式（bare=False）也注册宿主自定义 tools，双 registry 都可见。"""
+        agent = Agent(llm=llm, bare=False, tools=sample_tools)
+        orch = {t.name for t in agent.raw._orchestrator_registry.all()}
+        spec = {t.name for t in agent.raw._specialist_registry.all()}
+        assert "Echo" in orch and "Add" in orch
+        assert "Echo" in spec and "Add" in spec
+
+    def test_bare_false_keeps_host_system_prompt(self, llm):
+        """P1-2：完整模式保留宿主 system_prompt，且 skill 刷新重建后仍在。"""
+        host_prompt = "你是水文领域专用助手，只回答洪水预报相关问题。"
+        agent = Agent(llm=llm, bare=False, system_prompt=host_prompt)
+        prompts = agent.raw._orchestrator_executor.system_prompts
+        assert host_prompt in prompts
+        # skill 热插拔重建提示词后宿主段不丢
+        agent.raw._rebuild_system_prompts()
+        prompts_after = agent.raw._orchestrator_executor.system_prompts
+        assert host_prompt in prompts_after
+
 
     def test_bare_true_default_keeps_legacy_behavior(self, llm, sample_tools):
         """默认 bare=True 行为不变：不含内置工具（仅自定义 + catalog 工具）。"""
