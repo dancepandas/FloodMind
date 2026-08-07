@@ -586,6 +586,26 @@ class TestSdkEnhancements:
         names = {t.name for t in agent.raw._orchestrator_registry.all()}
         assert any(n in names for n in ("Read", "Write", "Bash", "Glob", "Grep"))
 
+    def test_bare_false_registers_host_custom_tools(self, llm, sample_tools):
+        """P1-1：完整模式（bare=False）也注册宿主自定义 tools，双 registry 都可见。"""
+        agent = Agent(llm=llm, bare=False, tools=sample_tools)
+        orch = {t.name for t in agent.raw._orchestrator_registry.all()}
+        spec = {t.name for t in agent.raw._specialist_registry.all()}
+        assert "Echo" in orch and "Add" in orch
+        assert "Echo" in spec and "Add" in spec
+
+    def test_bare_false_keeps_host_system_prompt(self, llm):
+        """P1-2：完整模式保留宿主 system_prompt，且 skill 刷新重建后仍在。"""
+        host_prompt = "你是水文领域专用助手，只回答洪水预报相关问题。"
+        agent = Agent(llm=llm, bare=False, system_prompt=host_prompt)
+        prompts = agent.raw._orchestrator_executor.system_prompts
+        assert host_prompt in prompts
+        # skill 热插拔重建提示词后宿主段不丢
+        agent.raw._rebuild_system_prompts()
+        prompts_after = agent.raw._orchestrator_executor.system_prompts
+        assert host_prompt in prompts_after
+
+
     def test_bare_true_default_keeps_legacy_behavior(self, llm, sample_tools):
         """默认 bare=True 行为不变：不含内置工具（仅自定义 + catalog 工具）。"""
         agent = Agent(llm=llm, tools=sample_tools)

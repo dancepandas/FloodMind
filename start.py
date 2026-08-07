@@ -48,7 +48,7 @@ def _print_banner(host: str, port: int, no_scheduler: bool) -> None:
 
     print(f"{cyan}{_BANNER}{reset}", flush=True)
 
-    version = "1.1.7"
+    version = "1.1.9"
     print(f"  {green}{bold}FloodMind{reset}  {dim}v{version}{reset}", flush=True)
     print(f"  {blue}:: 大水云洪水预报智能体 ::{reset}", flush=True)
     print(flush=True)

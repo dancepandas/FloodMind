@@ -346,6 +346,12 @@ class NativeFloodAgent:
         self._checkpoint_service = CheckpointService(base_dir=service_base_dir, tracing_service=self._tracing_service)
         self._journal_service = ExecutionJournalService(base_dir=service_base_dir)
 
+        # 宿主注入的自定义工具与 system_prompt：bare 模式由 _init_bare 直接消费；
+        # 完整模式由 _init_tools 末尾注册（executor 快照 tools_schema 之前）、
+        # _rebuild_system_prompts 追加（skill 热插拔重建时不丢宿主段）。
+        self._host_tools = tools or []
+        self._host_system_prompt = system_prompt
+
         # ── bare 模式：精简初始化（嵌入 SDK 用） ──
         if bare:
             self._init_bare(tools or [], system_prompt)
@@ -964,6 +970,14 @@ class NativeFloodAgent:
         # Tool catalog 自省工具最后注册，确保能通过 GetTool 查到内置、MCP 与 plugin 工具。
         self._register_tool_catalog_tools()
 
+        # ── 宿主自定义工具 ──
+        # 完整模式此前丢弃宿主传入的 tools（只有 bare 模式消费）。在 executor 快照
+        # tools_schema（_init_executors）之前注册，eager 模式模型才能看到。
+        if self._host_tools:
+            self._orchestrator_registry.register_tools(self._host_tools)
+            self._specialist_registry.register_tools(self._host_tools)
+            logger.info("注册宿主自定义工具 %d 个", len(self._host_tools))
+
     def _register_tool_catalog_tools(self) -> None:
         """注册 GetTool：像 GetSkill 一样按需查看工具参数。工具目录已由 system prompt 全量列出，无需 SearchTools。"""
         self._orchestrator_registry.register(make_get_tool_tool(
@@ -1138,6 +1152,11 @@ class NativeFloodAgent:
             self.SPECIALIST_SESSION_TEMPLATE.format(session_env=session_env),
         ]
 
+        # 宿主 system_prompt 作为独立段注入初始 system_prompts（与 _rebuild_system_prompts 一致），
+        # 完整模式此前忽略该参数。
+        if self._host_system_prompt:
+            orchestrator_prompts = list(orchestrator_prompts) + [self._host_system_prompt]
+
         context_compressor = self._make_context_compressor()
         context_window = self._resolve_context_window()
 
@@ -1218,6 +1237,14 @@ class NativeFloodAgent:
             if len(prompts) > 1:
                 prompts[1] = new_project
             self._orchestrator_executor.system_prompts = prompts
+
+        # 宿主 system_prompt 作为独立段追加：完整模式此前忽略该参数，且
+        # skill 热插拔重建提示词时会整体覆盖——独立段保证宿主段始终保留。
+        if self._host_system_prompt:
+            orch_prompts = list(self._orchestrator_executor.system_prompts)
+            if self._host_system_prompt not in orch_prompts:
+                orch_prompts.append(self._host_system_prompt)
+            self._orchestrator_executor.system_prompts = orch_prompts
 
         new_spec_global = self.SPECIALIST_STATIC_GLOBAL.format(skill_catalog=self._skill_catalog)
         spec_prompts = list(self._specialist_executor.system_prompts)

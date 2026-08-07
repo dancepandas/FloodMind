@@ -333,11 +333,19 @@ class PermissionService:
             if policy_result.behavior == PermissionBehavior.ASK:
                 return policy_result
         else:
-            policy_result = PermissionDecision(
-                behavior=PermissionBehavior.DENY,
-                reason=f"工具 {request.tool_name} 未声明权限策略，默认拒绝",
-            )
-            return policy_result
+            # 未显式声明 policy：回退看 is_readonly——只读工具放行，非只读仍需确认。
+            # 此前一律 DENY，宿主用 build_agent_tool 标了 is_readonly=True 仍被一刀切拒绝，
+            # 接入成本过高（每个工具都要补 policy）。
+            if request.is_readonly:
+                policy_result = PermissionDecision(
+                    behavior=PermissionBehavior.ALLOW,
+                    reason="只读工具（未声明 policy，按 is_readonly 放行）",
+                )
+            else:
+                return PermissionDecision(
+                    behavior=PermissionBehavior.ASK,
+                    reason=f"工具 {request.tool_name} 未声明权限策略且非只读，需要用户确认",
+                )
 
         check_fn = getattr(request, "_check_permissions_fn", None)
         if check_fn is not None:

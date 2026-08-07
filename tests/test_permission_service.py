@@ -76,6 +76,21 @@ class TestPermissionService:
         )
         assert decision.behavior == PermissionBehavior.DENY
 
+    def test_no_policy_readonly_tool_allowed(self):
+        """P2：未声明 policy 的只读工具按 is_readonly 放行（不再一刀切 DENY）。"""
+        svc = self._make_svc()
+        req = PermissionRequest(tool_name="MyReadTool", tool_input={}, permission_policy=None, is_readonly=True)
+        decision = svc.check(req)
+        assert decision.behavior == PermissionBehavior.ALLOW
+
+    def test_no_policy_non_readonly_tool_asks(self):
+        """P2：未声明 policy 的非只读工具走 ASK（无 ask_service 时降级 DENY）。"""
+        svc = self._make_svc()
+        req = PermissionRequest(tool_name="MyWriteTool", tool_input={}, permission_policy=None, is_readonly=False)
+        decision = svc.check(req)
+        assert decision.behavior in (PermissionBehavior.ASK, PermissionBehavior.DENY)
+        assert decision.behavior != PermissionBehavior.ALLOW
+
     def test_make_feedback_deny(self):
         svc = self._make_svc()
         decision = PermissionDecision(behavior=PermissionBehavior.DENY, reason="权限拒绝")

@@ -2,6 +2,23 @@
 
 All notable changes to FloodMind are documented in this file.
 
+## [1.1.9] - 2026-08-06
+
+> 注：无 v1.1.8——其内容（ContextCompressor 原子组 + context_window 跟随注入模型）经确认属 v1.1.7 的 MiniMax 2013 根因链，已并入 v1.1.7。
+
+### Fixed
+
+- **P0-1 `exec_bash` 子进程关闭 stdin（挂起主因）**：`_impl_exec_bash` 的 `Popen` 此前只设 stdout/stderr 管道，stdin 继承父进程。模型发出读标准输入的命令（裸 `python`、`python -`、交互式程序）时子进程永久等输入，直到 120s 默认超时才被 kill——实测一轮任务 Bash 挂起约 4 分钟，用户侧看就是"智能体没反应"。现设 `stdin=subprocess.DEVNULL`（一次性执行工具本就不支持交互输入）。
+- **P0-2 Bash 工具描述告知 shell 类型 + stdin 已关闭**：描述只写"自动选择可用 shell"，Windows 上实际是 PowerShell，模型不知道就照写 bash 方言（`2>/dev/null`、heredoc）。新增 `_bash_shell_hint()` 动态带检测结果：`当前 shell：powershell（用 ; 连接、勿用 2>/dev/null、&&、heredoc）` + `stdin 已关闭，禁止交互式/读标准输入命令，Python 先写文件再执行`，接入 Bash 工具描述与 `ExecBashInput.command` 字段说明。
+- **P1-1 完整模式注册宿主自定义 tools**：`tools` 参数此前只有 `_init_bare` 消费，完整路径 `_init_tools()` 只注册内置工具，宿主注入的业务工具被静默丢弃。现 `_init_tools()` 末尾（内置 + MCP 之后、`_init_executors` 快照 tools_schema 之前）补注册到 orchestrator 与 specialist 双 registry。
+- **P1-2 完整模式保留宿主 system_prompt**：`system_prompt` 参数此前只在 `_init_bare` 使用，完整模式忽略。现 `__init__` 存 `_host_system_prompt`，`_init_executors` 与 `_rebuild_system_prompts` 都把它作为独立段注入——skill 热插拔重建提示词时宿主段不丢。
+- **P2 未声明 permission_policy 回退 is_readonly**：`PermissionRequest` 新增 `is_readonly` 字段（ToolExecutionService 填充）。未显式声明 policy 的工具此前一刀切 DENY，宿主用 `build_agent_tool` 标了 `is_readonly=True` 仍被拒，接入成本高。现回退看 `is_readonly`：True 按只读放行，False 走 ASK/DENY。
+
+### Verification
+
+- Full core-only test suite: `613 passed, 1 skipped`.
+- The single skipped test is legacy Web adapter compatibility that requires optional `floodmind[web]` / Flask extra.
+
 ## [1.1.7] - 2026-08-06
 
 ### Fixed

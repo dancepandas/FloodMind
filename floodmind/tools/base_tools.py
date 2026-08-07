@@ -263,7 +263,7 @@ class GetSkillInput(BaseModel):
 
 class ExecBashInput(BaseModel):
     """执行 Bash 命令的输入参数"""
-    command: str = Field(description="[必填] 要执行的 shell 命令（不要嵌套 powershell/bash 前缀）")
+    command: str = Field(description="[必填] 要执行的 shell 命令（不要嵌套 powershell/bash 前缀；stdin 已关闭，禁交互/读标准输入命令，Python 先写文件再执行）")
     workdir: str = Field(default="", description="[可选] 工作目录：相对当前 workspace 的目录，或已授权 roots 内的绝对目录；默认 workspace cwd")
     timeout: int = Field(default=120, description="[可选] 超时时间（秒），默认 120")
     env: str = Field(default="{}", description="[可选] 额外环境变量，JSON 对象格式")
@@ -627,6 +627,9 @@ def _impl_exec_bash(command: str = "", workdir: str = "", timeout: int = 120, en
         Path(run_env.get('MPLCONFIGDIR', str(_PROJECT_ROOT / 'data' / 'matplotlib'))).mkdir(parents=True, exist_ok=True)
 
         popen_kwargs = {
+            # 一次性执行工具不支持交互输入：关闭 stdin，避免模型发出读标准输入的
+            # 命令（裸 python / python - / 交互程序）时子进程永久挂起直到超时。
+            "stdin": subprocess.DEVNULL,
             "stdout": subprocess.PIPE,
             "stderr": subprocess.PIPE,
             "env": run_env,
@@ -708,6 +711,25 @@ def _impl_exec_bash(command: str = "", workdir: str = "", timeout: int = 120, en
         return _finalize_tool_output("exec_bash", f"命令执行失败：{str(e)}", command=command, timeout=timeout)
 
 
+def _bash_shell_hint() -> str:
+    """动态生成 shell 类型提示（含语法约束 + stdin 已关闭声明）。"""
+    try:
+        _, shell_name = _detect_shell_command()
+    except FileNotFoundError:
+        shell_name = "unknown"
+    if shell_name in ("powershell", "pwsh"):
+        syntax = "PowerShell 语法：用 `;` 连接多条命令，勿用 bash 方言（`2>/dev/null`、`&&`、heredoc、$(...)）。"
+    elif shell_name in ("bash", "sh"):
+        syntax = f"{shell_name} 语法。"
+    else:
+        syntax = ""
+    return (
+        f"当前 shell：{shell_name}。{syntax}"
+        "stdin 已关闭，禁止交互式/读标准输入的命令（如裸 `python`）；"
+        "运行 Python 请先写入 .py 文件再 `python xxx.py`。"
+    )
+
+
 exec_bash = build_agent_tool(
     name="Bash",
     description=(
@@ -715,7 +737,8 @@ exec_bash = build_agent_tool(
         "不要在 command 中嵌套 powershell -Command、pwsh -Command、bash -lc 或 sh -lc。"
         "[可选] workdir: 工作目录，相对当前 workspace，或已授权 roots 内的绝对路径；默认 workspace cwd，通常无需传。"
         "[可选] timeout: 超时秒数，默认 120。[可选] env: 额外环境变量（JSON格式）。"
-        "自动选择可用 shell。Python 用 python，Node.js 用 node 或 npm。"
+        "Python 用 python，Node.js 用 node 或 npm。"
+        + _bash_shell_hint()
     ),
     args_schema=ExecBashInput,
     func=_impl_exec_bash,
