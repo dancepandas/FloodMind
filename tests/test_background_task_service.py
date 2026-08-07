@@ -69,6 +69,20 @@ class TestBackgroundTaskService:
         status = _wait_status(svc, task, {"killed", "failed", "completed"})
         assert status == "killed"
 
+    def test_kill_notifies_subscribers_immediately(self, tmp_path):
+        """用户主动 kill 立即进完成队列并通知订阅者（Agent 感知状态变化，不等 wait 线程）。"""
+        svc = BackgroundTaskService(base_dir=tmp_path)
+        events = []
+        svc.subscribe(lambda t: events.append(t))
+        task = svc.start("s1", "sleep", _sleep_cmd(30), cwd=str(tmp_path))
+        assert svc.kill("s1", task.task_id) is True
+        # kill() 同步收尾：订阅者应立即收到，且状态为 killed
+        assert len(events) == 1, f"kill 后应立即可达 1 个通知，实际 {len(events)}"
+        assert events[0].status == "killed"
+        # 完成队列同样立即可 drain
+        drained = svc.drain_completions("s1")
+        assert any(t.task_id == task.task_id for t in drained)
+
     def test_kill_unknown_task_returns_false(self, tmp_path):
         svc = BackgroundTaskService(base_dir=tmp_path)
         assert svc.kill("s1", "nope") is False

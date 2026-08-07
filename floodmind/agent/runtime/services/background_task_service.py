@@ -86,6 +86,8 @@ class BackgroundTaskService:
         self._completed: List[BackgroundTask] = []
         self._subscribers: List[Callable[[BackgroundTask], None]] = []
         self._processes: Dict[str, subprocess.Popen] = {}
+        # 已收尾的任务（进过完成队列/通知过订阅者）——_finalize 幂等去重
+        self._finalized: set = set()
         self._platform = "win" if os.name == "nt" else "posix"
 
     # ── 公开 API ─────────────────────────────────────────────────────
@@ -192,27 +194,33 @@ class BackgroundTaskService:
             return completed + running
 
     def kill(self, session_id: str, task_id: str) -> bool:
-        """杀掉一个任务（进程树）。meta.json 保留。"""
+        """杀掉一个任务（进程树），并立即进入完成队列/通知订阅者（Agent 感知状态变化）。"""
         with self._lock:
             task = self._active_tasks.get(task_id)
             process = self._processes.get(task_id)
         if task is None or task.session_id != session_id:
             return False
+        if task.status == "running":
+            # 先标记 killed，抢在 _watch 线程把 process.wait() 的退出码写成 failed 之前
+            task.status = "killed"
         self._kill_process(process)
-        task.status = "killed"
         task.finished_at = time.time()
+        task.tail = self._read_tail(task.stdout_path)
         self._write_meta(task)
+        self._finalize(task)  # 用户主动关闭：立即推送，不等 _watch 线程
         return True
 
     def kill_session(self, session_id: str) -> int:
-        """杀掉会话内全部存活任务，返回杀掉的个数（会话结束/Agent 析构时调用）。"""
+        """杀掉会话内全部存活任务并立即收尾（会话结束/Agent 析构时调用）。"""
         with self._lock:
             targets = [t for t in self._active_tasks.values() if t.session_id == session_id and t.running]
             for t in targets:
-                self._kill_process(self._processes.get(t.task_id))
+                # 先标记 killed，抢在 _watch 线程覆盖前
                 t.status = "killed"
+                self._kill_process(self._processes.get(t.task_id))
                 t.finished_at = time.time()
                 self._write_meta(t)
+                self._finalize(t)
         return len(targets)
 
     def drain_completions(self, session_id: str) -> List[BackgroundTask]:
@@ -231,46 +239,59 @@ class BackgroundTaskService:
     # ── 内部 ─────────────────────────────────────────────────────────
 
     def _watch(self, task: BackgroundTask, process: subprocess.Popen, out_f, err_f, lifetime: int) -> None:
-        """守护线程：等进程退出 → 更新状态 → 尾部 → 完成队列 → 通知订阅者。"""
+        """守护线程：等进程退出 → 更新状态 → 收尾（完成队列 + 通知订阅者）。
+
+        若任务已被外部 kill（status 已置 "killed"），不覆盖该状态。
+        """
         try:
             try:
                 exit_code = process.wait(timeout=lifetime)
-                task.status = "completed" if exit_code == 0 else "failed"
-                task.exit_code = int(exit_code)
+                if task.status == "running":  # 未被外部 kill 抢占
+                    task.status = "completed" if exit_code == 0 else "failed"
+                    task.exit_code = int(exit_code)
             except subprocess.TimeoutExpired:
                 logger.warning("BackgroundTask %s 超过 %ds 存活上限，强制 kill", task.task_id, lifetime)
                 self._kill_process(process)
-                task.status = "killed"
-                task.exit_code = None
-                task.error = f"超过最大存活时间 {lifetime}s，已被强制终止"
+                if task.status == "running":
+                    task.status = "killed"
+                    task.exit_code = None
+                    task.error = f"超过最大存活时间 {lifetime}s，已被强制终止"
         except Exception as e:
             logger.warning("BackgroundTask %s wait 异常: %s", task.task_id, e)
-            task.status = "failed"
-            task.exit_code = None
-            task.error = str(e)
+            if task.status == "running":
+                task.status = "failed"
+                task.exit_code = None
+                task.error = str(e)
         finally:
             for f in (out_f, err_f):
                 try:
                     f.close()
                 except Exception:
                     pass
-            task.finished_at = time.time()
+            task.finished_at = task.finished_at or time.time()
             task.tail = self._read_tail(task.stdout_path)
             self._write_meta(task)
-            with self._lock:
-                self._active_tasks.pop(task.task_id, None)
-                self._processes.pop(task.task_id, None)
-                self._completed.append(task)
-                subscribers = list(self._subscribers)
-            logger.info(
-                "BackgroundTask finished: task=%s status=%s exit=%s",
-                task.task_id, task.status, task.exit_code,
-            )
-            for cb in subscribers:
-                try:
-                    cb(task)
-                except Exception as e:
-                    logger.warning("BackgroundTask subscriber error: %s", e)
+            self._finalize(task)
+
+    def _finalize(self, task: BackgroundTask) -> None:
+        """幂等收尾：移出活跃 → 进完成队列 → 通知订阅者。kill()/kill_session()/wait 线程共用。"""
+        with self._lock:
+            if task.task_id in self._finalized:
+                return
+            self._finalized.add(task.task_id)
+            self._active_tasks.pop(task.task_id, None)
+            self._processes.pop(task.task_id, None)
+            self._completed.append(task)
+            subscribers = list(self._subscribers)
+        logger.info(
+            "BackgroundTask finished: task=%s status=%s exit=%s",
+            task.task_id, task.status, task.exit_code,
+        )
+        for cb in subscribers:
+            try:
+                cb(task)
+            except Exception as e:
+                logger.warning("BackgroundTask subscriber error: %s", e)
 
     def _kill_process(self, process: Optional[subprocess.Popen]) -> None:
         """杀整棵进程树。Windows: taskkill /T /F；POSIX: killpg。"""

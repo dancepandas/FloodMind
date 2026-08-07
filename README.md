@@ -655,7 +655,7 @@ FloodMind/
 │   └── cli.py                     # CLI 入口
 ├── contrib/                       # 已外置为 MCP 服务的脚本（chronos/hydro_case_client）
 ├── web/                           # React 前端
-├── tests/                         # 623 passed / 1 legacy Web optional skip（v1.1.9 core-only 环境）
+├── tests/                         # 633 passed / 1 legacy Web optional skip（v1.1.9 core-only 环境）
 ├── web_server.py                  # Flask 入口（日志 + SessionManager + waitress）
 ├── scheduler.py                   # 后台调度
 ├── main.py                        # CLI 交互入口
@@ -701,7 +701,7 @@ cd web && npm run dev      # Vite 开发服务器 (:5173)
 
 # 运行测试
 python -m pytest tests/ -q
-# v1.1.9 core-only 验证结果：623 passed, 1 skipped
+# v1.1.9 core-only 验证结果：633 passed, 1 skipped
 # skipped = legacy Web adapter 需要可选 floodmind[web] / Flask extra
 
 # 前端构建（legacy Web，仅迁移期参考）
