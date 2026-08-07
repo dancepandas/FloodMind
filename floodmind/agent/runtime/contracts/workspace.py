@@ -102,6 +102,32 @@ class Workspace:
     def is_folder_first(self) -> bool:
         return self.mode == "folder_first"
 
+    def add_writable_root(self, *paths) -> "Workspace":
+        """运行时追加写白名单根（幂等，宿主显式调用的变更 API）。
+
+        宿主可据此放行 workspace 外目录（如 web 的 uploads/、web_workspace/），
+        exec_bash/file 工具的写路径检查即刻生效（PathService 持活引用）。
+        frozen=True 保护的是内部服务对字段的意外篡改；本方法是宿主显式授权，用
+        object.__setattr__ 绕过。
+        """
+        new = [Path(p).resolve() for p in paths]
+        merged = list(self.writable_roots)
+        for p in new:
+            if p not in merged:
+                merged.append(p)
+        object.__setattr__(self, "writable_roots", tuple(merged))
+        return self
+
+    def add_readable_root(self, *paths) -> "Workspace":
+        """运行时追加读白名单根（幂等，宿主显式调用的变更 API）。"""
+        new = [Path(p).resolve() for p in paths]
+        merged = list(self.readable_roots)
+        for p in new:
+            if p not in merged:
+                merged.append(p)
+        object.__setattr__(self, "readable_roots", tuple(merged))
+        return self
+
     def ensure(self) -> "Workspace":
         """建工作区相关根目录。幂等。"""
         self.user_dir.mkdir(parents=True, exist_ok=True)

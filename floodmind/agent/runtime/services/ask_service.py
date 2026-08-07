@@ -207,6 +207,31 @@ class AskService:
         with self._lock:
             return ask_id in self._pending
 
+    def age(self, ask_id: str) -> Optional[float]:
+        """ask_id 已等待的秒数；不存在返回 None（executor 轮询超时自动拒绝用）。"""
+        with self._lock:
+            pending = self._pending.get(ask_id)
+            return (time.time() - pending.created_at) if pending else None
+
+    def reject(self, ask_id: str) -> bool:
+        """强制拒绝一个 ASK（自动超时用）：结果置 False 并唤醒等待者。
+
+        不 pop pending——executor 依赖 is_pending() 区分"用户拒绝"与"记录丢失"，
+        拒绝后 is_pending 须保持 True 走正常拒绝分支（不触发崩溃恢复重发）。
+        """
+        with self._lock:
+            pending = self._pending.get(ask_id)
+            if pending is None:
+                return False
+            pending.result = False
+            pending.event.set()
+        logger.info("AskService: ASK %s 被强制拒绝（超时无响应）", ask_id)
+        return True
+
+    def get_timeout(self) -> Optional[float]:
+        """当前 ASK 超时秒数（None = 不限时）。"""
+        return self._timeout
+
     def pending(self, session_id: str = "") -> List[PermissionAskSnapshot]:
         with self._lock:
             items = self._pending.values()

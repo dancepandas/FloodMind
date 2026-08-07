@@ -61,9 +61,12 @@ class Agent:
         enable_reasoning: 启用推理模式
         on_event: 流式事件回调 ``Callable[[dict], None]``。run()/stream() 期间每个事件
             都会调用一次。回调内抛出的异常会被捕获并记录，不会中断执行流。
-        permission_handler: 工具调用审批钩子 ``Callable[[tool_name, tool_input], bool]``。
-            每次工具执行前同步调用，返回 False 则拒绝该次调用（工具不执行，模型收到拒绝
-            信息）。bare 模式默认放行所有调用，此钩子提供可选的安全网关。
+        permission_handler: 工具调用审批钩子 ``Callable[[tool_name, tool_input], Optional[bool]]``。
+            每次工具执行前同步调用，是宿主对工具调用的**最高裁决**：
+            - 返回 ``True``：宿主显式放行 → 直接 ALLOW，跳过 SDK permission_service（宿主放行最高权威）；
+            - 返回 ``False``：宿主拒绝 → DENY（工具不执行，模型收到拒绝信息）；
+            - 返回 ``None``（或未处理异常）：宿主无意见 → 交给 SDK 正常判断（permission_service 规则照常）。
+            此前实现只把 ``True`` 当"不拒绝"，后续 SDK 仍可能 ASK/DENY，宿主无法真正放行。
         permission_decision_hook: host-level 权限决策钩子
             ``Callable[[tool_name, tool_input, sdk_decision, permission_policy], PermissionDecision]``。
             在 SDK 完成基础权限判断后调用，宿主可基于 SDK 原始决策调整最终行为：保留 DENY/ASK、

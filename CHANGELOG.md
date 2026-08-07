@@ -24,9 +24,16 @@ All notable changes to FloodMind are documented in this file.
   - 空闲唤醒：Agent 初始化订阅任务完成 → EventBus 发 `background_task_completed` 事件（运行中的 stream 带出，宿主 UI 实时可见）；宿主收到且无活跃回合时自行决定是否开新回合，SDK 不越权自发回合。`Agent.cleanup()` / `__del__` kill 本会话存活任务（meta.json 保留供审计）。
   - 护栏：单会话并发上限 8（可配置）、单任务最大存活 30 分钟兜底 kill、会话结束清理存活任务。
 
+### Fixed
+
+- **permission_handler 改为宿主最高裁决**：此前 `permission_handler` 返回 `True` 只表示"不拒绝"，SDK 的 permission_service 仍会继续判断（ASK/DENY 照常触发），web 宿主无法真正放行。现：`True` = 宿主显式放行 → 直接 ALLOW 并跳过 permission_service（宿主放行是最高权威）；`False` = 宿主拒绝 → DENY；`None`（或钩子异常） = 宿主无意见 → 交给 SDK 正常判断。符合文档承诺的"安全网关"语义。
+- **ASK 无宿主响应时超时自动拒绝（不再无限卡死）**：executor `_on_awaiting_permission` 此前对未响应的 ASK 无限 `time.sleep(0.5)` 轮询，web 无人响应就永久挂起。现 `AskService` 新增 `age()`/`reject()`/`get_timeout()`，executor 在 ASK 等待超过配置超时（默认 300s，AskService 可配）后自动拒绝并回到 `awaiting_llm` 让模型处理，不再无限轮询。
+- **Bash 写范围可配（uploads/ 等不再被路径网误拒）**：`Workspace` 新增 `add_writable_root()`/`add_readable_root()`（运行时扩展写/读白名单，幂等；PathService 持活引用即刻生效），宿主可放行 workspace 外目录（如 web 的 uploads/、web_workspace/）。`build_workspace`（web_session 模式）自动把会话目录（含 uploads/、outputs/）纳入写根，不依赖 sandbox_strategy。
+- **后台任务 kill/失败状态变化立即通知 Agent**：`TaskKill`/`kill_session` 此前只改状态、不等 wait 线程，且 `_watch` 线程会把 "killed" 覆盖成 "failed"，Agent 无法感知任务被主动关闭。现 kill 先标记 killed 再杀进程、同步 `_finalize`（进完成队列 + 通知订阅者）；executor 注入通知区分 `[后台任务完成/失败/被终止]`。
+
 ### Verification
 
-- Full core-only test suite: `623 passed, 1 skipped`.
+- Full core-only test suite: `633 passed, 1 skipped`.
 - The single skipped test is legacy Web adapter compatibility that requires optional `floodmind[web]` / Flask extra.
 
 ## [1.1.7] - 2026-08-06

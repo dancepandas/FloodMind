@@ -593,7 +593,12 @@ class NativeAgentExecutor:
             return 0
         injected = 0
         for task in tasks:
-            outcome = "完成" if task.exit_code == 0 else "失败"
+            if task.status == "killed":
+                outcome = "被终止"
+            elif task.exit_code == 0:
+                outcome = "完成"
+            else:
+                outcome = "失败"
             tail = (task.tail or "").strip()
             text = (
                 f"[后台任务{outcome}] {task.command!r} exit={task.exit_code}\n"
@@ -702,10 +707,23 @@ class NativeAgentExecutor:
 
         approved = ask_service.get_response(state.pending_ask_id)
         if approved is None:
-            # 仍未响应，让出 CPU 避免忙等；保持 awaiting_permission 状态由主循环重新进入
-            logger.info("NativeAgentExecutor: awaiting_permission %s still pending", state.pending_ask_id)
-            time.sleep(0.5)
-            return state
+            # 宿主无响应：超过 AskService 配置超时后自动拒绝，避免无限轮询卡死
+            # （web 宿主无人响应 / 前端无 permission 处理时，此前会永久 sleep 循环）。
+            ask_timeout = getattr(ask_service, "get_timeout", lambda: 300.0)() or 300.0
+            age = getattr(ask_service, "age", lambda _a: None)(state.pending_ask_id)
+            if age is not None and age > ask_timeout:
+                logger.warning(
+                    "[EXEC] ASK %s 等待 %.0fs 超过超时 %.0fs，自动拒绝",
+                    state.pending_ask_id, age, ask_timeout,
+                )
+                if hasattr(ask_service, "reject"):
+                    ask_service.reject(state.pending_ask_id)
+                approved = False  # 走拒绝分支
+            else:
+                # 仍未响应，让出 CPU 避免忙等；保持 awaiting_permission 状态由主循环重新进入
+                logger.info("NativeAgentExecutor: awaiting_permission %s still pending", state.pending_ask_id)
+                time.sleep(0.5)
+                return state
 
         # 用户已响应
         if not approved:

@@ -351,19 +351,28 @@ class ToolExecutionService:
         agent_tier: str = "main",
         mode: str = "execution",
     ) -> PermissionDecision:
-        # SDK permission_handler 钩子（最高优先级）：嵌入方可同步审批/拦截，无需 permission_service。
+        # SDK permission_handler 钩子（宿主最高裁决）：True = 宿主显式放行 → 直接 ALLOW 并跳过
+        # permission_service（宿主放行是最高权威）；False = 宿主拒绝 → DENY；None = 宿主无意见 →
+        # 交给 SDK 正常判断。此前实现把 True 当"不拒绝"，permission_service 仍会 ASK/DENY，宿主无法真正放行。
         if self._permission_handler is not None:
             clean_input = {k: v for k, v in perm_input.items() if k != "__call_id"}
             try:
                 approved = self._permission_handler(tool.name, clean_input)
             except Exception as e:
-                logger.warning("permission_handler 执行异常（按放行处理）: %s", e)
-                approved = True
-            if not approved:
+                # 钩子异常视为宿主无意见（交给 SDK 判断），不放大放行权限——钩子只能收紧不能放开。
+                logger.warning("permission_handler 执行异常（按无意见处理，交给 SDK 判断）: %s", e)
+                approved = None
+            if approved is True:
+                return PermissionDecision(
+                    behavior=PermissionBehavior.ALLOW,
+                    reason=f"permission_handler 宿主显式放行 {tool.name}",
+                )
+            if approved is False:
                 return PermissionDecision(
                     behavior=PermissionBehavior.DENY,
                     reason=f"permission_handler 拒绝了工具 {tool.name} 的调用",
                 )
+            # approved is None（或非 bool 值）→ 继续 SDK 判断
 
         if self._permission_service is not None:
             request = PermissionRequest(

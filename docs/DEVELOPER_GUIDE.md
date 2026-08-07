@@ -1,6 +1,6 @@
 # FloodMind SDK 开发指南 v3.1
 
-> **更新**: 2026-08-06 — SDK v1.1.9；新增后台任务（`Bash run_in_background=True` + `BackgroundTaskService`，文件落 `.floodmind/sessions/<sid>/background/`，TaskOutput/TaskList/TaskKill，executor 完成通知注入 user 消息，EventBus `background_task_completed` 空闲唤醒，会话清理 kill 存活任务）；五项健壮性修复——① `exec_bash` 子进程关 stdin（裸 python/交互命令不再挂起）；② Bash 描述带 shell 类型 + stdin 已关；③ 完整模式注册宿主自定义 tools；④ 完整模式保留宿主 system_prompt；⑤ 未声明 permission_policy 回退 is_readonly（只读放行）。v1.1.7 彻底修复 MiniMax `tool id not found (2013)` 三层叠加根因——① 流式 tool call 空 id 时历史 id 不一致（fallback id 写回 accumulator）；② `ContextCompressor` 机械切尾部拆散工具调用原子组留下孤儿 tool（现按原子组对齐切分，head 至少保留首条 user）；③ `context_window` 误用全局默认模型窗口（现跟随注入模型 preset）。v1.1.6 移除 `SearchTools` 工具：工具发现与 skill 一致——`## 可用工具` 提示目录直接列出全部工具名称与基本描述，参数统一由 `GetTool` 查看并加载，模型无需搜索；移除工具输出静默字符截断（8000 字符 `_finalize_tool_output` 上限 + 1000 字符 journal 内联阈值），模型始终看到完整工具结果，上下文由 token 级 `ContextCompressor` 兜底；`short_description` 剥离 `[必填]/[可选]` 参数提示前缀。v1.1.5 含四项健壮性/权限收敛：① 工具调用参数键名统一清洗（模型偶发畸形键如 `{"tool_name"": ...}` 不再 `**kwargs` 崩）；② exec 命令体写目标检查（`>`/`Set-Content`/`Copy-Item` 等越权写 DENY，堵住"只读授权被 Bash 绕过"）；③ folder-first 读白名单加入已装 skill 注册表；④ PathService 读取拒绝原因附可操作引导。v1.1.4 含 create() 连接阶段 LLM 流式重试
+> **更新**: 2026-08-06 — SDK v1.1.9；新增后台任务（`Bash run_in_background=True` + `BackgroundTaskService`，文件落 `.floodmind/sessions/<sid>/background/`，TaskOutput/TaskList/TaskKill，executor 完成通知注入 user 消息，EventBus `background_task_completed` 空闲唤醒，会话清理 kill 存活任务，kill/失败状态变化立即通知 Agent）；宿主权限四修复——① `permission_handler` 改为宿主最高裁决（True=直接 ALLOW 跳过 SDK，False=DENY，None/异常=交 SDK）；② ASK 无宿主响应超时自动拒绝（不再无限轮询卡死）；③ Bash 写范围可配（`Workspace.add_writable_root` 运行时扩展 + web_session 自动含会话目录含 uploads/）；④ 后台任务 kill/失败状态变化立即通知 Agent（`[后台任务完成/失败/被终止]`）；加五项健壮性修复——① `exec_bash` 子进程关 stdin（裸 python/交互命令不再挂起）；② Bash 描述带 shell 类型 + stdin 已关；③ 完整模式注册宿主自定义 tools；④ 完整模式保留宿主 system_prompt；⑤ 未声明 permission_policy 回退 is_readonly（只读放行）。v1.1.7 彻底修复 MiniMax `tool id not found (2013)` 三层叠加根因——① 流式 tool call 空 id 时历史 id 不一致（fallback id 写回 accumulator）；② `ContextCompressor` 机械切尾部拆散工具调用原子组留下孤儿 tool（现按原子组对齐切分，head 至少保留首条 user）；③ `context_window` 误用全局默认模型窗口（现跟随注入模型 preset）。v1.1.6 移除 `SearchTools` 工具：工具发现与 skill 一致——`## 可用工具` 提示目录直接列出全部工具名称与基本描述，参数统一由 `GetTool` 查看并加载，模型无需搜索；移除工具输出静默字符截断（8000 字符 `_finalize_tool_output` 上限 + 1000 字符 journal 内联阈值），模型始终看到完整工具结果，上下文由 token 级 `ContextCompressor` 兜底；`short_description` 剥离 `[必填]/[可选]` 参数提示前缀。v1.1.5 含四项健壮性/权限收敛：① 工具调用参数键名统一清洗（模型偶发畸形键如 `{"tool_name"": ...}` 不再 `**kwargs` 崩）；② exec 命令体写目标检查（`>`/`Set-Content`/`Copy-Item` 等越权写 DENY，堵住"只读授权被 Bash 绕过"）；③ folder-first 读白名单加入已装 skill 注册表；④ PathService 读取拒绝原因附可操作引导。v1.1.4 含 create() 连接阶段 LLM 流式重试
 
 FloodMind 正在收敛为 **Python SDK + 最小 CLI run**：开发者通过 `Agent`、`ModelClient`、`Workspace`、`build_agent_tool`、Provider Pipeline、MCP 与 Skill API 将能力嵌入自己的平台、桌面助手或业务系统。Web / TUI 代码仅作为迁移期 legacy adapter 保留，不再是 SDK 核心公共面。
 
@@ -1145,7 +1145,7 @@ assert len(reg.list_skills()) == 0
 ### 11.4 运行全部测试
 
 ```bash
-pytest tests/ -q          # v1.1.9 core-only: 623 passed, 1 skipped
+pytest tests/ -q          # v1.1.9 core-only: 633 passed, 1 skipped
 pytest tests/test_sdk_agent.py -v   # SDK 相关
 pytest tests/test_skill_registry.py tests/test_skill_curator.py -v  # Skill 系统
 pytest tests/test_sdk_purity.py -q  # SDK import/package purity
@@ -1226,7 +1226,7 @@ FloodMind/
 ├── web/                              # React 19 + TypeScript 前端
 ├── web_server.py                     # Flask 入口（日志 + SessionManager + waitress）
 ├── scheduler.py                      # 定时任务调度
-├── tests/                            # 测试（v1.1.9 core-only: 623 passed, 1 skipped）
+├── tests/                            # 测试（v1.1.9 core-only: 633 passed, 1 skipped）
 ├── docs/                             # 文档
 │   ├── DEVELOPER_GUIDE.md            #   本文档
 │   └── architecture/                 #   架构 Wiki

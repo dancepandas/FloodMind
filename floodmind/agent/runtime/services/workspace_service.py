@@ -93,11 +93,18 @@ def build_workspace(
     if overwrite_protection is None:
         overwrite_protection = bool(ws_cfg.overwrite_protection) if ws_cfg else False
 
+    # web_session 写范围：自动纳入会话目录（含 uploads/、outputs/ 等），
+    # 不依赖 sandbox_strategy——模型把上传截图 Copy-Item 到 uploads/ 不再被
+    # exec_bash 写路径网误拒（宿主仍可经 add_writable_root 追加自定义白名单）。
+    session_dir = session_root / session_id
+    extra_writable = tuple(Path(p).resolve() for p in (session_dir,))
+    writable_roots = tuple(Path(p).resolve() for p in writable_roots) + extra_writable
+
     return Workspace(
         user_dir=user_dir,
         session_root=session_root,
         sandbox_base=sandbox_base,
-        writable_roots=tuple(Path(p).resolve() for p in writable_roots),
+        writable_roots=writable_roots,
         readable_roots=tuple(Path(p).resolve() for p in readable_roots),
         overwrite_protection=overwrite_protection,
         mode="web_session",
