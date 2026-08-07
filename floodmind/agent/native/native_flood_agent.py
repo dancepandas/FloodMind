@@ -314,6 +314,15 @@ class NativeFloodAgent:
         self._specialist_registry = _InstanceToolRegistry()
         self._event_bus = EventBus()
         self._message_builder = MessageBuilder()
+        # 后台任务完成 → EventBus 事件（宿主 UI 实时可见；运行中的 stream 会带出去）。
+        # 宿主收到该事件且当前无活跃回合时，自行决定是否 stream("[后台任务完成]…") 开新回合——
+        # SDK 不越权自发回合。回调按 agent 实例幂等注册。
+        self._bg_task_callback = self._on_background_task_completed
+        try:
+            from floodmind.agent.runtime.services.background_task_service import get_background_task_service
+            get_background_task_service().subscribe(self._bg_task_callback)
+        except Exception as e:
+            logger.debug("background task subscribe 失败: %s", e)
 
         self._model_client: Optional[ModelClient] = None
         self._orchestrator_executor: Optional[NativeAgentExecutor] = None
@@ -342,6 +351,9 @@ class NativeFloodAgent:
         # bare 与完整 runtime 均透传给 ToolExecutionService。
         self._permission_decision_hook = permission_decision_hook
         self._sandbox_service = SandboxService(workspace=self._workspace)
+        # 后台任务服务（exec_bash run_in_background）：executor 注入完成通知用。
+        # None 时 executor 回退全局单例 get_background_task_service()。
+        self._background_task_service = None
         service_base_dir = str(self._workspace.session_root) if self._workspace is not None else None
         self._checkpoint_service = CheckpointService(base_dir=service_base_dir, tracing_service=self._tracing_service)
         self._journal_service = ExecutionJournalService(base_dir=service_base_dir)
@@ -366,11 +378,41 @@ class NativeFloodAgent:
 
         logger.info("NativeFloodAgent 初始化成功")
 
+    def _on_background_task_completed(self, task) -> None:
+        """后台任务完成回调 → EventBus 事件（宿主唤醒通道）。"""
+        try:
+            self._event_bus.emit({
+                "type": "background_task_completed",
+                "task_id": task.task_id,
+                "session_id": task.session_id,
+                "status": task.status,
+                "exit_code": task.exit_code,
+                "command": task.command,
+                "stdout_path": task.stdout_path,
+            })
+        except Exception as e:
+            logger.warning("emit background_task_completed 失败: %s", e)
+
+    def cleanup(self) -> None:
+        """释放资源：kill 本会话存活的后台任务（meta.json 保留供审计）。幂等。"""
+        try:
+            from floodmind.agent.runtime.services.background_task_service import get_background_task_service
+            killed = get_background_task_service().kill_session(self.session_id)
+            if killed:
+                logger.info("NativeFloodAgent cleanup: kill %d 个存活后台任务", killed)
+        except Exception as e:
+            logger.warning("NativeFloodAgent cleanup 后台任务失败: %s", e)
+
     def _init_bare(self, tools: list, system_prompt: Optional[str]) -> None:
         """bare 模式精简初始化：只注册用户提供的工具 + MCP 外部工具，跳过内置工具/Plugin。"""
         # 注册用户工具（支持 AgentTool 和 ToolSpec 两种格式）
         self._orchestrator_registry.register_tools(tools)
         self._specialist_registry.register_tools(tools)
+        # 后台任务查询/控制工具：bare 模式同样需要（后台任务由 exec_bash run_in_background 启动，
+        # 与 runtime 无关，宿主在 SDK 循环内）。
+        from floodmind.tools import task_output, task_list, task_kill
+        self._orchestrator_registry.register_tools([task_output, task_list, task_kill])
+        self._specialist_registry.register_tools([task_output, task_list, task_kill])
         # MCP 外部工具接入（与完整 runtime 同一共享方法）：注册进 mcp.json 的 server 自动接入。
         # 放在 _register_tool_catalog_tools() 之前，让 MCP 工具也进入后续的工具目录/描述构建。
         self._load_mcp_tools()
@@ -432,6 +474,7 @@ class NativeFloodAgent:
             context_compressor=context_compressor,
             context_window=context_window,
             memory=self.memory,
+            background_task_service=self._background_task_service,
         )
 
         self._specialist_executor = NativeAgentExecutor(
@@ -511,6 +554,7 @@ class NativeFloodAgent:
             update_project_instructions,
             create_scheduled_task, list_scheduled_tasks, cancel_scheduled_task,
             set_memory_instance, reset_retry_guard,
+            task_output, task_list, task_kill,
         )
         from floodmind.tools.memory_tools import (
             conversation_search,
@@ -610,6 +654,9 @@ class NativeFloodAgent:
             core_memory_read,
             journal_search,
             journal_get_full_result,
+            task_output,
+            task_list,
+            task_kill,
         ]
         # 从全局 ToolRegistry 获取任务经验工具
         for _tname in ("SearchTaskExperience", "AddTaskExperience",
@@ -1176,6 +1223,7 @@ class NativeFloodAgent:
             context_compressor=context_compressor,
             context_window=context_window,
             memory=self.memory,
+            background_task_service=self._background_task_service,
         )
 
         self._specialist_executor = NativeAgentExecutor(
@@ -1193,6 +1241,7 @@ class NativeFloodAgent:
             tracing_service=self._tracing_service,
             context_compressor=context_compressor,
             context_window=context_window,
+            background_task_service=self._background_task_service,
         )
 
     def _rebuild_system_prompts(self) -> None:

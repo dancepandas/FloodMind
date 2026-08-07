@@ -98,11 +98,13 @@ class TestAgentCreation:
         agent = Agent(llm=llm, tools=sample_tools)
         registry = agent.raw._orchestrator_registry
         tool_names = [t.name for t in registry.all()]
-        assert len(registry.all()) == 4
+        # 4 = Echo/Add + GetSkill/GetTool；+3 后台任务工具（TaskOutput/TaskList/TaskKill）
+        assert len(registry.all()) == 7
         assert "Echo" in tool_names
         assert "Add" in tool_names
         assert "GetSkill" in tool_names
         assert "GetTool" in tool_names
+        assert {"TaskOutput", "TaskList", "TaskKill"} <= set(tool_names)
 
     def test_create_with_system_prompt(self, llm):
         """自定义提示词。"""
@@ -206,10 +208,10 @@ class TestToolRegistration:
         assert "ToolB" in names
 
     def test_empty_tools(self, llm):
-        """不传工具 — 只注册 catalog 与 skill 基础工具。"""
+        """不传工具 — 只注册 catalog/skill 基础工具 + 后台任务工具。"""
         agent = Agent(llm=llm)
         names = agent.raw._orchestrator_registry.names()
-        assert set(names) == {"GetSkill", "GetTool"}
+        assert set(names) == {"GetSkill", "GetTool", "TaskOutput", "TaskList", "TaskKill"}
 
 
 # ---------------------------------------------------------------------------

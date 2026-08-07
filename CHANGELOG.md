@@ -14,9 +14,19 @@ All notable changes to FloodMind are documented in this file.
 - **P1-2 完整模式保留宿主 system_prompt**：`system_prompt` 参数此前只在 `_init_bare` 使用，完整模式忽略。现 `__init__` 存 `_host_system_prompt`，`_init_executors` 与 `_rebuild_system_prompts` 都把它作为独立段注入——skill 热插拔重建提示词时宿主段不丢。
 - **P2 未声明 permission_policy 回退 is_readonly**：`PermissionRequest` 新增 `is_readonly` 字段（ToolExecutionService 填充）。未显式声明 policy 的工具此前一刀切 DENY，宿主用 `build_agent_tool` 标了 `is_readonly=True` 仍被拒，接入成本高。现回退看 `is_readonly`：True 按只读放行，False 走 ASK/DENY。
 
+### Added
+
+- **后台任务（`Bash run_in_background=True`）**：长任务不再受同步 120s 超时限制，可异步跑完再由 Agent 感知。
+  - `BackgroundTaskService`（`floodmind/agent/runtime/services/background_task_service.py`）：stdout/stderr 直写文件（无 PIPE 死锁风险），文件落 `.floodmind/sessions/<sid>/background/<task_id>/{out.log,err.log,meta.json}`；每任务 daemon wait 线程 → 完成队列 → subscribe 回调；Windows `taskkill /PID /T /F`、POSIX `killpg` 杀进程树。
+  - `exec_bash` 新增 `run_in_background` 参数：走全部安全管线（危险命令/写目标/workdir/sandbox）后交服务托管，立即返回 `task_id` + 文件路径；同步路径零改动。显式 `timeout` 作为存活上限覆盖，默认 30 分钟兜底 kill。
+  - 三个工具（完整 + bare 双模式注册）：`TaskOutput(task_id, tail_lines=200)` 只读查状态/输出尾部；`TaskList()` 只读列本会话任务；`TaskKill(task_id)` exec 策略杀进程树。
+  - executor 完成通知注入：`_inject_background_notifications` 在每次 LLM 调用前 drain 本会话完成队列，以 user 角色消息（`[后台任务完成/失败] …`）追加 state.messages——与排队用户消息同通道，厂商兼容性最好。
+  - 空闲唤醒：Agent 初始化订阅任务完成 → EventBus 发 `background_task_completed` 事件（运行中的 stream 带出，宿主 UI 实时可见）；宿主收到且无活跃回合时自行决定是否开新回合，SDK 不越权自发回合。`Agent.cleanup()` / `__del__` kill 本会话存活任务（meta.json 保留供审计）。
+  - 护栏：单会话并发上限 8（可配置）、单任务最大存活 30 分钟兜底 kill、会话结束清理存活任务。
+
 ### Verification
 
-- Full core-only test suite: `613 passed, 1 skipped`.
+- Full core-only test suite: `623 passed, 1 skipped`.
 - The single skipped test is legacy Web adapter compatibility that requires optional `floodmind[web]` / Flask extra.
 
 ## [1.1.7] - 2026-08-06
