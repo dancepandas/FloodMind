@@ -37,3 +37,6 @@ floodmind/memory/long_term_memory.json
 
 # API keys (local only, never commit)
 docs/key.txt
+
+# SDD workspaces (scratch: ledgers, briefs, reports)
+.superpowers/
