@@ -1190,6 +1190,27 @@ class NativeAgentExecutor:
         except Exception as e:
             logger.error("NativeAgentExecutor: checkpoint save failed: %s", e)
 
+    def _resolve_run_id(self, context: RunContext) -> str:
+        """Resolve the canonical run id for a new run (identity §3.1).
+
+        Priority order:
+        1. context.runtime_context.run_id — the RuntimeContext carries the
+           authoritative run identity (see _run_specialist_task child states).
+        2. self._journal_authority.run_id — so the state agrees with the journal
+           it writes to when an authority is injected.
+        3. new_id("run") — canonical generator (run_-prefixed), never time-based.
+        """
+        runtime_context = getattr(context, "runtime_context", None)
+        if runtime_context is not None:
+            runtime_run_id = getattr(runtime_context, "run_id", "") or ""
+            if isinstance(runtime_run_id, str) and runtime_run_id:
+                return runtime_run_id
+        if self._journal_authority is not None:
+            authority_run_id = getattr(self._journal_authority, "run_id", "") or ""
+            if isinstance(authority_run_id, str) and authority_run_id:
+                return authority_run_id
+        return new_id("run")
+
     def _build_initial_state(
         self,
         context: RunContext,
@@ -1201,7 +1222,7 @@ class NativeAgentExecutor:
         messages = self._build_initial_messages(context, user_text, attachments, memory_messages)
         return AgentLoopState(
             session_id=context.session_id,
-            run_id=f"run-{int(time.time())}",
+            run_id=self._resolve_run_id(context),
             status="created",
             iteration=0,
             max_iterations=self.max_iterations,

@@ -512,6 +512,71 @@ class TestNativeAgentExecutor:
         names = [t["function"]["name"] for t in mc.stream_chat.call_args.kwargs["tools"]]
         assert names == ["Read"]
 
+    def test_build_initial_state_uses_runtime_context_run_id(self):
+        """运行时注入的 RuntimeContext.run_id 为权威 run identity（§3.1）。"""
+        from floodmind.agent.runtime.contracts.runtime_context import RuntimeContext
+
+        mc = MagicMock(spec=ModelClient)
+        executor = self._make_executor(mc, tools_schema=[])
+        context = self._make_context()
+        context.runtime_context = RuntimeContext(
+            conversation_id="conv-1",
+            task_id="task-1",
+            run_id="run-runtime-canonical",
+            thread_id="thread-1",
+            turn_id="turn-1",
+        )
+
+        state = executor._build_initial_state(context, "hello", None, None, None)
+
+        assert state.run_id == "run-runtime-canonical"
+
+    def test_build_initial_state_uses_journal_authority_run_id(self):
+        """无 runtime_context 时，注入的 JournalAuthority.run_id 决定 state.run_id。"""
+        mc = MagicMock(spec=ModelClient)
+        executor = self._make_executor(mc, tools_schema=[])
+        authority = MagicMock()
+        authority.run_id = "run-authority-canonical"
+        executor._journal_authority = authority
+
+        state = executor._build_initial_state(self._make_context(), "hello", None, None, None)
+
+        assert state.run_id == "run-authority-canonical"
+
+    def test_build_initial_state_falls_back_to_canonical_new_id(self):
+        """无任何权威源时回退到 new_id("run")：run_ 前缀 uuid，非时间拼装。"""
+        mc = MagicMock(spec=ModelClient)
+        executor = self._make_executor(mc, tools_schema=[])
+
+        state = executor._build_initial_state(self._make_context(), "hello", None, None, None)
+
+        assert state.run_id.startswith("run_")
+        # uuid4().hex 为 32 位十六进制；同时确保不是旧的 `run-{int(time.time())}` 拼装
+        assert len(state.run_id) == len("run_") + 32
+        assert not state.run_id.startswith("run-")
+
+    def test_build_initial_state_runtime_context_takes_priority_over_authority(self):
+        """优先级：runtime_context.run_id > journal_authority.run_id。"""
+        from floodmind.agent.runtime.contracts.runtime_context import RuntimeContext
+
+        mc = MagicMock(spec=ModelClient)
+        executor = self._make_executor(mc, tools_schema=[])
+        authority = MagicMock()
+        authority.run_id = "run-authority-canonical"
+        executor._journal_authority = authority
+        context = self._make_context()
+        context.runtime_context = RuntimeContext(
+            conversation_id="conv-1",
+            task_id="task-1",
+            run_id="run-runtime-wins",
+            thread_id="thread-1",
+            turn_id="turn-1",
+        )
+
+        state = executor._build_initial_state(context, "hello", None, None, None)
+
+        assert state.run_id == "run-runtime-wins"
+
 
 class TestExecutorPlaceholderStates:
     def _make_context(self):
