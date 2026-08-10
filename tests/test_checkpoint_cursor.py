@@ -264,6 +264,25 @@ def test_run_from_state_uses_supplied_reducer_state_without_replaying():
     authority.replay.assert_not_called()
 
 
+def test_checkpoint_metadata_uses_authority_runtime_root(tmp_path):
+    auth = _authority(tmp_path)
+    service = MagicMock()
+    service.save.return_value = MagicMock(checkpoint_id="ckpt")
+
+    from floodmind.agent.native.executor import NativeAgentExecutor
+
+    native = object.__new__(NativeAgentExecutor)
+    native._journal_authority = auth
+    native._checkpoint_service = service
+    native.model_client = MagicMock(model_name="model")
+    state = AgentLoopState(session_id="child", run_id="run_1")
+    context = MagicMock(state_dir=str(tmp_path / "threads" / "child" / "state"))
+
+    native._save_checkpoint(state, context)
+
+    assert service.save.call_args.kwargs["metadata"]["runtime_dir"] == str(tmp_path)
+
+
 @pytest.mark.parametrize(
     ("run_status", "loop_status"),
     [

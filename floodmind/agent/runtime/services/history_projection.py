@@ -9,8 +9,11 @@ from floodmind.agent.runtime.services.journal_writer import JournalWriter
 
 
 def project_current(auth: JournalAuthority) -> List[Dict]:
-    """Project the authority's current run into flat turns."""
-    return auth.replay(after_sequence=0).turns
+    """Project the authority's current thread into flat turns."""
+    return [
+        turn for turn in auth.replay(after_sequence=0).turns
+        if turn.get("thread_id", "") in ("", auth.thread_id)
+    ]
 
 
 def project_conversation(runtime_dir, conversation_id: str) -> List[Dict]:
@@ -44,4 +47,8 @@ def project_conversation(runtime_dir, conversation_id: str) -> List[Dict]:
             continue
         seen.add(event.event_id)
         state = reduce(state, event)
-    return state.turns
+    child_ids = {child.thread_id for child in state.child_threads}
+    return [
+        turn for turn in state.turns
+        if turn.get("thread_id", "") not in child_ids
+    ]

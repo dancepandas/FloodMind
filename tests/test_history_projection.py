@@ -40,7 +40,9 @@ def test_project_current_roundtrip(tmp_path):
 
     turns = project_current(auth)
 
-    assert turns[0] == {"role": "user", "content": "hi", "turn_index": 0}
+    assert turns[0] == {
+        "role": "user", "content": "hi", "turn_index": 0, "thread_id": "thread_1",
+    }
     assert turns[1]["role"] == "assistant"
     assert turns[1]["tool_calls"][0]["tool_name"] == "Read"
 

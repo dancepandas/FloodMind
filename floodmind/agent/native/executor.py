@@ -62,8 +62,13 @@ def project_run_state_to_loop_state(
     """Project authoritative reducer fields onto the mutable loop driver state."""
     projected = loop_state.model_copy(deep=True)
     projected.status = _RUN_TO_LOOP_STATUS[run_state.status.value]
+    current_thread_id = run_state.current_thread_id
+    scoped_turns = [
+        turn for turn in run_state.turns
+        if not current_thread_id or turn.get("thread_id", "") in ("", current_thread_id)
+    ]
     projected.iteration = sum(
-        1 for turn in run_state.turns if turn.get("role") == "assistant"
+        1 for turn in scoped_turns if turn.get("role") == "assistant"
     )
     projected.journal_cursor = run_state.last_committed_sequence
     system_prefix: List[Dict[str, Any]] = []
@@ -72,7 +77,7 @@ def project_run_state_to_loop_state(
             break
         system_prefix.append(dict(message))
     journal_messages: List[Dict[str, Any]] = []
-    for turn in run_state.turns:
+    for turn in scoped_turns:
         role = turn.get("role")
         if role == "user":
             journal_messages.append({"role": "user", "content": turn.get("content", "")})
@@ -90,7 +95,8 @@ def project_run_state_to_loop_state(
                 "tool_call_id": turn.get("tool_call_id", ""),
                 "content": turn.get("content", ""),
             })
-    projected.messages = system_prefix + journal_messages
+    if journal_messages or not current_thread_id:
+        projected.messages = system_prefix + journal_messages
     projected.pending_tool_calls = []
     projected.pending_ask_id = None
     projected.pending_tool_transaction_id = ""
@@ -1155,7 +1161,7 @@ class NativeAgentExecutor:
                     "run_id": self._journal_authority.run_id,
                     "thread_id": self._journal_authority.thread_id,
                     "turn_id": self._journal_authority.turn_id,
-                    "runtime_dir": context.state_dir,
+                    "runtime_dir": str(self._journal_authority._writer._base_dir),
                 }
             run_state = None
             if self._journal_authority is not None:

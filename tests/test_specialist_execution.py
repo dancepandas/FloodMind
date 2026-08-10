@@ -9,6 +9,8 @@ from floodmind.agent.native.native_flood_agent import NativeFloodAgent, _Instanc
 from floodmind.agent.native.tool_loading import ToolLoader, ToolLoadingConfig, make_get_tool_tool
 from floodmind.agent.native.types import AgentResult, RunContext
 from floodmind.agent.runtime.contracts.tools import ToolSpec
+from floodmind.agent.runtime.contracts.runtime_context import RuntimeContext
+from floodmind.agent.runtime.services.journal_authority import open_journal_authority
 from floodmind.agent.runtime.services.sandbox_service import SandboxService
 from floodmind.agent.runtime.services.path_service import PathService
 from floodmind.agent.runtime.services.permission_service import PermissionService
@@ -49,7 +51,22 @@ def _specialist_agent(tmp_path: Path) -> NativeFloodAgent:
     agent._path_service = PathService(project_root=tmp_path)
     agent._permission_service = PermissionService(path_service=agent._path_service)
     agent._background_task_service = BackgroundTaskService(base_dir=tmp_path / "sessions")
+    agent._journal_authority = open_journal_authority(
+        tmp_path, conversation_id="conv", task_id="task", run_id="run_parent",
+        thread_id="thread_parent", turn_id="turn_parent",
+    )
     return agent
+
+
+def _parent_context(tmp_path: Path, *, output_dir: Path) -> RunContext:
+    return RunContext(
+        session_id="parent", user_text="task", output_dir=str(output_dir),
+        state_dir="",
+        runtime_context=RuntimeContext(
+            conversation_id="conv", task_id="task", run_id="run_parent",
+            thread_id="thread_parent", turn_id="turn_parent",
+        ),
+    )
 
 
 def test_parallel_specialist_tool_loaders_are_clean_and_isolated(tmp_path):
@@ -82,7 +99,7 @@ def test_specialist_run_injects_background_task_service(tmp_path, monkeypatch):
         def __init__(self, **kwargs):
             captured.update(kwargs)
 
-        def run_from_state(self, context, state):
+        def run_from_state(self, context, state, run_state=None):
             return AgentResult(final_output="done", reasoning="")
 
     monkeypatch.setattr(
@@ -92,11 +109,7 @@ def test_specialist_run_injects_background_task_service(tmp_path, monkeypatch):
     agent._run_specialist_task(
         task_text="run background work",
         skill_name="",
-        parent_context=RunContext(
-            session_id="parent",
-            user_text="task",
-            output_dir=str(tmp_path / "parent"),
-        ),
+        parent_context=_parent_context(tmp_path, output_dir=tmp_path / "parent"),
         step_key="step-bg",
     )
 
@@ -119,7 +132,7 @@ def test_specialist_copies_only_artifacts_created_during_run(tmp_path, monkeypat
         def __init__(self, **kwargs):
             pass
 
-        def run_from_state(self, context, state):
+        def run_from_state(self, context, state, run_state=None):
             (Path(context.output_dir) / "generated.md").write_text("new", encoding="utf-8")
             return AgentResult(final_output="done", reasoning="")
 
@@ -129,11 +142,7 @@ def test_specialist_copies_only_artifacts_created_during_run(tmp_path, monkeypat
     report = agent._run_specialist_task(
         task_text="write report",
         skill_name="",
-        parent_context=RunContext(
-            session_id="parent",
-            user_text="task",
-            output_dir=str(parent_output),
-        ),
+        parent_context=_parent_context(tmp_path, output_dir=parent_output),
         step_key="step-1",
     )
 
@@ -151,7 +160,7 @@ def test_specialist_copies_new_artifact_when_execution_fails(tmp_path, monkeypat
         def __init__(self, **kwargs):
             pass
 
-        def run_from_state(self, context, state):
+        def run_from_state(self, context, state, run_state=None):
             (Path(context.output_dir) / "partial.txt").write_text("partial", encoding="utf-8")
             raise RuntimeError("specialist failed")
 
@@ -161,11 +170,7 @@ def test_specialist_copies_new_artifact_when_execution_fails(tmp_path, monkeypat
     report = agent._run_specialist_task(
         task_text="write report",
         skill_name="",
-        parent_context=RunContext(
-            session_id="parent",
-            user_text="task",
-            output_dir=str(parent_output),
-        ),
+        parent_context=_parent_context(tmp_path, output_dir=parent_output),
         step_key="step-1",
     )
 

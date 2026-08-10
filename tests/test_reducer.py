@@ -13,7 +13,7 @@ def _ev(event_type: str, sequence: int, payload: dict, **kw) -> EventEnvelope:
 def test_message_sent_appends_turn():
     s = initial_run_state(new_id("run"))
     s = reduce(s, _ev("thread.message.sent", 1, {"content": "hi", "turn_index": 0}))
-    assert s.turns[-1] == {"role": "user", "content": "hi", "turn_index": 0}
+    assert s.turns[-1] == {"role": "user", "content": "hi", "turn_index": 0, "thread_id": ""}
     assert s.status == RunStatus.awaiting_model
 
 
@@ -49,6 +49,7 @@ def test_tool_transaction_lifecycle():
         "tool_id": "builtin:Read",
         "content": "ok",
         "turn_index": 0,
+        "thread_id": "",
     }
 
 
@@ -67,6 +68,7 @@ def test_tool_failed_appends_payload_derived_tool_turn():
         "tool_id": "builtin:Read",
         "content": "read failed",
         "turn_index": 0,
+        "thread_id": "",
     }
 
 

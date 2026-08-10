@@ -65,11 +65,16 @@ def _reduce_thread_terminal(
     return ns
 
 
-def _reduce_thread_message_sent(state: RunState, payload: Dict[str, Any]) -> RunState:
+def _reduce_thread_message_sent(
+    state: RunState, payload: Dict[str, Any], thread_id: str,
+) -> RunState:
     ns = _clone(state)
     content = str(payload.get("content", ""))
     turn_index = int(payload.get("turn_index", _turn_index(ns.turns)))
-    ns.turns.append({"role": "user", "content": content, "turn_index": turn_index})
+    ns.turns.append({
+        "role": "user", "content": content, "turn_index": turn_index,
+        "thread_id": thread_id,
+    })
     if ns.status in (RunStatus.created, RunStatus.completed, RunStatus.failed):
         ns.status = RunStatus.awaiting_model
     return ns
@@ -82,7 +87,9 @@ def _reduce_attempt_started(state: RunState, payload: Dict[str, Any]) -> RunStat
     return ns
 
 
-def _reduce_attempt_completed(state: RunState, payload: Dict[str, Any]) -> RunState:
+def _reduce_attempt_completed(
+    state: RunState, payload: Dict[str, Any], thread_id: str,
+) -> RunState:
     ns = _clone(state)
     usage = payload.get("usage") or {}
     for key in ("prompt_tokens", "completion_tokens", "total_tokens"):
@@ -97,6 +104,7 @@ def _reduce_attempt_completed(state: RunState, payload: Dict[str, Any]) -> RunSt
         "tool_calls": list(tool_calls),
         "is_final": is_final,
         "timestamp": "",
+        "thread_id": thread_id,
     })
     terminal = str(payload.get("terminal_reason", ""))
     if terminal == "tool_calls" and tool_calls:
@@ -129,6 +137,7 @@ def _reduce_tool_completed(
     state: RunState,
     payload: Dict[str, Any],
     event_type: str,
+    thread_id: str,
 ) -> RunState:
     ns = _clone(state)
     ttx_id = str(payload.get("transaction_id", ""))
@@ -147,6 +156,7 @@ def _reduce_tool_completed(
         "tool_id": str(payload.get("tool_id", "")),
         "content": result_summary,
         "turn_index": _turn_index(ns.turns),
+        "thread_id": thread_id,
     })
     for art in payload.get("artifacts") or []:
         if art not in ns.artifacts:
@@ -199,7 +209,7 @@ def reduce(state: RunState, event: EventEnvelope) -> RunState:
     ns.last_committed_sequence = event.sequence
     et = event.event_type
     if et == "thread.message.sent":
-        return _reduce_thread_message_sent(ns, event.payload)
+        return _reduce_thread_message_sent(ns, event.payload, event.thread_id)
     if et == "thread.spawn.requested":
         return _reduce_thread_spawn(ns, event.payload)
     if et == "thread.created":
@@ -209,13 +219,13 @@ def reduce(state: RunState, event: EventEnvelope) -> RunState:
     if et == "model.attempt.started":
         return _reduce_attempt_started(ns, event.payload)
     if et == "model.attempt.completed":
-        return _reduce_attempt_completed(ns, event.payload)
+        return _reduce_attempt_completed(ns, event.payload, event.thread_id)
     if et == "model.attempt.failed":
         return _reduce_attempt_failed(ns, event.payload)
     if et == "tool.execution.started":
         return _reduce_tool_started(ns, event.payload)
     if et in ("tool.execution.completed", "tool.execution.failed"):
-        return _reduce_tool_completed(ns, event.payload, et)
+        return _reduce_tool_completed(ns, event.payload, et, event.thread_id)
     if et == "tool.approval.requested":
         return _reduce_approval_requested(ns, event.payload)
     if et == "tool.approval.resolved":

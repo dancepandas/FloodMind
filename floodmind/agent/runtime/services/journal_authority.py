@@ -121,4 +121,9 @@ class JournalAuthority:
                 continue  # 重复 event_id 不重复副作用
             seen.add(event.event_id)
             current = reduce(current, event)
+        if self.thread_id:
+            current.turns = [
+                turn for turn in current.turns
+                if turn.get("thread_id", "") in ("", self.thread_id)
+            ]
         return current

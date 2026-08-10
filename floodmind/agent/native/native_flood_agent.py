@@ -28,6 +28,7 @@ from floodmind.agent.native.types import (
 )
 from floodmind.agent.runtime.contracts.subagent import SubAgentReport
 from floodmind.agent.runtime.contracts.identity import new_id
+from floodmind.agent.runtime.reducer import initial_run_state
 from floodmind.agent.runtime.contracts.tools import ToolSpec
 from floodmind.agent.runtime.contracts.permissions import ToolPermissionPolicy
 from floodmind.agent.native.artifact_watcher import ArtifactWatcher
@@ -2008,41 +2009,45 @@ class NativeFloodAgent:
         if parent_auth is None:
             raise ValueError("specialist requires parent JournalAuthority")
 
-        runtime_dir = Path(parent_context.state_dir)
+        runtime_dir = Path(parent_auth._writer._base_dir)
         child_thread_id = new_id("thread")
         child_turn_id = new_id("turn")
         thread_payload = {"thread_id": child_thread_id, "parent_call_id": step_key}
-        parent_auth.emit("thread.spawn.requested", thread_payload)
-        parent_auth.emit("thread.created", thread_payload)
-        child_auth = open_journal_authority(
-            runtime_dir,
-            conversation_id=parent_runtime_context.conversation_id,
-            task_id=parent_runtime_context.task_id,
-            run_id=parent_runtime_context.run_id,
-            thread_id=child_thread_id,
-            turn_id=child_turn_id,
-        )
-        tdirs = thread_dirs(
-            runtime_dir,
-            parent_runtime_context.conversation_id,
-            parent_runtime_context.task_id,
-            parent_runtime_context.run_id,
-            child_thread_id,
-        )
-
         sub_session_id = f"sub-{parent_context.session_id}-{step_key}-{uuid.uuid4().hex[:8]}"
-        specialist_input = self._build_specialist_user_input(task_text, skill_name)
-
-        sandbox_ctx = self._sandbox_service.create(
-            sub_session_id=sub_session_id,
-            parent_output_dir=Path(parent_context.output_dir) if parent_context.output_dir else None,
-            delegate_cwd=Path(delegate_cwd) if delegate_cwd else None,
-        )
-
-        # 子代理默认 cwd：delegate_cwd 优先，否则 sandbox outputs
-        sub_cwd = str(sandbox_ctx.delegate_cwd) if sandbox_ctx.delegate_cwd else str(sandbox_ctx.outputs_dir)
+        sandbox_ctx = None
 
         try:
+            parent_auth.emit("thread.spawn.requested", thread_payload)
+            parent_auth.emit("thread.created", thread_payload)
+            child_auth = open_journal_authority(
+                runtime_dir,
+                conversation_id=parent_runtime_context.conversation_id,
+                task_id=parent_runtime_context.task_id,
+                run_id=parent_runtime_context.run_id,
+                thread_id=child_thread_id,
+                turn_id=child_turn_id,
+            )
+            tdirs = thread_dirs(
+                runtime_dir,
+                parent_runtime_context.conversation_id,
+                parent_runtime_context.task_id,
+                parent_runtime_context.run_id,
+                child_thread_id,
+            )
+            specialist_input = self._build_specialist_user_input(task_text, skill_name)
+            child_auth.emit("thread.message.sent", {
+                "content": specialist_input,
+                "turn_index": 0,
+            })
+
+            sandbox_ctx = self._sandbox_service.create(
+                sub_session_id=sub_session_id,
+                parent_output_dir=Path(parent_context.output_dir) if parent_context.output_dir else None,
+                delegate_cwd=Path(delegate_cwd) if delegate_cwd else None,
+            )
+
+            # 子代理默认 cwd：delegate_cwd 优先，否则 sandbox outputs
+            sub_cwd = str(sandbox_ctx.delegate_cwd) if sandbox_ctx.delegate_cwd else str(sandbox_ctx.outputs_dir)
             from floodmind.agent.runtime.contracts.runtime_context import RuntimeContext
 
             sub_runtime_context = RuntimeContext(
@@ -2132,7 +2137,16 @@ class NativeFloodAgent:
             watcher.take_snapshot()
             execution_error: Optional[Exception] = None
             try:
-                result = specialist_executor.run_from_state(context=sub_context, state=sub_state)
+                result = specialist_executor.run_from_state(
+                    context=sub_context,
+                    state=sub_state,
+                    run_state=initial_run_state(
+                        parent_runtime_context.run_id,
+                        conversation_id=parent_runtime_context.conversation_id,
+                        task_id=parent_runtime_context.task_id,
+                        thread_id=child_thread_id,
+                    ),
+                )
             except Exception as exc:
                 logger.exception("specialist %s 执行失败", sub_session_id)
                 execution_error = exc
@@ -2207,7 +2221,8 @@ class NativeFloodAgent:
                     logger.info("specialist cleanup: kill %d 个子会话后台任务", killed)
             except Exception as e:
                 logger.warning("specialist cleanup 后台任务失败: %s", e)
-            self._sandbox_service.destroy(sandbox_ctx)
+            if sandbox_ctx is not None:
+                self._sandbox_service.destroy(sandbox_ctx)
 
     def _handle_delegate_specialist(self, task: str = "", skill_name: str = "", workdir: str = "") -> str:
         task = (task or "").strip()
