@@ -292,9 +292,14 @@ def run(task, model, resume_session_id, resume_checkpoint_id, verbose):
                     tmp_dir=str(workspace.tmp_dir),
                     scripts_dir=str(workspace.scripts_dir),
                 )
-            result = agent._orchestrator_executor.run_from_state(
-                context, state, run_state=run_state
-            )
+            try:
+                result = agent._orchestrator_executor.run_from_state(
+                    context, state, run_state=run_state
+                )
+            finally:
+                # fencing lease 覆盖整个 resumed run；到达终态后释放，
+                # 使同一 run 的后续 resume 不被 300s TTL 阻塞。
+                outcome.lease.release()
             print(result.final_output)
             return
         except Exception as e:

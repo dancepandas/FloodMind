@@ -207,3 +207,93 @@ def test_resume_checkpoint_tool_registry_mismatch_fails_closed(tmp_path):
             session_id="sess_1", checkpoint_service=svc,
             expected_tool_registry_version="tools-v2",
         )
+
+
+# ── lease 在成功 resume 后仍需显式 release（CLI 调用方职责）──────────
+
+def test_resume_holds_lease_then_release_unblocks_next_resume(tmp_path):
+    """成功 resume 后 lease 仍被持有（fencing 覆盖整个 run）；
+    显式 release 后同一 run 可再次 resume，无 stuck lease。"""
+    auth = _authority(tmp_path)
+    auth.emit("thread.message.sent", {"content": "q1", "turn_index": 0})
+    outcome = ResumeService().resume(
+        runtime_dir=tmp_path, conversation_id="c", task_id="t", run_id="run_1",
+        thread_id="th", turn_id="tu", checkpoint_id="",
+    )
+    # fencing：run 进行期间，其他 owner 无法抢占同一 run
+    with pytest.raises(ResumeBusyError):
+        open_lease(tmp_path, "run_1", owner="other",
+                   conversation_id="c", task_id="t")
+    # 释放后同一 run 的后续 resume 成功
+    outcome.lease.release()
+    outcome2 = ResumeService().resume(
+        runtime_dir=tmp_path, conversation_id="c", task_id="t", run_id="run_1",
+        thread_id="th", turn_id="tu", checkpoint_id="",
+    )
+    assert outcome2.journal_cursor > outcome.journal_cursor
+
+
+def test_cli_resume_releases_lease_after_run(tmp_path, monkeypatch):
+    """CLI resume 路径在 run 到达终态后必须释放 lease（try/finally），
+    否则 lease 文件残留 300s TTL，同一 run 的后续 resume 被 ResumeBusyError 阻塞。"""
+    from types import SimpleNamespace
+    from unittest.mock import MagicMock
+
+    from click.testing import CliRunner
+
+    from floodmind.agent.runtime.services.checkpoint_service import CheckpointService
+    from floodmind.agent.runtime.services.journal_authority import open_journal_authority
+    from floodmind.agent.runtime.services.runtime_layout import lease_file
+    from floodmind.agent.runtime.services.workspace_service import build_folder_workspace
+    from floodmind.cli import main
+
+    # 真实 checkpoint：journal 在 tmp_path，checkpoint 在 workspace.session_root
+    ws = build_folder_workspace("sess_1", primary_dir=tmp_path)
+    svc = CheckpointService(base_dir=str(ws.session_root))
+    auth = open_journal_authority(tmp_path, conversation_id="c", task_id="t",
+                                  run_id="run_1", thread_id="th", turn_id="tu")
+    auth.emit("thread.message.sent", {"content": "q1", "turn_index": 0})
+    record = svc.save(
+        AgentLoopState(session_id="sess_1", run_id="run_1"),
+        journal_cursor=auth.cursor(), reducer_version="1",
+        run_state=auth.replay(),
+        metadata={
+            "conversation_id": "c", "task_id": "t", "run_id": "run_1",
+            "thread_id": "th", "turn_id": "tu", "runtime_dir": str(tmp_path),
+        },
+    )
+
+    executor = SimpleNamespace(
+        run_from_state=lambda context, state, run_state=None: SimpleNamespace(
+            final_output="done"
+        )
+    )
+    agent = SimpleNamespace(
+        _orchestrator_executor=executor,
+        _current_run_context=None,
+        _journal_authority=None,
+        _last_loop_state=None,
+    )
+
+    monkeypatch.setattr("floodmind.cli._validate_api_key", lambda: None)
+    monkeypatch.setattr("floodmind.cli._build_cli_workspace", lambda sid: ws)
+    monkeypatch.setattr(
+        "floodmind.agent.native.model_client.ModelClient.from_settings",
+        lambda **kw: MagicMock(),
+    )
+    monkeypatch.setattr("floodmind.agent.create_flood_agent", lambda **kw: agent)
+
+    result = CliRunner().invoke(
+        main,
+        ["run", "续接", "--resume", "sess_1", "--checkpoint", record.checkpoint_id],
+        catch_exceptions=False,
+    )
+
+    assert result.exit_code == 0
+    assert "done" in result.output
+    # run 到达终态后 lease 文件已被释放：同一 run 可重新获取 lease
+    lease_path = lease_file(tmp_path, "c", "t", "run_1")
+    assert not lease_path.exists()
+    lease2 = open_lease(tmp_path, "run_1", owner="next",
+                        conversation_id="c", task_id="t")
+    assert lease2.acquired
