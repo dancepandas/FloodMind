@@ -15,6 +15,12 @@ from floodmind.agent.runtime.contracts.permissions import (
 from floodmind.agent.runtime.contracts.tools import ToolCall
 from floodmind.agent.runtime.services.permission_service import PermissionService
 from floodmind.agent.runtime.services.tool_execution_service import ToolExecutionService
+from floodmind.agent.runtime.services.idempotency import (
+    derive_idempotency_key,
+    side_effect_class_for_spec,
+)
+from floodmind.agent.runtime.contracts.tool_transaction import canonical_arguments
+from floodmind.agent.runtime.services.journal_authority import open_journal_authority
 from floodmind.tools.session_context import SESSION_CONTEXT
 
 
@@ -588,3 +594,72 @@ class TestRawParametersJsonSchemaValidation:
         assert result.status == "completed"
         permission_handler.assert_called_once()
         handler.assert_called_once_with(mode="safe", payload=3)
+
+
+class TestToolExecutionIdempotency:
+    """§6.5：非 read 工具带幂等键，命中已提交结果即复用，不重执行。"""
+
+    def _make_non_read_tool(self):
+        tool = MagicMock()
+        tool.name = "Write"
+        tool.permission_policy = None
+        tool.check_permissions.return_value = True
+        tool.validate_input.return_value = MagicMock(valid=True)
+        tool.args_schema = None
+        tool.is_readonly = False
+        tool.is_destructive = False
+        return tool
+
+    def test_committed_result_is_replayed_and_tool_not_reexecuted(self, tmp_path):
+        calls = []
+        tool = self._make_non_read_tool()
+        tool.func = lambda path: calls.append(path) or f"wrote {path}"
+        reg = MagicMock()
+        reg.get.return_value = tool
+        svc = ToolExecutionService()
+        call = ToolCall(id="c1", name="Write", arguments={"file_path": "a.txt"})
+        canon = canonical_arguments(call.arguments)
+        ik = derive_idempotency_key(
+            tool_id=call.name,
+            canonical_arguments=canon,
+            side_effect_class=side_effect_class_for_spec(tool),
+        )
+        assert ik != ""
+
+        auth = open_journal_authority(tmp_path, conversation_id="c", task_id="t",
+                                      run_id="r", thread_id="th", turn_id="tu")
+        # Simulate a previously committed result for the same idempotency key.
+        auth.emit("tool.execution.completed", {
+            "transaction_id": "ttx_old", "call_id": "c_old", "tool_id": "Write",
+            "status": "succeeded", "result_summary": "wrote a.txt", "full_ref": "ref://a",
+            "artifacts": ["art_1"], "idempotency_key": ik,
+        })
+
+        result = svc.execute(call, context=_ctx(), registry=reg, journal_authority=auth)
+
+        assert result.status == "completed"
+        assert result.metadata.get("idempotent_replay") is True
+        assert result.content == "wrote a.txt"
+        assert result.artifacts == ["art_1"]
+        assert calls == []  # never executed — replayed from journal
+
+    def test_read_tool_has_empty_key_and_still_executes(self, tmp_path):
+        calls = []
+        tool = MagicMock()
+        tool.name = "Read"
+        tool.permission_policy = None
+        tool.check_permissions.return_value = True
+        tool.validate_input.return_value = MagicMock(valid=True)
+        tool.args_schema = None
+        tool.is_readonly = True
+        tool.func = lambda path: calls.append(path) or "content"
+        reg = MagicMock()
+        reg.get.return_value = tool
+        svc = ToolExecutionService()
+        call = ToolCall(id="c1", name="Read", arguments={"path": "a.txt"})
+
+        result = svc.execute(call, context=_ctx(), registry=reg, journal_authority=object())
+
+        assert result.status == "completed"
+        assert result.metadata.get("idempotent_replay") is not True
+        assert calls == ["a.txt"]

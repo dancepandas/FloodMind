@@ -24,6 +24,14 @@ from floodmind.agent.native.types import (
 from floodmind.agent.runtime.contracts.tools import ToolCall, ToolResult
 from floodmind.agent.runtime.contracts.run_state import RunState
 from floodmind.agent.runtime.contracts.identity import new_id
+from floodmind.agent.runtime.contracts.tool_transaction import (
+    canonical_arguments,
+    arguments_sha256,
+)
+from floodmind.agent.runtime.services.idempotency import (
+    derive_idempotency_key,
+    side_effect_class_for_spec,
+)
 from floodmind.agent.runtime.services.journal_authority import JournalAuthority
 from floodmind.agent.native.event_bus import EventBus
 from floodmind.agent.native.message_builder import MessageBuilder
@@ -646,7 +654,32 @@ class NativeAgentExecutor:
                 return state
 
             transaction_id = new_id("transaction")
+            # §6.1/§6.5：先建立事务（tool.call.proposed，含幂等键），再发 started。
+            # 幂等键与 ToolExecutionService 基于同一 canonical 形态派生，保证一致。
+            spec = self._tool_registry.get(call.name) if self._tool_registry is not None else None
+            canon = canonical_arguments(call.arguments)
+            side_effect_class = side_effect_class_for_spec(spec)
+            idempotency_key = derive_idempotency_key(
+                tool_id=call.name,
+                canonical_arguments=canon,
+                side_effect_class=side_effect_class,
+            )
             if self._journal_authority is not None:
+                self._journal_authority.emit(
+                    "tool.call.proposed",
+                    {
+                        "transaction_id": transaction_id,
+                        "call_id": call.id,
+                        "tool_id": call.name,
+                        "tool_version": "1",
+                        "canonical_arguments": canon,
+                        "arguments_sha256": arguments_sha256(call.name, "1", canon),
+                        "side_effect_class": side_effect_class,
+                        "idempotency_key": idempotency_key,
+                        "preconditions": [],
+                    },
+                    call_id=call.id,
+                )
                 self._journal_authority.emit(
                     "tool.execution.started",
                     {
@@ -703,7 +736,7 @@ class NativeAgentExecutor:
                 state.consecutive_failures[call.name] = 0
 
             if state.consecutive_failures.get(call.name, 0) >= self.MAX_CONSECUTIVE_TOOL_FAILURES:
-                self._emit_tool_execution_result(transaction_id, call, result)
+                self._emit_tool_execution_result(transaction_id, call, result, idempotency_key=idempotency_key)
                 failure_msg = (
                     f"工具 {call.name} 已连续失败 {self.MAX_CONSECUTIVE_TOOL_FAILURES} 次，"
                     f"强制终止执行循环。请检查参数是否正确。"
@@ -715,7 +748,7 @@ class NativeAgentExecutor:
                 return state
 
             inline_content = result.content
-            self._emit_tool_execution_result(transaction_id, call, result)
+            self._emit_tool_execution_result(transaction_id, call, result, idempotency_key=idempotency_key)
 
             # 记录本轮工具调用/结果（写 memory 用）
             round_tool_records.append({
@@ -952,7 +985,12 @@ class NativeAgentExecutor:
                             content=denial_msg,
                             status="error",
                         )
-                        self._emit_tool_execution_result(transaction_id, pending_call, denied_result)
+                        self._emit_tool_execution_result(
+                            transaction_id,
+                            pending_call,
+                            denied_result,
+                            idempotency_key=self._tool_idempotency_key(pending_call),
+                        )
                 state.pending_tool_calls = []
                 state.pending_tool_transaction_id = ""
                 state.pending_ask_id = None
@@ -1008,7 +1046,12 @@ class NativeAgentExecutor:
         tool_input_str = json.dumps(first_call.arguments, ensure_ascii=False) if first_call.arguments else ""
         inline_content = result.content
         transaction_id = getattr(state, "pending_tool_transaction_id", "") or new_id("transaction")
-        self._emit_tool_execution_result(transaction_id, first_call, result)
+        self._emit_tool_execution_result(
+            transaction_id,
+            first_call,
+            result,
+            idempotency_key=self._tool_idempotency_key(first_call),
+        )
         state.pending_tool_transaction_id = ""
         state._pending_round_tool_records = [{
             "tool_name": first_call.name,
@@ -1104,13 +1147,38 @@ class NativeAgentExecutor:
             return all(s == input_sig for _, s in last_n)
         return False
 
+    def _tool_idempotency_key(self, call: ToolCall) -> str:
+        """为单个 call 派生幂等键（与 tool.call.proposed 同源，§6.5）。"""
+        spec = self._tool_registry.get(call.name) if self._tool_registry is not None else None
+        return derive_idempotency_key(
+            tool_id=call.name,
+            canonical_arguments=canonical_arguments(call.arguments),
+            side_effect_class=side_effect_class_for_spec(spec),
+        )
+
     def _emit_tool_execution_result(
         self,
         transaction_id: str,
         call: ToolCall,
         result: ToolResult,
+        *,
+        idempotency_key: str = "",
     ) -> None:
         if self._journal_authority is None:
+            return
+        # 结果不确定（超时等）：发 indeterminate，事务保留 pending 供 reconcile。
+        if (result.metadata or {}).get("indeterminate"):
+            self._journal_authority.emit(
+                "tool.execution.indeterminate",
+                {
+                    "transaction_id": transaction_id,
+                    "call_id": call.id,
+                    "tool_id": call.name,
+                    "reason": "timeout",
+                    "idempotency_key": idempotency_key,
+                },
+                call_id=call.id,
+            )
             return
         succeeded = result.status in {"completed", "succeeded", "success"}
         self._journal_authority.emit(
@@ -1123,6 +1191,7 @@ class NativeAgentExecutor:
                 "result_summary": result.content or "",
                 "full_ref": str((result.metadata or {}).get("full_ref", "")),
                 "artifacts": list(result.artifacts or []),
+                "idempotency_key": idempotency_key,
             },
             call_id=call.id,
         )

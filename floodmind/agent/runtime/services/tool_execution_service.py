@@ -38,6 +38,12 @@ from floodmind.agent.runtime.contracts.permissions import (
 )
 from floodmind.agent.runtime.contracts.paths import PathResolveRequest, PathResolveResult
 from floodmind.agent.runtime.contracts.tools import ToolCall, ToolExecutionContext, ToolResult, ToolSpec
+from floodmind.agent.runtime.contracts.tool_transaction import canonical_arguments
+from floodmind.agent.runtime.services.idempotency import (
+    derive_idempotency_key,
+    find_committed_result,
+    side_effect_class_for_spec,
+)
 from floodmind.agent.runtime.services.tracing_service import TracingService
 
 logger = logging.getLogger(__name__)
@@ -347,6 +353,28 @@ class ToolExecutionService:
                 content=feedback.to_output_string(),
                 status="error",
             )
+
+        # §6.5 幂等：非 read 且有幂等键，先查已提交结果，命中直接复用（不重执行）。
+        # 与 executor 的 tool.call.proposed 使用同一 canonical 形态（call.arguments），
+        # 保证幂等键一致；dummy journal_authority（无 read_after）跳过查询。
+        canon = canonical_arguments(call.arguments)
+        side_effect_class = side_effect_class_for_spec(tool)
+        idempotency_key = derive_idempotency_key(
+            tool_id=call.name,
+            canonical_arguments=canon,
+            side_effect_class=side_effect_class,
+        )
+        if idempotency_key and hasattr(journal_authority, "read_after"):
+            committed = find_committed_result(journal_authority, idempotency_key)
+            if committed is not None:
+                return ToolResult(
+                    tool_call_id=call.id,
+                    name=call.name,
+                    content=committed["result_summary"],
+                    status="completed",
+                    artifacts=committed["artifacts"],
+                    metadata={"idempotent_replay": True, "full_ref": committed["full_ref"]},
+                )
 
         try:
             ctx = contextvars.copy_context()
