@@ -1,12 +1,20 @@
+import threading
+import time
 from unittest.mock import MagicMock
 
 from floodmind.agent.native.event_bus import EventBus
 from floodmind.agent.native.executor import NativeAgentExecutor
 from floodmind.agent.native.types import AgentLoopState, ModelEvent, RunContext
-from floodmind.agent.runtime.contracts.permissions import PermissionAskRequest, PermissionAskResponse
+from floodmind.agent.runtime.contracts.permissions import (
+    PermissionAskRequest,
+    PermissionAskResponse,
+    PermissionRequest,
+    ToolPermissionPolicy,
+)
 from floodmind.agent.runtime.contracts.tools import ToolCall, ToolResult
 from floodmind.agent.runtime.services.ask_service import AskService
 from floodmind.agent.runtime.services.journal_authority import open_journal_authority
+from floodmind.agent.runtime.services.permission_service import PermissionService
 from floodmind.agent.runtime.services.history_projection import project_current
 from floodmind.agent.runtime.reducer import reduce, initial_run_state
 
@@ -223,3 +231,55 @@ def test_approval_authority_is_bound_to_pending_ask(tmp_path):
         "call_id": "call-approval",
         "approved": True,
     }
+
+
+def test_blocking_permission_ask_emits_matching_events_once(tmp_path):
+    auth = open_journal_authority(
+        tmp_path,
+        conversation_id="c",
+        task_id="t",
+        run_id="r-blocking-approval",
+        thread_id="th",
+        turn_id="tu",
+    )
+    ask_service = AskService(timeout=3.0)
+    ask_service.set_emit_fn(lambda _event: None, session_id="session")
+    permission_service = PermissionService(ask_service=ask_service)
+    request = PermissionRequest(
+        session_id="session",
+        call_id="call-blocking",
+        tool_name="DangerousTool",
+        tool_input={"path": "x.txt"},
+        permission_policy=ToolPermissionPolicy(policy_type="ask", reason="confirm"),
+    )
+    decision = {}
+
+    worker = threading.Thread(
+        target=lambda: decision.setdefault(
+            "value", permission_service.check(request, journal_authority=auth)
+        )
+    )
+    worker.start()
+    for _ in range(100):
+        pending = ask_service.pending("session")
+        if pending:
+            break
+        time.sleep(0.01)
+    assert pending
+    ask_id = pending[0].ask_id
+    assert ask_service.respond(
+        PermissionAskResponse(session_id="session", ask_id=ask_id, approved=True)
+    )
+    worker.join(timeout=3.0)
+    assert not worker.is_alive()
+
+    approval_events = [
+        event for event in auth.read_after(0)
+        if event.event_type.startswith("tool.approval.")
+    ]
+    assert [event.event_type for event in approval_events] == [
+        "tool.approval.requested",
+        "tool.approval.resolved",
+    ]
+    assert {event.payload["ask_id"] for event in approval_events} == {ask_id}
+    assert {event.payload["call_id"] for event in approval_events} == {"call-blocking"}

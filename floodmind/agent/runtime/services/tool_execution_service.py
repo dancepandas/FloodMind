@@ -194,7 +194,14 @@ class ToolExecutionService:
         perm_input = dict(clean_arguments) if clean_arguments else {}
         perm_input["__call_id"] = call.id
 
-        perm_decision = self._check_permissions(tool, perm_input, session_id, agent_tier, mode)
+        perm_decision = self._check_permissions(
+            tool,
+            perm_input,
+            session_id,
+            agent_tier,
+            mode,
+            journal_authority=journal_authority,
+        )
         # Host-level 决策钩子：基础 SDK decision → hook → tracing 记录最终 decision → 执行，
         # 保证日志与实际行为一致。
         perm_decision = self._apply_permission_decision_hook(tool, perm_input, perm_decision)
@@ -490,6 +497,8 @@ class ToolExecutionService:
         session_id: str,
         agent_tier: str = "main",
         mode: str = "execution",
+        *,
+        journal_authority: Any = None,
     ) -> PermissionDecision:
         # SDK permission_handler 钩子（宿主最高裁决）：True = 宿主显式放行 → 直接 ALLOW 并跳过
         # permission_service（宿主放行是最高权威）；False = 宿主拒绝 → DENY；None = 宿主无意见 →
@@ -528,7 +537,10 @@ class ToolExecutionService:
             check_fn = getattr(tool, "check_permissions_fn", None)
             if check_fn is not None:
                 request._check_permissions_fn = check_fn
-            return self._permission_service.check(request)
+            return self._permission_service.check(
+                request,
+                journal_authority=journal_authority,
+            )
 
         result = tool.check_permissions(perm_input)
         if hasattr(result, "behavior"):

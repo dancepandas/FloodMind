@@ -91,7 +91,12 @@ class PermissionService:
         "UpdateProjectInstructions",  # 写 AGENTS.md
     })
 
-    def check(self, request: PermissionRequest) -> PermissionDecision:
+    def check(
+        self,
+        request: PermissionRequest,
+        *,
+        journal_authority: Any = None,
+    ) -> PermissionDecision:
         tool_policy_result = self._check_tool_policy(request)
 
         if tool_policy_result.behavior == PermissionBehavior.DENY:
@@ -111,7 +116,11 @@ class PermissionService:
                 return decision
 
         if tool_policy_result.behavior == PermissionBehavior.ASK:
-            return self._handle_ask(request, tool_policy_result.reason)
+            return self._handle_ask(
+                request,
+                tool_policy_result.reason,
+                journal_authority=journal_authority,
+            )
 
         for rule in self._deny_rules:
             if rule.matches(request.tool_name, request.tool_input, request.session_id):
@@ -344,7 +353,13 @@ class PermissionService:
 
         return policy_result
 
-    def _handle_ask(self, request: PermissionRequest, reason: str) -> PermissionDecision:
+    def _handle_ask(
+        self,
+        request: PermissionRequest,
+        reason: str,
+        *,
+        journal_authority: Any = None,
+    ) -> PermissionDecision:
         if self._ask_service is None:
             logger.warning("PermissionService: AskService 未设置，ASK 自动拒绝")
             return PermissionDecision(behavior=PermissionBehavior.DENY, reason=f"需要用户确认: {reason}（AskService 不可用）")
@@ -353,13 +368,16 @@ class PermissionService:
         call_id = request.call_id
         clean_input = {k: v for k, v in request.tool_input.items() if k != "__call_id"} if isinstance(request.tool_input, dict) else request.tool_input
 
-        approved = self._ask_service.request(PermissionAskRequest(
-            session_id=request.session_id,
-            call_id=call_id,
-            tool_name=request.tool_name,
-            reason=reason,
-            tool_input=clean_input,
-        ))
+        approved = self._ask_service.request(
+            PermissionAskRequest(
+                session_id=request.session_id,
+                call_id=call_id,
+                tool_name=request.tool_name,
+                reason=reason,
+                tool_input=clean_input,
+            ),
+            journal_authority=journal_authority,
+        )
 
         if approved:
             policy = request.permission_policy

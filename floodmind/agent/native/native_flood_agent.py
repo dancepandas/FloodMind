@@ -2619,13 +2619,16 @@ class NativeFloodAgent:
         clean_input = {k: v for k, v in tool_input.items() if k != "__call_id"} if isinstance(tool_input, dict) else tool_input
         bridge = get_ask_service()
         from floodmind.agent.runtime.contracts.permissions import PermissionAskRequest
-        return bridge.request(PermissionAskRequest(
-            session_id=self.session_id,
-            call_id=call_id,
-            tool_name=tool_name,
-            reason=reason,
-            tool_input=clean_input,
-        ))
+        return bridge.request(
+            PermissionAskRequest(
+                session_id=self.session_id,
+                call_id=call_id,
+                tool_name=tool_name,
+                reason=reason,
+                tool_input=clean_input,
+            ),
+            journal_authority=self._journal_authority,
+        )
 
     def _build_experience_context(self) -> str:
         """注入经验摘要到上下文（渐进压缩，只给摘要而非全部叶子），带版本号缓存"""

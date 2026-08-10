@@ -82,3 +82,13 @@ Status: DONE.
 - Tests: expanded `tests/test_execution_events.py` with a real executor terminal-failure test, approval requested/resolved exactly-once coverage, terminal exactly-once coverage, and a pending-ASK authority-binding test. Red run: `2 failed, 1 passed`; focused green run: `100 passed` across execution events, tool execution, permission, host permission, and executor tests; the expanded event file then passed `4 passed`.
 - Commit SHA: recorded in the fix-round final handoff.
 - Concerns: none beyond the existing deferred ArtifactStore concern above.
+
+## Fix round 2
+
+Status: DONE.
+
+- Centralized `tool.approval.requested` in `AskService.start_ask` after host event delivery succeeds. Both blocking and non-blocking ASK lifecycles now emit the canonical request exactly once with JSON-string arguments; the duplicate executor emission was removed.
+- Threaded the run authority through `ToolExecutionService._check_permissions`, `PermissionService.check/_handle_ask`, and `NativeFloodAgent._on_permission_ask`, covering both controller-confirmed production blocking ASK paths. Standalone non-journal callers retain normal ASK behavior with an explicit warning, while production run paths bind the canonical authority.
+- Added a blocking `PermissionService.check` regression that runs the approval response from another thread and asserts exactly one requested/resolved pair with matching `ask_id` and `call_id`. Red evidence: the test failed because `PermissionService.check` did not accept the authority; green evidence: `tests/test_execution_events.py` passed `5 passed`.
+- Commit SHA: recorded in the fix-round final handoff.
+- Concerns: none beyond the existing deferred ArtifactStore concern.

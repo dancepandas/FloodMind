@@ -611,18 +611,6 @@ class NativeAgentExecutor:
                 state.pending_tool_transaction_id = transaction_id
                 state.pending_tool_calls = tool_calls[idx:]  # 包含当前这个
                 state.pending_ask_id = result.metadata.get("ask_id")
-                if self._journal_authority is not None:
-                    self._journal_authority.emit(
-                        "tool.approval.requested",
-                        {
-                            "call_id": call.id,
-                            "ask_id": state.pending_ask_id or "",
-                            "tool_name": call.name,
-                            "reason": result.metadata.get("reason", ""),
-                            "arguments": tool_input_str,
-                        },
-                        call_id=call.id,
-                    )
                 state.status = "awaiting_permission"
                 return state
 

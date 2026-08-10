@@ -11,6 +11,7 @@ AskService — 结构化 ASK 确认服务
 - request() 保证先发 action_start 再发 permission_ask
 """
 
+import json
 import logging
 import threading
 import time
@@ -31,7 +32,7 @@ _DEFAULT_TIMEOUT: Optional[float] = 300.0  # 5 minutes default timeout
 class _PendingAsk:
     __slots__ = (
         "ask_id", "session_id", "call_id", "tool_name", "reason", "tool_input",
-        "event", "result", "created_at", "journal_authority",
+        "event", "result", "created_at", "accepting_response", "journal_authority",
     )
 
     def __init__(
@@ -53,6 +54,7 @@ class _PendingAsk:
         self.event = threading.Event()
         self.result: Optional[bool] = None
         self.created_at = time.time()
+        self.accepting_response = True
         self.journal_authority = journal_authority
 
 
@@ -136,6 +138,24 @@ class AskService:
                 self._pending.pop(ask_id, None)
             return None
 
+        if journal_authority is not None:
+            journal_authority.emit(
+                "tool.approval.requested",
+                {
+                    "ask_id": ask_id,
+                    "call_id": ask.call_id,
+                    "tool_name": ask.tool_name,
+                    "reason": ask.reason,
+                    "arguments": json.dumps(ask.tool_input, ensure_ascii=False),
+                },
+                call_id=ask.call_id,
+            )
+        else:
+            logger.warning(
+                "AskService: ASK %s 未绑定 journal authority，跳过 approval requested 事件",
+                ask_id,
+            )
+
         if self._timeout is None:
             logger.info("AskService: ASK %s 已发射，等待用户响应", ask_id)
         else:
@@ -158,15 +178,16 @@ class AskService:
             return pending.result
 
     def wait_response(self, ask_id: str, timeout: Optional[float] = None) -> bool:
-        """阻塞等待 ask_id 对应的用户响应。
+        """阻塞等待 ask_id 对应的用户响应，并在返回前消费该 ASK。"""
+        return self._wait_response(ask_id, timeout=timeout, remove=True)
 
-        Args:
-            ask_id: ASK ID
-            timeout: 等待超时秒数，None 表示使用默认超时
-
-        Returns:
-            True: 用户允许；False: 用户拒绝或超时
-        """
+    def _wait_response(
+        self,
+        ask_id: str,
+        timeout: Optional[float] = None,
+        *,
+        remove: bool,
+    ) -> bool:
         with self._lock:
             pending = self._pending.get(ask_id)
             if pending is None:
@@ -177,9 +198,17 @@ class AskService:
         pending.event.wait(timeout=wait_timeout)
 
         with self._lock:
-            self._pending.pop(ask_id, None)
+            if pending.result is None:
+                # Close the response window atomically with observing the timeout so
+                # a late response cannot turn an already-denied request into approval.
+                pending.accepting_response = False
+                timed_out = True
+            else:
+                timed_out = False
+            if remove:
+                self._pending.pop(ask_id, None)
 
-        if wait_timeout is not None and pending.result is None:
+        if timed_out:
             logger.warning("AskService: ASK %s 超时，自动拒绝", ask_id)
             return False
 
@@ -191,25 +220,29 @@ class AskService:
         *,
         journal_authority: Any = None,
     ) -> bool:
-        """兼容旧接口：启动 ASK 并阻塞等待响应。"""
+        """兼容旧接口：启动 ASK、等待响应、发射结果事件后再清理。"""
         ask_id = self.start_ask(ask, journal_authority=journal_authority)
         if ask_id is None:
             return False
-        approved = self.wait_response(ask_id)
+        approved = self._wait_response(ask_id, remove=False)
 
-        # 发射 permission_resolved 事件
+        # Keep the pending record available through event delivery.  Holding the
+        # re-entrant lock makes emit-and-remove one lifecycle transition relative
+        # to responders and cancellation.
         with self._lock:
             pending = self._pending.get(ask_id)
-            emit_fn = self._emit_fns.get(ask.session_id) or self._emit_fn if pending else None
-
-        if emit_fn and pending:
-            emit_fn({
-                "type": "permission_resolved",
-                "session_id": pending.session_id,
-                "call_id": pending.call_id,
-                "ask_id": ask_id,
-                "approved": approved,
-            })
+            try:
+                emit_fn = self._emit_fns.get(ask.session_id) or self._emit_fn
+                if emit_fn and pending:
+                    emit_fn({
+                        "type": "permission_resolved",
+                        "session_id": pending.session_id,
+                        "call_id": pending.call_id,
+                        "ask_id": ask_id,
+                        "approved": approved,
+                    })
+            finally:
+                self._pending.pop(ask_id, None)
 
         logger.info("AskService: ASK %s 用户响应: %s", ask_id, "允许" if approved else "拒绝")
         return approved
@@ -218,8 +251,8 @@ class AskService:
         with self._lock:
             pending = self._pending.get(response.ask_id)
 
-            if pending is None:
-                logger.warning("AskService: respond 收到未知 ask_id %s", response.ask_id)
+            if pending is None or not pending.accepting_response:
+                logger.warning("AskService: respond 收到未知或已结束 ask_id %s", response.ask_id)
                 return False
 
             if not response.session_id or not pending.session_id:
