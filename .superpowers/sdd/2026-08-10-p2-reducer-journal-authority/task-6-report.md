@@ -47,3 +47,14 @@ Conversation-wide ordering uses event `recorded_at`, then per-run sequence and e
 - Full suite: `952 passed, 1 skipped` in 52.01s.
 - Concern: cross-run ordering still assumes sequential runs; concurrent runs for the same conversation remain explicitly out of scope until child threads share one run.
 - Fix commit: pending at section-write time; final response records the SHA.
+
+## Fix round 2
+
+- Status: DONE.
+- Stale-authority fix: `_run_loop` now clears the agent, executor, and memory run-scoped Journal bindings in `finally`. Cleanup is ownership-checked so an older run cannot clear a newer authority. After cleanup, `enqueue_user_message` returns `False`; idle configuration notices are not journaled, while the chat queued path continues to work only during an active run.
+- Tie-break test fix: the projection test now constructs equal-`recorded_at` events across directory-opposite runs and asserts the exact order produced by `(recorded_at, sequence, event_id)`: sequence one first, then the sequence-two events ordered by event ID. Directory traversal alone would fail the assertion.
+- TDD: authority cleanup test failed first because `_deactivate_run_authority` did not exist; it passes after implementation.
+- Focused verification: `6 passed`.
+- Full suite: `953 passed, 1 skipped` in 53.85s.
+- Fix commit: pending at section-write time; final response records the SHA.
+- Concern: cross-run ordering continues to assume sequential conversation runs, as documented in fix round 1.

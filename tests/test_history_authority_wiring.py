@@ -13,6 +13,18 @@ def test_enqueue_user_message_uses_agent_held_authority():
     )
 
 
+def test_deactivate_run_clears_authority_and_disables_enqueue():
+    agent = NativeFloodAgent.__new__(NativeFloodAgent)
+    authority = MagicMock()
+    agent._journal_authority = authority
+
+    agent._deactivate_run_authority(authority)
+
+    assert agent._journal_authority is None
+    assert agent.enqueue_user_message("idle notice") is False
+    authority.emit.assert_not_called()
+
+
 def test_enqueue_user_message_reports_unbound_authority():
     agent = NativeFloodAgent.__new__(NativeFloodAgent)
     agent._journal_authority = None

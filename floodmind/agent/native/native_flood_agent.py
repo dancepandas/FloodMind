@@ -2750,6 +2750,17 @@ class NativeFloodAgent:
             "scripts_dir": str(ws.scripts_dir or ""),
         }
 
+    def _deactivate_run_authority(self, authority: Any) -> None:
+        """Clear run-scoped Journal bindings only if this run still owns them."""
+        if self._journal_authority is not authority:
+            return
+        self._journal_authority = None
+        if hasattr(self, "_orchestrator_executor"):
+            self._orchestrator_executor._journal_authority = None
+        memory = getattr(self, "memory", None)
+        if memory is not None and hasattr(memory, "bind_journal"):
+            memory.bind_journal(None, None, "")
+
     def enqueue_user_message(self, content: str) -> bool:
         """Append a queued user message through the active run's Journal authority."""
         authority = self._journal_authority
@@ -2793,6 +2804,7 @@ class NativeFloodAgent:
                 # 提前取出，保证 finally 恢复时变量一定存在
                 saved_thinking = self._model_client.enable_thinking
                 effective_session_id = resume_session_id or self.session_id
+                auth = None
                 try:
                     logger.info("[RUN_LOOP] === _run_loop started, session=%s ===", self.session_id)
 
@@ -2986,6 +2998,8 @@ class NativeFloodAgent:
                     else:
                         q.put({"type": "error", "content": error_str})
                 finally:
+                    if auth is not None:
+                        self._deactivate_run_authority(auth)
                     self._current_run_context = None
                     self._model_client.enable_thinking = saved_thinking
                     try:
