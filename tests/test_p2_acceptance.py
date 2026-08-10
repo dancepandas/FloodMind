@@ -9,6 +9,15 @@ from floodmind.agent.runtime.reducer import initial_run_state, reduce
 from floodmind.agent.runtime.contracts.canonical_events import EventEnvelope
 
 
+def _is_valid_json_event(line: str) -> bool:
+    """一行是否是可解析的完整 EventEnvelope（用于验证修复后无撕裂残片）。"""
+    try:
+        EventEnvelope.model_validate_json(line)
+        return True
+    except Exception:
+        return False
+
+
 def _scenario(auth):
     auth.emit("thread.message.sent", {"content": "q1", "turn_index": 0})
     auth.emit("model.attempt.completed", {"attempt_id": "a1", "terminal_reason": "tool_calls",
@@ -70,10 +79,33 @@ def test_half_written_tail_recoverable(tmp_path):
     _scenario(auth)
     writer = auth._writer
     seg = sorted(writer._journal_dir.glob("events-*.jsonl"))[-1]
+
+    # 写入撕裂尾并证明它确实在 segment 里——否则"修复后消失"的断言没有区分力。
+    torn_marker = '"event_type": "partial'
     with seg.open("a", encoding="utf-8") as f:
         f.write('{"event_type": "partial')
+    assert torn_marker in seg.read_text(encoding="utf-8")
+
+    # repair_tail 必须实际截断撕裂行，而不是靠 read_from 读取时跳过（read_from 会
+    # except 掉不可解析行）。T3 的 repair_tail 单测覆盖截断本身，这里验证的是
+    # 半写尾部确实被物理移除。
     writer.repair_tail()
-    assert auth.replay(0).status.value == "completed"  # 恢复后重放不受半写尾部影响
+    after = seg.read_text(encoding="utf-8")
+    assert torn_marker not in after
+    assert all(
+        not line.strip() or _is_valid_json_event(line.strip())
+        for line in after.splitlines()
+    )
+
+    # 端到端恢复：重放得到场景自然终态 completed（不受半写尾部影响）
+    assert auth.replay(0).status.value == "completed"
+
+    # 修复后 Journal 仍可连续追加：sequence 连续、无 JournalWriteConflict
+    auth.emit("model.attempt.completed", {"attempt_id": "a3", "terminal_reason": "completed",
+        "content": "after", "reasoning": "", "tool_calls": [], "is_final": True,
+        "usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}})
+    assert writer.current_sequence() == 7
+    assert len(writer.read_from(6)) == 1
 
 
 def test_old_history_sources_offline():
