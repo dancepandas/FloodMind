@@ -297,6 +297,67 @@ def test_append_many_write_failure_leaves_no_torn_prefix(tmp_path, monkeypatch):
     assert len(ids) == len(set(ids))
 
 
+def test_append_many_partial_write_failure_recovers_truthfully(tmp_path, monkeypatch):
+    w = JournalWriter(tmp_path, "run_1")
+    evs = [_mk_event("thread.message.sent", {"k": "a", "content": "hi"}),
+           _mk_event("model.attempt.completed", {"k": "b", "content": "ok"})]
+    real_path_open = Path.open
+
+    class _FlakyWriteFile:
+        """真实二进制文件句柄的包装：第一次 write 只写前缀（截断最后一行）后抛错。"""
+
+        def __init__(self, real):
+            self._real = real
+
+        def write(self, data):
+            self._real.write(data[:-5])  # 写掉除最后 5 字节外的全部 → 最后一行被截断
+            raise OSError("injected partial write failure")
+
+        def flush(self):
+            return self._real.flush()
+
+        def fileno(self):
+            return self._real.fileno()
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return self._real.__exit__(*exc)
+
+    def flaky_open(self, mode="r", buffering=-1, encoding=None, errors=None, newline=None):
+        if mode == "ab" and self.name.endswith(".jsonl"):
+            return _FlakyWriteFile(real_path_open(self, mode, buffering, encoding, errors, newline))
+        return real_path_open(self, mode, buffering, encoding, errors, newline)
+
+    monkeypatch.setattr(Path, "open", flaky_open)
+    with pytest.raises(OSError):
+        w.append_many(evs, expected_last_sequence=0)
+    monkeypatch.undo()
+
+    # 无撕裂行：每个非空行都能解析为 EventEnvelope
+    seg = tmp_path / "runs" / "run_1" / "journal" / "events-000001.jsonl"
+    lines = [l for l in seg.read_text(encoding="utf-8").splitlines() if l.strip()]
+    parsed = [EventEnvelope.model_validate_json(l) for l in lines]
+    seqs = [e.sequence for e in parsed]
+    assert seqs == sorted(seqs)
+    assert len(seqs) == len(set(seqs))  # 无重复
+    assert seqs == list(range(1, len(seqs) + 1))  # 连续
+
+    # reconcile 恢复的状态只反映完整落盘的事件（truthful）
+    assert w.current_sequence() == (seqs[-1] if seqs else 0)
+    assert w.sealed("evt_a") is not None  # 完整行已落盘
+    assert w.sealed("evt_b") is None      # 撕裂尾被 repair_tail 截断，未落盘
+
+    # 后续全新组 append_many 成功，sequence 连续且不重复
+    evs2 = [_mk_event("thread.message.sent", {"k": "n", "content": "new"})]
+    sealed2 = w.append_many(evs2, expected_last_sequence=w.current_sequence())
+    assert sealed2[0].sequence == (seqs[-1] + 1 if seqs else 1)
+    all_events = w.read_from(0)
+    ids = [x.event_id for x in all_events]
+    assert len(ids) == len(set(ids))
+
+
 def test_journal_dir_override(tmp_path):
     custom = tmp_path / "custom" / "runs" / "run_9" / "journal"
     default_dir = tmp_path / "runs" / "run_9" / "journal"

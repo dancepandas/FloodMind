@@ -5,6 +5,13 @@ accelerator that is reconciled against the segments on every load, so a crash
 between a segment append and an index save can never re-use a sequence or hash.
 Appends take a cross-platform file lock so concurrent writer instances against
 the same run observe each other's tail and raise on CAS conflicts.
+
+Group commits (append_many) are a single write under the file lock — atomic
+w.r.t. concurrent writers, but NOT filesystem-level all-or-none atomicity.
+On an OS-level write/flush/fsync failure the segment is repaired to the last
+full line (repair_tail) and reconciled before re-raising: a clean committed
+prefix may remain, a torn tail never does. Callers must re-read after a failed
+group append and retry only the uncommitted remainder.
 """
 
 import hashlib
@@ -248,6 +255,13 @@ class JournalWriter:
         - 全新组：无任何 id 已封存 → CAS 校验后整体写入；
         - 整组重试：全部 id 已封存、内容语义一致、且封存序列连续（组身份由 journal 自身证明）→ 原样返回；
         - 其余（部分重叠 / 内容不符 / 从无关组拼装出非连续序列）→ ValueError，绝不静默当作幂等。
+
+        恢复契约（不承诺文件系统级 all-or-none 原子性）：
+        - 整组在文件锁内以单次 write 提交，对并发写者原子；
+        - 若 OS 级 write/flush/fsync 失败，本方法会 repair_tail()（截断到最后一个完整行）并
+          _reconcile_from_journal() 后再抛出——可能残留干净的已提交前缀，但绝不残留撕裂行；
+        - 调用方失败后应通过 read_from(after_sequence=cursor) 重读对齐，仅重试未提交的余量
+          （partial-overlap 的 ValueError 正是触发该重试的信号）。
         """
         if not events:
             return []
