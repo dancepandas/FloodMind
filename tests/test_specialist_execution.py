@@ -75,6 +75,35 @@ def test_parallel_specialist_tool_loaders_are_clean_and_isolated(tmp_path):
     assert first_registry.get("GetTool") is not second_registry.get("GetTool")
 
 
+def test_specialist_run_injects_background_task_service(tmp_path, monkeypatch):
+    agent = _specialist_agent(tmp_path)
+    captured = {}
+
+    class CapturingExecutor:
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+
+        def run_from_state(self, context, state):
+            return AgentResult(final_output="done", reasoning="")
+
+    monkeypatch.setattr(
+        "floodmind.agent.native.native_flood_agent.NativeAgentExecutor",
+        CapturingExecutor,
+    )
+    agent._run_specialist_task(
+        task_text="run background work",
+        skill_name="",
+        parent_context=RunContext(
+            session_id="parent",
+            user_text="task",
+            output_dir=str(tmp_path / "parent"),
+        ),
+        step_key="step-bg",
+    )
+
+    assert captured["background_task_service"] is agent._background_task_service
+
+
 def test_specialist_copies_only_artifacts_created_during_run(tmp_path, monkeypatch):
     agent = _specialist_agent(tmp_path)
     parent_output = tmp_path / "parent"

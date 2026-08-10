@@ -607,6 +607,7 @@ class NativeFloodAgent:
             tracing_service=self._tracing_service,
             context_compressor=specialist_compressor,
             context_window=context_window,
+            background_task_service=self._background_task_service,
         )
 
     def _register_mcp_connection(self, server_name: str, conn: Any) -> List[ToolSpec]:
@@ -2094,6 +2095,7 @@ class NativeFloodAgent:
                 checkpoint_service=self._checkpoint_service,
                 execution_journal_service=self._journal_service,
                 tracing_service=self._tracing_service,
+                background_task_service=self._background_task_service,
             )
 
             # Baseline before any specialist tool can write.  Detection and copying

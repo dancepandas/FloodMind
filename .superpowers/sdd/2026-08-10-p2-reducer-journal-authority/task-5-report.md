@@ -73,3 +73,12 @@ Commit SHA: `211512d` (report added in this commit; the SHA is recorded here imm
 
 - The working tree already contained extensive unrelated uncommitted changes before Task 5. Only explicit Task 5 paths are staged for this commit; unrelated paths remain unstaged.
 - Several Task 5 target files also had pre-existing modifications, so path-level staging necessarily includes the current versions of those target files as directed by the brief.
+
+## Review fix round 1/5
+
+- Finding: bare-mode and per-run specialist `NativeAgentExecutor` constructions omitted `background_task_service`, preventing specialist loops from draining background completion notifications.
+- Fix: explicitly passed `self._background_task_service` at both missing specialist construction sites; audited all four persistent main/specialist constructors plus the per-run specialist constructor.
+- Regression test: `test_specialist_run_injects_background_task_service` captures per-run constructor kwargs and asserts identity with the agent-owned service. It failed first with `KeyError: 'background_task_service'` and passed after the fix.
+- Targeted verification: `7 passed`.
+- Full suite: `947 passed, 1 skipped` in 52.78 seconds.
+- Fix commit: recorded in the coordinator return after commit.
