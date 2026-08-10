@@ -47,3 +47,45 @@ def test_read_from_replays_in_order(tmp_path: Path):
     w.append(_evt(2))
     assert [e.sequence for e in w.read_from()] == [1, 2]
     assert [e.sequence for e in w.read_from(after_sequence=1)] == [2]
+
+
+def test_cas_conflict_across_writer_instances(tmp_path: Path):
+    w1 = JournalWriter(tmp_path, "run_1")
+    w2 = JournalWriter(tmp_path, "run_1")
+    w1.append(_evt(1))
+    # w2 was constructed before the append; a stale expected value must conflict
+    # against the authoritative on-disk tail, not a cached in-memory value.
+    with pytest.raises(JournalWriteConflict):
+        w2.append(_evt(2), expected_last_sequence=0)
+
+
+def test_duplicate_event_id_returns_persisted_sealed_envelope(tmp_path: Path):
+    w = JournalWriter(tmp_path, "run_1")
+    first = w.append(_evt(1, event_id="evt_x"))
+    again = w.append(_evt(2, event_id="evt_x"))
+    assert again.event_id == first.event_id
+    assert again.sequence == first.sequence
+    assert again.integrity.event_sha256 == first.integrity.event_sha256
+
+
+def test_duplicate_event_id_with_wrong_cas_raises(tmp_path: Path):
+    w = JournalWriter(tmp_path, "run_1")
+    w.append(_evt(1, event_id="evt_x"))
+    with pytest.raises(JournalWriteConflict):
+        w.append(_evt(2, event_id="evt_x"), expected_last_sequence=5)
+
+
+def test_crash_between_append_and_index_save_recovers_sequence(tmp_path: Path):
+    w = JournalWriter(tmp_path, "run_1")
+    w.append(_evt(1))
+    # Simulate a crash window: JSONL already holds the event but index.json still
+    # points at sequence 0. A fresh writer must reconcile to the journal tail.
+    index = tmp_path / "runs" / "run_1" / "journal" / "index.json"
+    index.write_text(
+        '{"run_id":"run_1","last_sequence":0,"last_event_sha256":"","current_segment":1,"event_ids":[]}',
+        encoding="utf-8",
+    )
+    w2 = JournalWriter(tmp_path, "run_1")
+    assert w2.current_sequence() == 1
+    w2.append(_evt(2))
+    assert [e.sequence for e in w2.read_from()] == [1, 2]
