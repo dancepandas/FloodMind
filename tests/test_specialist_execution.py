@@ -45,7 +45,6 @@ def _specialist_agent(tmp_path: Path) -> NativeFloodAgent:
     agent._tool_executor = None
     agent._max_iterations = 4
     agent._checkpoint_service = None
-    agent._journal_service = None
     agent._tracing_service = None
     agent._path_service = PathService(project_root=tmp_path)
     agent._permission_service = PermissionService(path_service=agent._path_service)

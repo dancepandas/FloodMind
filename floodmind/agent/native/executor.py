@@ -29,7 +29,6 @@ from floodmind.agent.native.message_builder import MessageBuilder
 from floodmind.agent.native.model_client import ModelClient
 from floodmind.agent.native.retry import RetryPolicy, is_retryable_error
 
-from floodmind.agent.runtime.services.execution_journal_service import ExecutionJournalService
 from floodmind.agent.runtime.services.tracing_service import TracingService
 
 # 上下文压缩（可选）
@@ -67,7 +66,6 @@ class NativeAgentExecutor:
         tool_registry: Optional[Any] = None,
         tool_loader: Optional[Any] = None,
         checkpoint_service: Optional[Any] = None,
-        execution_journal_service: Optional[ExecutionJournalService] = None,
         tracing_service: Optional[TracingService] = None,
         context_compressor: Optional[ContextCompressor] = None,
         context_window: int = 128000,
@@ -91,7 +89,6 @@ class NativeAgentExecutor:
         self._tool_registry = tool_registry
         self._tool_loader = tool_loader
         self._checkpoint_service = checkpoint_service
-        self._journal_service = execution_journal_service
         self._tracing_service = tracing_service
         self._context_compressor = context_compressor
         self.context_window = context_window
@@ -210,6 +207,29 @@ class NativeAgentExecutor:
         if self._tracing_service is not None:
             self._tracing_service.flush(context.session_id)
 
+        if self._journal_authority is not None:
+            terminal_reason = (
+                state.terminal_reason.code
+                if state.terminal_reason is not None
+                else state.status
+            )
+            if state.status == "completed":
+                self._journal_authority.emit(
+                    "run.completed",
+                    {
+                        "final_output": state.final_output,
+                        "terminal_reason": terminal_reason,
+                    },
+                )
+            else:
+                self._journal_authority.emit(
+                    "run.failed",
+                    {
+                        "error": state.final_output,
+                        "terminal_reason": terminal_reason,
+                    },
+                )
+
         return self._build_result(state)
 
     # --- 状态处理器 ---
@@ -238,6 +258,13 @@ class NativeAgentExecutor:
             self._context_compressor.reset()
             self._compressor_session_id = state.session_id
 
+        before_messages = len(state.messages)
+        reason = "context_window_threshold"
+        if self._journal_authority is not None:
+            self._journal_authority.emit(
+                "context.compaction.started",
+                {"reason": reason, "before_messages": before_messages},
+            )
         try:
             result = self._context_compressor.compress(state.messages, max_context_tokens=self.context_window)
             if result.saved_tokens > 0:
@@ -257,6 +284,15 @@ class NativeAgentExecutor:
                 )
             else:
                 logger.info("[EXEC] context_compress triggered but no compression performed")
+            if self._journal_authority is not None:
+                self._journal_authority.emit(
+                    "context.compaction.completed",
+                    {
+                        "reason": reason,
+                        "before_messages": before_messages,
+                        "after_messages": len(result.compressed_messages),
+                    },
+                )
         except Exception as e:
             logger.error("[EXEC] context compression failed: %s", e)
             self.event_bus.emit_error(f"上下文压缩失败: {str(e)[:200]}")
@@ -498,9 +534,6 @@ class NativeAgentExecutor:
         completed_ask_calls = list(getattr(state, "_pending_completed_ask_calls", []) or [])
         state._pending_completed_ask_calls = []
 
-        # 本轮工具结果 journal 条目（ASK 批准路径可预先完成首个结果）
-        tool_result_entries = list(getattr(state, "_pending_tool_result_entries", []) or [])
-        state._pending_tool_result_entries = []
         # 本轮工具记录（写 memory 用：tool_name/input/output/status）
         round_tool_records: List[Dict[str, Any]] = list(
             getattr(state, "_pending_round_tool_records", []) or []
@@ -530,6 +563,18 @@ class NativeAgentExecutor:
                 state.status = "failed"
                 return state
 
+            transaction_id = new_id("transaction")
+            if self._journal_authority is not None:
+                self._journal_authority.emit(
+                    "tool.execution.started",
+                    {
+                        "transaction_id": transaction_id,
+                        "call_id": call.id,
+                        "tool_id": call.name,
+                        "arguments": tool_input_str,
+                    },
+                    call_id=call.id,
+                )
             self.event_bus.emit_tool_status(call.name, "running", tool_input=tool_input_str, call_id=call.id)
             logger.info("[EXEC] executing tool: name=%s, call_id=%s, input_len=%d", call.name, call.id, len(tool_input_str))
 
@@ -558,8 +603,21 @@ class NativeAgentExecutor:
 
             # 处理 awaiting_permission：保存当前未完成的工具调用，暂停执行
             if result.status == "awaiting_permission":
+                state.pending_tool_transaction_id = transaction_id
                 state.pending_tool_calls = tool_calls[idx:]  # 包含当前这个
                 state.pending_ask_id = result.metadata.get("ask_id")
+                if self._journal_authority is not None:
+                    self._journal_authority.emit(
+                        "tool.approval.requested",
+                        {
+                            "call_id": call.id,
+                            "ask_id": state.pending_ask_id or "",
+                            "tool_name": call.name,
+                            "reason": result.metadata.get("reason", ""),
+                            "arguments": tool_input_str,
+                        },
+                        call_id=call.id,
+                    )
                 state.status = "awaiting_permission"
                 return state
 
@@ -580,16 +638,8 @@ class NativeAgentExecutor:
                 state.status = "failed"
                 return state
 
-            # 使用 journal service 决定 inline 还是归档
-            if self._journal_service is not None:
-                inline_content, journal_entry = self._journal_service.process_tool_result(
-                    session_id=context.session_id,
-                    tool_call=call,
-                    tool_result=result,
-                )
-                tool_result_entries.append(journal_entry)
-            else:
-                inline_content = result.content
+            inline_content = result.content
+            self._emit_tool_execution_result(transaction_id, call, result)
 
             # 记录本轮工具调用/结果（写 memory 用）
             round_tool_records.append({
@@ -818,7 +868,17 @@ class NativeAgentExecutor:
                 if pending_call:
                     denial_msg = f"用户拒绝了工具 {pending_call.name} 的执行请求。"
                     self._emit_tool_error(pending_call, denial_msg, state)
+                    transaction_id = getattr(state, "pending_tool_transaction_id", "")
+                    if transaction_id:
+                        denied_result = ToolResult(
+                            tool_call_id=pending_call.id,
+                            name=pending_call.name,
+                            content=denial_msg,
+                            status="error",
+                        )
+                        self._emit_tool_execution_result(transaction_id, pending_call, denied_result)
                 state.pending_tool_calls = []
+                state.pending_tool_transaction_id = ""
                 state.pending_ask_id = None
                 state.status = "awaiting_llm"
                 return state
@@ -864,15 +924,10 @@ class NativeAgentExecutor:
         )
         state.tool_results.append(result)
         tool_input_str = json.dumps(first_call.arguments, ensure_ascii=False) if first_call.arguments else ""
-        if self._journal_service is not None:
-            inline_content, journal_entry = self._journal_service.process_tool_result(
-                session_id=context.session_id,
-                tool_call=first_call,
-                tool_result=result,
-            )
-            state._pending_tool_result_entries = [journal_entry]
-        else:
-            inline_content = result.content
+        inline_content = result.content
+        transaction_id = getattr(state, "pending_tool_transaction_id", "") or new_id("transaction")
+        self._emit_tool_execution_result(transaction_id, first_call, result)
+        state.pending_tool_transaction_id = ""
         state._pending_round_tool_records = [{
             "tool_name": first_call.name,
             "tool_input": tool_input_str,
@@ -967,6 +1022,29 @@ class NativeAgentExecutor:
             return all(s == input_sig for _, s in last_n)
         return False
 
+    def _emit_tool_execution_result(
+        self,
+        transaction_id: str,
+        call: ToolCall,
+        result: ToolResult,
+    ) -> None:
+        if self._journal_authority is None:
+            return
+        succeeded = result.status in {"completed", "succeeded", "success"}
+        self._journal_authority.emit(
+            "tool.execution.completed" if succeeded else "tool.execution.failed",
+            {
+                "transaction_id": transaction_id,
+                "call_id": call.id,
+                "tool_id": call.name,
+                "status": "succeeded" if succeeded else result.status,
+                "result_summary": result.content or "",
+                "full_ref": str((result.metadata or {}).get("full_ref", "")),
+                "artifacts": list(result.artifacts or []),
+            },
+            call_id=call.id,
+        )
+
     def _emit_tool_error(self, call: ToolCall, msg: str, state: AgentLoopState) -> None:
         """向事件总线和 messages 发送一个工具错误结果。"""
         tool_input_str = json.dumps(call.arguments, ensure_ascii=False) if call.arguments else ""
@@ -988,13 +1066,23 @@ class NativeAgentExecutor:
         if self._checkpoint_service is None:
             return
         try:
-            self._checkpoint_service.save(
+            record = self._checkpoint_service.save(
                 state,
                 metadata={
                     "model_name": getattr(self.model_client, 'model_name', ''),
                     "status": state.status,
                 },
             )
+            if self._journal_authority is not None:
+                self._journal_authority.emit(
+                    "checkpoint.created",
+                    {
+                        "checkpoint_id": record.checkpoint_id,
+                        "cursor": self._journal_authority.cursor(),
+                        "iteration": state.iteration,
+                        "status": state.status,
+                    },
+                )
         except Exception as e:
             logger.error("NativeAgentExecutor: checkpoint save failed: %s", e)
 

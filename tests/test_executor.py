@@ -591,6 +591,44 @@ class TestAwaitingPermissionRecovery:
         assert new_state.pending_tool_calls == []
         tool_executor.execute.assert_not_called()
 
+    def test_approved_ask_uses_normal_journal_memory_and_artifact_path(self):
+        from floodmind.agent.native.types import AgentLoopState
+        from floodmind.agent.runtime.contracts.permissions import PermissionAskRequest, PermissionAskResponse
+        from floodmind.agent.runtime.contracts.tools import ToolResult as NativeToolResult
+        from floodmind.agent.runtime.services.ask_service import AskService, set_ask_service
+
+        ask_svc = AskService()
+        set_ask_service(ask_svc)
+        ask_svc.set_emit_fn(lambda e: None, session_id="test-session")
+        ask_id = ask_svc.start_ask(PermissionAskRequest(
+            session_id="test-session", call_id="c1", tool_name="Write",
+            reason="write", tool_input={"path": "x.txt"},
+        ))
+        ask_svc.respond(PermissionAskResponse(session_id="test-session", ask_id=ask_id, approved=True))
+
+        result = NativeToolResult(
+            tool_call_id="c1", name="Write", content="written", status="completed",
+            artifacts=["/tmp/x.txt"],
+        )
+        tool_executor = MagicMock()
+        tool_executor.execute.return_value = result
+        authority = MagicMock()
+        executor = self._make_executor(tool_executor=tool_executor)
+        executor._journal_authority = authority
+        state = AgentLoopState(
+            session_id="test-session", run_id="run-1", status="awaiting_permission",
+            pending_ask_id=ask_id,
+            pending_tool_calls=[ToolCall(id="c1", name="Write", arguments={"path": "x.txt"})],
+        )
+
+        state = executor._on_awaiting_permission(state, self._make_context())
+        state = executor._on_awaiting_tool(state, self._make_context())
+
+        event_types = [call.args[0] for call in authority.emit.call_args_list]
+        assert event_types == ["tool.execution.completed", "model.attempt.completed"]
+        assert state.artifacts == ["/tmp/x.txt"]
+        assert "written" in str(state.messages[-1])
+
     def test_lost_ask_id_reissues_ask(self):
         from floodmind.agent.native.types import AgentLoopState
         from floodmind.agent.runtime.contracts.tools import ToolResult as NativeToolResult

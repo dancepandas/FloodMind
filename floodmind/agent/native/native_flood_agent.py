@@ -48,7 +48,6 @@ from floodmind.skills.skill_curator import SkillCurator, run_maintenance_if_need
 
 from floodmind.config.settings import settings
 from floodmind.agent.runtime.services.checkpoint_service import CheckpointService
-from floodmind.agent.runtime.services.execution_journal_service import ExecutionJournalService
 from floodmind.agent.runtime.services.path_service import PathService
 from floodmind.agent.runtime.services.sandbox_service import SandboxService
 from floodmind.agent.runtime.services.tracing_service import TracingService
@@ -410,7 +409,6 @@ class NativeFloodAgent:
         service_base_dir = str(self._workspace.session_root) if self._workspace is not None else None
         self._background_task_service = BackgroundTaskService(base_dir=service_base_dir)
         self._checkpoint_service = CheckpointService(base_dir=service_base_dir, tracing_service=self._tracing_service)
-        self._journal_service = ExecutionJournalService(base_dir=service_base_dir)
 
         # 宿主注入的自定义工具与 system_prompt：bare 模式由 _init_bare 直接消费；
         # 完整模式由 _init_tools 末尾注册（executor 快照 tools_schema 之前）、
@@ -585,7 +583,6 @@ class NativeFloodAgent:
             tool_registry=self._orchestrator_registry,
             tool_loader=self._orchestrator_tool_loader,
             checkpoint_service=self._checkpoint_service,
-            execution_journal_service=self._journal_service,
             tracing_service=self._tracing_service,
             context_compressor=orchestrator_compressor,
             context_window=context_window,
@@ -604,7 +601,6 @@ class NativeFloodAgent:
             tool_registry=self._specialist_registry,
             tool_loader=self._specialist_tool_loader,
             checkpoint_service=self._checkpoint_service,
-            execution_journal_service=self._journal_service,
             tracing_service=self._tracing_service,
             context_compressor=specialist_compressor,
             context_window=context_window,
@@ -1399,7 +1395,6 @@ class NativeFloodAgent:
             tool_registry=self._orchestrator_registry,
             tool_loader=self._orchestrator_tool_loader,
             checkpoint_service=self._checkpoint_service,
-            execution_journal_service=self._journal_service,
             tracing_service=self._tracing_service,
             context_compressor=orchestrator_compressor,
             context_window=context_window,
@@ -1418,7 +1413,6 @@ class NativeFloodAgent:
             tool_registry=self._specialist_registry,
             tool_loader=self._specialist_tool_loader,
             checkpoint_service=self._checkpoint_service,
-            execution_journal_service=self._journal_service,
             tracing_service=self._tracing_service,
             context_compressor=specialist_compressor,
             context_window=context_window,
@@ -2094,7 +2088,6 @@ class NativeFloodAgent:
                 tool_registry=specialist_registry,
                 tool_loader=specialist_tool_loader,
                 checkpoint_service=self._checkpoint_service,
-                execution_journal_service=self._journal_service,
                 tracing_service=self._tracing_service,
                 background_task_service=self._background_task_service,
             )

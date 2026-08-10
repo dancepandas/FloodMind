@@ -199,6 +199,20 @@ class AskService:
                 return False
 
             pending.result = response.approved
+            from floodmind.tools.session_context import get_runtime_context
+
+            runtime_context = get_runtime_context()
+            authority = getattr(runtime_context, "journal_authority", None)
+            if authority is not None:
+                authority.emit(
+                    "tool.approval.resolved",
+                    {
+                        "ask_id": response.ask_id,
+                        "call_id": pending.call_id,
+                        "approved": response.approved,
+                    },
+                    call_id=pending.call_id,
+                )
             pending.event.set()
             return True
 
