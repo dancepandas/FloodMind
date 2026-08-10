@@ -49,13 +49,18 @@ class JournalWriter:
         run_id: str,
         *,
         max_segment_bytes: int = 10 * 1024 * 1024,
+        journal_dir: Optional[Path] = None,
     ):
         if not run_id or run_id in {".", ".."} or ".." in run_id or Path(run_id).name != run_id:
             raise ValueError(f"unsafe run_id: {run_id!r}")
         self._base_dir = Path(base_dir)
         self._run_id = run_id
         self._max_segment_bytes = max_segment_bytes
-        self._journal_dir = self._base_dir / "runs" / run_id / "journal"
+        self._journal_dir = (
+            Path(journal_dir)
+            if journal_dir is not None
+            else self._base_dir / "runs" / run_id / "journal"
+        )
         self._journal_dir.mkdir(parents=True, exist_ok=True)
         self._lock_path = self._journal_dir / ".lock"
         self._index_path = self._journal_dir / "index.json"
@@ -216,6 +221,52 @@ class JournalWriter:
             else:
                 self._save_index()
             return event
+
+    def append_many(
+        self,
+        events: List[EventEnvelope],
+        *,
+        expected_last_sequence: Optional[int] = None,
+    ) -> List[EventEnvelope]:
+        """原子追加一组事件：单次锁、单次 CAS、sequence 连续、哈希链连续、一次 fsync。"""
+        if not events:
+            return []
+        with self._locked():
+            self._reconcile_from_journal()
+            # 幂等：整组已封存则原样返回（组已提交，重试为 no-op，无需 CAS）
+            if all(e.event_id in self._sealed for e in events):
+                return [self._sealed[e.event_id] for e in events]
+            if expected_last_sequence is not None and expected_last_sequence != self._last_sequence:
+                raise JournalWriteConflict(
+                    f"expected last sequence {expected_last_sequence}, got {self._last_sequence}"
+                )
+            sealed_group: List[EventEnvelope] = []
+            for event in events:
+                existing = self._sealed.get(event.event_id)
+                if existing is not None:
+                    sealed_group.append(existing)
+                    continue
+                event.sequence = self._last_sequence + 1
+                event.integrity.payload_sha256 = canonical_payload_sha256(event.payload)
+                event.integrity.previous_event_sha256 = self._last_event_sha256
+                event.integrity.event_sha256 = hashlib.sha256(
+                    f"{self._last_event_sha256}|{_hash_input(event)}".encode("utf-8")
+                ).hexdigest()
+                self._last_sequence = event.sequence
+                self._last_event_sha256 = event.integrity.event_sha256
+                self._sealed[event.event_id] = event
+                sealed_group.append(event)
+            path = self._segment_path(self._current_segment)
+            with path.open("a", encoding="utf-8") as f:
+                for event in sealed_group:
+                    f.write(canonical_json(event.model_dump()) + "\n")
+                f.flush()
+                os.fsync(f.fileno())
+            if path.stat().st_size > self._max_segment_bytes:
+                self.roll_segment()
+            else:
+                self._save_index()
+            return sealed_group
 
     def roll_segment(self) -> None:
         self._current_segment += 1

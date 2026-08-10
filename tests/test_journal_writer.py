@@ -156,3 +156,51 @@ def test_stale_reader_sees_concurrently_rolled_segments(tmp_path: Path):
 def test_unsafe_run_id_rejected(tmp_path: Path):
     with pytest.raises(ValueError):
         JournalWriter(tmp_path, "../evil")
+
+
+from floodmind.agent.runtime.contracts.canonical_events import EventEnvelope
+from floodmind.agent.runtime.services.journal_writer import JournalWriter, JournalWriteConflict
+
+
+def _mk_event(event_type: str, payload: dict) -> EventEnvelope:
+    return EventEnvelope(event_id=f"evt_{payload.get('k', event_type)}", event_type=event_type, payload=payload, sequence=0)
+
+
+def test_append_many_consecutive_sequences_and_chain(tmp_path):
+    w = JournalWriter(tmp_path, "run_1")
+    evs = [_mk_event("thread.message.sent", {"k": "a", "content": "hi"}),
+           _mk_event("model.attempt.completed", {"k": "b", "content": "ok"})]
+    sealed = w.append_many(evs, expected_last_sequence=0)
+    assert [e.sequence for e in sealed] == [1, 2]
+    assert sealed[1].integrity.previous_event_sha256 == sealed[0].integrity.event_sha256
+    # 重读一致性
+    reread = w.read_from(0)
+    assert [e.sequence for e in reread] == [1, 2]
+
+
+def test_append_many_cas_conflict(tmp_path):
+    w = JournalWriter(tmp_path, "run_1")
+    w.append(_mk_event("thread.message.sent", {"k": "x", "content": "hi"}))
+    try:
+        w.append_many([_mk_event("model.attempt.completed", {"k": "y"})], expected_last_sequence=0)
+    except JournalWriteConflict:
+        return
+    assert False, "expected JournalWriteConflict"
+
+
+def test_append_many_idempotent_retry(tmp_path):
+    w = JournalWriter(tmp_path, "run_1")
+    evs = [_mk_event("thread.message.sent", {"k": "a", "content": "hi"}),
+           _mk_event("model.attempt.completed", {"k": "b", "content": "ok"})]
+    first = w.append_many(evs, expected_last_sequence=0)
+    second = w.append_many(evs, expected_last_sequence=0)
+    assert second == first
+    assert len(w.read_from(0)) == 2  # 未重复写
+
+
+def test_journal_dir_override(tmp_path):
+    custom = tmp_path / "custom" / "runs" / "run_9" / "journal"
+    w = JournalWriter(tmp_path, "run_9", journal_dir=custom)
+    w.append(_mk_event("thread.message.sent", {"k": "z", "content": "hi"}))
+    assert custom.exists()
+    assert len(w.read_from(0)) == 1
