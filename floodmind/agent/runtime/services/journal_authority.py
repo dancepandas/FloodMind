@@ -12,7 +12,6 @@ from pathlib import Path
 from floodmind.agent.runtime.contracts.canonical_events import (
     EventEnvelope, Actor, utcnow,
 )
-from floodmind.agent.runtime.contracts.identity import new_id
 from floodmind.agent.runtime.contracts.run_state import RunState
 from floodmind.agent.runtime.reducer import reduce, initial_run_state
 from floodmind.agent.runtime.services.journal_writer import JournalWriter

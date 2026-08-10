@@ -4,7 +4,6 @@ from floodmind.agent.runtime.services.journal_authority import (
 )
 from floodmind.agent.runtime.contracts.canonical_events import EventEnvelope, Actor, utcnow
 from floodmind.agent.runtime.contracts.identity import new_id, is_valid_id
-from floodmind.agent.runtime.contracts.run_state import RunStatus
 
 
 def test_emit_scopes_identity(tmp_path):
