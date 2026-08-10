@@ -56,7 +56,7 @@ class _PendingAsk:
         self.event = threading.Event()
         self.result: Optional[bool] = None
         self.created_at = time.time()
-        self.accepting_response = True
+        self.accepting_response = False
         self.journal_authority = journal_authority
 
 
@@ -115,7 +115,25 @@ class AskService:
                 self._pending.pop(ask_id, None)
             return None
 
+        requested_emitted = False
+
         try:
+            with self._lock:
+                self._pending[ask_id] = pending
+                journal_authority.emit(
+                    "tool.approval.requested",
+                    {
+                        "ask_id": ask_id,
+                        "call_id": ask.call_id,
+                        "tool_name": ask.tool_name,
+                        "reason": ask.reason,
+                        "arguments": json.dumps(ask.tool_input, ensure_ascii=False),
+                    },
+                    call_id=ask.call_id,
+                )
+                requested_emitted = True
+                pending.accepting_response = True
+
             if ask.call_id:
                 emit_fn({
                     "type": "action_start",
@@ -134,24 +152,16 @@ class AskService:
                 "tool_input": ask.tool_input,
             })
         except Exception as e:
-            logger.error("AskService: emit_fn 调用失败 ask_id=%s: %s", ask_id, e)
+            logger.error("AskService: ASK 发起失败 ask_id=%s: %s", ask_id, e)
+            if requested_emitted:
+                with self._lock:
+                    if pending.accepting_response:
+                        pending.accepting_response = False
+                        pending.result = False
+                        self._emit_resolved(pending, approved=False)
             with self._lock:
                 self._pending.pop(ask_id, None)
             return None
-
-        journal_authority.emit(
-            "tool.approval.requested",
-            {
-                "ask_id": ask_id,
-                "call_id": ask.call_id,
-                "tool_name": ask.tool_name,
-                "reason": ask.reason,
-                "arguments": json.dumps(ask.tool_input, ensure_ascii=False),
-            },
-            call_id=ask.call_id,
-        )
-        with self._lock:
-            self._pending[ask_id] = pending
 
         if self._timeout is None:
             logger.info("AskService: ASK %s 已发射，等待用户响应", ask_id)

@@ -233,6 +233,67 @@ def test_approval_authority_is_bound_to_pending_ask(tmp_path):
     }
 
 
+def test_synchronous_permission_ask_response_is_accepted_and_ordered(tmp_path):
+    auth = open_journal_authority(
+        tmp_path,
+        conversation_id="c",
+        task_id="t",
+        run_id="r-sync-approval",
+        thread_id="th",
+        turn_id="tu",
+    )
+    service = AskService()
+    respond_results = []
+
+    def emit_fn(event):
+        if event["type"] == "permission_ask":
+            respond_results.append(
+                service.respond(
+                    PermissionAskResponse(
+                        session_id="session",
+                        ask_id=event["ask_id"],
+                        approved=True,
+                    )
+                )
+            )
+
+    service.set_emit_fn(emit_fn, session_id="session")
+    ask_id = service.start_ask(
+        PermissionAskRequest(
+            session_id="session",
+            call_id="call-sync-approval",
+            tool_name="Write",
+            reason="write",
+            tool_input={"path": "同步.txt"},
+        ),
+        journal_authority=auth,
+    )
+
+    assert ask_id is not None
+    assert respond_results == [True]
+    approval_events = [
+        event for event in auth.read_after(0)
+        if event.event_type.startswith("tool.approval.")
+    ]
+    assert [event.event_type for event in approval_events] == [
+        "tool.approval.requested",
+        "tool.approval.resolved",
+    ]
+    requested, resolved = approval_events
+    assert requested.payload == {
+        "ask_id": ask_id,
+        "call_id": "call-sync-approval",
+        "tool_name": "Write",
+        "reason": "write",
+        "arguments": '{"path": "同步.txt"}',
+    }
+    assert resolved.payload == {
+        "ask_id": ask_id,
+        "call_id": "call-sync-approval",
+        "approved": True,
+    }
+
+
 def test_blocking_permission_ask_timeout_emits_matching_denial_once(tmp_path):
     auth = open_journal_authority(
         tmp_path,

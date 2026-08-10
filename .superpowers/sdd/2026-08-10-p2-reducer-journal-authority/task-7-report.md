@@ -102,3 +102,14 @@ Status: DONE.
 - Added `test_blocking_permission_ask_timeout_emits_matching_denial_once`, proving timeout journals requested then one matching denied resolution. Adjusted direct service tests to supply an authority under the forward-only contract.
 - Red evidence: timeout regression failed with only `tool.approval.requested`. Green focused evidence: `tests/test_execution_events.py` produced `6 passed`; adjusted permission/execution group produced `136 passed`; final full suite produced `949 passed, 1 skipped` in 52.71s. `git diff --check` reported no whitespace errors.
 - Concern: no production ASK creation path without an authority was found; all production executor call sites already pass the run authority.
+
+## Fix round 4
+
+Status: DONE.
+
+- Fixed the synchronous host-callback race in `AskService.start_ask`: pending ASK records are now registered before host callback delivery, and `tool.approval.requested` is emitted before responses can be accepted so journal order remains requested-before-resolved.
+- Kept `journal_authority` required; no `get_runtime_context()` fallback was added. The no-host `emit_fn is None` auto-deny path remains unchanged.
+- Added failure cleanup for the combined requested-emission/callback delivery block: if requested emission fails, the pending record is popped with no orphan event; if host callback delivery fails after requested was emitted, an exactly-once denied `tool.approval.resolved` is emitted under the pending `accepting_response` guard before popping.
+- Added `test_synchronous_permission_ask_response_is_accepted_and_ordered`, where the host `permission_ask` callback synchronously calls `AskService.respond`; red evidence failed with `respond_results == [False]` and the unknown-ask warning; focused green evidence passed after the fix.
+- Verification: `python -m pytest tests/test_execution_events.py -q` produced `7 passed`; full suite `python -m pytest -q` produced `950 passed, 1 skipped` in 53.40s.
+- Concern: none.
