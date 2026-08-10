@@ -8,6 +8,8 @@ from floodmind.agent.native.types import AgentLoopState, ModelEvent, RunContext
 from floodmind.agent.runtime.contracts.permissions import (
     PermissionAskRequest,
     PermissionAskResponse,
+    PermissionBehavior,
+    PermissionDecision,
     PermissionRequest,
     ToolPermissionPolicy,
 )
@@ -15,9 +17,13 @@ from floodmind.agent.runtime.contracts.tools import ToolCall, ToolResult, ToolSp
 from floodmind.agent.runtime.services.ask_service import AskService
 from floodmind.agent.runtime.services.idempotency import (
     derive_idempotency_key,
+    find_committed_result,
     side_effect_class_for_spec,
 )
-from floodmind.agent.runtime.contracts.tool_transaction import canonical_arguments
+from floodmind.agent.runtime.contracts.tool_transaction import (
+    arguments_sha256,
+    canonical_arguments,
+)
 from floodmind.agent.runtime.services.journal_authority import open_journal_authority
 from floodmind.agent.runtime.services.permission_service import PermissionService
 from floodmind.agent.runtime.services.tool_execution_service import ToolExecutionService
@@ -78,6 +84,8 @@ def test_tool_and_terminal_event_sequence(tmp_path):
 
 
 def test_terminal_tool_failure_closes_started_transaction(tmp_path):
+    """Real service: each failing tool closes its started transaction, and 5
+    consecutive failures force the executor to terminate with run.failed."""
     auth = open_journal_authority(
         tmp_path,
         conversation_id="c",
@@ -106,20 +114,27 @@ def test_terminal_tool_failure_closes_started_transaction(tmp_path):
 
     model_client.stream_chat.side_effect = stream_chat
     model_client.model_name = "test-model"
-    tool_executor = MagicMock()
-    tool_executor.execute.return_value = ToolResult(
-        tool_call_id="ignored",
+
+    def _fail(attempt):
+        raise RuntimeError(f"boom {attempt}")
+
+    spec = ToolSpec(
         name="FailTool",
-        content="错误: terminal failure",
-        status="error",
-        artifacts=["failed-artifact"],
-        metadata={"full_ref": "failure-ref"},
+        description="always fails",
+        parameters={"type": "object", "properties": {"attempt": {"type": "integer"}}},
+        func=_fail,
+        is_readonly=False,
+        is_destructive=False,
     )
+    registry = MagicMock()
+    registry.get.return_value = spec
+    tool_executor = ToolExecutionService()
     executor = NativeAgentExecutor(
         model_client=model_client,
         tool_executor=tool_executor,
         event_bus=EventBus(),
         tools_schema=[],
+        tool_registry=registry,
         journal_authority=auth,
         max_iterations=10,
     )
@@ -130,18 +145,15 @@ def test_terminal_tool_failure_closes_started_transaction(tmp_path):
     events = auth.read_after(0)
     starts = [event for event in events if event.event_type == "tool.execution.started"]
     failures = [event for event in events if event.event_type == "tool.execution.failed"]
+    proposed = [event for event in events if event.event_type == "tool.call.proposed"]
     assert len(starts) == 5
     assert len(failures) == 5
-    assert failures[-1].payload == {
-        "transaction_id": starts[-1].payload["transaction_id"],
-        "call_id": starts[-1].payload["call_id"],
-        "tool_id": "FailTool",
-        "status": "error",
-        "result_summary": "错误: terminal failure",
-        "full_ref": "failure-ref",
-        "artifacts": ["failed-artifact"],
-        "idempotency_key": "",
-    }
+    assert len(proposed) == 5
+    for p, s, f in zip(proposed, starts, failures):
+        assert s.payload["transaction_id"] == p.payload["transaction_id"]
+        assert f.payload["transaction_id"] == p.payload["transaction_id"]
+        assert f.payload["idempotency_key"] == p.payload["idempotency_key"]
+    assert failures[-1].payload["call_id"] == starts[-1].payload["call_id"]
     assert [event.event_type for event in events].count("run.failed") == 1
 
 
@@ -405,16 +417,16 @@ def _make_write_spec():
     )
 
 
-def test_executor_emits_proposed_before_started_with_full_fields(tmp_path):
+def test_executor_emits_full_lifecycle_events_in_order(tmp_path):
+    """Executor + real service emit the §6.6 chain order:
+    proposed -> validated -> permission.evaluated(fingerprint) -> started -> completed.
+    The executor no longer emits a premature started before execute()."""
     auth = open_journal_authority(
         tmp_path, conversation_id="c", task_id="t", run_id="r", thread_id="th", turn_id="tu",
     )
     registry = MagicMock()
     registry.get.return_value = _make_write_spec()
-    tool_executor = MagicMock()
-    tool_executor.execute.return_value = ToolResult(
-        tool_call_id="c1", name="Write", content="wrote", status="completed",
-    )
+    tool_executor = ToolExecutionService()
     executor = NativeAgentExecutor(
         model_client=MagicMock(),
         tool_executor=tool_executor,
@@ -433,8 +445,12 @@ def test_executor_emits_proposed_before_started_with_full_fields(tmp_path):
     executor._on_awaiting_tool(state, RunContext(session_id="session", user_text="t"))
 
     events = auth.read_after(0)
-    assert [e.event_type for e in events][:2] == [
-        "tool.call.proposed", "tool.execution.started",
+    assert [e.event_type for e in events][:5] == [
+        "tool.call.proposed",
+        "tool.call.validated",
+        "tool.permission.evaluated",
+        "tool.execution.started",
+        "tool.execution.completed",
     ]
     proposed = events[0].payload
     assert proposed["transaction_id"]
@@ -442,7 +458,7 @@ def test_executor_emits_proposed_before_started_with_full_fields(tmp_path):
     assert proposed["tool_id"] == "Write"
     assert proposed["tool_version"] == "1"
     assert proposed["canonical_arguments"] == '{"path":"/a"}'
-    assert proposed["arguments_sha256"]
+    assert proposed["arguments_sha256"] == arguments_sha256("Write", "1", '{"path":"/a"}')
     assert proposed["side_effect_class"] == "reversible_write"
     assert proposed["idempotency_key"] == derive_idempotency_key(
         tool_id="Write",
@@ -450,9 +466,19 @@ def test_executor_emits_proposed_before_started_with_full_fields(tmp_path):
         side_effect_class="reversible_write",
     )
     assert proposed["preconditions"] == []
-    assert events[1].payload["transaction_id"] == proposed["transaction_id"]
-    completed = [e for e in events if e.event_type == "tool.execution.completed"]
-    assert completed[0].payload["idempotency_key"] == proposed["idempotency_key"]
+    for e in events[1:5]:
+        assert e.payload["transaction_id"] == proposed["transaction_id"]
+    perm = events[2].payload
+    assert perm["decision"] == "allow"
+    assert perm["approval_fingerprint"]  # non-empty fingerprint bound to the transaction
+    started = events[3].payload
+    assert started["tool_id"] == "Write"
+    assert started["arguments"] == '{"path":"/a"}'
+    completed = events[4].payload
+    assert completed["status"] == "succeeded"
+    assert completed["idempotency_key"] == proposed["idempotency_key"]
+    # started must NOT appear before permission.evaluated (the old premature emission).
+    assert events[1].event_type == "tool.call.validated"
 
 
 def test_timeout_result_emits_indeterminate_event(tmp_path):
@@ -539,3 +565,88 @@ def test_replayed_committed_result_skips_reexecution(tmp_path):
     assert r2.content == "wrote /a"
     assert r2.artifacts == ["art_1"]
     assert calls == ["/a"]  # still only executed once
+
+
+def test_ask_path_emits_approval_required_with_same_fingerprint(tmp_path):
+    """ASK path emits permission.evaluated(ask) then tool.approval.required carrying
+    the SAME deterministic approval fingerprint, and returns awaiting_permission."""
+    auth = open_journal_authority(
+        tmp_path, conversation_id="c", task_id="t", run_id="r", thread_id="th", turn_id="tu",
+    )
+    registry = MagicMock()
+    registry.get.return_value = _make_write_spec()
+    ask_service = MagicMock()
+    ask_service.start_ask.return_value = "ask-123"
+    svc = ToolExecutionService(
+        ask_service=ask_service,
+        permission_decision_hook=lambda tool_name, tool_input, sdk_decision, policy: (
+            PermissionDecision(behavior=PermissionBehavior.ASK, reason="需要确认")
+        ),
+    )
+    call = ToolCall(id="c1", name="Write", arguments={"path": "/a"})
+    canon = canonical_arguments(call.arguments)
+    ik = derive_idempotency_key(
+        tool_id=call.name, canonical_arguments=canon, side_effect_class="reversible_write",
+    )
+    ttx = "ttx_ask"
+    auth.emit("tool.call.proposed", {
+        "transaction_id": ttx, "call_id": call.id, "tool_id": call.name,
+        "tool_version": "1", "canonical_arguments": canon,
+        "arguments_sha256": arguments_sha256(call.name, "1", canon),
+        "side_effect_class": "reversible_write", "idempotency_key": ik, "preconditions": [],
+    })
+
+    result = svc.execute(
+        call, context=RunContext(session_id="session", user_text="t"),
+        registry=registry, journal_authority=auth,
+        transaction_id=ttx, idempotency_key=ik, side_effect_class="reversible_write",
+        canonical_arguments_str=canon, arguments_sha256=arguments_sha256(call.name, "1", canon),
+    )
+
+    assert result.status == "awaiting_permission"
+    assert result.metadata["ask_id"] == "ask-123"
+    events = auth.read_after(0)
+    types = [e.event_type for e in events]
+    assert "tool.permission.evaluated" in types
+    assert "tool.approval.required" in types
+    assert types.index("tool.permission.evaluated") < types.index("tool.approval.required")
+    assert "tool.execution.started" not in types  # no side effect started
+    perm = [e for e in events if e.event_type == "tool.permission.evaluated"][0].payload
+    approval = [e for e in events if e.event_type == "tool.approval.required"][0].payload
+    assert perm["decision"] == "ask"
+    assert perm["transaction_id"] == ttx
+    assert approval["transaction_id"] == ttx
+    assert approval["tool_name"] == "Write"
+    assert approval["reason"] == "需要确认"
+    assert approval["arguments"] == '{"path":"/a"}'
+    assert approval["approval_fingerprint"] == perm["approval_fingerprint"]
+    assert approval["approval_fingerprint"]  # non-empty, deterministic
+
+
+def test_find_committed_result_requires_succeeded_status(tmp_path):
+    """find_committed_result must not treat a malformed completed event (status !=
+    succeeded) as a reusable success."""
+    auth = open_journal_authority(
+        tmp_path, conversation_id="c", task_id="t", run_id="r", thread_id="th", turn_id="tu",
+    )
+    ik = derive_idempotency_key(
+        tool_id="Write", canonical_arguments=canonical_arguments({"path": "/f"}),
+        side_effect_class="reversible_write",
+    )
+    # Failed result recorded on tool.execution.completed (malformed) — NOT reusable.
+    auth.emit("tool.execution.completed", {
+        "transaction_id": "ttx_f", "call_id": "c1", "tool_id": "Write",
+        "status": "failed", "result_summary": "boom", "full_ref": "", "artifacts": [],
+        "idempotency_key": ik,
+    })
+    assert find_committed_result(auth, ik) is None
+    # Genuine succeeded result — reusable.
+    auth.emit("tool.execution.completed", {
+        "transaction_id": "ttx_ok", "call_id": "c2", "tool_id": "Write",
+        "status": "succeeded", "result_summary": "wrote /f", "full_ref": "ref://f",
+        "artifacts": ["art"], "idempotency_key": ik,
+    })
+    hit = find_committed_result(auth, ik)
+    assert hit is not None
+    assert hit["result_summary"] == "wrote /f"
+    assert hit["artifacts"] == ["art"]

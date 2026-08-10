@@ -39,6 +39,7 @@ from floodmind.agent.runtime.contracts.permissions import (
 from floodmind.agent.runtime.contracts.paths import PathResolveRequest, PathResolveResult
 from floodmind.agent.runtime.contracts.tools import ToolCall, ToolExecutionContext, ToolResult, ToolSpec
 from floodmind.agent.runtime.contracts.tool_transaction import canonical_arguments
+from floodmind.agent.runtime.services.approval_fingerprint import compute_approval_fingerprint
 from floodmind.agent.runtime.services.idempotency import (
     derive_idempotency_key,
     find_committed_result,
@@ -126,6 +127,11 @@ class ToolExecutionService:
         authorized_ask_id: Optional[str] = None,
         *,
         journal_authority: Any,
+        transaction_id: str = "",
+        idempotency_key: str = "",
+        side_effect_class: str = "read",
+        canonical_arguments_str: str = "",
+        arguments_sha256: str = "",
     ) -> ToolResult:
         """Execute a tool with services supplied by the execution RuntimeContext."""
         if journal_authority is None:
@@ -136,6 +142,11 @@ class ToolExecutionService:
             registry,
             authorized_ask_id,
             journal_authority=journal_authority,
+            transaction_id=transaction_id,
+            idempotency_key=idempotency_key,
+            side_effect_class=side_effect_class,
+            canonical_arguments_str=canonical_arguments_str,
+            arguments_sha256=arguments_sha256,
         )
 
     def _execute_bound(
@@ -146,6 +157,11 @@ class ToolExecutionService:
         authorized_ask_id: Optional[str] = None,
         *,
         journal_authority: Any,
+        transaction_id: str = "",
+        idempotency_key: str = "",
+        side_effect_class: str = "read",
+        canonical_arguments_str: str = "",
+        arguments_sha256: str = "",
     ) -> ToolResult:
         if journal_authority is None:
             raise ValueError("journal_authority is required for tool execution")
@@ -249,7 +265,27 @@ class ToolExecutionService:
                     status="error",
                 )
 
+        # §6.6 事务中段事件（validated / permission.evaluated / approval.required /
+        # execution.started）由 ToolExecutionService 在此处发出；executor 只发
+        # tool.call.proposed 与终态事件。transaction_id 为空（旧调用方/测试未传）时
+        # 全部跳过发射，保持向后兼容。approval_fingerprint 为确定性纯函数（§6.3），
+        # 同一调用恒得同一指纹，绝不含时间/随机。
+        canon = canonical_arguments(call.arguments)
+        effective_canonical = canonical_arguments_str or canon
+        approval_fingerprint = self._compute_approval_fingerprint(
+            tool=tool,
+            call=call,
+            context=context,
+            agent_tier=agent_tier,
+            mode=mode,
+            canonical_arguments_str=effective_canonical,
+            side_effect_class=side_effect_class,
+        )
+
         if perm_decision.behavior == PermissionBehavior.DENY:
+            self._emit_permission_evaluated(
+                journal_authority, transaction_id, call, "deny", approval_fingerprint
+            )
             feedback = self._make_permission_feedback(perm_decision)
             return ToolResult(
                 tool_call_id=call.id,
@@ -268,6 +304,22 @@ class ToolExecutionService:
                     name=call.name,
                     content=feedback.to_output_string(),
                     status="error",
+                )
+            self._emit_permission_evaluated(
+                journal_authority, transaction_id, call, "ask", approval_fingerprint
+            )
+            if transaction_id:
+                journal_authority.emit(
+                    "tool.approval.required",
+                    {
+                        "transaction_id": transaction_id,
+                        "call_id": call.id,
+                        "tool_name": tool.name,
+                        "reason": perm_decision.reason,
+                        "arguments": effective_canonical,
+                        "approval_fingerprint": approval_fingerprint,
+                    },
+                    call_id=call.id,
                 )
             ask_id = self._ask_service.start_ask(
                 PermissionAskRequest(
@@ -305,6 +357,9 @@ class ToolExecutionService:
             if command and self._permission_service is not None:
                 danger_decision = self._permission_service.check_dangerous_command(command)
                 if danger_decision.behavior == PermissionBehavior.DENY:
+                    self._emit_permission_evaluated(
+                        journal_authority, transaction_id, call, "deny", approval_fingerprint
+                    )
                     feedback = self._make_permission_feedback(danger_decision)
                     return ToolResult(
                         tool_call_id=call.id,
@@ -354,10 +409,22 @@ class ToolExecutionService:
                 status="error",
             )
 
+        # 校验通过后按 §6.6 链序发出 validated → permission.evaluated(allow)。
+        # 权限决策此前已最终化（hook + exec-danger 检查），此处只是按 reducer 链序落记。
+        if transaction_id:
+            journal_authority.emit(
+                "tool.call.validated",
+                {"transaction_id": transaction_id, "call_id": call.id},
+                call_id=call.id,
+            )
+            self._emit_permission_evaluated(
+                journal_authority, transaction_id, call, "allow", approval_fingerprint
+            )
+
         # §6.5 幂等：非 read 且有幂等键，先查已提交结果，命中直接复用（不重执行）。
         # 与 executor 的 tool.call.proposed 使用同一 canonical 形态（call.arguments），
         # 保证幂等键一致；dummy journal_authority（无 read_after）跳过查询。
-        canon = canonical_arguments(call.arguments)
+        # 幂等短路在本处之前 return，因此重放不会发出 execution.started（不重执行）。
         side_effect_class = side_effect_class_for_spec(tool)
         idempotency_key = derive_idempotency_key(
             tool_id=call.name,
@@ -375,6 +442,19 @@ class ToolExecutionService:
                     artifacts=committed["artifacts"],
                     metadata={"idempotent_replay": True, "full_ref": committed["full_ref"]},
                 )
+
+        # 真正副作用前发出 started：此后才把事务标记 running（reducer 链）。
+        if transaction_id:
+            journal_authority.emit(
+                "tool.execution.started",
+                {
+                    "transaction_id": transaction_id,
+                    "call_id": call.id,
+                    "tool_id": call.name,
+                    "arguments": effective_canonical,
+                },
+                call_id=call.id,
+            )
 
         try:
             ctx = contextvars.copy_context()
@@ -523,6 +603,62 @@ class ToolExecutionService:
         if mode:
             return mode
         return "execution"
+
+    def _compute_approval_fingerprint(
+        self,
+        *,
+        tool: ToolSpec,
+        call: ToolCall,
+        context: Any,
+        agent_tier: str,
+        mode: str,
+        canonical_arguments_str: str,
+        side_effect_class: str,
+    ) -> str:
+        """§6.3 确定性 approval fingerprint（纯函数，无 I/O/时间/随机）。
+
+        full target resolution is a follow-up —— resolved_targets=[]；workspace_generation
+        由 workspace_dir 确定性派生（绝不用时间/随机），同一调用恒得同一指纹。
+        """
+        cwd = getattr(context, "cwd", "") if context else ""
+        workspace_dir = getattr(context, "workspace_dir", "") if context else ""
+        return compute_approval_fingerprint(
+            tool_id=tool.name,
+            tool_version="1",
+            canonical_arguments=canonical_arguments_str or canonical_arguments(call.arguments),
+            resolved_targets=[],
+            cwd=cwd or "",
+            environment_identity="",
+            workspace_id=workspace_dir or "",
+            workspace_generation=f"{workspace_dir}#v1" if workspace_dir else "",
+            sandbox_permissions=[],
+            agent_tier=agent_tier or "main",
+            runtime_mode=mode or "execution",
+            side_effect_class=side_effect_class or "read",
+            policy_version="v1",
+        )
+
+    @staticmethod
+    def _emit_permission_evaluated(
+        journal_authority: Any,
+        transaction_id: str,
+        call: ToolCall,
+        decision: str,
+        approval_fingerprint: str,
+    ) -> None:
+        """发 tool.permission.evaluated（无事务 id 时为 no-op，兼容旧调用方）。"""
+        if not transaction_id:
+            return
+        journal_authority.emit(
+            "tool.permission.evaluated",
+            {
+                "transaction_id": transaction_id,
+                "call_id": call.id,
+                "decision": decision,
+                "approval_fingerprint": approval_fingerprint or "",
+            },
+            call_id=call.id,
+        )
 
     def _check_permissions(
         self,

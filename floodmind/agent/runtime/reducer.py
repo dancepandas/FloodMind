@@ -274,7 +274,10 @@ def _reduce_tool_approval_required(
     fingerprint = str(payload.get("approval_fingerprint", ""))
     ns = _advance_to(ns, ttx_id, ToolStatus.approval_required,
                      permission_fingerprint=fingerprint)
-    if _find_ttx(ns, ttx_id) is not None:
+    # 只有事务确实推进到 approval_required 才置 awaiting_approval：
+    # 过期/回退事件（_advance_to 失败）不得把运行状态错误翻成等待授权。
+    tx = _find_ttx(ns, ttx_id)
+    if tx is not None and tx.status == ToolStatus.approval_required:
         ns.status = RunStatus.awaiting_approval
     return ns
 

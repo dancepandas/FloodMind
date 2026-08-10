@@ -28,6 +28,10 @@ def find_committed_result(authority: JournalAuthority, idempotency_key: str) -> 
     for event in reversed(authority.read_after(0)):
         if event.event_type != "tool.execution.completed":
             continue
+        # 防御：失败结果归属 tool.execution.failed，不信任畸形的 completed 事件作为
+        # 可复用成功（status 必须为 succeeded 才允许重放）。
+        if event.payload.get("status") != "succeeded":
+            continue
         if event.payload.get("idempotency_key") != idempotency_key:
             continue
         return {

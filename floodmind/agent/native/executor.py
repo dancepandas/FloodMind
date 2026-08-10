@@ -654,16 +654,13 @@ class NativeAgentExecutor:
                 return state
 
             transaction_id = new_id("transaction")
-            # §6.1/§6.5：先建立事务（tool.call.proposed，含幂等键），再发 started。
-            # 幂等键与 ToolExecutionService 基于同一 canonical 形态派生，保证一致。
-            spec = self._tool_registry.get(call.name) if self._tool_registry is not None else None
-            canon = canonical_arguments(call.arguments)
-            side_effect_class = side_effect_class_for_spec(spec)
-            idempotency_key = derive_idempotency_key(
-                tool_id=call.name,
-                canonical_arguments=canon,
-                side_effect_class=side_effect_class,
-            )
+            # §6.1/§6.5：先建立事务（tool.call.proposed，含幂等键）。tool.execution.started
+            # 不再由 executor 提前发出 —— 它由 ToolExecutionService 在真正副作用前发出，
+            # 保证校验/权限评估发生在事务标记 running 之前（§6.6 生命周期时序）。
+            identity = self._tool_transaction_identity(call)
+            canon = identity["canonical_arguments_str"]
+            side_effect_class = identity["side_effect_class"]
+            idempotency_key = identity["idempotency_key"]
             if self._journal_authority is not None:
                 self._journal_authority.emit(
                     "tool.call.proposed",
@@ -673,20 +670,10 @@ class NativeAgentExecutor:
                         "tool_id": call.name,
                         "tool_version": "1",
                         "canonical_arguments": canon,
-                        "arguments_sha256": arguments_sha256(call.name, "1", canon),
+                        "arguments_sha256": identity["arguments_sha256"],
                         "side_effect_class": side_effect_class,
                         "idempotency_key": idempotency_key,
                         "preconditions": [],
-                    },
-                    call_id=call.id,
-                )
-                self._journal_authority.emit(
-                    "tool.execution.started",
-                    {
-                        "transaction_id": transaction_id,
-                        "call_id": call.id,
-                        "tool_id": call.name,
-                        "arguments": tool_input_str,
                     },
                     call_id=call.id,
                 )
@@ -712,6 +699,11 @@ class NativeAgentExecutor:
                     context,
                     registry=self._tool_registry,
                     journal_authority=self._journal_authority,
+                    transaction_id=transaction_id,
+                    idempotency_key=idempotency_key,
+                    side_effect_class=side_effect_class,
+                    canonical_arguments_str=canon,
+                    arguments_sha256=identity["arguments_sha256"],
                 )
             logger.info("[EXEC] tool done: name=%s, status=%s, result_len=%d", call.name, result.status, len(result.content) if result.content else 0)
 
@@ -1005,11 +997,17 @@ class NativeAgentExecutor:
             pending_call = state.pending_tool_calls[0] if state.pending_tool_calls else None
             if pending_call and hasattr(self.tool_executor, "execute"):
                 context.mode = getattr(state, "mode", "execution")
+                identity = self._tool_transaction_identity(pending_call)
                 result = self.tool_executor.execute(
                     pending_call,
                     context,
                     registry=self._tool_registry,
                     journal_authority=self._journal_authority,
+                    transaction_id=getattr(state, "pending_tool_transaction_id", "") or new_id("transaction"),
+                    idempotency_key=identity["idempotency_key"],
+                    side_effect_class=identity["side_effect_class"],
+                    canonical_arguments_str=identity["canonical_arguments_str"],
+                    arguments_sha256=identity["arguments_sha256"],
                 )
                 if result.status == "awaiting_permission":
                     state.pending_ask_id = result.metadata.get("ask_id")
@@ -1035,22 +1033,28 @@ class NativeAgentExecutor:
 
         first_call = pending_calls[0]
         context.mode = getattr(state, "mode", "execution")
+        transaction_id = getattr(state, "pending_tool_transaction_id", "") or new_id("transaction")
+        identity = self._tool_transaction_identity(first_call)
         result = self.tool_executor.execute(
             first_call,
             context,
             registry=self._tool_registry,
             authorized_ask_id=authorized_ask_id,
             journal_authority=self._journal_authority,
+            transaction_id=transaction_id,
+            idempotency_key=identity["idempotency_key"],
+            side_effect_class=identity["side_effect_class"],
+            canonical_arguments_str=identity["canonical_arguments_str"],
+            arguments_sha256=identity["arguments_sha256"],
         )
         state.tool_results.append(result)
         tool_input_str = json.dumps(first_call.arguments, ensure_ascii=False) if first_call.arguments else ""
         inline_content = result.content
-        transaction_id = getattr(state, "pending_tool_transaction_id", "") or new_id("transaction")
         self._emit_tool_execution_result(
             transaction_id,
             first_call,
             result,
-            idempotency_key=self._tool_idempotency_key(first_call),
+            idempotency_key=identity["idempotency_key"],
         )
         state.pending_tool_transaction_id = ""
         state._pending_round_tool_records = [{
@@ -1147,14 +1151,30 @@ class NativeAgentExecutor:
             return all(s == input_sig for _, s in last_n)
         return False
 
+    def _tool_transaction_identity(self, call: ToolCall) -> dict:
+        """派生一次调用的确定性事务身份字段（§6.5/§6.6）。
+
+        与 ToolExecutionService 同源（同一 canonical 形态派生），供 tool.call.proposed
+        与 execute() 中段生命周期事件（validated/permission/started）共用。
+        """
+        spec = self._tool_registry.get(call.name) if self._tool_registry is not None else None
+        canon = canonical_arguments(call.arguments)
+        side_effect_class = side_effect_class_for_spec(spec)
+        idempotency_key = derive_idempotency_key(
+            tool_id=call.name,
+            canonical_arguments=canon,
+            side_effect_class=side_effect_class,
+        )
+        return {
+            "canonical_arguments_str": canon,
+            "arguments_sha256": arguments_sha256(call.name, "1", canon),
+            "side_effect_class": side_effect_class,
+            "idempotency_key": idempotency_key,
+        }
+
     def _tool_idempotency_key(self, call: ToolCall) -> str:
         """为单个 call 派生幂等键（与 tool.call.proposed 同源，§6.5）。"""
-        spec = self._tool_registry.get(call.name) if self._tool_registry is not None else None
-        return derive_idempotency_key(
-            tool_id=call.name,
-            canonical_arguments=canonical_arguments(call.arguments),
-            side_effect_class=side_effect_class_for_spec(spec),
-        )
+        return self._tool_transaction_identity(call)["idempotency_key"]
 
     def _emit_tool_execution_result(
         self,
