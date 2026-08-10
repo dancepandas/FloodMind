@@ -1,0 +1,62 @@
+from floodmind.agent.runtime.contracts.canonical_events import EventEnvelope
+from floodmind.agent.runtime.contracts.run_state import RunStatus
+from floodmind.agent.runtime.contracts.tool_transaction import ToolStatus
+from floodmind.agent.runtime.reducer import initial_run_state, reduce
+from floodmind.agent.runtime.services.journal_authority import open_journal_authority
+
+
+def _evt(auth, event_type, payload, **scope):
+    return auth.new_envelope(event_type, payload, **scope)
+
+
+def test_full_lifecycle_to_succeeded(tmp_path):
+    auth = open_journal_authority(tmp_path, conversation_id="c", task_id="t",
+                                   run_id="run_1", thread_id="th", turn_id="tu")
+    tx = "ttx_1"
+    events = [
+        _evt(auth, "tool.call.proposed", {"transaction_id": tx, "call_id": "call_1",
+            "tool_id": "builtin:Write", "arguments_sha256": "h", "idempotency_key": "ik"}),
+        _evt(auth, "tool.call.validated", {"transaction_id": tx, "call_id": "call_1"}),
+        _evt(auth, "tool.permission.evaluated", {"transaction_id": tx, "call_id": "call_1",
+            "decision": "allow", "approval_fingerprint": ""}),
+        _evt(auth, "tool.execution.started", {"transaction_id": tx, "call_id": "call_1",
+            "tool_id": "builtin:Write", "arguments": "{}"}),
+        _evt(auth, "tool.execution.completed", {"transaction_id": tx, "call_id": "call_1",
+            "tool_id": "builtin:Write", "status": "succeeded",
+            "result_summary": "ok", "full_ref": "", "artifacts": [], "idempotency_key": "ik"}),
+    ]
+    s = initial_run_state("run_1", thread_id="th")
+    for e in events:
+        s = reduce(s, e)
+    assert s.pending_tool_transactions == []  # 终态移出
+    assert any(t["role"] == "tool" for t in s.turns)
+    assert s.status == RunStatus.awaiting_model
+
+
+def test_indeterminate_stays_pending_then_result_committed_removes(tmp_path):
+    auth = open_journal_authority(tmp_path, conversation_id="c", task_id="t",
+                                   run_id="run_1", thread_id="th", turn_id="tu")
+    tx = "ttx_2"
+    events = [
+        _evt(auth, "tool.call.proposed", {"transaction_id": tx, "call_id": "call_2",
+            "tool_id": "builtin:Bash", "arguments_sha256": "h", "idempotency_key": "ik"}),
+        _evt(auth, "tool.execution.started", {"transaction_id": tx, "call_id": "call_2",
+            "tool_id": "builtin:Bash", "arguments": "{}"}),
+        _evt(auth, "tool.execution.indeterminate", {"transaction_id": tx, "call_id": "call_2",
+            "tool_id": "builtin:Bash", "reason": "timeout", "idempotency_key": "ik"}),
+    ]
+    s = initial_run_state("run_1", thread_id="th")
+    for e in events:
+        s = reduce(s, e)
+    assert len(s.pending_tool_transactions) == 1
+    assert s.pending_tool_transactions[0].status == ToolStatus.indeterminate
+    # 幂等：replay 相同事件不重复副作用
+    s2 = initial_run_state("run_1", thread_id="th")
+    for e in events:
+        s2 = reduce(s2, e)
+    assert s.model_dump() == s2.model_dump()
+    # result.committed 落定并移出
+    s3 = reduce(s, _evt(auth, "tool.result.committed",
+        {"transaction_id": tx, "call_id": "call_2", "tool_id": "builtin:Bash",
+         "result_ref": "art_1", "verdict": "succeeded"}))
+    assert s3.pending_tool_transactions == []

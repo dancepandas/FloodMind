@@ -7,9 +7,12 @@
 from typing import Dict, Any
 
 from floodmind.agent.runtime.contracts.run_state import (
-    RunState, RunStatus, PendingToolTransaction, PendingApproval, ChildThreadState,
+    RunState, RunStatus, PendingApproval, ChildThreadState,
 )
 from floodmind.agent.runtime.contracts.canonical_events import EventEnvelope
+from floodmind.agent.runtime.contracts.tool_transaction import (
+    SideEffectClass, ToolStatus, ToolTransaction,
+)
 
 
 def initial_run_state(run_id: str, *, conversation_id: str = "", task_id: str = "",
@@ -139,20 +142,151 @@ def _reduce_attempt_failed(
     return ns
 
 
+def _find_ttx(ns: RunState, ttx_id: str):
+    return next((t for t in ns.pending_tool_transactions if t.transaction_id == ttx_id), None)
+
+
+def _update_ttx(ns: RunState, ttx_id: str, to: ToolStatus, **update) -> RunState:
+    """把 pending 中对应事务 transition 到 to；非法转移忽略（fail-closed）。"""
+    tx = _find_ttx(ns, ttx_id)
+    if tx is None:
+        return ns
+    try:
+        moved = tx.transition(to)
+    except ValueError:
+        return ns
+    fields = {"status": moved.status}
+    fields.update(update)
+    ns.pending_tool_transactions = [
+        (m.model_copy(update=fields) if m.transaction_id == ttx_id else m)
+        for m in ns.pending_tool_transactions
+    ]
+    return ns
+
+
+def _remove_ttx(ns: RunState, ttx_id: str) -> RunState:
+    ns.pending_tool_transactions = [
+        t for t in ns.pending_tool_transactions if t.transaction_id != ttx_id
+    ]
+    return ns
+
+
+def _reduce_tool_proposed(
+    state: RunState, payload: Dict[str, Any], thread_id: str,
+) -> RunState:
+    ns = _clone(state)
+    if not _is_current_thread(ns, thread_id):
+        return ns
+    side_effect = payload.get("side_effect_class") or SideEffectClass.read
+    ns.pending_tool_transactions.append(ToolTransaction(
+        transaction_id=str(payload.get("transaction_id", "")),
+        call_id=str(payload.get("call_id", "")),
+        tool_id=str(payload.get("tool_id", "")),
+        tool_version=str(payload.get("tool_version", "1")),
+        canonical_arguments=str(payload.get("canonical_arguments", "")),
+        arguments_sha256=str(payload.get("arguments_sha256", "")),
+        side_effect_class=side_effect,
+        idempotency_key=str(payload.get("idempotency_key", "")),
+        preconditions=list(payload.get("preconditions") or []),
+        status=ToolStatus.proposed,
+    ))
+    ns.status = RunStatus.awaiting_tool
+    return ns
+
+
+def _reduce_tool_validated(
+    state: RunState, payload: Dict[str, Any], thread_id: str,
+) -> RunState:
+    ns = _clone(state)
+    if not _is_current_thread(ns, thread_id):
+        return ns
+    return _update_ttx(ns, str(payload.get("transaction_id", "")), ToolStatus.validated)
+
+
+def _reduce_tool_permission(
+    state: RunState, payload: Dict[str, Any], thread_id: str,
+) -> RunState:
+    ns = _clone(state)
+    if not _is_current_thread(ns, thread_id):
+        return ns
+    ttx_id = str(payload.get("transaction_id", ""))
+    decision = str(payload.get("decision", ""))
+    fingerprint = str(payload.get("approval_fingerprint", ""))
+    if decision == "deny":
+        return _remove_ttx(ns, ttx_id)  # denied 终态，移出 pending
+    if decision == "allow":
+        return _update_ttx(ns, ttx_id, ToolStatus.approved, permission_fingerprint=fingerprint)
+    return ns  # ask 由 tool.approval.required 事件推进，这里保持现状
+
+
+def _reduce_tool_approval_required(
+    state: RunState, payload: Dict[str, Any], thread_id: str,
+) -> RunState:
+    ns = _clone(state)
+    if not _is_current_thread(ns, thread_id):
+        return ns
+    ttx_id = str(payload.get("transaction_id", ""))
+    fingerprint = str(payload.get("approval_fingerprint", ""))
+    return _update_ttx(ns, ttx_id, ToolStatus.approval_required,
+                       permission_fingerprint=fingerprint)
+
+
 def _reduce_tool_started(
     state: RunState, payload: Dict[str, Any], thread_id: str,
 ) -> RunState:
     ns = _clone(state)
     if not _is_current_thread(ns, thread_id):
         return ns
-    ttx = PendingToolTransaction(
-        transaction_id=str(payload["transaction_id"]),
-        call_id=str(payload["call_id"]),
-        tool_id=str(payload["tool_id"]),
-        status="running",
-    )
-    ns.pending_tool_transactions.append(ttx)
+    ttx_id = str(payload.get("transaction_id", ""))
+    if _find_ttx(ns, ttx_id) is not None:
+        # 执行已开始：对已存在事务直接置为 running（P2 风格时序下可能跳步，
+        # 例如 proposed -> started，严格状态机拒绝跳步，这里以执行边界为准强制置位）。
+        ns.pending_tool_transactions = [
+            (m.model_copy(update={"status": ToolStatus.running}) if m.transaction_id == ttx_id else m)
+            for m in ns.pending_tool_transactions
+        ]
+    else:
+        ns.pending_tool_transactions.append(ToolTransaction(
+            transaction_id=ttx_id,
+            call_id=str(payload.get("call_id", "")),
+            tool_id=str(payload.get("tool_id", "")),
+            canonical_arguments=str(payload.get("arguments", "")),
+            status=ToolStatus.running,
+        ))
     ns.status = RunStatus.executing_tool
+    return ns
+
+
+def _reduce_tool_cancelled(
+    state: RunState, payload: Dict[str, Any], thread_id: str,
+) -> RunState:
+    ns = _clone(state)
+    if not _is_current_thread(ns, thread_id):
+        return ns
+    return _remove_ttx(ns, str(payload.get("transaction_id", "")))
+
+
+def _reduce_tool_indeterminate(
+    state: RunState, payload: Dict[str, Any], thread_id: str,
+) -> RunState:
+    ns = _clone(state)
+    if not _is_current_thread(ns, thread_id):
+        return ns
+    return _update_ttx(ns, str(payload.get("transaction_id", "")), ToolStatus.indeterminate)
+
+
+def _reduce_tool_result_committed(
+    state: RunState, payload: Dict[str, Any], thread_id: str,
+) -> RunState:
+    ns = _clone(state)
+    if not _is_current_thread(ns, thread_id):
+        return ns
+    ttx_id = str(payload.get("transaction_id", ""))
+    if str(payload.get("verdict", "")) == "succeeded":
+        ns = _update_ttx(ns, ttx_id, ToolStatus.result_committed)
+    ns = _remove_ttx(ns, ttx_id)
+    if not ns.pending_tool_transactions:
+        ns.status = RunStatus.awaiting_model
     return ns
 
 
@@ -166,9 +300,7 @@ def _reduce_tool_completed(
     is_current = _is_current_thread(ns, thread_id)
     ttx_id = str(payload.get("transaction_id", ""))
     if is_current:
-        ns.pending_tool_transactions = [
-            t for t in ns.pending_tool_transactions if t.transaction_id != ttx_id
-        ]
+        _remove_ttx(ns, ttx_id)
     result_summary = str(
         payload.get("result_summary")
         or payload.get("reason")
@@ -264,8 +396,22 @@ def reduce(state: RunState, event: EventEnvelope) -> RunState:
         return _reduce_attempt_completed(ns, event.payload, event.thread_id)
     if et == "model.attempt.failed":
         return _reduce_attempt_failed(ns, event.payload, event.thread_id)
+    if et == "tool.call.proposed":
+        return _reduce_tool_proposed(ns, event.payload, event.thread_id)
+    if et == "tool.call.validated":
+        return _reduce_tool_validated(ns, event.payload, event.thread_id)
+    if et == "tool.permission.evaluated":
+        return _reduce_tool_permission(ns, event.payload, event.thread_id)
+    if et == "tool.approval.required":
+        return _reduce_tool_approval_required(ns, event.payload, event.thread_id)
     if et == "tool.execution.started":
         return _reduce_tool_started(ns, event.payload, event.thread_id)
+    if et == "tool.execution.cancelled":
+        return _reduce_tool_cancelled(ns, event.payload, event.thread_id)
+    if et == "tool.execution.indeterminate":
+        return _reduce_tool_indeterminate(ns, event.payload, event.thread_id)
+    if et == "tool.result.committed":
+        return _reduce_tool_result_committed(ns, event.payload, event.thread_id)
     if et in ("tool.execution.completed", "tool.execution.failed"):
         return _reduce_tool_completed(ns, event.payload, et, event.thread_id)
     if et == "tool.approval.requested":

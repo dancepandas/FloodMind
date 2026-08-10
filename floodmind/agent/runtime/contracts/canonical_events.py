@@ -80,9 +80,9 @@ _EVENT_TYPES: Dict[str, frozenset[str]] = {
     }),
     "tool": frozenset({
         "tool.call.proposed", "tool.call.validated", "tool.permission.evaluated",
-        "tool.approval.requested", "tool.approval.resolved", "tool.execution.started",
-        "tool.execution.completed", "tool.execution.failed", "tool.execution.cancelled",
-        "tool.execution.indeterminate", "tool.result.committed",
+        "tool.approval.requested", "tool.approval.required", "tool.approval.resolved",
+        "tool.execution.started", "tool.execution.completed", "tool.execution.failed",
+        "tool.execution.cancelled", "tool.execution.indeterminate", "tool.result.committed",
     }),
     "thread": frozenset({
         "thread.spawn.requested", "thread.created", "thread.message.sent",

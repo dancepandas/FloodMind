@@ -5,6 +5,8 @@ from typing import Any, Dict, List
 
 from pydantic import BaseModel, Field
 
+from floodmind.agent.runtime.contracts.tool_transaction import ToolTransaction
+
 
 class RunStatus(str, Enum):
     created = "created"
@@ -29,13 +31,6 @@ class PendingApproval(BaseModel):
     reason: str = ""
 
 
-class PendingToolTransaction(BaseModel):
-    transaction_id: str
-    call_id: str
-    tool_id: str
-    status: str = "proposed"
-
-
 class ChildThreadState(BaseModel):
     thread_id: str
     parent_call_id: str = ""
@@ -51,7 +46,7 @@ class RunState(BaseModel):
     current_turn_id: str = ""
     active_attempt_id: str = ""
     last_committed_sequence: int = 0
-    pending_tool_transactions: List[PendingToolTransaction] = Field(default_factory=list)
+    pending_tool_transactions: List[ToolTransaction] = Field(default_factory=list)
     pending_approvals: List[PendingApproval] = Field(default_factory=list)
     active_background_tasks: List[str] = Field(default_factory=list)
     child_threads: List[ChildThreadState] = Field(default_factory=list)
