@@ -265,7 +265,6 @@ def run(task, model, resume_session_id, resume_checkpoint_id, verbose):
             state = project_run_state_to_loop_state(state, run_state)
             state.user_message = task
             state.original_input = state.original_input or task
-            state.messages.append({"role": "user", "content": task})
             if state.status in {"completed", "failed"}:
                 state.status = "awaiting_llm"
                 state.final_output = ""
@@ -286,7 +285,9 @@ def run(task, model, resume_session_id, resume_checkpoint_id, verbose):
                     tmp_dir=str(workspace.tmp_dir),
                     scripts_dir=str(workspace.scripts_dir),
                 )
-            result = agent._orchestrator_executor.run_from_state(context, state)
+            result = agent._orchestrator_executor.run_from_state(
+                context, state, run_state=run_state
+            )
             print(result.final_output)
             return
         except Exception as e:

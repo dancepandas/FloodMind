@@ -66,6 +66,31 @@ def project_run_state_to_loop_state(
         1 for turn in run_state.turns if turn.get("role") == "assistant"
     )
     projected.journal_cursor = run_state.last_committed_sequence
+    system_prefix = [
+        dict(message)
+        for message in loop_state.messages
+        if message.get("role") == "system"
+    ]
+    journal_messages: List[Dict[str, Any]] = []
+    for turn in run_state.turns:
+        role = turn.get("role")
+        if role == "user":
+            journal_messages.append({"role": "user", "content": turn.get("content", "")})
+        elif role == "assistant":
+            message: Dict[str, Any] = {
+                "role": "assistant",
+                "content": turn.get("content", ""),
+            }
+            if turn.get("tool_calls"):
+                message["tool_calls"] = list(turn["tool_calls"])
+            journal_messages.append(message)
+        elif role == "tool":
+            journal_messages.append({
+                "role": "tool",
+                "tool_call_id": turn.get("tool_call_id", ""),
+                "content": turn.get("content", ""),
+            })
+    projected.messages = system_prefix + journal_messages
     projected.pending_tool_calls = []
     projected.pending_ask_id = None
     projected.pending_tool_transaction_id = ""
@@ -194,6 +219,7 @@ class NativeAgentExecutor:
         self,
         context: RunContext,
         state: AgentLoopState,
+        run_state: Optional[RunState] = None,
     ) -> AgentResult:
         """从给定状态开始运行状态机。
 
@@ -202,10 +228,12 @@ class NativeAgentExecutor:
         """
         # Checkpoint snapshots are projections. Replay the canonical journal before
         # driving the loop so authoritative fields come from reducer state.
-        if self._journal_authority is not None:
-            run_state = self._journal_authority.replay()
-            if run_state.last_committed_sequence:
-                state = project_run_state_to_loop_state(state, run_state)
+        if run_state is not None:
+            state = project_run_state_to_loop_state(state, run_state)
+        elif self._journal_authority is not None:
+            replayed_state = self._journal_authority.replay()
+            if replayed_state.last_committed_sequence:
+                state = project_run_state_to_loop_state(state, replayed_state)
 
         # 用户中断检查回调
         effective_abort = context.abort_check

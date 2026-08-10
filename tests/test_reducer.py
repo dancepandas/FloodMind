@@ -43,6 +43,31 @@ def test_tool_transaction_lifecycle():
     }))
     assert s.pending_tool_transactions == []
     assert s.artifacts == []
+    assert s.turns[-1] == {
+        "role": "tool",
+        "tool_call_id": "call_1",
+        "tool_id": "builtin:Read",
+        "content": "ok",
+        "turn_index": 0,
+    }
+
+
+def test_tool_failed_appends_payload_derived_tool_turn():
+    s = initial_run_state("run_r")
+    s = reduce(s, _ev("tool.execution.started", 1, {
+        "transaction_id": "ttx_1", "call_id": "call_1", "tool_id": "builtin:Read",
+    }))
+    s = reduce(s, _ev("tool.execution.failed", 2, {
+        "transaction_id": "ttx_1", "call_id": "call_1", "tool_id": "builtin:Read",
+        "status": "error", "result_summary": "read failed", "artifacts": [],
+    }))
+    assert s.turns[-1] == {
+        "role": "tool",
+        "tool_call_id": "call_1",
+        "tool_id": "builtin:Read",
+        "content": "read failed",
+        "turn_index": 0,
+    }
 
 
 def test_replay_determinism():

@@ -93,12 +93,29 @@ def _reduce_tool_started(state: RunState, payload: Dict[str, Any]) -> RunState:
     return ns
 
 
-def _reduce_tool_completed(state: RunState, payload: Dict[str, Any]) -> RunState:
+def _reduce_tool_completed(
+    state: RunState,
+    payload: Dict[str, Any],
+    event_type: str,
+) -> RunState:
     ns = _clone(state)
     ttx_id = str(payload.get("transaction_id", ""))
     ns.pending_tool_transactions = [
         t for t in ns.pending_tool_transactions if t.transaction_id != ttx_id
     ]
+    result_summary = str(
+        payload.get("result_summary")
+        or payload.get("reason")
+        or payload.get("error")
+        or ("tool execution failed" if event_type == "tool.execution.failed" else "")
+    )
+    ns.turns.append({
+        "role": "tool",
+        "tool_call_id": str(payload.get("call_id", "")),
+        "tool_id": str(payload.get("tool_id", "")),
+        "content": result_summary,
+        "turn_index": _turn_index(ns.turns),
+    })
     for art in payload.get("artifacts") or []:
         if art not in ns.artifacts:
             ns.artifacts.append(str(art))
@@ -160,7 +177,7 @@ def reduce(state: RunState, event: EventEnvelope) -> RunState:
     if et == "tool.execution.started":
         return _reduce_tool_started(ns, event.payload)
     if et in ("tool.execution.completed", "tool.execution.failed"):
-        return _reduce_tool_completed(ns, event.payload)
+        return _reduce_tool_completed(ns, event.payload, et)
     if et == "tool.approval.requested":
         return _reduce_approval_requested(ns, event.payload)
     if et == "tool.approval.resolved":

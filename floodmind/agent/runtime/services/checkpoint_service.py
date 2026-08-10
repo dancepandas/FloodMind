@@ -267,18 +267,32 @@ class CheckpointService:
             )
         identity = manifest.metadata
         expected = {
-            "run_id": authority.run_id,
             "conversation_id": authority.conversation_id,
+            "task_id": authority.task_id,
+            "run_id": authority.run_id,
             "thread_id": authority.thread_id,
-        }
-        snapshot_identity = {
-            "run_id": snapshot.run_id,
-            "conversation_id": snapshot.conversation_id,
-            "thread_id": snapshot.current_thread_id,
+            "turn_id": authority.turn_id,
         }
         for key, value in expected.items():
-            if str(identity.get(key) or snapshot_identity[key]) != value:
-                raise CheckpointConsistencyError(f"checkpoint journal identity 不匹配: {key}")
+            if key not in identity or not identity[key]:
+                raise CheckpointConsistencyError(
+                    f"checkpoint journal identity 缺失: {key}"
+                )
+            if str(identity[key]) != value:
+                raise CheckpointConsistencyError(
+                    f"checkpoint journal identity 不匹配: {key}"
+                )
+        snapshot_expected = {
+            "run_id": snapshot.run_id,
+            "conversation_id": snapshot.conversation_id,
+            "task_id": snapshot.task_id,
+            "thread_id": snapshot.current_thread_id,
+        }
+        for key, value in snapshot_expected.items():
+            if str(identity[key]) != value:
+                raise CheckpointConsistencyError(
+                    f"checkpoint RunState identity 不匹配: {key}"
+                )
         if snapshot.run_id != manifest.run_id:
             raise CheckpointConsistencyError("checkpoint RunState run_id 不匹配")
         if snapshot.last_committed_sequence != manifest.journal_cursor:

@@ -1,4 +1,5 @@
 import json
+from unittest.mock import MagicMock
 
 import pytest
 from pydantic import ValidationError
@@ -110,6 +111,58 @@ def test_checkpoint_snapshot_replays_only_suffix(tmp_path):
     assert resumed == auth.replay()
 
 
+def test_checkpoint_replay_calls_suffix_with_bound_snapshot(tmp_path, monkeypatch):
+    auth = _authority(tmp_path)
+    _emit_completed_turn(auth)
+    snapshot = auth.replay()
+    svc = CheckpointService(base_dir=str(tmp_path))
+    record = svc.save(
+        AgentLoopState(session_id="sess_1", run_id="run_1"),
+        journal_cursor=auth.cursor(), reducer_version="1", run_state=snapshot,
+        metadata={
+            "conversation_id": "c", "task_id": "t", "run_id": "run_1",
+            "thread_id": "th", "turn_id": "tu", "runtime_dir": str(tmp_path),
+        },
+    )
+    original = auth.replay
+    calls = []
+
+    def recording_replay(after_sequence=0, state=None):
+        calls.append((after_sequence, state))
+        return original(after_sequence=after_sequence, state=state)
+
+    monkeypatch.setattr(auth, "replay", recording_replay)
+    svc.replay_from_checkpoint(auth, "sess_1", record.checkpoint_id)
+
+    assert calls[-1] == (record.journal_cursor, snapshot)
+
+
+@pytest.mark.parametrize("metadata_change", [
+    {"task_id": "wrong"},
+    {"turn_id": "wrong"},
+    {"task_id": None},
+    {"turn_id": None},
+])
+def test_checkpoint_identity_requires_all_metadata(tmp_path, metadata_change):
+    auth = _authority(tmp_path)
+    _emit_completed_turn(auth)
+    snapshot = auth.replay()
+    metadata = {
+        "conversation_id": "c", "task_id": "t", "run_id": "run_1",
+        "thread_id": "th", "turn_id": "tu", "runtime_dir": str(tmp_path),
+    }
+    metadata.update(metadata_change)
+    svc = CheckpointService(base_dir=str(tmp_path))
+    record = svc.save(
+        AgentLoopState(session_id="sess_1", run_id="run_1"),
+        journal_cursor=auth.cursor(), reducer_version="1", run_state=snapshot,
+        metadata=metadata,
+    )
+
+    with pytest.raises(CheckpointConsistencyError, match="identity"):
+        svc.replay_from_checkpoint(auth, "sess_1", record.checkpoint_id)
+
+
 def test_checkpoint_projection_disagreement_fails_closed(tmp_path):
     auth = _authority(tmp_path)
     _emit_completed_turn(auth)
@@ -120,6 +173,10 @@ def test_checkpoint_projection_disagreement_fails_closed(tmp_path):
         journal_cursor=auth.cursor(),
         reducer_version="1",
         run_state=run_state,
+        metadata={
+            "conversation_id": "c", "task_id": "t", "run_id": "run_1",
+            "thread_id": "th", "turn_id": "tu", "runtime_dir": str(tmp_path),
+        },
     )
     snapshot_path = (
         tmp_path / "sess_1" / "checkpoints" / record.checkpoint_id / "run_state.json"
@@ -150,6 +207,60 @@ def test_projection_clears_stale_pending_fields():
     assert projected.pending_ask_id is None
     assert projected.pending_tool_transaction_id == ""
     assert projected.journal_cursor == 4
+
+
+def test_projection_rebuilds_messages_from_journal_turns():
+    loop = AgentLoopState(messages=[
+        {"role": "system", "content": "system prefix"},
+        {"role": "user", "content": "tampered checkpoint"},
+    ])
+    run_state = initial_run_state("run_1")
+    run_state.turns = [
+        {"role": "user", "content": "canonical question", "turn_index": 0},
+        {
+            "role": "assistant", "content": "", "tool_calls": [{"id": "call-1"}],
+            "reasoning": "hidden", "timestamp": "ignored", "turn_index": 0,
+        },
+        {
+            "role": "tool", "tool_call_id": "call-1", "tool_id": "builtin:Read",
+            "content": "canonical result", "turn_index": 1,
+        },
+    ]
+
+    projected = project_run_state_to_loop_state(loop, run_state)
+
+    assert projected.messages == [
+        {"role": "system", "content": "system prefix"},
+        {"role": "user", "content": "canonical question"},
+        {"role": "assistant", "content": "", "tool_calls": [{"id": "call-1"}]},
+        {"role": "tool", "tool_call_id": "call-1", "content": "canonical result"},
+    ]
+
+
+def test_run_from_state_uses_supplied_reducer_state_without_replaying():
+    authority = MagicMock()
+    supplied = initial_run_state("run_1")
+    supplied.last_committed_sequence = 7
+    supplied.status = RunStatus.completed
+    executor = MagicMock()
+
+    from floodmind.agent.native.executor import NativeAgentExecutor
+
+    native = object.__new__(NativeAgentExecutor)
+    native._journal_authority = authority
+    native._TERMINAL_STATUSES = {"completed", "failed"}
+    native._tracing_service = None
+    native._memory = None
+    native._build_result = MagicMock(return_value="result")
+
+    result = native.run_from_state(
+        MagicMock(abort_check=None, session_id="sess"),
+        AgentLoopState(run_id="run_1"),
+        run_state=supplied,
+    )
+
+    assert result == "result"
+    authority.replay.assert_not_called()
 
 
 @pytest.mark.parametrize(
