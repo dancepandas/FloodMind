@@ -27,6 +27,7 @@ from floodmind.agent.native.types import (
     RunContext,
 )
 from floodmind.agent.runtime.contracts.subagent import SubAgentReport
+from floodmind.agent.runtime.contracts.identity import new_id
 from floodmind.agent.runtime.contracts.tools import ToolSpec
 from floodmind.agent.runtime.contracts.permissions import ToolPermissionPolicy
 from floodmind.agent.native.artifact_watcher import ArtifactWatcher
@@ -1995,6 +1996,39 @@ class NativeFloodAgent:
         """
         import uuid
         from floodmind.agent.native.artifact_watcher import ArtifactWatcher
+        from floodmind.agent.runtime.services.journal_authority import open_journal_authority
+        from floodmind.agent.runtime.services.runtime_layout import thread_dirs
+
+        parent_runtime_context = parent_context.runtime_context
+        if parent_runtime_context is None:
+            raise ValueError("specialist requires parent RuntimeContext identity")
+        parent_auth = getattr(self, "_journal_authority", None)
+        if parent_auth is None:
+            parent_auth = parent_runtime_context.journal_authority
+        if parent_auth is None:
+            raise ValueError("specialist requires parent JournalAuthority")
+
+        runtime_dir = Path(parent_context.state_dir)
+        child_thread_id = new_id("thread")
+        child_turn_id = new_id("turn")
+        thread_payload = {"thread_id": child_thread_id, "parent_call_id": step_key}
+        parent_auth.emit("thread.spawn.requested", thread_payload)
+        parent_auth.emit("thread.created", thread_payload)
+        child_auth = open_journal_authority(
+            runtime_dir,
+            conversation_id=parent_runtime_context.conversation_id,
+            task_id=parent_runtime_context.task_id,
+            run_id=parent_runtime_context.run_id,
+            thread_id=child_thread_id,
+            turn_id=child_turn_id,
+        )
+        tdirs = thread_dirs(
+            runtime_dir,
+            parent_runtime_context.conversation_id,
+            parent_runtime_context.task_id,
+            parent_runtime_context.run_id,
+            child_thread_id,
+        )
 
         sub_session_id = f"sub-{parent_context.session_id}-{step_key}-{uuid.uuid4().hex[:8]}"
         specialist_input = self._build_specialist_user_input(task_text, skill_name)
@@ -2011,17 +2045,12 @@ class NativeFloodAgent:
         try:
             from floodmind.agent.runtime.contracts.runtime_context import RuntimeContext
 
-            parent_runtime_context = parent_context.runtime_context
             sub_runtime_context = RuntimeContext(
-                conversation_id=(
-                    parent_runtime_context.conversation_id
-                    if parent_runtime_context is not None
-                    else parent_context.session_id
-                ),
-                task_id=sub_session_id,
-                run_id=f"run-{int(time.time())}",
-                thread_id=sub_session_id,
-                turn_id=uuid.uuid4().hex,
+                conversation_id=parent_runtime_context.conversation_id,
+                task_id=parent_runtime_context.task_id,
+                run_id=parent_runtime_context.run_id,
+                thread_id=child_thread_id,
+                turn_id=child_turn_id,
                 actor_type="agent",
                 actor_id=sub_session_id,
                 agent_tier="sub",
@@ -2031,6 +2060,7 @@ class NativeFloodAgent:
                 permission_service=self._permission_service,
                 path_service=self._path_service,
                 background_service=self._background_task_service,
+                journal_authority=child_auth,
             )
             sub_context = RunContext(
                 session_id=sub_session_id,
@@ -2040,10 +2070,10 @@ class NativeFloodAgent:
                 upload_dir=str(sandbox_ctx.uploads_dir),
                 cwd=sub_cwd,
                 workspace_dir=str(sandbox_ctx.workspace_dir),
-                state_dir=parent_context.state_dir,
+                state_dir=str(tdirs["state_dir"]),
                 artifact_dir=str(sandbox_ctx.outputs_dir),
-                tmp_dir=parent_context.tmp_dir,
-                scripts_dir=parent_context.scripts_dir,
+                tmp_dir=str(tdirs["tmp_dir"]),
+                scripts_dir=str(tdirs["scripts_dir"]),
                 enable_reasoning=parent_context.enable_reasoning,
                 abort_check=parent_context.abort_check,
                 delegate_cwd=sub_cwd,
@@ -2090,6 +2120,7 @@ class NativeFloodAgent:
                 checkpoint_service=self._checkpoint_service,
                 tracing_service=self._tracing_service,
                 background_task_service=self._background_task_service,
+                journal_authority=child_auth,
             )
 
             # Baseline before any specialist tool can write.  Detection and copying
@@ -2126,7 +2157,7 @@ class NativeFloodAgent:
                     "summary": (tr.content[:200] + "...") if len(tr.content) > 200 else tr.content,
                 })
 
-            return SubAgentReport(
+            report = SubAgentReport(
                 summary=result.final_output or (str(execution_error) if execution_error else ""),
                 completed=completed,
                 outputs={"error": str(execution_error)} if execution_error else {},
@@ -2136,6 +2167,37 @@ class NativeFloodAgent:
                 sub_session_id=sub_session_id,
                 tool_result_summaries=tool_summaries,
             )
+            cancelled = bool(parent_context.abort_check and parent_context.abort_check())
+            terminal_event = (
+                "thread.completed" if completed
+                else "thread.cancelled" if cancelled
+                else "thread.failed"
+            )
+            parent_auth.emit(
+                terminal_event,
+                {
+                    "thread_id": child_thread_id,
+                    "parent_call_id": step_key,
+                    "summary": report.summary,
+                    "artifact_ids": report.artifacts,
+                },
+                thread_id=child_thread_id,
+            )
+            return report
+        except Exception as exc:
+            parent_auth.emit(
+                "thread.cancelled"
+                if parent_context.abort_check and parent_context.abort_check()
+                else "thread.failed",
+                {
+                    "thread_id": child_thread_id,
+                    "parent_call_id": step_key,
+                    "summary": str(exc),
+                    "artifact_ids": [],
+                },
+                thread_id=child_thread_id,
+            )
+            raise
         finally:
             # 子代理可能启动了长时后台命令；先终止进程树再销毁其 sandbox，
             # 避免进程继续写入已删除目录或逃逸子会话生命周期。

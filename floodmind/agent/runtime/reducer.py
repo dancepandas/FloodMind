@@ -7,7 +7,7 @@
 from typing import Dict, Any
 
 from floodmind.agent.runtime.contracts.run_state import (
-    RunState, RunStatus, PendingToolTransaction, PendingApproval,
+    RunState, RunStatus, PendingToolTransaction, PendingApproval, ChildThreadState,
 )
 from floodmind.agent.runtime.contracts.canonical_events import EventEnvelope
 
@@ -31,6 +31,38 @@ def _turn_index(turns: list) -> int:
     if not turns:
         return 0
     return max(int(t.get("turn_index", 0)) for t in turns) + 1
+
+
+def _reduce_thread_spawn(state: RunState, payload: Dict[str, Any]) -> RunState:
+    ns = _clone(state)
+    return ns
+
+
+def _reduce_thread_created(state: RunState, payload: Dict[str, Any]) -> RunState:
+    ns = _clone(state)
+    ns.child_threads.append(ChildThreadState(
+        thread_id=str(payload["thread_id"]),
+        parent_call_id=str(payload.get("parent_call_id", "")),
+        status="running",
+    ))
+    return ns
+
+
+def _reduce_thread_terminal(
+    state: RunState,
+    payload: Dict[str, Any],
+    event_type: str,
+) -> RunState:
+    ns = _clone(state)
+    tid = str(payload.get("thread_id", ""))
+    for ct in ns.child_threads:
+        if ct.thread_id == tid:
+            ct.status = {
+                "thread.completed": "completed",
+                "thread.failed": "failed",
+                "thread.cancelled": "cancelled",
+            }.get(event_type, "running")
+    return ns
 
 
 def _reduce_thread_message_sent(state: RunState, payload: Dict[str, Any]) -> RunState:
@@ -168,6 +200,12 @@ def reduce(state: RunState, event: EventEnvelope) -> RunState:
     et = event.event_type
     if et == "thread.message.sent":
         return _reduce_thread_message_sent(ns, event.payload)
+    if et == "thread.spawn.requested":
+        return _reduce_thread_spawn(ns, event.payload)
+    if et == "thread.created":
+        return _reduce_thread_created(ns, event.payload)
+    if et in ("thread.completed", "thread.failed", "thread.cancelled"):
+        return _reduce_thread_terminal(ns, event.payload, et)
     if et == "model.attempt.started":
         return _reduce_attempt_started(ns, event.payload)
     if et == "model.attempt.completed":

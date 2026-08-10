@@ -169,6 +169,44 @@ def test_approval_resolved_removes_pending():
     assert s.status == RunStatus.awaiting_model
 
 
+def test_thread_spawn_only_advances_cursor():
+    s = initial_run_state("run_r")
+    out = reduce(s, _ev("thread.spawn.requested", 1, {
+        "thread_id": "thread_child", "parent_call_id": "call_1",
+    }))
+    assert out.child_threads == []
+    assert out.last_committed_sequence == 1
+
+
+def test_thread_created_records_child():
+    s = initial_run_state("run_r")
+    out = reduce(s, _ev("thread.created", 1, {
+        "thread_id": "thread_child", "parent_call_id": "call_1",
+    }))
+    assert [ct.model_dump() for ct in out.child_threads] == [{
+        "thread_id": "thread_child", "parent_call_id": "call_1", "status": "running",
+    }]
+
+
+@pytest.mark.parametrize("event_type,expected_status", [
+    ("thread.completed", "completed"),
+    ("thread.failed", "failed"),
+    ("thread.cancelled", "cancelled"),
+])
+def test_thread_terminal_updates_matching_child(event_type, expected_status):
+    s = initial_run_state("run_r")
+    s = reduce(s, _ev("thread.created", 1, {
+        "thread_id": "thread_child", "parent_call_id": "call_1",
+    }))
+    s = reduce(s, _ev("thread.created", 2, {
+        "thread_id": "thread_other", "parent_call_id": "call_2",
+    }))
+    out = reduce(s, _ev(event_type, 3, {"thread_id": "thread_child"}))
+    assert [(ct.thread_id, ct.status) for ct in out.child_threads] == [
+        ("thread_child", expected_status), ("thread_other", "running"),
+    ]
+
+
 def test_unknown_event_fail_closed():
     s = initial_run_state("run_r")
     s = reduce(s, _ev("thread.message.sent", 1, {"content": "hi", "turn_index": 0}))
