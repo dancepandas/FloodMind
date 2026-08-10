@@ -349,7 +349,7 @@ def test_9_rebuild():
 # ============================================================
 # Test 10: Run full pytest suite
 # ============================================================
-def test_10_pytest():
+def run_full_pytest_suite():
     import subprocess
     project_root = str(Path(__file__).parent.parent)
     result = subprocess.run(
@@ -377,7 +377,7 @@ if __name__ == "__main__":
     run_test_suite("7. Custom SOUL.md (Secondary Dev)", test_7_custom_soul)
     run_test_suite("8. AgentInfo.prompt Override", test_8_agent_override)
     run_test_suite("9. Rebuild Consistency", test_9_rebuild)
-    run_test_suite("10. Full Pytest Suite", test_10_pytest)
+    run_test_suite("10. Full Pytest Suite", run_full_pytest_suite)
 
     print(f"\n{'='*60}")
     print(f"RESULTS: {PASS} passed, {FAIL} failed, {PASS+FAIL} total")
