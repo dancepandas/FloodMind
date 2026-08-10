@@ -1,3 +1,4 @@
+import os
 from pathlib import Path
 
 import pytest
@@ -207,13 +208,17 @@ def test_append_many_mismatched_retry_rejected(tmp_path):
 
 def test_append_many_ids_from_unrelated_groups_rejected(tmp_path):
     w = JournalWriter(tmp_path, "run_1")
-    w.append_many([_mk_event("thread.message.sent", {"k": "a", "content": "hi"})], expected_last_sequence=0)
-    w.append_many([_mk_event("model.attempt.completed", {"k": "b", "content": "ok"})], expected_last_sequence=1)
-    # 组装一个从未以整组提交过的 id 集合（内容与各自已封存事件一致）→ 不能证明是整组重试
+    w.append_many([_mk_event("thread.message.sent", {"k": "a", "content": "hi"}),
+                   _mk_event("model.attempt.completed", {"k": "b", "content": "ok"})],
+                  expected_last_sequence=0)  # seq 1,2
+    w.append_many([_mk_event("tool.execution.completed", {"k": "c", "content": "done"}),
+                   _mk_event("artifact.committed", {"k": "d", "content": "saved"})],
+                  expected_last_sequence=2)  # seq 3,4
+    # 从两个无关组各取一个 id 拼装（sealed 序列 1 与 4，非连续）→ 不能证明是整组重试
     with pytest.raises(ValueError):
         w.append_many([_mk_event("thread.message.sent", {"k": "a", "content": "hi"}),
-                       _mk_event("model.attempt.completed", {"k": "b", "content": "ok"})],
-                      expected_last_sequence=0)
+                       _mk_event("artifact.committed", {"k": "d", "content": "saved"})],
+                      expected_last_sequence=4)
 
 
 def test_append_many_partial_overlap_rejected(tmp_path):
@@ -247,6 +252,49 @@ def test_append_many_no_duplicate_rows_and_contiguous_sequences(tmp_path):
     seg = tmp_path / "runs" / "run_1" / "journal" / "events-000001.jsonl"
     lines = [l for l in seg.read_text(encoding="utf-8").splitlines() if l.strip()]
     assert len(lines) == 3  # 每事件恰好一行
+
+
+def test_append_many_write_failure_leaves_no_torn_prefix(tmp_path, monkeypatch):
+    w = JournalWriter(tmp_path, "run_1")
+    evs = [_mk_event("thread.message.sent", {"k": "a", "content": "hi"}),
+           _mk_event("model.attempt.completed", {"k": "b", "content": "ok"})]
+    real_fsync = os.fsync
+    calls = {"n": 0}
+
+    def flaky_fsync(fd):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise OSError("injected fsync failure")
+        return real_fsync(fd)
+
+    monkeypatch.setattr("floodmind.agent.runtime.services.journal_writer.os.fsync", flaky_fsync)
+    with pytest.raises(OSError):
+        w.append_many(evs, expected_last_sequence=0)
+    monkeypatch.undo()
+
+    # 段中无撕裂行：每个非空行都能解析为 EventEnvelope
+    seg = tmp_path / "runs" / "run_1" / "journal" / "events-000001.jsonl"
+    lines = [l for l in seg.read_text(encoding="utf-8").splitlines() if l.strip()]
+    parsed = [EventEnvelope.model_validate_json(l) for l in lines]
+    seqs = [e.sequence for e in parsed]
+    assert seqs == sorted(seqs)
+    assert len(seqs) == len(set(seqs))  # 无重复
+    assert seqs == list(range(1, len(seqs) + 1))  # 连续
+
+    # reconcile 恢复的状态与磁盘一致（truthful）
+    assert w.current_sequence() == (seqs[-1] if seqs else 0)
+    on_disk_ids = {e.event_id for e in parsed}
+    for e in evs:
+        if e.event_id in on_disk_ids:
+            assert w.sealed(e.event_id) is not None
+
+    # 后续全新 append 成功，sequence 连续且不重复
+    ev = _mk_event("thread.message.sent", {"k": "n", "content": "new"})
+    sealed = w.append(ev)
+    assert sealed.sequence == (seqs[-1] + 1 if seqs else 1)
+    all_events = w.read_from(0)
+    ids = [x.event_id for x in all_events]
+    assert len(ids) == len(set(ids))
 
 
 def test_journal_dir_override(tmp_path):

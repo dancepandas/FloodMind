@@ -114,14 +114,12 @@ class JournalWriter:
         self._last_event_sha256 = ""
         self._current_segment = 1
         self._sealed = {}
-        self._groups = []
         if self._index_path.exists():
             try:
                 data = json.loads(self._index_path.read_text(encoding="utf-8"))
                 self._last_sequence = int(data.get("last_sequence", 0))
                 self._last_event_sha256 = str(data.get("last_event_sha256", ""))
                 self._current_segment = int(data.get("current_segment", 1))
-                self._groups = [list(g) for g in data.get("groups", [])]
             except (ValueError, OSError):
                 pass
         self._reconcile_from_journal()
@@ -178,7 +176,6 @@ class JournalWriter:
             "last_event_sha256": self._last_event_sha256,
             "current_segment": self._current_segment,
             "event_ids": sorted(self._sealed),
-            "groups": self._groups,
         }
         tmp = self._index_path.with_suffix(".tmp")
         tmp.write_text(json.dumps(index, indent=2), encoding="utf-8")
@@ -245,12 +242,12 @@ class JournalWriter:
         *,
         expected_last_sequence: Optional[int] = None,
     ) -> List[EventEnvelope]:
-        """原子追加一组事件：单次锁、单次 CAS、sequence 连续、哈希链连续、一次 fsync。
+        """原子追加一组事件：单次锁、单次 CAS、sequence 连续、哈希链连续、单次写 + 单次 fsync。
 
         三种情形精确区分：
         - 全新组：无任何 id 已封存 → CAS 校验后整体写入；
-        - 整组重试：全部 id 已封存、内容语义一致、且该 id 集合确以整组提交过 → 原样返回已封存信封；
-        - 其余（部分重叠 / 内容不符 / 从无关组拼装）→ ValueError，绝不静默当作幂等。
+        - 整组重试：全部 id 已封存、内容语义一致、且封存序列连续（组身份由 journal 自身证明）→ 原样返回；
+        - 其余（部分重叠 / 内容不符 / 从无关组拼装出非连续序列）→ ValueError，绝不静默当作幂等。
         """
         if not events:
             return []
@@ -265,19 +262,21 @@ class JournalWriter:
 
             sealed_ids = [e.event_id for e in events if e.event_id in self._sealed]
             if len(sealed_ids) == len(events):
-                # 全部已封存：必须是“同一整组”的重试且内容语义一致，否则拒绝。
+                # 全部已封存：内容语义一致 + 封存序列连续 = 整组重试，否则拒绝。
                 for event in events:
                     sealed = self._sealed[event.event_id]
                     if _retry_hash(sealed) != _retry_hash(event):
                         raise ValueError("append_many: partial or mismatched group retry")
-                group_ids = {e.event_id for e in events}
-                if len(events) == 1 or any(set(g) == group_ids for g in self._groups):
-                    return [self._sealed[e.event_id] for e in events]
-                raise ValueError("append_many: partial or mismatched group retry")
+                sorted_seqs = sorted(
+                    self._sealed[e.event_id].sequence for e in events
+                )
+                if sorted_seqs != list(range(sorted_seqs[0], sorted_seqs[0] + len(sorted_seqs))):
+                    raise ValueError("append_many: partial or mismatched group retry")
+                return [self._sealed[e.event_id] for e in events]
             if sealed_ids:
                 raise ValueError("append_many: partial or mismatched group retry")
 
-            # 全新组：先 CAS，再在本地副本上构造，落盘成功后才发布到内存权威状态。
+            # 全新组：先 CAS，再在本地副本上构造，单次写落盘成功后才发布到内存权威状态。
             if expected_last_sequence is not None and expected_last_sequence != self._last_sequence:
                 raise JournalWriteConflict(
                     f"expected last sequence {expected_last_sequence}, got {self._last_sequence}"
@@ -296,15 +295,19 @@ class JournalWriter:
                 ).hexdigest()
                 last_hash = copy.integrity.event_sha256
                 sealed_group.append(copy)
+            group_bytes = "".join(
+                canonical_json(e.model_dump()) + "\n" for e in sealed_group
+            ).encode("utf-8")
             path = self._segment_path(self._current_segment)
             try:
-                with path.open("a", encoding="utf-8") as f:
-                    for copy in sealed_group:
-                        f.write(canonical_json(copy.model_dump()) + "\n")
+                with path.open("ab") as f:
+                    f.write(group_bytes)
                     f.flush()
                     os.fsync(f.fileno())
                 should_roll = path.stat().st_size > self._max_segment_bytes
             except Exception:
+                # 截断撕裂行、恢复磁盘权威尾，再抛出；实例保持可用。
+                self.repair_tail()
                 self._reconcile_from_journal()
                 raise
             # 落盘成功后才推进内存权威状态。
@@ -312,7 +315,6 @@ class JournalWriter:
             self._last_event_sha256 = sealed_group[-1].integrity.event_sha256
             for copy in sealed_group:
                 self._sealed[copy.event_id] = copy
-            self._groups.append([e.event_id for e in events])
             if should_roll:
                 self.roll_segment()
             else:
