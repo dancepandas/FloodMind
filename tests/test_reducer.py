@@ -1,6 +1,6 @@
-import json
+import pytest
 from floodmind.agent.runtime.reducer import reduce, initial_run_state
-from floodmind.agent.runtime.contracts.run_state import RunState, RunStatus
+from floodmind.agent.runtime.contracts.run_state import RunStatus
 from floodmind.agent.runtime.contracts.canonical_events import EventEnvelope, canonical_json
 from floodmind.agent.runtime.contracts.identity import new_id
 
@@ -46,31 +46,146 @@ def test_tool_transaction_lifecycle():
 
 
 def test_replay_determinism():
+    # 覆盖 model.attempt.started 的带/不带 attempt_id 两条路径（无随机 ID 分支）。
     events = [
         _ev("thread.message.sent", 1, {"content": "hi", "turn_index": 0}),
-        _ev("model.attempt.completed", 2, {"attempt_id": "a1", "terminal_reason": "tool_calls",
+        _ev("model.attempt.started", 2, {"attempt_id": "a1"}),
+        _ev("model.attempt.completed", 3, {"attempt_id": "a1", "terminal_reason": "tool_calls",
             "content": "", "reasoning": "", "tool_calls": [], "is_final": False, "usage": {}}),
-        _ev("tool.execution.started", 3, {"transaction_id": "ttx_1", "call_id": "c1",
+        _ev("tool.execution.started", 4, {"transaction_id": "ttx_1", "call_id": "c1",
             "tool_id": "builtin:Read", "arguments": "{}"}),
-        _ev("tool.execution.completed", 4, {"transaction_id": "ttx_1", "call_id": "c1",
+        _ev("tool.execution.completed", 5, {"transaction_id": "ttx_1", "call_id": "c1",
             "tool_id": "builtin:Read", "status": "succeeded", "result_summary": "r", "full_ref": "", "artifacts": []}),
-        _ev("model.attempt.completed", 5, {"attempt_id": "a2", "terminal_reason": "completed",
+        _ev("model.attempt.started", 6, {}),  # 无 attempt_id → 确定性空串
+        _ev("model.attempt.completed", 7, {"attempt_id": "a2", "terminal_reason": "completed",
             "content": "done", "reasoning": "", "tool_calls": [], "is_final": True, "usage": {"total_tokens": 3}}),
-        _ev("run.completed", 6, {"final_output": "done", "terminal_reason": "completed"}),
+        _ev("run.completed", 8, {"final_output": "done", "terminal_reason": "completed"}),
     ]
     s1 = initial_run_state("run_r")
     s2 = initial_run_state("run_r")
     for e in events:
+        s1_before = s1
+        s2_before = s2
+        pre1 = canonical_json(s1_before.model_dump())
+        pre2 = canonical_json(s2_before.model_dump())
         s1 = reduce(s1, e)
         s2 = reduce(s2, e)
-    assert canonical_json(s1.model_dump()) == canonical_json(s2.model_dump())
+        assert canonical_json(s1.model_dump()) == canonical_json(s2.model_dump())
+        # 输入不可变：reduce 不得修改入参对象
+        assert canonical_json(s1_before.model_dump()) == pre1
+        assert canonical_json(s2_before.model_dump()) == pre2
 
 
 def test_duplicate_event_id_does_not_double_apply():
-    # 重放层按 event_id 去重是 Task 4 的职责；这里验证 reduce 对相同序列（含重复 payload）
-    # 只按事件语义前进，且 token_usage 累加逻辑正确。
+    # reducer 层按 event_id 去重：同一 EventEnvelope 对象应用两次，结果与一次相同。
     s = initial_run_state("run_r")
-    s = reduce(s, _ev("model.attempt.completed", 1, {"attempt_id": "a1", "terminal_reason": "completed",
+    ev = _ev("model.attempt.completed", 1, {"attempt_id": "a1", "terminal_reason": "completed",
         "content": "x", "reasoning": "", "tool_calls": [], "is_final": True,
-        "usage": {"prompt_tokens": 5, "completion_tokens": 5, "total_tokens": 10}}))
-    assert s.token_usage["total_tokens"] == 10
+        "usage": {"prompt_tokens": 5, "completion_tokens": 5, "total_tokens": 10}})
+    once = reduce(s, ev)
+    twice = reduce(once, ev)
+    assert canonical_json(twice.model_dump()) == canonical_json(once.model_dump())
+    assert len(twice.turns) == len(once.turns) == 1
+    assert twice.token_usage["total_tokens"] == 10
+    assert twice.last_committed_sequence == 1
+
+
+def _fold(setup_events, final_event):
+    """应用一串 setup 事件后应用 final 事件，返回最终状态。"""
+    s = initial_run_state("run_r")
+    seq = 0
+    for et, payload in setup_events:
+        seq += 1
+        s = reduce(s, _ev(et, seq, payload))
+    seq += 1
+    return reduce(s, _ev(final_event[0], seq, final_event[1]))
+
+
+@pytest.mark.parametrize("setup,event_type,payload,expected_status", [
+    ([], "model.attempt.failed", {"attempt_id": "a1", "reason": "boom"}, RunStatus.failed),
+    ([("tool.execution.started", {"transaction_id": "ttx_1", "call_id": "c1", "tool_id": "builtin:Read"})],
+     "tool.execution.failed", {"transaction_id": "ttx_1", "call_id": "c1", "tool_id": "builtin:Read"},
+     RunStatus.awaiting_model),
+    ([], "tool.approval.requested", {"ask_id": "ask_1", "call_id": "c1", "tool_name": "Bash"},
+     RunStatus.awaiting_approval),
+    ([("tool.approval.requested", {"ask_id": "ask_1", "call_id": "c1", "tool_name": "Bash"})],
+     "tool.approval.resolved", {"ask_id": "ask_1"}, RunStatus.awaiting_model),
+    ([], "context.compaction.started", {}, RunStatus.compacting),
+    ([], "context.compaction.completed", {}, RunStatus.awaiting_model),
+    ([], "run.failed", {"terminal_reason": "boom"}, RunStatus.failed),
+])
+def test_status_transitions(setup, event_type, payload, expected_status):
+    s = _fold(setup, (event_type, payload))
+    assert s.status == expected_status
+
+
+def test_tool_failed_clears_pending_transaction():
+    s = _fold(
+        [("tool.execution.started", {"transaction_id": "ttx_1", "call_id": "c1", "tool_id": "builtin:Read"})],
+        ("tool.execution.failed", {"transaction_id": "ttx_1", "call_id": "c1", "tool_id": "builtin:Read"}),
+    )
+    assert s.pending_tool_transactions == []
+    assert s.status == RunStatus.awaiting_model
+
+
+def test_approval_requested_adds_pending():
+    s = _fold([], ("tool.approval.requested", {"ask_id": "ask_1", "call_id": "c1", "tool_name": "Bash"}))
+    assert len(s.pending_approvals) == 1
+    assert s.pending_approvals[0].ask_id == "ask_1"
+    assert s.status == RunStatus.awaiting_approval
+
+
+def test_approval_resolved_removes_pending():
+    s = _fold(
+        [("tool.approval.requested", {"ask_id": "ask_1", "call_id": "c1", "tool_name": "Bash"})],
+        ("tool.approval.resolved", {"ask_id": "ask_1"}),
+    )
+    assert s.pending_approvals == []
+    assert s.status == RunStatus.awaiting_model
+
+
+def test_unknown_event_fail_closed():
+    s = initial_run_state("run_r")
+    s = reduce(s, _ev("thread.message.sent", 1, {"content": "hi", "turn_index": 0}))
+    turns_before = list(s.turns)
+    status_before = s.status
+    s = reduce(s, _ev("some.future.event", 2, {"anything": 1}))
+    assert s.turns == turns_before
+    assert s.status == status_before
+    assert s.last_committed_sequence == 2  # 未知事件仅推进 cursor
+
+
+def test_cursor_advances_with_event_sequence():
+    s = initial_run_state("run_r")
+    assert s.last_committed_sequence == 0
+    s = reduce(s, _ev("thread.message.sent", 7, {"content": "hi", "turn_index": 0}))
+    assert s.last_committed_sequence == 7
+
+
+def test_token_accumulation_separate():
+    s = initial_run_state("run_r")
+    s = reduce(s, _ev("model.attempt.completed", 1, {"attempt_id": "a1", "terminal_reason": "tool_calls",
+        "content": "", "reasoning": "", "tool_calls": [], "is_final": False,
+        "usage": {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15}}))
+    s = reduce(s, _ev("model.attempt.completed", 2, {"attempt_id": "a2", "terminal_reason": "completed",
+        "content": "done", "reasoning": "", "tool_calls": [], "is_final": True,
+        "usage": {"prompt_tokens": 3, "completion_tokens": 4, "total_tokens": 7}}))
+    assert s.token_usage["prompt_tokens"] == 13
+    assert s.token_usage["completion_tokens"] == 9
+    assert s.token_usage["total_tokens"] == 22
+
+
+def test_reduce_does_not_mutate_input_on_every_path():
+    s = initial_run_state("run_r")
+    events = [
+        _ev("thread.message.sent", 1, {"content": "hi", "turn_index": 0}),
+        _ev("model.attempt.started", 2, {"attempt_id": "a1"}),
+        _ev("tool.execution.started", 3, {"transaction_id": "ttx_1", "call_id": "c1", "tool_id": "builtin:Read"}),
+        _ev("tool.execution.completed", 4, {"transaction_id": "ttx_1", "call_id": "c1", "tool_id": "builtin:Read"}),
+        _ev("run.completed", 5, {"final_output": "done", "terminal_reason": "completed"}),
+    ]
+    for e in events:
+        before_obj = s
+        pre = canonical_json(before_obj.model_dump())
+        s = reduce(s, e)
+        assert canonical_json(before_obj.model_dump()) == pre

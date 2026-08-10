@@ -10,7 +10,6 @@ from floodmind.agent.runtime.contracts.run_state import (
     RunState, RunStatus, PendingToolTransaction, PendingApproval,
 )
 from floodmind.agent.runtime.contracts.canonical_events import EventEnvelope
-from floodmind.agent.runtime.contracts.identity import new_id
 
 
 def initial_run_state(run_id: str, *, conversation_id: str = "", task_id: str = "",
@@ -46,7 +45,7 @@ def _reduce_thread_message_sent(state: RunState, payload: Dict[str, Any]) -> Run
 
 def _reduce_attempt_started(state: RunState, payload: Dict[str, Any]) -> RunState:
     ns = _clone(state)
-    ns.active_attempt_id = str(payload.get("attempt_id", new_id("attempt")))
+    ns.active_attempt_id = str(payload.get("attempt_id") or "")
     ns.status = RunStatus.streaming_model
     return ns
 
@@ -108,10 +107,6 @@ def _reduce_tool_completed(state: RunState, payload: Dict[str, Any]) -> RunState
     return ns
 
 
-def _reduce_tool_failed(state: RunState, payload: Dict[str, Any]) -> RunState:
-    return _reduce_tool_completed(state, payload)
-
-
 def _reduce_approval_requested(state: RunState, payload: Dict[str, Any]) -> RunState:
     ns = _clone(state)
     ns.pending_approvals.append(PendingApproval(
@@ -148,7 +143,10 @@ def _reduce_run_terminal(state: RunState, payload: Dict[str, Any], event_type: s
 
 def reduce(state: RunState, event: EventEnvelope) -> RunState:
     """确定性折叠。未知事件 fail closed：保持不变但推进 cursor。"""
+    if event.event_id in state.processed_event_ids:
+        return state  # duplicate: no re-apply, no cursor bump
     ns = _clone(state)
+    ns.processed_event_ids = ns.processed_event_ids + [event.event_id]
     ns.last_committed_sequence = event.sequence
     et = event.event_type
     if et == "thread.message.sent":

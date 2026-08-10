@@ -57,6 +57,7 @@ class RunState(BaseModel):
     child_threads: List[ChildThreadState] = Field(default_factory=list)
     artifacts: List[str] = Field(default_factory=list)
     token_usage: Dict[str, int] = Field(default_factory=dict)
+    processed_event_ids: List[str] = Field(default_factory=list)
     cancellation_state: str = ""
     resumability: str = ""
     # 派生对话历史：扁平 user/assistant 条目，与现 DualMemory._turns 形状 wire 兼容

@@ -7,6 +7,7 @@ def test_default_state():
     assert s.status == RunStatus.created
     assert s.pending_tool_transactions == []
     assert s.turns == []
+    assert s.processed_event_ids == []
 
 def test_required_identity_fields():
     try:
