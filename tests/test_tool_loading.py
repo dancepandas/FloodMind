@@ -74,7 +74,7 @@ def test_get_tool_real_end_to_end_malformed_key():
     svc = ToolExecutionService(permission_service=permission_service)
     call = ToolCall(id="c1", name="GetTool", arguments={'tool_name"': "Read"})
 
-    result = svc.execute(call, context=None, registry=reg)
+    result = svc.execute(call, context=None, registry=reg, journal_authority=object())
     set_runtime_context(None)
 
     assert result.status == "completed"

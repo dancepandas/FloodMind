@@ -233,6 +233,46 @@ def test_approval_authority_is_bound_to_pending_ask(tmp_path):
     }
 
 
+def test_blocking_permission_ask_timeout_emits_matching_denial_once(tmp_path):
+    auth = open_journal_authority(
+        tmp_path,
+        conversation_id="c",
+        task_id="t",
+        run_id="r-blocking-timeout",
+        thread_id="th",
+        turn_id="tu",
+    )
+    ask_service = AskService(timeout=0.01)
+    ask_service.set_emit_fn(lambda _event: None, session_id="session")
+    permission_service = PermissionService(ask_service=ask_service)
+    decision = permission_service.check(
+        PermissionRequest(
+            session_id="session",
+            call_id="call-timeout",
+            tool_name="DangerousTool",
+            tool_input={"path": "x.txt"},
+            permission_policy=ToolPermissionPolicy(policy_type="ask", reason="confirm"),
+        ),
+        journal_authority=auth,
+    )
+
+    assert decision.behavior.value == "deny"
+    approval_events = [
+        event for event in auth.read_after(0)
+        if event.event_type.startswith("tool.approval.")
+    ]
+    assert [event.event_type for event in approval_events] == [
+        "tool.approval.requested",
+        "tool.approval.resolved",
+    ]
+    requested, resolved = approval_events
+    assert resolved.payload == {
+        "ask_id": requested.payload["ask_id"],
+        "call_id": "call-timeout",
+        "approved": False,
+    }
+
+
 def test_blocking_permission_ask_emits_matching_events_once(tmp_path):
     auth = open_journal_authority(
         tmp_path,

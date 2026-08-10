@@ -107,7 +107,7 @@ class TestSandboxService:
             tool_input={"query": "x"},
             permission_policy=ToolPermissionPolicy(policy_type="network"),
         )
-        decision = perm_svc.check(sub_req)
+        decision = perm_svc.check(sub_req, journal_authority=object())
         assert decision.behavior == PermissionBehavior.DENY
 
         # 父代理调用不应命中
@@ -117,7 +117,7 @@ class TestSandboxService:
             tool_input={"query": "x"},
             permission_policy=ToolPermissionPolicy(policy_type="network"),
         )
-        decision = perm_svc.check(parent_req)
+        decision = perm_svc.check(parent_req, journal_authority=object())
         assert decision.behavior == PermissionBehavior.ALLOW
 
 

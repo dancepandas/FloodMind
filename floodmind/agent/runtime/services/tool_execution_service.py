@@ -118,15 +118,18 @@ class ToolExecutionService:
         context: Optional[Any] = None,
         registry: Optional[Any] = None,
         authorized_ask_id: Optional[str] = None,
-        journal_authority: Any = None,
+        *,
+        journal_authority: Any,
     ) -> ToolResult:
         """Execute a tool with services supplied by the execution RuntimeContext."""
+        if journal_authority is None:
+            raise ValueError("journal_authority is required for tool execution")
         return self._execute_bound(
             call,
             context,
             registry,
             authorized_ask_id,
-            journal_authority,
+            journal_authority=journal_authority,
         )
 
     def _execute_bound(
@@ -135,8 +138,11 @@ class ToolExecutionService:
         context: Optional[Any] = None,
         registry: Optional[Any] = None,
         authorized_ask_id: Optional[str] = None,
-        journal_authority: Any = None,
+        *,
+        journal_authority: Any,
     ) -> ToolResult:
+        if journal_authority is None:
+            raise ValueError("journal_authority is required for tool execution")
         tool = self._resolve_tool(call, registry)
         if tool is None:
             return ToolResult(
@@ -498,8 +504,10 @@ class ToolExecutionService:
         agent_tier: str = "main",
         mode: str = "execution",
         *,
-        journal_authority: Any = None,
+        journal_authority: Any,
     ) -> PermissionDecision:
+        if journal_authority is None:
+            raise ValueError("journal_authority is required for permission checks")
         # SDK permission_handler 钩子（宿主最高裁决）：True = 宿主显式放行 → 直接 ALLOW 并跳过
         # permission_service（宿主放行是最高权威）；False = 宿主拒绝 → DENY；None = 宿主无意见 →
         # 交给 SDK 正常判断。此前实现把 True 当"不拒绝"，permission_service 仍会 ASK/DENY，宿主无法真正放行。

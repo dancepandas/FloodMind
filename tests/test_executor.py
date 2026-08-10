@@ -8,7 +8,9 @@ from floodmind.agent.native.executor import NativeAgentExecutor
 from floodmind.agent.native.event_bus import EventBus
 from floodmind.agent.native.message_builder import MessageBuilder
 from floodmind.agent.native.model_client import ModelClient
-from floodmind.agent.native.types import AgentResult, ModelEvent, RunContext, ToolCall
+from floodmind.agent.native.types import (
+    AgentResult, InvalidToolCall, ModelEvent, RunContext, TerminalReason, ToolCall,
+)
 
 
 class TestNativeAgentExecutor:
@@ -163,11 +165,16 @@ class TestNativeAgentExecutor:
 
         mc.stream_chat.side_effect = stream_chat
         executor = self._make_executor(mc, tools_schema=[])
+        observed = []
+        executor.event_bus.add_listener(observed.append)
         result = executor.run(self._make_context(), "hello")
 
         assert calls["n"] == 2  # 断流后自动重试了一次
         assert "Hello world" in result.final_output
         assert not result.is_timeout
+        assert "".join(
+            event.get("content", "") for event in observed if event.get("type") == "answer_delta"
+        ) == "Hello world"
 
     def test_executor_calls_tools_and_resumes_loop(self):
         """Agent loop executes tool call then continues."""
@@ -203,6 +210,61 @@ class TestNativeAgentExecutor:
 
         assert tool_executor.execute.called
         assert "Done" in result.final_output
+
+    def test_malformed_tool_json_returns_retry_feedback_without_execution(self):
+        mc = MagicMock(spec=ModelClient)
+        mc.stream_chat.side_effect = [
+            [
+                ModelEvent(
+                    type="invalid_tool_call",
+                    content="bad json",
+                    invalid_tool_call=InvalidToolCall(
+                        id="bad1", name="danger", raw_arguments='{"target":', error="bad json"
+                    ),
+                ),
+                ModelEvent(type="done", terminal_reason=TerminalReason.from_raw("tool_calls")),
+            ],
+            [
+                ModelEvent(type="token", content="Recovered"),
+                ModelEvent(type="done", terminal_reason=TerminalReason.from_raw("stop")),
+            ],
+        ]
+        tool_executor = MagicMock()
+        executor = self._make_executor(mc, tool_executor=tool_executor, tools_schema=[])
+        result = executor.run(self._make_context(), "call it")
+
+        tool_executor.execute.assert_not_called()
+        assert result.final_output == "Recovered"
+        retry_messages = mc.stream_chat.call_args_list[1].kwargs["messages"]
+        assert any("参数 JSON 无法解析" in str(message) for message in retry_messages)
+
+    @pytest.mark.parametrize("reason", ["content_filter", "refusal", "pause_turn", "aborted"])
+    def test_non_success_finish_reasons_are_not_normal_completion(self, reason):
+        mc = MagicMock(spec=ModelClient)
+        mc.stream_chat.return_value = [
+            ModelEvent(type="token", content="partial"),
+            ModelEvent(type="done", terminal_reason=TerminalReason.from_raw(reason)),
+        ]
+        memory = MagicMock()
+        executor = self._make_executor(mc, tools_schema=[])
+        executor._memory = memory
+        result = executor.run(self._make_context(), "hello")
+
+        assert result.final_output != "partial"
+        memory.add_assistant_round.assert_not_called()
+
+    def test_max_tokens_continues_once_then_completes(self):
+        mc = MagicMock(spec=ModelClient)
+        mc.stream_chat.side_effect = [
+            [ModelEvent(type="token", content="first "),
+             ModelEvent(type="done", terminal_reason=TerminalReason.from_raw("length"))],
+            [ModelEvent(type="token", content="second"),
+             ModelEvent(type="done", terminal_reason=TerminalReason.from_raw("stop"))],
+        ]
+        executor = self._make_executor(mc, tools_schema=[])
+        result = executor.run(self._make_context(), "hello")
+        assert result.final_output == "first second"
+        assert mc.stream_chat.call_count == 2
 
     def test_executor_appends_provider_assistant_snapshot_for_tool_calls(self):
         """工具调用轮优先使用 ModelClient 给出的 provider 原生 assistant message。"""
@@ -571,7 +633,7 @@ class TestAwaitingPermissionRecovery:
             tool_name="Write",
             reason="写文件",
             tool_input={"path": "x.txt"},
-        ))
+        ), journal_authority=MagicMock())
         ask_svc.respond(PermissionAskResponse(session_id="test-session", ask_id=ask_id, approved=False))
 
         tool_executor = MagicMock()
@@ -603,7 +665,7 @@ class TestAwaitingPermissionRecovery:
         ask_id = ask_svc.start_ask(PermissionAskRequest(
             session_id="test-session", call_id="c1", tool_name="Write",
             reason="write", tool_input={"path": "x.txt"},
-        ))
+        ), journal_authority=MagicMock())
         ask_svc.respond(PermissionAskResponse(session_id="test-session", ask_id=ask_id, approved=True))
 
         result = NativeToolResult(

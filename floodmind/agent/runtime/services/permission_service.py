@@ -95,8 +95,10 @@ class PermissionService:
         self,
         request: PermissionRequest,
         *,
-        journal_authority: Any = None,
+        journal_authority: Any,
     ) -> PermissionDecision:
+        if journal_authority is None:
+            raise ValueError("journal_authority is required for permission checks")
         tool_policy_result = self._check_tool_policy(request)
 
         if tool_policy_result.behavior == PermissionBehavior.DENY:
@@ -358,8 +360,10 @@ class PermissionService:
         request: PermissionRequest,
         reason: str,
         *,
-        journal_authority: Any = None,
+        journal_authority: Any,
     ) -> PermissionDecision:
+        if journal_authority is None:
+            raise ValueError("journal_authority is required for ASK creation")
         if self._ask_service is None:
             logger.warning("PermissionService: AskService 未设置，ASK 自动拒绝")
             return PermissionDecision(behavior=PermissionBehavior.DENY, reason=f"需要用户确认: {reason}（AskService 不可用）")

@@ -43,8 +43,10 @@ class _PendingAsk:
         tool_name: str,
         reason: str,
         tool_input: Dict[str, Any],
-        journal_authority: Any = None,
+        journal_authority: Any,
     ):
+        if journal_authority is None:
+            raise ValueError("journal_authority is required for ASK creation")
         self.ask_id = ask_id
         self.session_id = session_id
         self.call_id = call_id
@@ -84,13 +86,15 @@ class AskService:
         self,
         ask: PermissionAskRequest,
         *,
-        journal_authority: Any = None,
+        journal_authority: Any,
     ) -> Optional[str]:
         """启动一个非阻塞 ASK，发射 permission_ask 事件，返回 ask_id。
 
         调用方需要自行通过 get_response(ask_id) 或 wait_response(ask_id) 获取结果。
         如果 emit_fn 未设置，返回 None 表示无法发起 ASK。
         """
+        if journal_authority is None:
+            raise ValueError("journal_authority is required for ASK creation")
         ask_id = f"ask-{uuid.uuid4().hex[:12]}"
         pending = _PendingAsk(
             ask_id,
@@ -101,9 +105,6 @@ class AskService:
             ask.tool_input,
             journal_authority,
         )
-
-        with self._lock:
-            self._pending[ask_id] = pending
 
         with self._lock:
             emit_fn = self._emit_fns.get(ask.session_id) or self._emit_fn
@@ -138,23 +139,19 @@ class AskService:
                 self._pending.pop(ask_id, None)
             return None
 
-        if journal_authority is not None:
-            journal_authority.emit(
-                "tool.approval.requested",
-                {
-                    "ask_id": ask_id,
-                    "call_id": ask.call_id,
-                    "tool_name": ask.tool_name,
-                    "reason": ask.reason,
-                    "arguments": json.dumps(ask.tool_input, ensure_ascii=False),
-                },
-                call_id=ask.call_id,
-            )
-        else:
-            logger.warning(
-                "AskService: ASK %s 未绑定 journal authority，跳过 approval requested 事件",
-                ask_id,
-            )
+        journal_authority.emit(
+            "tool.approval.requested",
+            {
+                "ask_id": ask_id,
+                "call_id": ask.call_id,
+                "tool_name": ask.tool_name,
+                "reason": ask.reason,
+                "arguments": json.dumps(ask.tool_input, ensure_ascii=False),
+            },
+            call_id=ask.call_id,
+        )
+        with self._lock:
+            self._pending[ask_id] = pending
 
         if self._timeout is None:
             logger.info("AskService: ASK %s 已发射，等待用户响应", ask_id)
@@ -209,6 +206,7 @@ class AskService:
                 self._pending.pop(ask_id, None)
 
         if timed_out:
+            self._emit_resolved(pending, approved=False)
             logger.warning("AskService: ASK %s 超时，自动拒绝", ask_id)
             return False
 
@@ -218,9 +216,11 @@ class AskService:
         self,
         ask: PermissionAskRequest,
         *,
-        journal_authority: Any = None,
+        journal_authority: Any,
     ) -> bool:
-        """兼容旧接口：启动 ASK、等待响应、发射结果事件后再清理。"""
+        """启动 ASK、等待响应、发射结果事件后再清理。"""
+        if journal_authority is None:
+            raise ValueError("journal_authority is required for ASK creation")
         ask_id = self.start_ask(ask, journal_authority=journal_authority)
         if ask_id is None:
             return False
@@ -263,24 +263,22 @@ class AskService:
                 return False
 
             pending.result = response.approved
-            authority = pending.journal_authority
-            if authority is not None:
-                authority.emit(
-                    "tool.approval.resolved",
-                    {
-                        "ask_id": response.ask_id,
-                        "call_id": pending.call_id,
-                        "approved": response.approved,
-                    },
-                    call_id=pending.call_id,
-                )
-            else:
-                logger.warning(
-                    "AskService: ASK %s 未绑定 journal authority，跳过 approval resolved 事件",
-                    response.ask_id,
-                )
+            pending.accepting_response = False
+            self._emit_resolved(pending, approved=response.approved)
             pending.event.set()
             return True
+
+    @staticmethod
+    def _emit_resolved(pending: _PendingAsk, *, approved: bool) -> None:
+        pending.journal_authority.emit(
+            "tool.approval.resolved",
+            {
+                "ask_id": pending.ask_id,
+                "call_id": pending.call_id,
+                "approved": approved,
+            },
+            call_id=pending.call_id,
+        )
 
     def is_pending(self, ask_id: str) -> bool:
         """判断 ask_id 是否仍在等待响应（用于崩溃恢复时区分"丢失"与"用户拒绝"）。"""
@@ -301,9 +299,11 @@ class AskService:
         """
         with self._lock:
             pending = self._pending.get(ask_id)
-            if pending is None:
+            if pending is None or not pending.accepting_response:
                 return False
+            pending.accepting_response = False
             pending.result = False
+            self._emit_resolved(pending, approved=False)
             pending.event.set()
         logger.info("AskService: ASK %s 被强制拒绝（超时无响应）", ask_id)
         return True
@@ -334,8 +334,11 @@ class AskService:
             to_cancel = {k: v for k, v in self._pending.items() if v.session_id == session_id}
             count = len(to_cancel)
             for p in to_cancel.values():
-                p.result = False
-                p.event.set()
+                if p.accepting_response:
+                    p.accepting_response = False
+                    p.result = False
+                    self._emit_resolved(p, approved=False)
+                    p.event.set()
             for k in to_cancel:
                 self._pending.pop(k, None)
         return count
@@ -344,8 +347,11 @@ class AskService:
         with self._lock:
             count = len(self._pending)
             for p in self._pending.values():
-                p.result = False
-                p.event.set()
+                if p.accepting_response:
+                    p.accepting_response = False
+                    p.result = False
+                    self._emit_resolved(p, approved=False)
+                    p.event.set()
             self._pending.clear()
         return count
 

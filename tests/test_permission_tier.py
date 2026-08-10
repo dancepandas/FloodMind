@@ -24,7 +24,7 @@ class TestSubAgentTier:
             permission_policy=ToolPermissionPolicy(policy_type="network"),
             agent_tier="sub",
         )
-        decision = perm_svc.check(request)
+        decision = perm_svc.check(request, journal_authority=object())
         assert decision.behavior == PermissionBehavior.DENY
         assert "子代理" in decision.reason
 
@@ -35,7 +35,7 @@ class TestSubAgentTier:
             permission_policy=ToolPermissionPolicy(policy_type="readonly"),
             agent_tier="sub",
         )
-        decision = perm_svc.check(request)
+        decision = perm_svc.check(request, journal_authority=object())
         assert decision.behavior == PermissionBehavior.ALLOW
 
     def test_ask_downgraded_for_sub(self, perm_svc):
@@ -46,7 +46,7 @@ class TestSubAgentTier:
             permission_policy=ToolPermissionPolicy(policy_type="ask", reason="需要确认"),
             agent_tier="sub",
         )
-        decision = perm_svc.check(request)
+        decision = perm_svc.check(request, journal_authority=object())
         assert decision.behavior == PermissionBehavior.DENY
         assert "子代理无权" in decision.reason
 
@@ -57,7 +57,7 @@ class TestSubAgentTier:
             permission_policy=ToolPermissionPolicy(policy_type="state_write"),
             agent_tier="sub",
         )
-        decision = perm_svc.check(request)
+        decision = perm_svc.check(request, journal_authority=object())
         assert decision.behavior == PermissionBehavior.DENY
         assert "不允许修改全局状态" in decision.reason
 
@@ -69,7 +69,7 @@ class TestSubAgentTier:
             permission_policy=ToolPermissionPolicy(policy_type="exec"),
             agent_tier="sub",
         )
-        decision = perm_svc.check(request)
+        decision = perm_svc.check(request, journal_authority=object())
         assert decision.behavior == PermissionBehavior.ALLOW
 
     def test_global_allow_does_not_override_sub_deny(self, perm_svc):
@@ -87,7 +87,7 @@ class TestSubAgentTier:
             permission_policy=ToolPermissionPolicy(policy_type="network"),
             agent_tier="sub",
         )
-        decision = perm_svc.check(request)
+        decision = perm_svc.check(request, journal_authority=object())
         assert decision.behavior == PermissionBehavior.DENY
         assert "子代理" in decision.reason
 
@@ -99,5 +99,5 @@ class TestSubAgentTier:
             permission_policy=ToolPermissionPolicy(policy_type="network"),
             agent_tier="main",
         )
-        decision = perm_svc.check(request)
+        decision = perm_svc.check(request, journal_authority=object())
         assert decision.behavior == PermissionBehavior.ALLOW

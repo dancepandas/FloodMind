@@ -92,3 +92,13 @@ Status: DONE.
 - Added a blocking `PermissionService.check` regression that runs the approval response from another thread and asserts exactly one requested/resolved pair with matching `ask_id` and `call_id`. Red evidence: the test failed because `PermissionService.check` did not accept the authority; green evidence: `tests/test_execution_events.py` passed `5 passed`.
 - Commit SHA: recorded in the fix-round final handoff.
 - Concerns: none beyond the existing deferred ArtifactStore concern.
+
+## Fix round 3
+
+Status: DONE.
+
+- Made `journal_authority` a required, non-None dependency across `AskService.start_ask/request`, `PermissionService.check/_handle_ask`, and `ToolExecutionService.execute/_execute_bound/_check_permissions`; removed all ASK canonical-event skip branches.
+- Closed every terminal pending-ASK path exactly once using `accepting_response`: response, blocking timeout, forced reject, session cancel, and global cancel now emit one matching `tool.approval.resolved`; late responses are rejected.
+- Added `test_blocking_permission_ask_timeout_emits_matching_denial_once`, proving timeout journals requested then one matching denied resolution. Adjusted direct service tests to supply an authority under the forward-only contract.
+- Red evidence: timeout regression failed with only `tool.approval.requested`. Green focused evidence: `tests/test_execution_events.py` produced `6 passed`; adjusted permission/execution group produced `136 passed`; final full suite produced `949 passed, 1 skipped` in 52.71s. `git diff --check` reported no whitespace errors.
+- Concern: no production ASK creation path without an authority was found; all production executor call sites already pass the run authority.
