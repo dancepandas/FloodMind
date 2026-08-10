@@ -22,6 +22,8 @@ from floodmind.agent.native.types import (
     TokenUsage,
 )
 from floodmind.agent.runtime.contracts.tools import ToolCall, ToolResult
+from floodmind.agent.runtime.contracts.identity import new_id
+from floodmind.agent.runtime.services.journal_authority import JournalAuthority
 from floodmind.agent.native.event_bus import EventBus
 from floodmind.agent.native.message_builder import MessageBuilder
 from floodmind.agent.native.model_client import ModelClient
@@ -71,6 +73,7 @@ class NativeAgentExecutor:
         context_window: int = 128000,
         memory: Optional[Any] = None,
         background_task_service: Optional[Any] = None,
+        journal_authority: Optional[JournalAuthority] = None,
     ):
         self.model_client = model_client
         self.tool_executor = tool_executor
@@ -92,8 +95,8 @@ class NativeAgentExecutor:
         self._tracing_service = tracing_service
         self._context_compressor = context_compressor
         self.context_window = context_window
-        # 唯一历史源：每轮原子完成后写入 memory（add_assistant_round）；中断时不写。
         self._memory = memory
+        self._journal_authority = journal_authority
         # 后台任务服务：任务完成通知注入（None 时回退全局单例 getter）
         self._background_task_service = background_task_service
         self._compressor_session_id: Optional[str] = None
@@ -304,6 +307,18 @@ class NativeAgentExecutor:
         # 记录本轮开始前 reasoning 长度，重试时截断本轮残片，避免两段拼接
         reasoning_before = len(state.reasoning)
 
+        state.attempt_id = new_id("attempt")
+        if self._journal_authority is not None:
+            self._journal_authority.emit(
+                "model.attempt.started",
+                {
+                    "attempt_id": state.attempt_id,
+                    "model": getattr(self.model_client, "model_name", ""),
+                    "iteration": state.iteration,
+                    "messages_count": len(state.messages),
+                },
+                attempt_id=state.attempt_id,
+            )
         self.event_bus.emit_llm_step_start(
             model_name=getattr(self.model_client, 'model_name', ''),
             iteration=state.iteration,
@@ -452,20 +467,10 @@ class NativeAgentExecutor:
             return state
 
         if not tool_calls:
-            # 终态轮（只有 LLM 回答，没有工具调用）：立即落 memory（history 只含完整轮）
-            self._write_round_to_memory(state, tool_calls_records=[], is_final=True)
+            self._emit_round_events(
+                state, tool_calls_records=[], is_final=True, attempt_id=state.attempt_id
+            )
             state.final_output += state.current_answer
-            # 记录最终一轮（只有 LLM 回答，没有工具调用）
-            if self._journal_service is not None:
-                self._journal_service.record_turn(
-                    session_id=context.session_id,
-                    turn_index=state.iteration,
-                    checkpoint_id=state.checkpoint_id,
-                    current_answer=state.current_answer,
-                    tool_calls=[],
-                    tool_result_entries=[],
-                    token_usage=state.token_usage.model_dump(),
-                )
             # 终态后再检查一次排队指令：运行中若有追加的新指令，继续处理而非结束
             if self._inject_queued_user_messages(state) > 0:
                 logger.info("[EXEC] terminal round deferred: %d queued message(s) pending", state.iteration)
@@ -610,21 +615,12 @@ class NativeAgentExecutor:
                 self.message_builder.build_tool_result_message(call.id, inline_content)
             )
 
-        # 本轮工具全部执行完毕：整轮（assistant + tool_results）原子落 memory（history 只含完整轮）
-        all_round_calls = completed_ask_calls + tool_calls
-        self._write_round_to_memory(state, tool_calls_records=round_tool_records, is_final=False)
-
-        # 本轮工具全部执行完毕，记录 journal
-        if self._journal_service is not None:
-            self._journal_service.record_turn(
-                session_id=context.session_id,
-                turn_index=state.iteration,
-                checkpoint_id=state.checkpoint_id,
-                current_answer=state.current_answer,
-                tool_calls=all_round_calls,
-                tool_result_entries=tool_result_entries,
-                token_usage=state.token_usage.model_dump(),
-            )
+        self._emit_round_events(
+            state,
+            tool_calls_records=round_tool_records,
+            is_final=False,
+            attempt_id=state.attempt_id,
+        )
 
         # 本轮工具全部执行完毕，进入下一轮 LLM
         state.pending_tool_calls = []
@@ -633,30 +629,36 @@ class NativeAgentExecutor:
         state.status = "awaiting_llm"
         return state
 
-    # --- memory 单一历史源：整轮原子写入 + 排队指令注入 ---
+    # --- canonical round events + queued-message projection ---
 
-    def _write_round_to_memory(
+    def _emit_round_events(
         self,
         state: AgentLoopState,
+        *,
         tool_calls_records: List[Dict[str, Any]],
         is_final: bool,
+        attempt_id: str,
     ) -> None:
-        """把一个完整 LLM 调用轮（assistant 产物 + 本轮工具结果）原子写入 memory。
-
-        仅在轮原子完成（LLM 出完 + 全部工具执行完 / 终态无工具）后调用。
-        中断路径不会走到这里，故 memory 永远只含完整轮。子代理 memory=None 时跳过。
-        """
-        if self._memory is None or not hasattr(self._memory, "add_assistant_round"):
+        if self._journal_authority is None:
             return
-        try:
-            self._memory.add_assistant_round(
-                content=state.current_answer or "",
-                reasoning=getattr(state, "round_reasoning", "") or "",
-                tool_calls=tool_calls_records,
-                is_final=is_final,
-            )
-        except Exception as e:
-            logger.warning("[EXEC] write round to memory failed: %s", e)
+        terminal_reason = (
+            state.terminal_reason.code
+            if state.terminal_reason is not None
+            else ("tool_calls" if tool_calls_records else "completed")
+        )
+        self._journal_authority.emit(
+            "model.attempt.completed",
+            {
+                "attempt_id": attempt_id,
+                "terminal_reason": terminal_reason,
+                "content": state.current_answer or "",
+                "reasoning": state.round_reasoning or "",
+                "tool_calls": tool_calls_records,
+                "is_final": bool(is_final),
+                "usage": state.token_usage.model_dump(),
+            },
+            attempt_id=attempt_id,
+        )
 
     def _inject_background_notifications(self, state: AgentLoopState) -> int:
         """把本会话已完成的后台任务作为 user 消息注入，使下一次 LLM 调用感知其完成。

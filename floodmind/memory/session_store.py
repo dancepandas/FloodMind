@@ -1,7 +1,7 @@
 """
 SQLite 会话存储（精简角色）。
 
-**注意**：对话历史的权威源是 ``chat_history.json``（``memory._turns``），不是本库。
+The canonical conversation-history source is the per-run Journal projection, not this database.
 本 SQLite 库的生产职责单一：``sync_events`` 表 —— SSE 流式事件回放日志
 （``append_sync_event`` / ``get_sync_events`` / ``get_last_event_index``，由 web_server 调用）。
 

@@ -146,13 +146,8 @@ def save_current_session():
     try:
         data = request.get_json() or {}
         session_id = _require_session_id(data.get('session_id', 'default'))
-        sm = _sm()
-        agent = sm.get_agent(session_id)
-        if agent and hasattr(agent.memory, 'save_chat_history'):
-            agent.memory.save_chat_history()
-            return jsonify({'status': 'success', 'message': '会话已保存'})
-        else:
-            return jsonify({'status': 'success', 'message': '会话已保存（无Agent实例）'})
+        _sm().save_all()
+        return jsonify({'status': 'success', 'message': '会话已保存'})
     except Exception as e:
         logger.error("保存会话失败: %s", e)
         return jsonify({'status': 'error', 'message': sanitize_output(str(e)) or '服务器内部错误'}), 500

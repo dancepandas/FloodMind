@@ -197,11 +197,17 @@ def chat():
         # 排队路径
         if is_queued:
             try:
-                if hasattr(agent, 'memory') and agent.memory is not None and hasattr(agent.memory, 'add_user_message'):
-                    agent.memory.add_user_message(enhanced_message)
+                from floodmind.tools.session_context import get_runtime_context
+                runtime_context = get_runtime_context()
+                authority = getattr(runtime_context, "journal_authority", None)
+                if authority is not None:
+                    authority.emit(
+                        "thread.message.sent",
+                        {"content": enhanced_message, "turn_index": 0},
+                    )
                     logger.info("[chat] 排队消息（运行中）: session=%s, msg=%s", session_id, message[:50])
                 else:
-                    logger.warning("[chat] 排队失败：agent.memory 不可用 session=%s", session_id)
+                    logger.warning("[chat] 排队失败：journal authority 不可用 session=%s", session_id)
             except Exception as e:
                 logger.warning("[chat] 排队消息写入 memory 失败: %s", e)
             return jsonify({'status': 'queued', 'message': '消息已排队，将在当前任务完成后处理'}), 202

@@ -2777,13 +2777,6 @@ class NativeFloodAgent:
             _active_input_var.set(user_message or user_input)
             self._active_user_message = user_message or user_input
 
-            active_notice = None
-            if hasattr(self.memory, "add_user_message"):
-                result = self.memory.add_user_message(user_input)
-                if result:
-                    active_notice = result
-                    yield {"type": "system", "content": f"【{result}】"}
-
             q: queue.Queue = queue.Queue()
             result_holder: Dict[str, Any] = {}
 
@@ -2808,15 +2801,32 @@ class NativeFloodAgent:
                     upload_dir = self._get_upload_dir(effective_session_id)
                     workspace_dirs = self._workspace_context_dirs(output_dir)
                     from floodmind.agent.runtime.contracts.runtime_context import RuntimeContext
+                    from floodmind.agent.runtime.services.journal_authority import open_journal_authority
+                    from floodmind.agent.runtime.services.run_identity import resolve_identity
                     from floodmind.tools.session_context import set_runtime_context
+
+                    if workspace_dirs.get("state_dir"):
+                        runtime_dir = Path(workspace_dirs["state_dir"])
+                        session_dir = runtime_dir / "sessions" / effective_session_id
+                    elif _ws is not None:
+                        runtime_dir = Path(_ws.session_root).parent
+                        session_dir = Path(_ws.session_root) / effective_session_id
+                    else:
+                        runtime_dir = Path(output_dir).parent.parent
+                        session_dir = runtime_dir / "sessions" / effective_session_id
+                    ident = resolve_identity(effective_session_id, session_dir)
+                    auth = open_journal_authority(runtime_dir, **ident)
+                    auth.emit("thread.message.sent", {"content": user_input, "turn_index": 0})
+                    self.memory.bind_journal(auth, runtime_dir, ident["conversation_id"])
+                    self._orchestrator_executor._journal_authority = auth
 
                     workspace_id = str(_ws.workspace_dir) if _ws is not None else ""
                     runtime_context = RuntimeContext(
-                        conversation_id=effective_session_id,
-                        task_id=effective_session_id,
-                        run_id=f"run-{int(time.time())}",
-                        thread_id=threading.current_thread().name,
-                        turn_id=uuid.uuid4().hex,
+                        conversation_id=ident["conversation_id"],
+                        task_id=ident["task_id"],
+                        run_id=ident["run_id"],
+                        thread_id=ident["thread_id"],
+                        turn_id=ident["turn_id"],
                         actor_type="host",
                         actor_id=effective_session_id,
                         agent_tier="main",
@@ -2825,6 +2835,7 @@ class NativeFloodAgent:
                         permission_service=self._permission_service,
                         path_service=self._path_service,
                         background_service=self._background_task_service,
+                        journal_authority=auth,
                     )
                     set_runtime_context(runtime_context)
                     self._set_session_context(
@@ -3038,22 +3049,6 @@ class NativeFloodAgent:
 
             if full_answer:
                 yield {"type": "final_text", "content": full_answer}
-
-            if full_answer:
-                # DualMemory（支持 add_assistant_round）：每个完整 LLM 调用轮已由 executor
-                # 原子写入 memory，这里不再重复写终态轮，避免重复。
-                # memory 为 None（子代理）或异常未落轮时，由 save_chat_history 兜底。
-                if not hasattr(self.memory, "add_assistant_round"):
-                    if hasattr(self.memory, "add_ai_message_with_trace"):
-                        self.memory.add_ai_message_with_trace(full_answer, full_reasoning, full_tool_calls)
-                    elif hasattr(self.memory, "add_ai_message"):
-                        self.memory.add_ai_message(full_answer)
-                # 持久化对话历史（兜底：确保 user entry 等落盘）
-                if hasattr(self.memory, "save_chat_history"):
-                    try:
-                        self.memory.save_chat_history()
-                    except Exception as e:
-                        logger.warning("保存对话历史失败: %s", e)
 
             # 任务经验自动捕获（非阻塞，后台线程）
             if settings.task_experience.enabled and settings.task_experience.auto_capture:

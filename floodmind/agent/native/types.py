@@ -205,6 +205,7 @@ class AgentLoopState(BaseModel):
     checkpoint_id: str = ""
     status: AgentLoopStatus = "created"
     iteration: int = 0
+    attempt_id: str = ""
     max_iterations: int = 10000
 
     # 对话与执行上下文

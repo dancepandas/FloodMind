@@ -155,10 +155,26 @@ def update_session_config():
                     f"[系统通知] 功能状态更新：{', '.join(status_messages)}。"
                     f"请在后续对话中使用更新后的功能状态。"
                 )
-                if hasattr(agent.memory, 'add_user_message'):
-                    agent.memory.add_user_message(system_notice)
-                    if hasattr(agent.memory, 'add_ai_message'):
-                        agent.memory.add_ai_message("收到，已更新功能状态配置。")
+                from floodmind.tools.session_context import get_runtime_context
+                runtime_context = get_runtime_context()
+                authority = getattr(runtime_context, "journal_authority", None)
+                if authority is not None:
+                    authority.emit(
+                        "thread.message.sent",
+                        {"content": system_notice, "turn_index": 0},
+                    )
+                    authority.emit(
+                        "model.attempt.completed",
+                        {
+                            "attempt_id": "configuration_notice",
+                            "terminal_reason": "completed",
+                            "content": "收到，已更新功能状态配置。",
+                            "reasoning": "",
+                            "tool_calls": [],
+                            "is_final": True,
+                            "usage": {},
+                        },
+                    )
             if hasattr(sm, '_agents') and session_id in sm._agents:
                 del sm._agents[session_id]
 

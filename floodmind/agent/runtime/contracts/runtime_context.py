@@ -28,6 +28,7 @@ class RuntimeContext:
     path_service: Any = None
     background_service: Any = None
     artifact_service: Any = None
+    journal_authority: Any = None
     cancellation: Any = None
     deadline: Any = None
     environment_id: str = ""
