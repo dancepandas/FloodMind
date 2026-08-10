@@ -72,6 +72,11 @@ class JournalAuthority:
         self.turn_id = turn_id
         self.attempt_id = attempt_id
 
+    def _scope(self, scope: dict, key: str) -> str:
+        """解析 scope 覆盖；显式 None 视为未提供，回落权威身份默认值。"""
+        value = scope.get(key)
+        return value if value else getattr(self, key, "")
+
     def new_envelope(self, event_type: str, payload: Dict[str, Any], **scope) -> EventEnvelope:
         import uuid
         return EventEnvelope(
@@ -81,11 +86,14 @@ class JournalAuthority:
             conversation_id=self.conversation_id,
             task_id=self.task_id,
             run_id=self.run_id,
-            thread_id=scope.get("thread_id", self.thread_id),
-            turn_id=scope.get("turn_id", self.turn_id),
-            attempt_id=scope.get("attempt_id", self.attempt_id),
-            call_id=scope.get("call_id", ""),
-            actor=Actor(type=scope.get("actor_type", "system"), id=scope.get("actor_id", "")),
+            thread_id=self._scope(scope, "thread_id"),
+            turn_id=self._scope(scope, "turn_id"),
+            attempt_id=self._scope(scope, "attempt_id"),
+            call_id=self._scope(scope, "call_id"),
+            actor=Actor(
+                type=scope.get("actor_type") or "system",
+                id=scope.get("actor_id") or "",
+            ),
             payload=payload,
             recorded_at=utcnow(),
         )
