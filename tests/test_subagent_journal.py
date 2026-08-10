@@ -5,7 +5,9 @@ import pytest
 from floodmind.agent.native.executor import project_run_state_to_loop_state
 from floodmind.agent.native.native_flood_agent import NativeFloodAgent
 from floodmind.agent.native.types import AgentLoopState, RunContext
+from floodmind.agent.runtime.contracts.run_state import RunStatus
 from floodmind.agent.runtime.contracts.runtime_context import RuntimeContext
+from floodmind.agent.runtime.services.checkpoint_service import CheckpointService
 from floodmind.agent.runtime.services.history_projection import project_conversation, project_current
 from floodmind.agent.runtime.services.journal_authority import open_journal_authority
 from floodmind.agent.runtime.reducer import initial_run_state, reduce
@@ -133,3 +135,80 @@ def test_specialist_preparation_failure_emits_failed_terminal(tmp_path, monkeypa
         "thread.spawn.requested", "thread.created", "thread.failed",
     ]
     assert all(e.run_id == "run_1" for e in events)
+
+
+def _tool_calls(auth, content=""):
+    auth.emit("model.attempt.completed", {
+        "attempt_id": "a-tool", "terminal_reason": "tool_calls", "content": content,
+        "reasoning": "", "tool_calls": [{"id": "call", "name": "Read", "arguments": {}}],
+        "is_final": False, "usage": {},
+    })
+
+
+def test_child_terminal_events_do_not_clobber_parent_status(tmp_path):
+    parent = open_journal_authority(
+        tmp_path, conversation_id="c", task_id="t", run_id="run_1",
+        thread_id="thread_parent", turn_id="turn_parent",
+    )
+    parent.emit("thread.message.sent", {"content": "parent", "turn_index": 0})
+    _tool_calls(parent)
+    parent.emit("thread.created", {"thread_id": "thread_child", "parent_call_id": "call"})
+    child = open_journal_authority(
+        tmp_path, conversation_id="c", task_id="t", run_id="run_1",
+        thread_id="thread_child", turn_id="turn_child",
+    )
+    child.emit("thread.message.sent", {"content": "child", "turn_index": 0})
+    _completed(child, "child done")
+    child.emit("run.completed", {"final_output": "child done"})
+    child.emit("thread.completed", {"thread_id": "thread_child"})
+
+    parent_state = parent.replay()
+    child_state = child.replay()
+    assert parent_state.status == RunStatus.awaiting_tool
+    assert [turn["content"] for turn in parent_state.turns] == ["parent", ""]
+    assert child_state.status == RunStatus.completed
+    assert [turn["content"] for turn in child_state.turns] == ["child", "child done"]
+
+
+def test_checkpoint_resume_with_child_turns_replays_parent_suffix(tmp_path):
+    parent = open_journal_authority(
+        tmp_path, conversation_id="c", task_id="t", run_id="run_1",
+        thread_id="thread_parent", turn_id="turn_parent",
+    )
+    parent.emit("thread.message.sent", {"content": "parent", "turn_index": 0})
+    _tool_calls(parent)
+    parent.emit("thread.created", {"thread_id": "thread_child", "parent_call_id": "call"})
+    child = open_journal_authority(
+        tmp_path, conversation_id="c", task_id="t", run_id="run_1",
+        thread_id="thread_child", turn_id="turn_child",
+    )
+    child.emit("thread.message.sent", {"content": "child", "turn_index": 0})
+    _completed(child, "child done")
+    child.emit("run.completed", {"final_output": "child done"})
+    child.emit("thread.completed", {"thread_id": "thread_child"})
+
+    snapshot = parent.replay()
+    service = CheckpointService(base_dir=str(tmp_path / "checkpoints"))
+    record = service.save(
+        AgentLoopState(session_id="parent", run_id="run_1"),
+        journal_cursor=snapshot.last_committed_sequence,
+        reducer_version="1",
+        run_state=snapshot,
+        metadata={
+            "conversation_id": "c", "task_id": "t", "run_id": "run_1",
+            "thread_id": "thread_parent", "turn_id": "turn_parent",
+            "runtime_dir": str(tmp_path),
+        },
+    )
+    parent.emit("tool.execution.completed", {
+        "transaction_id": "tx-parent", "call_id": "delegate", "tool_id": "Delegate",
+        "status": "succeeded", "result_summary": "specialist done", "artifacts": [],
+    })
+    _completed(parent, "parent done")
+    parent.emit("run.completed", {"final_output": "parent done"})
+
+    resumed = service.replay_from_checkpoint(parent, "parent", record.checkpoint_id)
+    assert resumed.status == RunStatus.completed
+    assert [turn["content"] for turn in resumed.turns] == [
+        "parent", "", "specialist done", "parent done",
+    ]

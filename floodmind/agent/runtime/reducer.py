@@ -33,6 +33,13 @@ def _turn_index(turns: list) -> int:
     return max(int(t.get("turn_index", 0)) for t in turns) + 1
 
 
+def _is_current_thread(state: RunState, thread_id: str) -> bool:
+    """事件属于当前线程。current_thread_id 为空（未定义线程）视为当前。"""
+    if not state.current_thread_id:
+        return True
+    return thread_id in ("", state.current_thread_id)
+
+
 def _reduce_thread_spawn(state: RunState, payload: Dict[str, Any]) -> RunState:
     ns = _clone(state)
     return ns
@@ -69,6 +76,8 @@ def _reduce_thread_message_sent(
     state: RunState, payload: Dict[str, Any], thread_id: str,
 ) -> RunState:
     ns = _clone(state)
+    if not _is_current_thread(ns, thread_id):
+        return ns
     content = str(payload.get("content", ""))
     turn_index = int(payload.get("turn_index", _turn_index(ns.turns)))
     ns.turns.append({
@@ -80,8 +89,12 @@ def _reduce_thread_message_sent(
     return ns
 
 
-def _reduce_attempt_started(state: RunState, payload: Dict[str, Any]) -> RunState:
+def _reduce_attempt_started(
+    state: RunState, payload: Dict[str, Any], thread_id: str,
+) -> RunState:
     ns = _clone(state)
+    if not _is_current_thread(ns, thread_id):
+        return ns
     ns.active_attempt_id = str(payload.get("attempt_id") or "")
     ns.status = RunStatus.streaming_model
     return ns
@@ -94,6 +107,8 @@ def _reduce_attempt_completed(
     usage = payload.get("usage") or {}
     for key in ("prompt_tokens", "completion_tokens", "total_tokens"):
         ns.token_usage[key] = int(ns.token_usage.get(key, 0)) + int(usage.get(key, 0))
+    if not _is_current_thread(ns, thread_id):
+        return ns
     tool_calls = payload.get("tool_calls") or []
     is_final = bool(payload.get("is_final"))
     ns.turns.append({
@@ -114,14 +129,22 @@ def _reduce_attempt_completed(
     return ns
 
 
-def _reduce_attempt_failed(state: RunState, payload: Dict[str, Any]) -> RunState:
+def _reduce_attempt_failed(
+    state: RunState, payload: Dict[str, Any], thread_id: str,
+) -> RunState:
     ns = _clone(state)
+    if not _is_current_thread(ns, thread_id):
+        return ns
     ns.status = RunStatus.failed
     return ns
 
 
-def _reduce_tool_started(state: RunState, payload: Dict[str, Any]) -> RunState:
+def _reduce_tool_started(
+    state: RunState, payload: Dict[str, Any], thread_id: str,
+) -> RunState:
     ns = _clone(state)
+    if not _is_current_thread(ns, thread_id):
+        return ns
     ttx = PendingToolTransaction(
         transaction_id=str(payload["transaction_id"]),
         call_id=str(payload["call_id"]),
@@ -140,34 +163,41 @@ def _reduce_tool_completed(
     thread_id: str,
 ) -> RunState:
     ns = _clone(state)
+    is_current = _is_current_thread(ns, thread_id)
     ttx_id = str(payload.get("transaction_id", ""))
-    ns.pending_tool_transactions = [
-        t for t in ns.pending_tool_transactions if t.transaction_id != ttx_id
-    ]
+    if is_current:
+        ns.pending_tool_transactions = [
+            t for t in ns.pending_tool_transactions if t.transaction_id != ttx_id
+        ]
     result_summary = str(
         payload.get("result_summary")
         or payload.get("reason")
         or payload.get("error")
         or ("tool execution failed" if event_type == "tool.execution.failed" else "")
     )
-    ns.turns.append({
-        "role": "tool",
-        "tool_call_id": str(payload.get("call_id", "")),
-        "tool_id": str(payload.get("tool_id", "")),
-        "content": result_summary,
-        "turn_index": _turn_index(ns.turns),
-        "thread_id": thread_id,
-    })
+    if is_current:
+        ns.turns.append({
+            "role": "tool",
+            "tool_call_id": str(payload.get("call_id", "")),
+            "tool_id": str(payload.get("tool_id", "")),
+            "content": result_summary,
+            "turn_index": _turn_index(ns.turns),
+            "thread_id": thread_id,
+        })
     for art in payload.get("artifacts") or []:
         if art not in ns.artifacts:
             ns.artifacts.append(str(art))
-    if not ns.pending_tool_transactions:
+    if is_current and not ns.pending_tool_transactions:
         ns.status = RunStatus.awaiting_model
     return ns
 
 
-def _reduce_approval_requested(state: RunState, payload: Dict[str, Any]) -> RunState:
+def _reduce_approval_requested(
+    state: RunState, payload: Dict[str, Any], thread_id: str,
+) -> RunState:
     ns = _clone(state)
+    if not _is_current_thread(ns, thread_id):
+        return ns
     ns.pending_approvals.append(PendingApproval(
         ask_id=str(payload["ask_id"]),
         call_id=str(payload["call_id"]),
@@ -178,8 +208,12 @@ def _reduce_approval_requested(state: RunState, payload: Dict[str, Any]) -> RunS
     return ns
 
 
-def _reduce_approval_resolved(state: RunState, payload: Dict[str, Any]) -> RunState:
+def _reduce_approval_resolved(
+    state: RunState, payload: Dict[str, Any], thread_id: str,
+) -> RunState:
     ns = _clone(state)
+    if not _is_current_thread(ns, thread_id):
+        return ns
     ask_id = str(payload.get("ask_id", ""))
     ns.pending_approvals = [a for a in ns.pending_approvals if a.ask_id != ask_id]
     if not ns.pending_approvals:
@@ -187,14 +221,22 @@ def _reduce_approval_resolved(state: RunState, payload: Dict[str, Any]) -> RunSt
     return ns
 
 
-def _reduce_compaction(state: RunState, payload: Dict[str, Any], event_type: str) -> RunState:
+def _reduce_compaction(
+    state: RunState, payload: Dict[str, Any], event_type: str, thread_id: str,
+) -> RunState:
     ns = _clone(state)
+    if not _is_current_thread(ns, thread_id):
+        return ns
     ns.status = RunStatus.compacting if event_type.endswith("started") else RunStatus.awaiting_model
     return ns
 
 
-def _reduce_run_terminal(state: RunState, payload: Dict[str, Any], event_type: str) -> RunState:
+def _reduce_run_terminal(
+    state: RunState, payload: Dict[str, Any], event_type: str, thread_id: str,
+) -> RunState:
     ns = _clone(state)
+    if not _is_current_thread(ns, thread_id):
+        return ns
     ns.status = RunStatus.failed if event_type == "run.failed" else RunStatus.completed
     ns.last_committed_sequence = ns.last_committed_sequence
     return ns
@@ -217,21 +259,21 @@ def reduce(state: RunState, event: EventEnvelope) -> RunState:
     if et in ("thread.completed", "thread.failed", "thread.cancelled"):
         return _reduce_thread_terminal(ns, event.payload, et)
     if et == "model.attempt.started":
-        return _reduce_attempt_started(ns, event.payload)
+        return _reduce_attempt_started(ns, event.payload, event.thread_id)
     if et == "model.attempt.completed":
         return _reduce_attempt_completed(ns, event.payload, event.thread_id)
     if et == "model.attempt.failed":
-        return _reduce_attempt_failed(ns, event.payload)
+        return _reduce_attempt_failed(ns, event.payload, event.thread_id)
     if et == "tool.execution.started":
-        return _reduce_tool_started(ns, event.payload)
+        return _reduce_tool_started(ns, event.payload, event.thread_id)
     if et in ("tool.execution.completed", "tool.execution.failed"):
         return _reduce_tool_completed(ns, event.payload, et, event.thread_id)
     if et == "tool.approval.requested":
-        return _reduce_approval_requested(ns, event.payload)
+        return _reduce_approval_requested(ns, event.payload, event.thread_id)
     if et == "tool.approval.resolved":
-        return _reduce_approval_resolved(ns, event.payload)
+        return _reduce_approval_resolved(ns, event.payload, event.thread_id)
     if et in ("context.compaction.started", "context.compaction.completed"):
-        return _reduce_compaction(ns, event.payload, et)
+        return _reduce_compaction(ns, event.payload, et, event.thread_id)
     if et in ("run.completed", "run.failed"):
-        return _reduce_run_terminal(ns, event.payload, et)
+        return _reduce_run_terminal(ns, event.payload, et, event.thread_id)
     return ns  # 其他事件（usage/checkpoint/thread.*）不改状态，仅推进 cursor

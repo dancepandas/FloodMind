@@ -209,6 +209,38 @@ def test_thread_terminal_updates_matching_child(event_type, expected_status):
     ]
 
 
+def test_two_thread_reduction_is_deterministic_and_scoped():
+    events = [
+        _ev("thread.message.sent", 1, {"content": "parent", "turn_index": 0}, thread_id="parent"),
+        _ev("model.attempt.completed", 2, {
+            "terminal_reason": "tool_calls", "content": "", "tool_calls": [{"id": "call"}],
+            "is_final": False, "usage": {"total_tokens": 2},
+        }, thread_id="parent"),
+        _ev("thread.message.sent", 3, {"content": "child", "turn_index": 0}, thread_id="child"),
+        _ev("model.attempt.completed", 4, {
+            "terminal_reason": "completed", "content": "child done", "tool_calls": [],
+            "is_final": True, "usage": {"total_tokens": 3},
+        }, thread_id="child"),
+        _ev("run.completed", 5, {}, thread_id="child"),
+    ]
+    states = []
+    for thread_id in ("parent", "child"):
+        first = initial_run_state("run_r", thread_id=thread_id)
+        second = initial_run_state("run_r", thread_id=thread_id)
+        for event in events:
+            first = reduce(first, event)
+            second = reduce(second, event)
+        assert canonical_json(first.model_dump()) == canonical_json(second.model_dump())
+        states.append(first)
+
+    parent, child = states
+    assert [turn["content"] for turn in parent.turns] == ["parent", ""]
+    assert parent.status == RunStatus.awaiting_tool
+    assert [turn["content"] for turn in child.turns] == ["child", "child done"]
+    assert child.status == RunStatus.completed
+    assert parent.token_usage["total_tokens"] == child.token_usage["total_tokens"] == 5
+
+
 def test_unknown_event_fail_closed():
     s = initial_run_state("run_r")
     s = reduce(s, _ev("thread.message.sent", 1, {"content": "hi", "turn_index": 0}))
