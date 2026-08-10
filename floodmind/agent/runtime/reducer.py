@@ -171,15 +171,59 @@ def _remove_ttx(ns: RunState, ttx_id: str) -> RunState:
     return ns
 
 
+# §6.4 终态机的线性执行链。denied 为旁路终态（不在链中），由 permission 处理器
+# 单独 remove；succeeded/failed/cancelled/indeterminate 是 running 之后的并列终态，
+# 链式前进只允许沿正向分支走（indeterminate -> running 属回退，被 _advance_to 拒绝）。
+_CHAIN = [
+    ToolStatus.proposed, ToolStatus.validated, ToolStatus.permission_evaluated,
+    ToolStatus.approval_required, ToolStatus.approved, ToolStatus.running,
+    ToolStatus.succeeded, ToolStatus.failed, ToolStatus.cancelled,
+    ToolStatus.indeterminate, ToolStatus.result_committed,
+]
+
+
+def _advance_to(ns: RunState, ttx_id: str, target: ToolStatus, **update) -> RunState:
+    """沿 §6.4 合法链前进到 target；不可达/回退/非法边 fail-closed（返回 ns 不变）。"""
+    tx = _find_ttx(ns, ttx_id)
+    if tx is None:
+        return ns
+    if target not in _CHAIN or tx.status not in _CHAIN:
+        return ns
+    cur = _CHAIN.index(tx.status)
+    tgt = _CHAIN.index(target)
+    if tgt < cur:
+        return ns  # 不能回退（含 indeterminate -> running 被拒）
+    walk = tx
+    for s in _CHAIN[cur + 1:tgt + 1]:
+        try:
+            walk = walk.transition(s)
+        except ValueError:
+            return ns  # fail-closed
+    fields = {"status": walk.status}
+    fields.update(update)
+    ns.pending_tool_transactions = [
+        (m.model_copy(update=fields) if m.transaction_id == ttx_id else m)
+        for m in ns.pending_tool_transactions
+    ]
+    return ns
+
+
 def _reduce_tool_proposed(
     state: RunState, payload: Dict[str, Any], thread_id: str,
 ) -> RunState:
     ns = _clone(state)
     if not _is_current_thread(ns, thread_id):
         return ns
-    side_effect = payload.get("side_effect_class") or SideEffectClass.read
+    ttx_id = str(payload.get("transaction_id", "") or "")
+    if not ttx_id:
+        return ns  # 无 transaction_id：不建立垃圾 pending 项，仅推进 cursor
+    raw_se = payload.get("side_effect_class")
+    try:
+        side_effect = SideEffectClass(raw_se) if raw_se else SideEffectClass.read
+    except ValueError:
+        side_effect = SideEffectClass.read  # 非法串 fail-closed 到 read，不抛异常
     ns.pending_tool_transactions.append(ToolTransaction(
-        transaction_id=str(payload.get("transaction_id", "")),
+        transaction_id=ttx_id,
         call_id=str(payload.get("call_id", "")),
         tool_id=str(payload.get("tool_id", "")),
         tool_version=str(payload.get("tool_version", "1")),
@@ -200,7 +244,7 @@ def _reduce_tool_validated(
     ns = _clone(state)
     if not _is_current_thread(ns, thread_id):
         return ns
-    return _update_ttx(ns, str(payload.get("transaction_id", "")), ToolStatus.validated)
+    return _advance_to(ns, str(payload.get("transaction_id", "")), ToolStatus.validated)
 
 
 def _reduce_tool_permission(
@@ -213,9 +257,10 @@ def _reduce_tool_permission(
     decision = str(payload.get("decision", ""))
     fingerprint = str(payload.get("approval_fingerprint", ""))
     if decision == "deny":
+        _advance_to(ns, ttx_id, ToolStatus.denied)  # denied 为旁路终态（不在 _CHAIN），仅作记档尝试
         return _remove_ttx(ns, ttx_id)  # denied 终态，移出 pending
     if decision == "allow":
-        return _update_ttx(ns, ttx_id, ToolStatus.approved, permission_fingerprint=fingerprint)
+        return _advance_to(ns, ttx_id, ToolStatus.approved, permission_fingerprint=fingerprint)
     return ns  # ask 由 tool.approval.required 事件推进，这里保持现状
 
 
@@ -227,8 +272,11 @@ def _reduce_tool_approval_required(
         return ns
     ttx_id = str(payload.get("transaction_id", ""))
     fingerprint = str(payload.get("approval_fingerprint", ""))
-    return _update_ttx(ns, ttx_id, ToolStatus.approval_required,
-                       permission_fingerprint=fingerprint)
+    ns = _advance_to(ns, ttx_id, ToolStatus.approval_required,
+                     permission_fingerprint=fingerprint)
+    if _find_ttx(ns, ttx_id) is not None:
+        ns.status = RunStatus.awaiting_approval
+    return ns
 
 
 def _reduce_tool_started(
@@ -239,12 +287,12 @@ def _reduce_tool_started(
         return ns
     ttx_id = str(payload.get("transaction_id", ""))
     if _find_ttx(ns, ttx_id) is not None:
-        # 执行已开始：对已存在事务直接置为 running（P2 风格时序下可能跳步，
-        # 例如 proposed -> started，严格状态机拒绝跳步，这里以执行边界为准强制置位）。
-        ns.pending_tool_transactions = [
-            (m.model_copy(update={"status": ToolStatus.running}) if m.transaction_id == ttx_id else m)
-            for m in ns.pending_tool_transactions
-        ]
+        # 沿 §6.4 链前进到 running（P2 风格时序下 proposed -> started 会补走
+        # validated/permission_evaluated/approval_required/approved）。
+        # 过期的 started（如 indeterminate 之后）因回退被 fail-closed，不翻回 running。
+        ns = _advance_to(ns, ttx_id, ToolStatus.running)
+        if _find_ttx(ns, ttx_id).status == ToolStatus.running:
+            ns.status = RunStatus.executing_tool
     else:
         ns.pending_tool_transactions.append(ToolTransaction(
             transaction_id=ttx_id,
@@ -253,7 +301,7 @@ def _reduce_tool_started(
             canonical_arguments=str(payload.get("arguments", "")),
             status=ToolStatus.running,
         ))
-    ns.status = RunStatus.executing_tool
+        ns.status = RunStatus.executing_tool
     return ns
 
 
@@ -300,7 +348,7 @@ def _reduce_tool_completed(
     is_current = _is_current_thread(ns, thread_id)
     ttx_id = str(payload.get("transaction_id", ""))
     if is_current:
-        _remove_ttx(ns, ttx_id)
+        ns = _remove_ttx(ns, ttx_id)
     result_summary = str(
         payload.get("result_summary")
         or payload.get("reason")
