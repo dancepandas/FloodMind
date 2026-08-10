@@ -592,7 +592,12 @@ class NativeAgentExecutor:
                     status="error",
                 )
             else:
-                result = self.tool_executor.execute(call, context, registry=self._tool_registry)
+                result = self.tool_executor.execute(
+                    call,
+                    context,
+                    registry=self._tool_registry,
+                    journal_authority=self._journal_authority,
+                )
             logger.info("[EXEC] tool done: name=%s, status=%s, result_len=%d", call.name, result.status, len(result.content) if result.content else 0)
 
             state.tool_results.append(result)
@@ -628,6 +633,7 @@ class NativeAgentExecutor:
                 state.consecutive_failures[call.name] = 0
 
             if state.consecutive_failures.get(call.name, 0) >= self.MAX_CONSECUTIVE_TOOL_FAILURES:
+                self._emit_tool_execution_result(transaction_id, call, result)
                 failure_msg = (
                     f"工具 {call.name} 已连续失败 {self.MAX_CONSECUTIVE_TOOL_FAILURES} 次，"
                     f"强制终止执行循环。请检查参数是否正确。"
@@ -891,7 +897,12 @@ class NativeAgentExecutor:
             pending_call = state.pending_tool_calls[0] if state.pending_tool_calls else None
             if pending_call and hasattr(self.tool_executor, "execute"):
                 context.mode = getattr(state, "mode", "execution")
-                result = self.tool_executor.execute(pending_call, context, registry=self._tool_registry)
+                result = self.tool_executor.execute(
+                    pending_call,
+                    context,
+                    registry=self._tool_registry,
+                    journal_authority=self._journal_authority,
+                )
                 if result.status == "awaiting_permission":
                     state.pending_ask_id = result.metadata.get("ask_id")
                     return state
@@ -921,6 +932,7 @@ class NativeAgentExecutor:
             context,
             registry=self._tool_registry,
             authorized_ask_id=authorized_ask_id,
+            journal_authority=self._journal_authority,
         )
         state.tool_results.append(result)
         tool_input_str = json.dumps(first_call.arguments, ensure_ascii=False) if first_call.arguments else ""

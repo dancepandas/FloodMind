@@ -118,9 +118,16 @@ class ToolExecutionService:
         context: Optional[Any] = None,
         registry: Optional[Any] = None,
         authorized_ask_id: Optional[str] = None,
+        journal_authority: Any = None,
     ) -> ToolResult:
         """Execute a tool with services supplied by the execution RuntimeContext."""
-        return self._execute_bound(call, context, registry, authorized_ask_id)
+        return self._execute_bound(
+            call,
+            context,
+            registry,
+            authorized_ask_id,
+            journal_authority,
+        )
 
     def _execute_bound(
         self,
@@ -128,6 +135,7 @@ class ToolExecutionService:
         context: Optional[Any] = None,
         registry: Optional[Any] = None,
         authorized_ask_id: Optional[str] = None,
+        journal_authority: Any = None,
     ) -> ToolResult:
         tool = self._resolve_tool(call, registry)
         if tool is None:
@@ -249,7 +257,8 @@ class ToolExecutionService:
                     tool_name=tool.name,
                     reason=perm_decision.reason,
                     tool_input=perm_input,
-                )
+                ),
+                journal_authority=journal_authority,
             )
             if ask_id is None:
                 feedback = self._make_permission_feedback(

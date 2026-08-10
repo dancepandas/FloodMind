@@ -29,9 +29,21 @@ _DEFAULT_TIMEOUT: Optional[float] = 300.0  # 5 minutes default timeout
 
 
 class _PendingAsk:
-    __slots__ = ("ask_id", "session_id", "call_id", "tool_name", "reason", "tool_input", "event", "result", "created_at")
+    __slots__ = (
+        "ask_id", "session_id", "call_id", "tool_name", "reason", "tool_input",
+        "event", "result", "created_at", "journal_authority",
+    )
 
-    def __init__(self, ask_id: str, session_id: str, call_id: str, tool_name: str, reason: str, tool_input: Dict[str, Any]):
+    def __init__(
+        self,
+        ask_id: str,
+        session_id: str,
+        call_id: str,
+        tool_name: str,
+        reason: str,
+        tool_input: Dict[str, Any],
+        journal_authority: Any = None,
+    ):
         self.ask_id = ask_id
         self.session_id = session_id
         self.call_id = call_id
@@ -41,6 +53,7 @@ class _PendingAsk:
         self.event = threading.Event()
         self.result: Optional[bool] = None
         self.created_at = time.time()
+        self.journal_authority = journal_authority
 
 
 class AskService:
@@ -65,14 +78,27 @@ class AskService:
             else:
                 self._emit_fn = None
 
-    def start_ask(self, ask: PermissionAskRequest) -> Optional[str]:
+    def start_ask(
+        self,
+        ask: PermissionAskRequest,
+        *,
+        journal_authority: Any = None,
+    ) -> Optional[str]:
         """启动一个非阻塞 ASK，发射 permission_ask 事件，返回 ask_id。
 
         调用方需要自行通过 get_response(ask_id) 或 wait_response(ask_id) 获取结果。
         如果 emit_fn 未设置，返回 None 表示无法发起 ASK。
         """
         ask_id = f"ask-{uuid.uuid4().hex[:12]}"
-        pending = _PendingAsk(ask_id, ask.session_id, ask.call_id, ask.tool_name, ask.reason, ask.tool_input)
+        pending = _PendingAsk(
+            ask_id,
+            ask.session_id,
+            ask.call_id,
+            ask.tool_name,
+            ask.reason,
+            ask.tool_input,
+            journal_authority,
+        )
 
         with self._lock:
             self._pending[ask_id] = pending
@@ -159,9 +185,14 @@ class AskService:
 
         return bool(pending.result)
 
-    def request(self, ask: PermissionAskRequest) -> bool:
+    def request(
+        self,
+        ask: PermissionAskRequest,
+        *,
+        journal_authority: Any = None,
+    ) -> bool:
         """兼容旧接口：启动 ASK 并阻塞等待响应。"""
-        ask_id = self.start_ask(ask)
+        ask_id = self.start_ask(ask, journal_authority=journal_authority)
         if ask_id is None:
             return False
         approved = self.wait_response(ask_id)
@@ -199,10 +230,7 @@ class AskService:
                 return False
 
             pending.result = response.approved
-            from floodmind.tools.session_context import get_runtime_context
-
-            runtime_context = get_runtime_context()
-            authority = getattr(runtime_context, "journal_authority", None)
+            authority = pending.journal_authority
             if authority is not None:
                 authority.emit(
                     "tool.approval.resolved",
@@ -212,6 +240,11 @@ class AskService:
                         "approved": response.approved,
                     },
                     call_id=pending.call_id,
+                )
+            else:
+                logger.warning(
+                    "AskService: ASK %s 未绑定 journal authority，跳过 approval resolved 事件",
+                    response.ask_id,
                 )
             pending.event.set()
             return True

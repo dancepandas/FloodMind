@@ -72,3 +72,13 @@ Commit SHA: recorded in the final handoff; a commit cannot contain its own SHA w
 
 - The brief's regression anchor does not fail before executor wiring because Tasks 2 and 4 already support its direct authority/reducer sequence; this is expected by the brief's own note.
 - `full_ref` now identifies canonical event payloads rather than a legacy full-result artifact. Until the planned ArtifactStore phase, the canonical payload's `result_summary` is the retrievable content.
+
+## Fix round 1
+
+Status: DONE.
+
+- Finding 1: moved terminal consecutive-failure transaction closure before the early return. The fifth failed tool result now emits `tool.execution.failed` with the same transaction ID as its `tool.execution.started` event and preserves `status`, `result_summary`, `full_ref`, and `artifacts`.
+- Finding 2: removed the `get_runtime_context()` lookup from `AskService.respond`. `ToolExecutionService.execute` now receives the executor's authority explicitly, passes it into `AskService.start_ask`, and `_PendingAsk` stores it so responses from any thread emit through the authority bound when the ASK was created. Missing authority logs and skips the journal emit without changing resolution semantics.
+- Tests: expanded `tests/test_execution_events.py` with a real executor terminal-failure test, approval requested/resolved exactly-once coverage, terminal exactly-once coverage, and a pending-ASK authority-binding test. Red run: `2 failed, 1 passed`; focused green run: `100 passed` across execution events, tool execution, permission, host permission, and executor tests; the expanded event file then passed `4 passed`.
+- Commit SHA: recorded in the fix-round final handoff.
+- Concerns: none beyond the existing deferred ArtifactStore concern above.
