@@ -50,6 +50,8 @@ class JournalWriter:
         *,
         max_segment_bytes: int = 10 * 1024 * 1024,
     ):
+        if not run_id or run_id in {".", ".."} or ".." in run_id or Path(run_id).name != run_id:
+            raise ValueError(f"unsafe run_id: {run_id!r}")
         self._base_dir = Path(base_dir)
         self._run_id = run_id
         self._max_segment_bytes = max_segment_bytes
@@ -201,7 +203,7 @@ class JournalWriter:
 
             path = self._segment_path(self._current_segment)
             with path.open("a", encoding="utf-8") as f:
-                f.write(event.model_dump_json() + "\n")
+                f.write(canonical_json(event.model_dump()) + "\n")
                 f.flush()
                 os.fsync(f.fileno())
 
@@ -250,7 +252,7 @@ class JournalWriter:
 
     def read_from(self, after_sequence: int = 0) -> List[EventEnvelope]:
         events: List[EventEnvelope] = []
-        for number in range(1, self._current_segment + 1):
+        for number in self._segment_numbers_on_disk():
             path = self._segment_path(number)
             if not path.exists():
                 continue

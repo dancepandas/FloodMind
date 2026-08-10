@@ -133,3 +133,26 @@ def test_repair_tail_clears_segment_with_only_half_write(tmp_path: Path):
         f.write(b'{"event_id": "evt_partial"')  # only content is a half-write
     w.repair_tail()
     assert seg.read_bytes() == b""
+
+
+def test_append_writes_canonical_json_line(tmp_path: Path):
+    from floodmind.agent.runtime.contracts.canonical_events import canonical_json
+    w = JournalWriter(tmp_path, "run_1")
+    sealed = w.append(_evt(1))
+    seg = tmp_path / "runs" / "run_1" / "journal" / "events-000001.jsonl"
+    line = seg.read_text(encoding="utf-8").splitlines()[0]
+    assert line == canonical_json(sealed.model_dump())
+
+
+def test_stale_reader_sees_concurrently_rolled_segments(tmp_path: Path):
+    w1 = JournalWriter(tmp_path, "run_1", max_segment_bytes=1024)
+    r2 = JournalWriter(tmp_path, "run_1")  # stale reader, never appends
+    for i in range(1, 30):
+        w1.append(_evt(i))
+    assert w1.segment_count() > 1
+    assert [e.sequence for e in r2.read_from()] == list(range(1, 30))
+
+
+def test_unsafe_run_id_rejected(tmp_path: Path):
+    with pytest.raises(ValueError):
+        JournalWriter(tmp_path, "../evil")
