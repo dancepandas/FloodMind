@@ -219,6 +219,32 @@ class JournalWriter:
         self._current_segment += 1
         self._save_index()
 
+    def repair_tail(self) -> None:
+        """Truncate a half-written final line in the current segment.
+
+        Binary mode is required: in text mode ``f.tell()`` returns an opaque
+        cookie that is not a byte offset, so a ``seek`` from a second file
+        object is unreliable. Binary mode gives exact byte offsets.
+        """
+        path = self._segment_path(self._current_segment)
+        if not path.exists():
+            return
+        last_full = 0
+        with path.open("rb") as f:
+            for raw in f:
+                line = raw.decode("utf-8", errors="replace").strip()
+                if not line:
+                    continue
+                try:
+                    EventEnvelope.model_validate_json(line)
+                    last_full = f.tell()
+                except Exception:
+                    break
+        if last_full:
+            with path.open("r+b") as f:
+                f.seek(last_full)
+                f.truncate()
+
     def read_from(self, after_sequence: int = 0) -> List[EventEnvelope]:
         events: List[EventEnvelope] = []
         for number in range(1, self._current_segment + 1):

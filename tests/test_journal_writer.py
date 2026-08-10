@@ -101,3 +101,23 @@ def test_concurrent_rollover_is_not_missed(tmp_path: Path):
     w2.append(_evt(100))
     seqs = [e.sequence for e in w2.read_from()]
     assert seqs == list(range(1, 30)) + [30]
+
+
+def test_roll_segment_creates_sealed_files(tmp_path: Path):
+    w = JournalWriter(tmp_path, "run_1", max_segment_bytes=1024)
+    for i in range(1, 60):
+        w.append(_evt(i))
+    assert w.segment_count() > 1
+    # sequence continuity across segments
+    seqs = [e.sequence for e in w.read_from()]
+    assert seqs == list(range(1, 60))
+
+
+def test_repair_tail_truncates_half_write(tmp_path: Path):
+    w = JournalWriter(tmp_path, "run_1")
+    w.append(_evt(1))
+    seg = tmp_path / "runs" / "run_1" / "journal" / "events-000001.jsonl"
+    with seg.open("a", encoding="utf-8") as f:
+        f.write('{"event_id": "evt_partial"')  # half-written line
+    w.repair_tail()
+    assert [e.sequence for e in w.read_from()] == [1]
