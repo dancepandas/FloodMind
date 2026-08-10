@@ -213,6 +213,7 @@ def test_projection_rebuilds_messages_from_journal_turns():
     loop = AgentLoopState(messages=[
         {"role": "system", "content": "system prefix"},
         {"role": "user", "content": "tampered checkpoint"},
+        {"role": "system", "content": "injected trailing system"},
     ])
     run_state = initial_run_state("run_1")
     run_state.turns = [

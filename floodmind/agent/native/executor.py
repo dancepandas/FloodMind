@@ -66,11 +66,11 @@ def project_run_state_to_loop_state(
         1 for turn in run_state.turns if turn.get("role") == "assistant"
     )
     projected.journal_cursor = run_state.last_committed_sequence
-    system_prefix = [
-        dict(message)
-        for message in loop_state.messages
-        if message.get("role") == "system"
-    ]
+    system_prefix: List[Dict[str, Any]] = []
+    for message in loop_state.messages:
+        if message.get("role") != "system":
+            break
+        system_prefix.append(dict(message))
     journal_messages: List[Dict[str, Any]] = []
     for turn in run_state.turns:
         role = turn.get("role")
