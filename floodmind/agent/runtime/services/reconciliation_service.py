@@ -37,11 +37,19 @@ class ReconciliationService:
     def retry_allowed(self, run_state: RunState, transaction_id: str) -> bool:
         """该事务是否允许直接重试。
 
-        indeterminate 必须先 reconcile（§6.5），禁止直接重试；其余状态允许。
+        §6.5：indeterminate 必须先 reconcile，禁止直接重试；僵尸 running / approved /
+        approval_required（reconcile 会先记 indeterminate 再落定，副作用可能已发生）
+        同样禁止直接重试——必须先 reconcile 落定再开新事务（§25.6 不重复已确认副作用）。
+        其余状态（proposed/validated/permission_evaluated 副作用未开始）允许。
         """
         for tx in run_state.pending_tool_transactions:
-            if tx.transaction_id == transaction_id and tx.status == ToolStatus.indeterminate:
-                return False  # indeterminate 必须先 reconcile，禁止直接重试
+            if tx.transaction_id == transaction_id and tx.status in (
+                ToolStatus.indeterminate,
+                ToolStatus.approval_required,
+                ToolStatus.approved,
+                ToolStatus.running,
+            ):
+                return False  # 未 reconcile 禁止直接重试
         return True
 
     def reconcile(self, authority: JournalAuthority, run_state: RunState) -> ReconcileResult:
