@@ -67,7 +67,7 @@ Affected-test run:
 
 ## Commit
 
-Commit SHA: pending at report write time; populated in the final task response after commit.
+Commit SHA: `211512d` (report added in this commit; the SHA is recorded here immediately afterward via amend).
 
 ## Concerns
 
