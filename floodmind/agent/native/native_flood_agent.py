@@ -13,10 +13,11 @@ import queue
 import re
 import threading
 import time
+import uuid
 from concurrent.futures import ThreadPoolExecutor, as_completed, wait, FIRST_COMPLETED
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Callable, Dict, Iterable, List, Optional, TYPE_CHECKING
+from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, TYPE_CHECKING, Union
 
 from floodmind.agent.native.types import (
     AgentLoopState,
@@ -42,12 +43,13 @@ from floodmind.agent.native.tool_loading import (
     resolve_tool_loading_config,
 )
 from floodmind.tools.agent_tool import AgentTool
-from floodmind.skills.registry import get_skill_registry
-from floodmind.skills.skill_curator import get_skill_curator, run_maintenance_if_needed
+from floodmind.skills.registry import SkillRegistry, create_skill_registry
+from floodmind.skills.skill_curator import SkillCurator, run_maintenance_if_needed
 
 from floodmind.config.settings import settings
 from floodmind.agent.runtime.services.checkpoint_service import CheckpointService
 from floodmind.agent.runtime.services.execution_journal_service import ExecutionJournalService
+from floodmind.agent.runtime.services.path_service import PathService
 from floodmind.agent.runtime.services.sandbox_service import SandboxService
 from floodmind.agent.runtime.services.tracing_service import TracingService
 from floodmind.agent.runtime.services.workspace_service import (
@@ -119,6 +121,16 @@ class _InstanceToolRegistry:
     def register_tools(self, tools: list) -> None:
         for tool in tools:
             self.register(tool)
+
+    def unregister_names(self, names: Iterable[str]) -> int:
+        """Remove exactly the requested tool names, leaving prefix lookalikes untouched."""
+        with self._lock:
+            removed = 0
+            for name in names:
+                if name in self._tools:
+                    del self._tools[name]
+                    removed += 1
+        return removed
 
     def unregister_prefix(self, prefix: str) -> int:
         """移除所有名字以 prefix 开头的工具（如 ``mcp:server:``），返回移除数。
@@ -290,6 +302,10 @@ class NativeFloodAgent:
         permission_decision_hook: Optional[Callable] = None,
         workspace: Optional["Workspace"] = None,
         tool_loading: Optional[Any] = None,
+        skill_roots: Optional[Sequence[Union[str, Path]]] = None,
+        skill_writable_root: Optional[Union[str, Path]] = None,
+        skill_registry: Optional[SkillRegistry] = None,
+        mcp_pool: Optional[Any] = None,
         **kwargs,
     ):
         self.llm_service = llm_service
@@ -298,11 +314,51 @@ class NativeFloodAgent:
         # 宿主显式注入的 workspace（线程无关，存为实例属性）。子线程 _run_loop 据此重绑
         # floodmind_workspace contextvar，修复桌面端跨线程丢失的问题；None 时回退
         # contextvar（网页版 set_workspace 注入）。与 PathService 同模式。
+        from floodmind.agent.runtime.services.permission_service import PermissionService
+
         self._workspace = workspace
+        if skill_registry is not None and (skill_roots is not None or skill_writable_root is not None):
+            raise ValueError("skill_registry 不能与 skill_roots/skill_writable_root 同时提供")
+        # Skill parsing uses an explicit, construction-order-independent scanner.
+        skill_threat_scanner = PermissionService().scan_content_threats
+        self._skill_registry = skill_registry or create_skill_registry(
+            additional_roots=skill_roots,
+            writable_root=skill_writable_root,
+            threat_scanner=skill_threat_scanner,
+        )
+        self._skill_curator = SkillCurator(registry=self._skill_registry)
+        # Subscribe only after executors and prompt state exist.  An injected/shared
+        # registry may refresh concurrently while this instance is being constructed.
+        self._skill_registry_unsubscribe = None
+        self._bound_get_skill_tool = None
+        from floodmind.memory.task_experience import TaskExperienceCapture
+        self._task_experience_capture = TaskExperienceCapture(
+            self.llm_service
+        ).bind_skill_generation(
+            self._skill_registry.writable_root,
+            self.refresh_skills,
+            llm_service=self.llm_service,
+        )
+        self._path_service = PathService(
+            workspace=workspace,
+            extra_read_roots=self._skill_registry.roots,
+        )
         self._enable_search = enable_search
         self._enable_reasoning = enable_reasoning
         self._agent_type = agent_type
         self._bare = bare
+        # 每个 Agent 默认拥有独立 MCP pool；显式注入的 pool 为 borrowed，cleanup 不关闭。
+        # 旧 get_mcp_client_pool() 全局 API 保留给外部调用方，但新 Agent runtime 不再使用它。
+        if mcp_pool is None:
+            from floodmind.agent.mcp_client import McpClientPool
+            self._mcp_pool = McpClientPool()
+            self._owns_mcp_pool = True
+        else:
+            self._mcp_pool = mcp_pool
+            self._owns_mcp_pool = False
+        self._mcp_pool_lock = threading.Lock()
+        self._mcp_owned_connections: set[str] = set()
+        self._mcp_tool_names: Dict[str, set[str]] = {}
 
         from floodmind.agent.agent_registry import get_agent
         self._agent_info = get_agent(agent_type) or get_agent("build")
@@ -314,15 +370,11 @@ class NativeFloodAgent:
         self._specialist_registry = _InstanceToolRegistry()
         self._event_bus = EventBus()
         self._message_builder = MessageBuilder()
-        # 后台任务完成 → EventBus 事件（宿主 UI 实时可见；运行中的 stream 会带出去）。
-        # 宿主收到该事件且当前无活跃回合时，自行决定是否 stream("[后台任务完成]…") 开新回合——
-        # SDK 不越权自发回合。回调按 agent 实例幂等注册。
+        # Runtime subscriptions are installed only after executors and prompt state are
+        # fully initialized.  This matters for injected registries shared with another
+        # thread, which may refresh at any point during construction.
         self._bg_task_callback = self._on_background_task_completed
-        try:
-            from floodmind.agent.runtime.services.background_task_service import get_background_task_service
-            get_background_task_service().subscribe(self._bg_task_callback)
-        except Exception as e:
-            logger.debug("background task subscribe 失败: %s", e)
+        self._background_task_unsubscribe = None
 
         self._model_client: Optional[ModelClient] = None
         self._orchestrator_executor: Optional[NativeAgentExecutor] = None
@@ -351,10 +403,11 @@ class NativeFloodAgent:
         # bare 与完整 runtime 均透传给 ToolExecutionService。
         self._permission_decision_hook = permission_decision_hook
         self._sandbox_service = SandboxService(workspace=self._workspace)
-        # 后台任务服务（exec_bash run_in_background）：executor 注入完成通知用。
-        # None 时 executor 回退全局单例 get_background_task_service()。
-        self._background_task_service = None
+        # 后台任务服务（exec_bash run_in_background）：按 Agent 实例显式注入。
+        from floodmind.agent.runtime.services.background_task_service import BackgroundTaskService
+
         service_base_dir = str(self._workspace.session_root) if self._workspace is not None else None
+        self._background_task_service = BackgroundTaskService(base_dir=service_base_dir)
         self._checkpoint_service = CheckpointService(base_dir=service_base_dir, tracing_service=self._tracing_service)
         self._journal_service = ExecutionJournalService(base_dir=service_base_dir)
 
@@ -367,6 +420,7 @@ class NativeFloodAgent:
         # ── bare 模式：精简初始化（嵌入 SDK 用） ──
         if bare:
             self._init_bare(tools or [], system_prompt)
+            self._subscribe_runtime_callbacks()
             logger.info("NativeFloodAgent (bare) 初始化成功")
             return
 
@@ -374,9 +428,35 @@ class NativeFloodAgent:
         self._init_tools()
         self._init_model_client()
         self._init_executors()
+        self._subscribe_runtime_callbacks()
         # Chronos 已外置为 MCP 服务，不再预热（_warmup_chronos 保留为 no-op 占位已移除）。
 
         logger.info("NativeFloodAgent 初始化成功")
+
+    def _subscribe_runtime_callbacks(self) -> None:
+        """Install lifecycle callbacks after construction reaches a usable state."""
+        self._skill_registry_unsubscribe = self._skill_registry.add_refresh_callback(
+            self._on_skill_registry_changed
+        )
+        try:
+            unsubscribe = self._background_task_service.subscribe(
+                self._bg_task_callback,
+                session_id=self.session_id,
+            )
+            if callable(unsubscribe):
+                self._background_task_unsubscribe = unsubscribe
+        except Exception as e:
+            logger.debug("background task subscribe 失败: %s", e)
+
+    @property
+    def skill_registry(self) -> SkillRegistry:
+        """This agent's isolated Skill registry."""
+        return self._skill_registry
+
+    def _on_skill_registry_changed(self) -> None:
+        """Refresh only this agent's catalog and prompts after registry mutations."""
+        self._skill_catalog = self._skill_registry.catalog()
+        self._rebuild_system_prompts()
 
     def _on_background_task_completed(self, task) -> None:
         """后台任务完成回调 → EventBus 事件（宿主唤醒通道）。"""
@@ -394,10 +474,36 @@ class NativeFloodAgent:
             logger.warning("emit background_task_completed 失败: %s", e)
 
     def cleanup(self) -> None:
-        """释放资源：kill 本会话存活的后台任务（meta.json 保留供审计）。幂等。"""
+        """Release registry subscriptions, bound tools, and background tasks. Idempotent."""
+        unsubscribe = getattr(self, "_skill_registry_unsubscribe", None)
+        if callable(unsubscribe):
+            try:
+                unsubscribe()
+            finally:
+                self._skill_registry_unsubscribe = None
+        unsubscribe = getattr(self, "_background_task_unsubscribe", None)
+        if callable(unsubscribe):
+            try:
+                unsubscribe()
+            finally:
+                self._background_task_unsubscribe = None
+        tool = getattr(self, "_bound_get_skill_tool", None)
+        cleanup = getattr(tool, "cleanup", None)
+        if callable(cleanup):
+            cleanup()
         try:
-            from floodmind.agent.runtime.services.background_task_service import get_background_task_service
-            killed = get_background_task_service().kill_session(self.session_id)
+            if getattr(self, "_owns_mcp_pool", False):
+                self._mcp_pool.disconnect_all()
+            else:
+                # Borrowed pool stays alive; close only connections this Agent created.
+                for name in list(self._mcp_owned_connections):
+                    self._mcp_pool.disconnect_server(name)
+            self._mcp_owned_connections.clear()
+            self._mcp_tool_names.clear()
+        except Exception as e:
+            logger.warning("NativeFloodAgent cleanup MCP 失败: %s", e)
+        try:
+            killed = self._background_task_service.kill_session(self.session_id)
             if killed:
                 logger.info("NativeFloodAgent cleanup: kill %d 个存活后台任务", killed)
         except Exception as e:
@@ -446,16 +552,25 @@ class NativeFloodAgent:
         # 接入全局 AskService，使 permission_decision_hook 升级出的 ASK 能在 bare 模式
         # 走 permission_ask → respond 流程（emit_fn 由 _run_loop 统一挂载）。
         from floodmind.agent.runtime.services.tool_execution_service import ToolExecutionService
+        from floodmind.agent.runtime.services.permission_service import PermissionService
         from floodmind.agent.runtime.services.ask_service import get_ask_service
+        bare_ask_service = get_ask_service()
+        self._permission_service = PermissionService.create_default(
+            ask_service=bare_ask_service,
+            path_service=self._path_service,
+        )
         self._tool_executor = ToolExecutionService(
+            permission_service=self._permission_service,
+            path_service=self._path_service,
             tracing_service=self._tracing_service,
             permission_handler=self._permission_handler,
             permission_decision_hook=self._permission_decision_hook,
-            ask_service=get_ask_service(),
+            ask_service=bare_ask_service,
         )
 
-        context_compressor = self._make_context_compressor()
         context_window = self._resolve_context_window()
+        orchestrator_compressor = self._make_context_compressor()
+        specialist_compressor = self._make_context_compressor()
 
         # 构建 executor
         self._orchestrator_executor = NativeAgentExecutor(
@@ -471,7 +586,7 @@ class NativeFloodAgent:
             checkpoint_service=self._checkpoint_service,
             execution_journal_service=self._journal_service,
             tracing_service=self._tracing_service,
-            context_compressor=context_compressor,
+            context_compressor=orchestrator_compressor,
             context_window=context_window,
             memory=self.memory,
             background_task_service=self._background_task_service,
@@ -490,9 +605,39 @@ class NativeFloodAgent:
             checkpoint_service=self._checkpoint_service,
             execution_journal_service=self._journal_service,
             tracing_service=self._tracing_service,
-            context_compressor=context_compressor,
+            context_compressor=specialist_compressor,
             context_window=context_window,
         )
+
+    def _register_mcp_connection(self, server_name: str, conn: Any) -> List[ToolSpec]:
+        """Build and atomically validate one server's specs before mutating registries."""
+        from floodmind.agent.mcp_client import build_mcp_tool_specs
+
+        specs = build_mcp_tool_specs(conn, server_name, self._mcp_pool.call_tool)
+        names = [spec.name for spec in specs]
+        duplicate_names = sorted({name for name in names if names.count(name) > 1})
+        existing = set(self._orchestrator_registry.names()) | set(self._specialist_registry.names())
+        collisions = duplicate_names + sorted(set(names) & existing)
+        if collisions:
+            raise ValueError(
+                "MCP 工具名称冲突（sanitize 后）: " + ", ".join(sorted(set(collisions)))
+            )
+        for spec in specs:
+            self._orchestrator_registry.register(spec)
+            self._specialist_registry.register(spec)
+        self._mcp_tool_names[server_name] = set(names)
+        return specs
+
+    def _refresh_mcp_catalog(self) -> None:
+        """Refresh executor schemas and prompt catalog after a runtime MCP change."""
+        orchestrator = getattr(self, "_orchestrator_executor", None)
+        specialist = getattr(self, "_specialist_executor", None)
+        if orchestrator is not None:
+            orchestrator.set_tools_schema(self._orchestrator_registry.tools_schema())
+        if specialist is not None:
+            specialist.set_tools_schema(self._specialist_registry.tools_schema())
+        if orchestrator is not None and specialist is not None:
+            self._rebuild_system_prompts()
 
     def _load_mcp_tools(self) -> None:
         """接入配置的 MCP 外部工具（bare 与完整 runtime 共用）。
@@ -504,21 +649,30 @@ class NativeFloodAgent:
         """
         from floodmind.config.settings import settings as _settings
         _mcp_servers = _settings.mcp.servers if hasattr(_settings, 'mcp') else []
-        self._mcp_pool = None
-        self._mcp_pool_lock = threading.Lock()
         if not _mcp_servers:
             return
         try:
-            from floodmind.agent.mcp_client import get_mcp_client_pool, build_mcp_tool_specs
-            self._mcp_pool = get_mcp_client_pool()
-            connected = self._mcp_pool.connect_all(_mcp_servers)
-            if connected > 0:
-                mcp_tools_registered = 0
-                for server_name, conn in self._mcp_pool.connections().items():
-                    for spec in build_mcp_tool_specs(conn, server_name, self._mcp_pool.call_tool):
-                        self._orchestrator_registry.register(spec)
-                        self._specialist_registry.register(spec)
-                        mcp_tools_registered += 1
+            configured_names = {
+                str(cfg.get("name")) for cfg in _mcp_servers if cfg.get("name")
+            }
+            before = set(self._mcp_pool.connections())
+            self._mcp_pool.connect_all(_mcp_servers)
+            after = self._mcp_pool.connections()
+            connected_names = set(after) & configured_names
+            if self._owns_mcp_pool:
+                self._mcp_owned_connections.update(connected_names)
+            else:
+                self._mcp_owned_connections.update((set(after) - before) & configured_names)
+            mcp_tools_registered = 0
+            for server_name in sorted(connected_names):
+                try:
+                    specs = self._register_mcp_connection(server_name, after[server_name])
+                except Exception:
+                    self._mcp_pool.disconnect_server(server_name)
+                    self._mcp_owned_connections.discard(server_name)
+                    raise
+                mcp_tools_registered += len(specs)
+            if mcp_tools_registered:
                 logger.info("MCP: %d 个外部工具已注册（orchestrator + specialist）", mcp_tools_registered)
         except Exception as e:
             logger.warning("MCP 外部工具加载失败: %s", e)
@@ -531,14 +685,18 @@ class NativeFloodAgent:
         重复注册无害——``_InstanceToolRegistry`` 按名覆盖）。
         """
         try:
-            self._skill_catalog = get_skill_registry().catalog()
+            self._skill_catalog = self._skill_registry.catalog()
         except Exception as e:
             logger.warning("skill catalog 构建失败: %s", e)
             self._skill_catalog = ""
         try:
-            from floodmind.tools.base_tools import get_skill
-            self._orchestrator_registry.register(get_skill)
-            self._specialist_registry.register(get_skill)
+            from floodmind.tools.base_tools import make_get_skill_tool
+            if self._bound_get_skill_tool is None:
+                self._bound_get_skill_tool = make_get_skill_tool(
+                    self._skill_registry, self._skill_curator
+                )
+            self._orchestrator_registry.register(self._bound_get_skill_tool)
+            self._specialist_registry.register(self._bound_get_skill_tool)
         except Exception as e:
             logger.warning("GetSkill 工具注册失败: %s", e)
 
@@ -549,7 +707,7 @@ class NativeFloodAgent:
 
     def _init_tools(self) -> None:
         from floodmind.tools import (
-            get_skill, exec_bash,
+            exec_bash,
             web_search, fetch_webpage, add_memory, search_memory,
             update_project_instructions,
             create_scheduled_task, list_scheduled_tasks, cancel_scheduled_task,
@@ -564,22 +722,18 @@ class NativeFloodAgent:
             journal_search,
             journal_get_full_result,
         )
-        from floodmind.tools.agent_tool import ToolRegistry as _GlobalToolRegistry
-        from floodmind.memory.task_experience import get_task_experience_capture
         from floodmind.agent.runtime.contracts.permissions import PermissionBehavior, PermissionRule, ToolPermissionPolicy
-        from floodmind.agent.runtime.services.permission_service import PermissionService, set_permission_service
+        from floodmind.agent.runtime.services.permission_service import PermissionService
         from floodmind.agent.runtime.services.ask_service import get_ask_service, set_ask_service
-        from floodmind.agent.runtime.services.path_service import PathService, set_path_service
         from floodmind.agent.runtime.services.tool_execution_service import ToolExecutionService
-        from floodmind.skills.registry import get_skill_registry
 
         if self.memory is not None:
             set_memory_instance(self.memory)
             if self.memory._llm is None:
                 self.memory.set_llm(self.llm_service)
 
-        path_service = PathService()
-        set_path_service(path_service)
+        path_service = self._path_service
+        path_service.bind_workspace(self._effective_workspace())
 
         ask_service = get_ask_service()
         set_ask_service(ask_service)
@@ -636,16 +790,14 @@ class NativeFloodAgent:
             reason="子代理禁止修改项目级指令",
         ))
 
-        set_permission_service(perm_svc)
-
-        from floodmind.tools.agent_tool import set_permission_manager
-        set_permission_manager(perm_svc)
+        self._permission_service = perm_svc
 
         from floodmind.tools.file_tools import Glob_tool, Grep_tool, Read_tool, Write_tool, Edit_tool
 
+        self._load_skills()
         all_tools = [
             Glob_tool, Grep_tool, Read_tool, Write_tool, Edit_tool,
-            get_skill, exec_bash,
+            self._bound_get_skill_tool, exec_bash,
             search_memory, update_project_instructions,
             create_scheduled_task, list_scheduled_tasks, cancel_scheduled_task,
             conversation_search,
@@ -658,44 +810,31 @@ class NativeFloodAgent:
             task_list,
             task_kill,
         ]
-        # 从全局 ToolRegistry 获取任务经验工具
-        for _tname in ("SearchTaskExperience", "AddTaskExperience",
-                        "BrowseExperienceTree", "DrillDownExperience"):
-            _t = _GlobalToolRegistry.get(_tname)
-            if _t:
-                all_tools.append(_t)
+        # Bind every experience operation to this Agent's single owner-scoped service.
+        from floodmind.tools.base_tools import make_task_experience_tools
+        all_tools.extend(make_task_experience_tools(
+            self._task_experience_capture.store,
+            skill_owner=self._task_experience_capture.skill_owner,
+        ))
         if self._enable_search:
             all_tools.append(web_search)
             all_tools.append(fetch_webpage)
 
-        self._load_skills()
-
-        # 注册经验→Skill 自动生成回调：auto-gen 写盘后触发 refresh_skills（热插拔闭环）。
-        # 在 _init_tools 注册（而非 refresh_skills 内部），避免旧代码 chicken-and-egg 死循环。
+        # Skill curator maintenance is owner-scoped and writes state below this registry.
         try:
-            import floodmind.memory.task_experience as _te
-            _te._on_skill_generated = self.refresh_skills
-        except Exception:
-            logger.debug("task_experience skill 生成回调注册跳过", exc_info=True)
-
-        # Skill curator 定期巡检：stale 标记 + 过期归档 + 重复检测（时间间隔标记文件防重入）
-        try:
-            run_maintenance_if_needed()
+            run_maintenance_if_needed(
+                state_dir=self._skill_registry.writable_root / ".floodmind",
+                curator=self._skill_curator,
+            )
         except Exception:
             logger.debug("skill curator 巡检跳过", exc_info=True)
 
         self._orchestrator_registry.register_tools(all_tools)
-        # 子代理工具白名单：排除依赖主代理 memory 实例的工具（子代理 clean slate 无 memory，
-        # 调用会报"记忆系统未初始化"）与子代理禁止的编排工具（已有 permission deny 规则，
-        # 从工具表移除可避免 LLM 误调用浪费一轮）。对齐 Claude Code 子代理 tools 白名单设计。
-        _SPECIALIST_EXCLUDED_TOOLS = {
-            "MemorySearch",               # 依赖主代理 memory 实例
-            "ConversationSearch",         # 同上
-            "UpdateProjectInstructions",  # 子代理禁止修改项目指令
-        }
+        # Specialists execute scoped work, including file edits and shell commands, but
+        # must not mutate agent-owned state or invoke destructive management actions.
+        # File write/patch/exec tools remain subject to their normal permission policy.
         specialist_tools = [
-            t for t in all_tools
-            if getattr(t, "name", "") not in _SPECIALIST_EXCLUDED_TOOLS
+            tool for tool in all_tools if self._is_specialist_builtin_safe(tool)
         ]
         self._specialist_registry.register_tools(specialist_tools)
 
@@ -808,7 +947,7 @@ class NativeFloodAgent:
         ))
         self._orchestrator_registry.register(AgentTool(
             name="RemoveSkill",
-            description="归档（移除）一个技能。落盘技能移到 .archived/（可恢复），编程式技能内存禁用。[必填] name。",
+            description="归档（移除）一个位于当前 Agent writable_root 的磁盘技能。只读根和编程式/ephemeral 技能会被拒绝。[必填] name。",
             parameters={
                 "type": "object",
                 "properties": {"name": {"type": "string", "description": "要归档的技能名"}},
@@ -863,10 +1002,14 @@ class NativeFloodAgent:
                 "required": ["user_goal", "deliverables", "steps"],
             },
             func=self._handle_create_plan,
-            is_readonly=True,
+            is_readonly=False,
             is_destructive=False,
             is_concurrency_safe=True,
-            permission_policy=ToolPermissionPolicy(policy_type="readonly"),
+            permission_policy=ToolPermissionPolicy(
+                policy_type="state_write",
+                reason="更新代理执行计划状态",
+                allow_in_planning=True,
+            ),
         ))
 
         self._orchestrator_registry.register(AgentTool(
@@ -930,7 +1073,11 @@ class NativeFloodAgent:
             is_readonly=False,
             is_destructive=False,
             is_concurrency_safe=True,
-            permission_policy=ToolPermissionPolicy(policy_type="readonly"),
+            permission_policy=ToolPermissionPolicy(
+                policy_type="state_write",
+                reason="更新代理执行计划状态",
+                allow_in_planning=True,
+            ),
         ))
 
         # 阶段E：exit_plan_mode（仅主代理，policy="ask"，提交计划等用户审批）
@@ -1022,8 +1169,39 @@ class NativeFloodAgent:
         # tools_schema（_init_executors）之前注册，eager 模式模型才能看到。
         if self._host_tools:
             self._orchestrator_registry.register_tools(self._host_tools)
-            self._specialist_registry.register_tools(self._host_tools)
-            logger.info("注册宿主自定义工具 %d 个", len(self._host_tools))
+            specialist_host_tools = [
+                tool for tool in self._host_tools
+                if self._is_specialist_host_tool_safe(tool)
+            ]
+            self._specialist_registry.register_tools(specialist_host_tools)
+            logger.info(
+                "注册宿主自定义工具 %d 个（specialist 安全子集 %d 个）",
+                len(self._host_tools),
+                len(specialist_host_tools),
+            )
+
+    @staticmethod
+    def _is_specialist_builtin_safe(tool: Any) -> bool:
+        """Allow execution tools, but reject agent-state and destructive management tools."""
+        if getattr(tool, "is_destructive", False):
+            return False
+        policy = getattr(tool, "permission_policy", None)
+        if getattr(policy, "policy_type", None) == "state_write":
+            return False
+        return getattr(tool, "name", "") not in {
+            "MemorySearch",          # requires the orchestrator's memory instance
+            "ConversationSearch",    # same
+            "UpdateProjectInstructions",
+            "TaskKill",
+        }
+
+    @staticmethod
+    def _is_specialist_host_tool_safe(tool: Any) -> bool:
+        """Host tools are opt-in for specialists through readonly/read-path metadata."""
+        if getattr(tool, "is_destructive", False):
+            return False
+        policy = getattr(tool, "permission_policy", None)
+        return getattr(policy, "policy_type", None) in {"readonly", "read_path"}
 
     def _register_tool_catalog_tools(self) -> None:
         """注册 GetTool：像 GetSkill 一样按需查看工具参数。工具目录已由 system prompt 全量列出，无需 SearchTools。"""
@@ -1131,8 +1309,9 @@ class NativeFloodAgent:
     def _init_executors(self) -> None:
         from floodmind.agent.context_runtime import ContextRuntime
 
+        context_window = self._resolve_context_window()
         self._context_runtime = ContextRuntime(
-            context_window=settings.model.context_window,
+            context_window=context_window,
         )
         self._context_runtime.prefetch()
 
@@ -1204,15 +1383,15 @@ class NativeFloodAgent:
         if self._host_system_prompt:
             orchestrator_prompts = list(orchestrator_prompts) + [self._host_system_prompt]
 
-        context_compressor = self._make_context_compressor()
-        context_window = self._resolve_context_window()
+        orchestrator_compressor = self._make_context_compressor()
+        specialist_compressor = self._make_context_compressor()
 
         self._orchestrator_executor = NativeAgentExecutor(
             model_client=self._model_client,
             tool_executor=self._tool_executor,
             event_bus=self._event_bus,
             message_builder=self._message_builder,
-            max_iterations=10000,
+            max_iterations=self._max_iterations,
             system_prompts=orchestrator_prompts,
             tools_schema=self._orchestrator_registry.tools_schema(),
             tool_registry=self._orchestrator_registry,
@@ -1220,7 +1399,7 @@ class NativeFloodAgent:
             checkpoint_service=self._checkpoint_service,
             execution_journal_service=self._journal_service,
             tracing_service=self._tracing_service,
-            context_compressor=context_compressor,
+            context_compressor=orchestrator_compressor,
             context_window=context_window,
             memory=self.memory,
             background_task_service=self._background_task_service,
@@ -1231,7 +1410,7 @@ class NativeFloodAgent:
             tool_executor=self._tool_executor,
             event_bus=self._event_bus,
             message_builder=self._message_builder,
-            max_iterations=10000,
+            max_iterations=self._max_iterations,
             system_prompts=specialist_prompts,
             tools_schema=self._specialist_registry.tools_schema(),
             tool_registry=self._specialist_registry,
@@ -1239,7 +1418,7 @@ class NativeFloodAgent:
             checkpoint_service=self._checkpoint_service,
             execution_journal_service=self._journal_service,
             tracing_service=self._tracing_service,
-            context_compressor=context_compressor,
+            context_compressor=specialist_compressor,
             context_window=context_window,
             background_task_service=self._background_task_service,
         )
@@ -1301,15 +1480,8 @@ class NativeFloodAgent:
         self._specialist_executor.system_prompts = spec_prompts
 
     def refresh_skills(self) -> None:
-        """刷新 skill 注册表（唯一权威源 SkillRegistry）并重建 Agent 的 system prompt。
-
-        修旧 bug：原 ``from import SKILL_REGISTRY as _reg`` 在 refresh 前快照 → catalog
-        用旧列表重建（stale-binding）。现直读单例 catalog（与 _init_tools 同格式，单一 catalog）。
-        """
-        from floodmind.skills.registry import get_skill_registry
-        get_skill_registry().refresh()
-        self._skill_catalog = get_skill_registry().catalog()
-        self._rebuild_system_prompts()
+        """Refresh this agent's registry; its subscription rebuilds its prompts once."""
+        self._skill_registry.refresh()
         logger.info("NativeFloodAgent 技能已刷新: catalog=%d chars", len(self._skill_catalog))
 
     def _handle_load_mcp_server(self, name: str = "", transport: str = "sse", url: str = "", command: str = "", args: Any = "", env: Any = "") -> str:
@@ -1336,21 +1508,22 @@ class NativeFloodAgent:
         }
 
         try:
-            from floodmind.agent.mcp_client import get_mcp_client_pool, build_mcp_tool_specs
             with self._mcp_pool_lock:
-                pool = self._mcp_pool or get_mcp_client_pool()
-                if self._mcp_pool is None:
-                    self._mcp_pool = pool
+                pool = self._mcp_pool
 
-            # 统一接入路径：connect_server（仅连接，不注册）→ build_mcp_tool_specs → 注册到双 registry。
-            # 与 init 同路径，消除原 connect_and_register(orchestrator) + _register_mcp_tools(specialist) 双写。
+            # 连接与 ToolSpec 均绑定当前 Agent 的具体 pool；不回退全局单例。
             conn = pool.connect_server(server_config)
-            specs = build_mcp_tool_specs(conn, name, pool.call_tool)
-            for spec in specs:
-                self._orchestrator_registry.register(spec)
-                self._specialist_registry.register(spec)
-
-            return f"MCP Server '{name}' 已接入，{len(specs)} 个工具已注册。使用 mcp:{name}:<tool_name> 调用。"
+            self._mcp_owned_connections.add(name)
+            try:
+                specs = self._register_mcp_connection(name, conn)
+            except Exception:
+                pool.disconnect_server(name)
+                self._mcp_owned_connections.discard(name)
+                raise
+            self._refresh_mcp_catalog()
+            spec_names = ", ".join(spec.name for spec in specs) or "（无工具）"
+            return (f"MCP Server '{name}' 已接入，{len(specs)} 个工具已注册: "
+                    f"{spec_names}")
 
         except Exception as e:
             logger.error("LoadMcpServer 失败: %s", e)
@@ -1385,15 +1558,23 @@ class NativeFloodAgent:
         if info is None:
             return f"错误: 未找到 MCP server '{name}'（用 ListMcpServers 查看已接入列表）"
         tool_count = len(info["tools"])
+        registered = getattr(self, "_mcp_tool_names", {})
+        tool_names = registered.pop(name, set())
+        if not tool_names:
+            from floodmind.agent.mcp_client import _mcp_tool_spec_name
+            tool_names = {_mcp_tool_spec_name(name, tool_name) for tool_name in info["tools"]}
         if not pool.disconnect_server(name):
             return f"错误: 断开 '{name}' 失败"
-        # MCP 工具 model-visible 名经 _mcp_tool_spec_name sanitize 为 `mcp_<server>_<tool>`，
-        # 清理前缀必须同步 sanitize，否则 `mcp:<name>:` 匹配不到已注册的 ToolSpec。
-        from floodmind.agent.mcp_client import mcp_tool_prefix
-        prefix = mcp_tool_prefix(name)
-        orch_removed = self._orchestrator_registry.unregister_prefix(prefix)
-        spec_removed = self._specialist_registry.unregister_prefix(prefix)
-        logger.info("MCP 断开清理: server=%s orchestrator=%d specialist=%d", name, orch_removed, spec_removed)
+        owned_connections = getattr(self, "_mcp_owned_connections", None)
+        if owned_connections is not None:
+            owned_connections.discard(name)
+        # 按该连接实际注册的精确 ToolSpec.name 清理，避免 lossy sanitize 名称
+        # 碰撞时误删其他 server 或宿主工具。
+        orch_removed = self._orchestrator_registry.unregister_names(tool_names)
+        spec_removed = self._specialist_registry.unregister_names(tool_names)
+        refresh_catalog = getattr(self, "_refresh_mcp_catalog", None)
+        if callable(refresh_catalog):
+            refresh_catalog()
         return (f"MCP Server '{name}' 已断开，移除 {tool_count} 个工具"
                 f"（orchestrator {orch_removed} + specialist {spec_removed}）。")
 
@@ -1450,18 +1631,13 @@ class NativeFloodAgent:
         return ("\n".join(out)).rstrip() + "\n"
 
     def _resolve_skill_md_path(self, name: str) -> Path:
-        """技能 SKILL.md 路径：优先 writable_root（可写），其次该技能实际 skill_dir。"""
-        reg = get_skill_registry()
-        writable = reg.writable_root / name / "SKILL.md"
-        if writable.exists():
-            return writable
-        skill = reg.get_skill(name)
-        if skill and skill.skill_dir:
-            return skill.skill_dir / "SKILL.md"
-        return writable  # 默认落点（create 用）
+        """Resolve and validate an existing writable on-disk Skill path."""
+        return self._skill_registry.validate_writable_skill_path(
+            name, require_source=True
+        )
 
     def _handle_list_skills(self) -> str:
-        skills = get_skill_registry().list_skills()
+        skills = self._skill_registry.list_skills()
         if not skills:
             return "当前没有可用技能。"
         lines = ["可用技能（name | version | category | source）："]
@@ -1477,8 +1653,11 @@ class NativeFloodAgent:
         err = self._validate_skill_name(name)
         if err:
             return f"错误：{err}"
-        reg = get_skill_registry()
-        path = reg.writable_root / name / "SKILL.md"
+        reg = self._skill_registry
+        try:
+            path = reg.writable_skill_path(name)
+        except ValueError as exc:
+            return f"错误：{exc}"
         if path.exists() or reg.get_skill(name):
             return f"错误：技能 '{name}' 已存在。用 UpdateSkill 修改，或先 RemoveSkill。"
         content = (f"---\nname: {name}\ndescription: {description}\n"
@@ -1502,10 +1681,13 @@ class NativeFloodAgent:
             return f"错误：{action} 需要 content。"
         if action in ("replace_section", "remove_section") and not section_title:
             return "错误：replace_section/remove_section 需要 section_title。"
-        reg = get_skill_registry()
+        reg = self._skill_registry
         if not reg.get_skill(name):
             return f"错误：未找到技能 '{name}'（用 ListSkills 查看）。"
-        path = self._resolve_skill_md_path(name)
+        try:
+            path = reg.validate_writable_skill_path(name, require_source=True)
+        except ValueError as exc:
+            return f"错误：技能 '{name}' 不可写（只读或编程式/ephemeral）：{exc}"
         if not path.exists():
             return f"错误：技能 '{name}' 无 SKILL.md 可改（{path}）。"
         fm, body = self._split_skill_md(path.read_text(encoding="utf-8"))
@@ -1521,18 +1703,20 @@ class NativeFloodAgent:
         err = self._validate_skill_name(name)
         if err:
             return f"错误：{err}"
-        reg = get_skill_registry()
+        reg = self._skill_registry
         skill = reg.get_skill(name)
         if not skill:
             return f"错误：未找到技能 '{name}'。"
         if not skill.skill_dir:
-            reg.set_disabled(name, True)
-            return f"编程式技能 '{name}' 已禁用（内存；重启后不保留）。"
-        curator = get_skill_curator()
+            return f"错误：编程式/ephemeral 技能 '{name}' 不能归档。"
+        try:
+            reg.validate_writable_skill_path(name, require_source=True)
+        except ValueError as exc:
+            return f"错误：只读技能 '{name}' 不能归档：{exc}"
+        curator = self._skill_curator
         ok = curator.archive_skill(name)
         if not ok:
             return f"错误：归档 '{name}' 失败（curator.archive_skill 返回 False）。"
-        self.refresh_skills()
         return f"技能 '{name}' 已归档（可恢复：{curator.archive_root / name}）。"
 
     def _handle_refresh_skills(self) -> str:
@@ -1544,7 +1728,7 @@ class NativeFloodAgent:
         """把一个原始步骤定义归一化为标准的 plan step dict。"""
         if not isinstance(raw, dict):
             raw = {"title": str(raw)[:60]}
-        step_id = raw.get("step_id") or f"step-{fallback_index + 1}"
+        step_id = str(raw.get("step_id") or f"step-{fallback_index + 1}").strip()
         expected = raw.get("expected_deliverables", [])
         if isinstance(expected, str):
             try:
@@ -1574,8 +1758,8 @@ class NativeFloodAgent:
             "executor": str(raw.get("executor", "") or "execution_specialist"),
             "skill_name": str(raw.get("skill_name", "") or ""),
             "purpose": str(raw.get("purpose", "") or ""),
-            "status": str(raw.get("status", "") or "pending"),
-            "needs": raw.get("needs", []) or [],
+            "status": "pending",
+            "needs": ExecutionPlan.normalize_needs(raw.get("needs")),
             "expected_deliverables": expected,
             "output_artifacts": raw.get("output_artifacts", []) or [],
             "output_summary": str(raw.get("output_summary", "") or ""),
@@ -1635,7 +1819,13 @@ class NativeFloodAgent:
         if not isinstance(parsed_steps, list):
             parsed_steps = [parsed_steps]
 
-        normalized_steps = [self._normalize_plan_step(raw, i) for i, raw in enumerate(parsed_steps)]
+        try:
+            normalized_steps = [
+                self._normalize_plan_step(raw, i)
+                for i, raw in enumerate(ExecutionPlan.normalize_steps(parsed_steps))
+            ]
+        except ValueError as exc:
+            return f"错误：执行计划无效：{exc}"
 
         deliverable_types = [d.strip() for d in deliverables.split(",") if d.strip()] if deliverables else []
         goal_deliverables = [{"type": dt} for dt in deliverable_types]
@@ -1688,15 +1878,22 @@ class NativeFloodAgent:
             if plan.find_step(new_step["step_id"]):
                 return f"错误：步骤 {new_step['step_id']} 已存在"
             plan.steps.append(new_step)
-            if plan.has_cycle():
+            try:
+                plan.validate_dependencies()
+            except ValueError as exc:
                 plan.steps.pop()
-                return f"错误：新增步骤 {new_step['step_id']} 会造成依赖环，已回滚"
+                return f"错误：新增步骤 {new_step['step_id']} 无效：{exc}，已回滚"
 
         elif action == "update_step":
             step_id = str(step_id).strip()
             target = plan.find_step(step_id)
             if target is None:
                 return f"错误：步骤 {step_id} 不存在"
+            if step and isinstance(step, dict) and "needs" in step:
+                try:
+                    plan.replace_needs(step_id, step.get("needs"))
+                except ValueError as exc:
+                    return f"错误：更新步骤 {step_id} 的依赖失败：{exc}，已回滚"
             if status in ("pending", "running", "completed", "error", "skipped"):
                 target["status"] = status
             if step and isinstance(step, dict):
@@ -1770,6 +1967,21 @@ class NativeFloodAgent:
 
         return f"计划已批准，进入执行模式。计划摘要:\n{plan_summary}"
 
+    def _make_specialist_tool_runtime(self) -> tuple[_InstanceToolRegistry, ToolLoader]:
+        """Build per-run specialist tool state from shared immutable definitions.
+
+        Tool specs may be shared, but progressive-loading state and the ``GetTool``
+        closure must belong to exactly one specialist execution.  Otherwise parallel
+        specialists consume the same loaded-tool cap and leak search/load history.
+        """
+        loader = self._specialist_tool_loader.clean_clone()
+        registry = _InstanceToolRegistry()
+        for spec in self._specialist_registry.all():
+            if spec.name != "GetTool":
+                registry.register(spec)
+        registry.register(make_get_tool_tool(loader, registry))
+        return registry, loader
+
     def _run_specialist_task(
         self,
         task_text: str,
@@ -1801,6 +2013,29 @@ class NativeFloodAgent:
         sub_cwd = str(sandbox_ctx.delegate_cwd) if sandbox_ctx.delegate_cwd else str(sandbox_ctx.outputs_dir)
 
         try:
+            from floodmind.agent.runtime.contracts.runtime_context import RuntimeContext
+
+            parent_runtime_context = parent_context.runtime_context
+            sub_runtime_context = RuntimeContext(
+                conversation_id=(
+                    parent_runtime_context.conversation_id
+                    if parent_runtime_context is not None
+                    else parent_context.session_id
+                ),
+                task_id=sub_session_id,
+                run_id=f"run-{int(time.time())}",
+                thread_id=sub_session_id,
+                turn_id=uuid.uuid4().hex,
+                actor_type="agent",
+                actor_id=sub_session_id,
+                agent_tier="sub",
+                runtime_mode="execution",
+                workspace_id=str(sandbox_ctx.workspace_dir),
+                sandbox_id=sub_session_id,
+                permission_service=self._permission_service,
+                path_service=self._path_service,
+                background_service=self._background_task_service,
+            )
             sub_context = RunContext(
                 session_id=sub_session_id,
                 user_text=specialist_input,
@@ -1817,11 +2052,12 @@ class NativeFloodAgent:
                 abort_check=parent_context.abort_check,
                 delegate_cwd=sub_cwd,
                 agent_tier="sub",
+                runtime_context=sub_runtime_context,
             )
 
             sub_state = AgentLoopState(
                 session_id=sub_session_id,
-                run_id=f"run-{int(time.time())}",
+                run_id=sub_runtime_context.run_id,
                 status="created",
                 user_message=specialist_input,
                 original_input=specialist_input,
@@ -1844,36 +2080,47 @@ class NativeFloodAgent:
             else:
                 # 串行委派：用父 EventBus 包装一层带 trace_session 的 StepEventBus
                 event_bus = StepEventBus(base_bus, step_key, trace_session_id=sub_session_id)
+            specialist_registry, specialist_tool_loader = self._make_specialist_tool_runtime()
             specialist_executor = NativeAgentExecutor(
                 model_client=self._model_client,
                 tool_executor=self._tool_executor,
                 event_bus=event_bus,
                 message_builder=MessageBuilder(),
-                max_iterations=10000,
+                max_iterations=self._max_iterations,
                 system_prompts=list(self._specialist_executor.system_prompts),
-                tools_schema=self._specialist_registry.tools_schema(),
-                tool_registry=self._specialist_registry,
-                tool_loader=self._specialist_tool_loader,
+                tools_schema=specialist_registry.tools_schema(),
+                tool_registry=specialist_registry,
+                tool_loader=specialist_tool_loader,
                 checkpoint_service=self._checkpoint_service,
                 execution_journal_service=self._journal_service,
                 tracing_service=self._tracing_service,
             )
 
-            result = specialist_executor.run_from_state(context=sub_context, state=sub_state)
-
-            # 产物检测（基于子代理自己的 workspace）
-            watcher = ArtifactWatcher(output_dir=sub_context.output_dir, upload_dir=sub_context.upload_dir)
+            # Baseline before any specialist tool can write.  Detection and copying
+            # happen before sandbox destruction on both successful and failed runs.
+            watcher = ArtifactWatcher(
+                output_dir=sub_context.output_dir,
+                upload_dir=sub_context.upload_dir,
+            )
             watcher.take_snapshot()
-            workspace_artifacts = [a.file_path for a in watcher.detect_new_artifacts()]
+            execution_error: Optional[Exception] = None
+            try:
+                result = specialist_executor.run_from_state(context=sub_context, state=sub_state)
+            except Exception as exc:
+                logger.exception("specialist %s 执行失败", sub_session_id)
+                execution_error = exc
+                result = AgentResult(final_output="", reasoning="", tool_results=[])
 
-            # 回流到父 output_dir，并更新 artifacts 路径
+            workspace_artifacts = [
+                artifact.file_path for artifact in watcher.detect_new_artifacts()
+            ]
             artifacts = self._sandbox_service.copy_artifacts_to_parent(
                 sandbox_ctx,
                 workspace_artifacts,
             )
 
             has_tool_success = any(tr.status == "completed" for tr in result.tool_results) if result.tool_results else False
-            completed = bool(result.final_output or has_tool_success or artifacts)
+            completed = execution_error is None and bool(result.final_output or has_tool_success or artifacts)
 
             tool_summaries = []
             for tr in result.tool_results:
@@ -1884,9 +2131,9 @@ class NativeFloodAgent:
                 })
 
             return SubAgentReport(
-                summary=result.final_output or "",
+                summary=result.final_output or (str(execution_error) if execution_error else ""),
                 completed=completed,
-                outputs={},
+                outputs={"error": str(execution_error)} if execution_error else {},
                 artifacts=artifacts,
                 next_steps=[],
                 needs_human=False,
@@ -1894,6 +2141,14 @@ class NativeFloodAgent:
                 tool_result_summaries=tool_summaries,
             )
         finally:
+            # 子代理可能启动了长时后台命令；先终止进程树再销毁其 sandbox，
+            # 避免进程继续写入已删除目录或逃逸子会话生命周期。
+            try:
+                killed = self._background_task_service.kill_session(sub_session_id)
+                if killed:
+                    logger.info("specialist cleanup: kill %d 个子会话后台任务", killed)
+            except Exception as e:
+                logger.warning("specialist cleanup 后台任务失败: %s", e)
             self._sandbox_service.destroy(sandbox_ctx)
 
     def _handle_delegate_specialist(self, task: str = "", skill_name: str = "", workdir: str = "") -> str:
@@ -2381,8 +2636,9 @@ class NativeFloodAgent:
         if not settings.task_experience.enabled:
             return ""
         try:
-            from floodmind.memory.task_experience import get_task_experience_store
-            store = get_task_experience_store()
+            capture = self._task_experience_capture
+            capture.wait_for_pending()
+            store = capture.store
             if not store.has_experiences():
                 return ""
             current_version = store.get_version()
@@ -2406,6 +2662,9 @@ class NativeFloodAgent:
         set_workspace()，使 _get_output_dir / _get_upload_dir / PathService 写读根一致。
         """
         self._workspace = ws
+        path_service = getattr(self, "_path_service", None)
+        if path_service is not None:
+            path_service.bind_workspace(ws)
 
     def _effective_workspace(self):
         """当前生效的 Workspace：优先实例属性（宿主 bind_workspace / 构造传入），
@@ -2419,10 +2678,16 @@ class NativeFloodAgent:
             return self._workspace
         ws = get_workspace()
         if ws is not None:
+            path_service = getattr(self, "_path_service", None)
+            if path_service is not None:
+                path_service.bind_workspace(ws)
             return ws
         try:
             from floodmind.agent.runtime.contracts.workspace import Workspace
             self._workspace = Workspace.from_cwd(session_id=self.session_id or "sdk-agent").ensure()
+            path_service = getattr(self, "_path_service", None)
+            if path_service is not None:
+                path_service.bind_workspace(self._workspace)
         except Exception:
             logger.warning("Workspace 自动创建失败，保持无 workspace（工具将 fail-closed）", exc_info=True)
             self._workspace = None
@@ -2497,9 +2762,14 @@ class NativeFloodAgent:
         与 FloodAgent.stream() 输出格式兼容。
 
         Args:
-            resume_session_id: 如果提供，从该 session 的最新 checkpoint 恢复执行。
-            resume_checkpoint_id: 如果提供，从指定 checkpoint 恢复（需配合 resume_session_id）。
+            resume_session_id: 如果提供，续接该 session 的 memory 对话历史。
+            resume_checkpoint_id: 已弃用；checkpoint 状态不能重建当前 memory-first 运行时。
         """
+        if resume_checkpoint_id is not None:
+            raise ValueError(
+                "resume_checkpoint_id is unsupported: the memory-first runtime cannot "
+                "reconstruct AgentLoopState from a checkpoint"
+            )
         try:
             logger.info("NativeFloodAgent 收到用户输入(流式): %s...", user_input[:50])
             _active_input_var.set(user_message or user_input)
@@ -2518,6 +2788,7 @@ class NativeFloodAgent:
             def _run_loop() -> None:
                 # 提前取出，保证 finally 恢复时变量一定存在
                 saved_thinking = self._model_client.enable_thinking
+                effective_session_id = resume_session_id or self.session_id
                 try:
                     logger.info("[RUN_LOOP] === _run_loop started, session=%s ===", self.session_id)
 
@@ -2525,16 +2796,41 @@ class NativeFloodAgent:
                     # 显式重绑，保证 _get_output_dir / _get_upload_dir / PathService 写读根
                     # 在 SDK 子线程内全部一致（修复桌面端跨线程丢失导致的 C 盘写入）。
                     _ws = self._effective_workspace()
+                    self._path_service.bind_workspace(_ws)
                     if _ws is not None:
                         set_workspace(_ws)
 
                     # 是否从 checkpoint 恢复
-                    effective_session_id = resume_session_id or self.session_id
 
                     output_dir = self._get_output_dir(effective_session_id)
                     upload_dir = self._get_upload_dir(effective_session_id)
                     workspace_dirs = self._workspace_context_dirs(output_dir)
-                    self._set_session_context(effective_session_id, output_dir, **workspace_dirs)
+                    from floodmind.agent.runtime.contracts.runtime_context import RuntimeContext
+                    from floodmind.tools.session_context import set_runtime_context
+
+                    workspace_id = str(_ws.workspace_dir) if _ws is not None else ""
+                    runtime_context = RuntimeContext(
+                        conversation_id=effective_session_id,
+                        task_id=effective_session_id,
+                        run_id=f"run-{int(time.time())}",
+                        thread_id=threading.current_thread().name,
+                        turn_id=uuid.uuid4().hex,
+                        actor_type="host",
+                        actor_id=effective_session_id,
+                        agent_tier="main",
+                        runtime_mode="execution",
+                        workspace_id=workspace_id,
+                        permission_service=self._permission_service,
+                        path_service=self._path_service,
+                        background_service=self._background_task_service,
+                    )
+                    set_runtime_context(runtime_context)
+                    self._set_session_context(
+                        effective_session_id,
+                        output_dir,
+                        runtime_context=runtime_context,
+                        **workspace_dirs,
+                    )
 
                     artifact_dir = workspace_dirs.get("artifact_dir", "") or output_dir
                     ignore_managed = Path(artifact_dir).resolve() == Path(output_dir).resolve()
@@ -2557,6 +2853,7 @@ class NativeFloodAgent:
                         artifact_dir=workspace_dirs.get("artifact_dir", ""),
                         tmp_dir=workspace_dirs.get("tmp_dir", ""),
                         scripts_dir=workspace_dirs.get("scripts_dir", ""),
+                        runtime_context=runtime_context,
                         enable_reasoning=enable_reasoning,
                         abort_check=None,
                     )
@@ -2590,7 +2887,7 @@ class NativeFloodAgent:
                     # 已完成的轮已原子落入 memory，下一次 stream 天然从 memory 续上。
                     self._last_loop_state = AgentLoopState(
                         session_id=effective_session_id,
-                        run_id=f"run-{int(time.time())}",
+                        run_id=runtime_context.run_id,
                         user_message=user_input,
                         original_input=user_input,
                     )
@@ -2602,7 +2899,7 @@ class NativeFloodAgent:
                     if hasattr(self.memory, "get_chat_history_for_system_prompt"):
                         _sp = getattr(self._orchestrator_executor, "system_prompts", None)
                         context_chars = len(_sp[0]) if _sp else 0
-                        cw = settings.model.context_window
+                        cw = self._resolve_context_window()
                         history_text = self.memory.get_chat_history_for_system_prompt(
                             total_context_chars=context_chars,
                             context_window=cw,
@@ -2758,28 +3055,25 @@ class NativeFloodAgent:
 
             # 任务经验自动捕获（非阻塞，后台线程）
             if settings.task_experience.enabled and settings.task_experience.auto_capture:
+                capture = self._task_experience_capture
                 try:
-                    from floodmind.memory.task_experience import get_task_experience_capture
-                    capture = get_task_experience_capture(self.llm_service)
-                    if capture:
-                        plan = self._last_loop_state.plan if self._last_loop_state else None
-                        tool_results_list = agent_result.tool_results if agent_result else []
-                        capture.on_task_complete(
-                            session_id=self.session_id,
-                            user_input=user_input,
-                            plan=plan,
-                            tool_results=tool_results_list,
-                            final_output=full_answer,
-                            execution_duration=time.time() - self._step_start_time if self._step_start_time else 0,
-                        )
+                    plan = self._last_loop_state.plan if self._last_loop_state else None
+                    tool_results_list = agent_result.tool_results if agent_result else []
+                    capture.on_task_complete(
+                        session_id=self.session_id,
+                        user_input=user_input,
+                        plan=plan,
+                        tool_results=tool_results_list,
+                        final_output=full_answer,
+                        execution_duration=time.time() - self._step_start_time if self._step_start_time else 0,
+                    )
                 except Exception as e:
                     logger.warning("Task experience capture failed (non-critical): %s", e)
 
                 # 反馈回写：任务成功则对引用的经验 +success_count
                 try:
                     if full_answer and agent_result and agent_result.final_output:
-                        from floodmind.memory.task_experience import get_task_experience_store
-                        store = get_task_experience_store()
+                        store = capture.store
                         all_leaves = store.tree.get_all_leaves()
                         is_success = not any(tr.status == "error" for tr in (agent_result.tool_results or []))
                         for leaf in all_leaves:

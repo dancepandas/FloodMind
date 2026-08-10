@@ -56,10 +56,17 @@ class ToolSpec:
         if self.check_permissions_fn is not None:
             return self.check_permissions_fn(tool_input)
         if self.permission_policy is not None:
-            from floodmind.agent.runtime.services.permission_service import get_permission_service
-            svc = get_permission_service()
+            from floodmind.tools.session_context import get_runtime_context
+
+            runtime_context = get_runtime_context()
+            svc = runtime_context.permission_service if runtime_context is not None else None
             if svc is not None:
                 return svc.check_tool_policy(self.permission_policy, tool_input)
+            from floodmind.agent.runtime.contracts.permissions import PermissionDecision, PermissionBehavior
+            return PermissionDecision(
+                behavior=PermissionBehavior.DENY,
+                reason="RuntimeContext 未注入 PermissionService",
+            )
         from floodmind.agent.runtime.contracts.permissions import PermissionDecision, PermissionBehavior
         return PermissionDecision(behavior=PermissionBehavior.ALLOW)
 

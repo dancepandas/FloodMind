@@ -7,7 +7,6 @@ import pytest
 from floodmind import Agent, Skill, SkillRegistry, create_flood_agent, create_skill_registry
 from floodmind.agent.native.model_client import ModelClient
 from floodmind.agent.runtime.contracts.workspace import Workspace
-from floodmind.agent.runtime.services.background_task_service import get_background_task_service
 
 
 def _llm():
@@ -99,9 +98,8 @@ def test_two_full_agents_sharing_workspace_keep_skill_roots_isolated(tmp_path):
     assert not b.raw._path_service.is_write_allowed(file_b)
 
 
-def test_run_rebinds_agent_path_service_after_later_constructor(tmp_path, monkeypatch):
+def test_run_injects_agent_path_service_after_later_constructor(tmp_path, monkeypatch):
     from floodmind.agent.native.types import AgentResult
-    from floodmind.agent.runtime.services.path_service import get_path_service
 
     shared = Workspace.from_folder(tmp_path / "workspace", session_id="run").ensure()
     root_a, root_b = tmp_path / "skills-a", tmp_path / "skills-b"
@@ -113,7 +111,7 @@ def test_run_rebinds_agent_path_service_after_later_constructor(tmp_path, monkey
     observed = {}
 
     def capture_context(*, context, state):
-        service = get_path_service()
+        service = context.runtime_context.path_service
         observed["service"] = service
         observed["a"] = service.is_read_allowed(file_a)
         observed["b"] = service.is_read_allowed(file_b)
@@ -147,7 +145,7 @@ def test_programmatic_update_and_cleanup_are_owner_scoped(tmp_path):
     assert b.raw._skill_catalog == before_b
     assert "dynamic-owner" not in b.raw._skill_catalog
 
-    bg_service = get_background_task_service()
+    bg_service = a.raw._background_task_service
     assert (a.raw.session_id, a.raw._bg_task_callback) in bg_service._subscribers
     assert len(a.skill_registry._refresh_callbacks) == 2  # GetSkill cache + agent prompt
 

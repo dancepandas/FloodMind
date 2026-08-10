@@ -42,6 +42,7 @@ def set_session_context(
     artifact_dir: Optional[str] = None,
     tmp_dir: Optional[str] = None,
     scripts_dir: Optional[str] = None,
+    runtime_context: Any = None,
 ):
     """注入会话/工作区上下文。
 
@@ -65,6 +66,7 @@ def set_session_context(
         "artifact_dir": effective_artifact,
         "tmp_dir": tmp_dir or "",
         "scripts_dir": scripts_dir or "",
+        "runtime_context": runtime_context,
     }
     if output_dir:
         os.makedirs(output_dir, exist_ok=True)
@@ -74,6 +76,16 @@ def set_session_context(
     if delegate_cwd is not None:
         ctx["delegate_cwd"] = delegate_cwd
     _session_ctx_var.set(ctx)
+
+
+def set_runtime_context(rtc: Any) -> None:
+    ctx = dict(_session_ctx_var.get({}))
+    ctx["runtime_context"] = rtc
+    _session_ctx_var.set(ctx)
+
+
+def get_runtime_context() -> Any:
+    return _session_ctx_var.get({}).get("runtime_context")
 
 
 def get_current_delegate_cwd() -> Optional[str]:

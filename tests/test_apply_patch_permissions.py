@@ -1,19 +1,20 @@
-from floodmind.agent.runtime.services.path_service import PathService, set_path_service
+from floodmind.agent.runtime.contracts.runtime_context import RuntimeContext
+from floodmind.agent.runtime.services.path_service import PathService
 from floodmind.agent.runtime.services.workspace_service import build_folder_workspace
 from floodmind.tools.file_tools import _impl_apply_patch
-from floodmind.tools.session_context import set_session_context
+from floodmind.tools.session_context import set_runtime_context, set_session_context
 
 
 def _bind_workspace(tmp_path):
     ws = build_folder_workspace("s1", primary_dir=tmp_path / "project").ensure()
-    set_path_service(PathService(project_root=tmp_path, workspace=ws))
     set_session_context("s1", output_dir=str(ws.user_dir), cwd=str(ws.default_cwd), workspace_dir=str(ws.workspace_dir))
+    set_runtime_context(RuntimeContext("s1", "s1", "run", "thread", "turn", path_service=PathService(project_root=tmp_path, workspace=ws)))
     return ws
 
 
 def _reset(tmp_path):
     set_session_context("", output_dir="")
-    set_path_service(PathService(project_root=tmp_path))
+    set_runtime_context(RuntimeContext("", "", "", "", "", path_service=PathService(project_root=tmp_path)))
 
 
 def test_apply_patch_rejects_external_section_before_any_write(tmp_path):

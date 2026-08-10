@@ -18,9 +18,12 @@ ToolExecutionService — 统一工具执行管线
 - ToolFeedback 统一由 service 生成
 """
 
+import concurrent.futures
 import contextvars
+import inspect
 import json
 import logging
+import queue
 import re
 import threading
 from typing import Any, Callable, Dict, List, Optional
@@ -50,7 +53,43 @@ PermissionDecisionHook = Callable[
 ]
 
 
+class _DaemonBoundedExecutor:
+    """Small shared worker pool whose stuck jobs cannot block interpreter shutdown."""
+
+    def __init__(self, max_workers: int = 8, max_pending: int = 32):
+        self._queue: queue.Queue = queue.Queue(maxsize=max_pending)
+        for index in range(max_workers):
+            worker = threading.Thread(
+                target=self._run,
+                name=f"floodmind-tool-{index}",
+                daemon=True,
+            )
+            worker.start()
+
+    def submit(self, fn: Callable[[], Any]) -> concurrent.futures.Future:
+        future: concurrent.futures.Future = concurrent.futures.Future()
+        self._queue.put_nowait((future, fn))
+        return future
+
+    def _run(self) -> None:
+        while True:
+            future, fn = self._queue.get()
+            try:
+                if future.set_running_or_notify_cancel():
+                    try:
+                        future.set_result(fn())
+                    except BaseException as exc:
+                        future.set_exception(exc)
+            finally:
+                self._queue.task_done()
+
+
+_TOOL_EXECUTOR = _DaemonBoundedExecutor()
+
+
 class ToolExecutionService:
+    TOOL_TIMEOUT_SECONDS = 300
+
     def __init__(
         self,
         permission_service=None,
@@ -80,6 +119,16 @@ class ToolExecutionService:
         registry: Optional[Any] = None,
         authorized_ask_id: Optional[str] = None,
     ) -> ToolResult:
+        """Execute a tool with services supplied by the execution RuntimeContext."""
+        return self._execute_bound(call, context, registry, authorized_ask_id)
+
+    def _execute_bound(
+        self,
+        call: ToolCall,
+        context: Optional[Any] = None,
+        registry: Optional[Any] = None,
+        authorized_ask_id: Optional[str] = None,
+    ) -> ToolResult:
         tool = self._resolve_tool(call, registry)
         if tool is None:
             return ToolResult(
@@ -92,6 +141,18 @@ class ToolExecutionService:
         # 统一参数键清洗（单点 chokepoint）：见 _sanitize_arguments docstring。
         # 在权限/校验/执行之前归一化，保证下游（权限、tracing、schema、**kwargs）都看到干净键。
         clean_arguments = self._sanitize_arguments(call.arguments)
+
+        # ToolSpec.parameters 是工具对外暴露的完整 JSON Schema。必须在权限钩子和工具
+        # handler 之前校验，避免无效输入触发授权流程或任何工具副作用。Pydantic
+        # args_schema 仍在后续负责类型转换与生成最终 handler 参数。
+        raw_schema_error = self._validate_raw_parameters(tool, clean_arguments)
+        if raw_schema_error is not None:
+            return self._make_input_validation_error(
+                call,
+                tool,
+                clean_arguments,
+                reason=raw_schema_error,
+            )
 
         session_id = getattr(context, "session_id", "") if context else ""
         output_dir = getattr(context, "output_dir", "") if context else ""
@@ -106,26 +167,21 @@ class ToolExecutionService:
         # 阶段D：agent 身份（主/子），阶段E：运行模式（规划/执行）
         agent_tier = getattr(context, "agent_tier", "main") if context else "main"
         mode = self._resolve_mode(context)
+        runtime_context = getattr(context, "runtime_context", None) if context else None
 
         if self._set_session_context_fn is not None and session_id:
-            try:
-                self._set_session_context_fn(
-                    session_id,
-                    output_dir,
-                    delegate_cwd=delegate_cwd or None,
-                    cwd=cwd or None,
-                    workspace_dir=workspace_dir or None,
-                    state_dir=state_dir or None,
-                    artifact_dir=artifact_dir or None,
-                    tmp_dir=tmp_dir or None,
-                    scripts_dir=scripts_dir or None,
-                )
-            except TypeError:
-                # 回调签名不支持 harness 字段或 delegate_cwd（旧签名），降级兼容
-                try:
-                    self._set_session_context_fn(session_id, output_dir, delegate_cwd=delegate_cwd or None)
-                except TypeError:
-                    self._set_session_context_fn(session_id, output_dir)
+            self._invoke_session_context_callback(
+                session_id,
+                output_dir,
+                delegate_cwd=delegate_cwd or None,
+                cwd=cwd or None,
+                workspace_dir=workspace_dir or None,
+                state_dir=state_dir or None,
+                artifact_dir=artifact_dir or None,
+                tmp_dir=tmp_dir or None,
+                scripts_dir=scripts_dir or None,
+                runtime_context=runtime_context,
+            )
 
         perm_input = dict(clean_arguments) if clean_arguments else {}
         perm_input["__call_id"] = call.id
@@ -271,22 +327,55 @@ class ToolExecutionService:
             )
 
         try:
-            import concurrent.futures
             ctx = contextvars.copy_context()
-            executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
-            future = executor.submit(lambda: ctx.run(tool.func, **validated_args))
             try:
-                output = future.result(timeout=300)
-            except concurrent.futures.TimeoutError:
-                executor.shutdown(wait=False)
+                future = _TOOL_EXECUTOR.submit(lambda: ctx.run(tool.func, **validated_args))
+            except queue.Full:
                 return ToolResult(
                     tool_call_id=call.id,
                     name=call.name,
-                    content="工具执行超时（300秒）",
+                    content="工具执行队列已满，请稍后重试。",
                     status="error",
+                    metadata={"error_code": "TOOL_EXECUTION_SATURATED", "retryable": True},
                 )
-            finally:
-                executor.shutdown(wait=False)
+            try:
+                output = future.result(timeout=self.TOOL_TIMEOUT_SECONDS)
+            except concurrent.futures.TimeoutError:
+                # Python cannot stop a running thread. Cancellation only succeeds while queued;
+                # once running, side effects may still complete after this response.
+                cancelled = future.cancel()
+                if cancelled:
+                    return ToolResult(
+                        tool_call_id=call.id,
+                        name=call.name,
+                        content=f"工具在执行前等待超时（{self.TOOL_TIMEOUT_SECONDS}秒），已取消。",
+                        status="error",
+                        metadata={
+                            "error_code": "TOOL_EXECUTION_TIMEOUT",
+                            "timeout_seconds": self.TOOL_TIMEOUT_SECONDS,
+                            "execution_state": "cancelled_before_start",
+                            "indeterminate": False,
+                            "retryable": True,
+                        },
+                    )
+                return ToolResult(
+                    tool_call_id=call.id,
+                    name=call.name,
+                    content=(
+                        f"工具执行超过{self.TOOL_TIMEOUT_SECONDS}秒；运行线程无法安全停止，"
+                        "操作结果不确定，且可能仍在后台完成。请先核实外部状态，不要自动重试。"
+                    ),
+                    status="error",
+                    metadata={
+                        "error_code": "TOOL_EXECUTION_TIMEOUT_INDETERMINATE",
+                        "timeout_seconds": self.TOOL_TIMEOUT_SECONDS,
+                        "execution_state": "indeterminate_running",
+                        "indeterminate": True,
+                        "cancelled": False,
+                        "retryable": False,
+                        "do_not_retry_same_call": True,
+                    },
+                )
             output_str = str(output) if output is not None else ""
             return ToolResult(
                 tool_call_id=call.id,
@@ -318,6 +407,48 @@ class ToolExecutionService:
                 content=feedback.to_output_string(),
                 status="error",
             )
+
+    def _invoke_session_context_callback(
+        self,
+        session_id: str,
+        output_dir: str,
+        **session_fields: Any,
+    ) -> None:
+        """Invoke the callback once, adapting arguments before user code runs.
+
+        Signature inspection distinguishes legacy callbacks from modern callbacks. A
+        ``TypeError`` raised inside callback code therefore propagates normally instead
+        of being mistaken for a signature mismatch and triggering duplicate side effects.
+        """
+        callback = self._set_session_context_fn
+        if callback is None:
+            return
+
+        try:
+            signature = inspect.signature(callback)
+        except (TypeError, ValueError):
+            # Some extension callables have no introspectable signature. Use the modern
+            # contract once; never retry after execution based on exception type.
+            callback(session_id, output_dir, **session_fields)
+            return
+
+        parameters = signature.parameters.values()
+        accepts_kwargs = any(param.kind == inspect.Parameter.VAR_KEYWORD for param in parameters)
+        if accepts_kwargs:
+            supported_fields = session_fields
+        else:
+            supported_names = {
+                param.name
+                for param in parameters
+                if param.kind in (inspect.Parameter.POSITIONAL_OR_KEYWORD, inspect.Parameter.KEYWORD_ONLY)
+            }
+            supported_fields = {
+                name: value for name, value in session_fields.items() if name in supported_names
+            }
+
+        # bind() detects genuinely incompatible callbacks before any callback code runs.
+        signature.bind(session_id, output_dir, **supported_fields)
+        callback(session_id, output_dir, **supported_fields)
 
     def _resolve_tool(self, call: ToolCall, registry: Optional[Any]) -> Optional[ToolSpec]:
         if registry is None:
@@ -501,6 +632,80 @@ class ToolExecutionService:
                 continue
             cleaned[clean_key] = value
         return cleaned
+
+    @staticmethod
+    def _validate_raw_parameters(tool: ToolSpec, arguments: dict) -> Optional[str]:
+        """Validate sanitized arguments against the complete ToolSpec JSON Schema.
+
+        ``args_schema`` only covers tools backed by Pydantic models. Raw/MCP/system
+        tools rely on ``parameters`` and may use JSON Schema features that Pydantic
+        does not enforce, including composition and references.
+        """
+        schema = getattr(tool, "parameters", None)
+        if not isinstance(schema, dict):
+            return None
+
+        try:
+            from jsonschema import exceptions, validators
+
+            validator_class = validators.validator_for(schema)
+            validator_class.check_schema(schema)
+            errors = sorted(
+                validator_class(schema).iter_errors(arguments),
+                key=lambda error: tuple(str(part) for part in error.absolute_path),
+            )
+        except exceptions.SchemaError as exc:
+            logger.warning(
+                "ToolExecutionService invalid parameters schema for %s: %s",
+                tool.name,
+                exc,
+            )
+            return f"工具参数 schema 无效：{exc.message}"
+        except Exception as exc:
+            logger.warning(
+                "ToolExecutionService JSON Schema validation error for %s: %s",
+                tool.name,
+                exc,
+            )
+            return f"JSON Schema 校验异常：{exc}"
+
+        if not errors:
+            return None
+
+        details = []
+        for error in errors:
+            location = ".".join(str(part) for part in error.absolute_path) or "<root>"
+            details.append(f"{location}: {error.message}")
+        reason = "; ".join(details)
+        logger.warning(
+            "ToolExecutionService parameters validation failed for %s: %s",
+            tool.name,
+            reason,
+        )
+        return reason
+
+    @staticmethod
+    def _make_input_validation_error(
+        call: ToolCall,
+        tool: ToolSpec,
+        arguments: dict,
+        reason: str,
+    ) -> ToolResult:
+        args_preview = json.dumps(arguments, ensure_ascii=False)[:500] if arguments else "EMPTY"
+        feedback = ToolFeedback(
+            error_type="输入校验失败",
+            error_code="INPUT_VALIDATION_FAILED",
+            what_went_wrong=f"工具 {tool.name} 输入校验失败：{reason}。收到参数：{args_preview}",
+            correct_usage="检查参数是否完整、参数名和值类型是否符合工具的 JSON Schema。",
+            retryable=True,
+            do_not_retry_same_call=False,
+        )
+        return ToolResult(
+            tool_call_id=call.id,
+            name=call.name,
+            content=feedback.to_output_string(),
+            status="error",
+        )
 
     def _validate_schema(self, tool: ToolSpec, arguments: dict) -> Optional[dict]:
         schema = getattr(tool, "args_schema", None)

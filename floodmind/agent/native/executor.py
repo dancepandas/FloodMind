@@ -18,6 +18,7 @@ from floodmind.agent.native.types import (
     AgentResult,
     ModelEvent,
     RunContext,
+    TerminalReason,
     TokenUsage,
 )
 from floodmind.agent.runtime.contracts.tools import ToolCall, ToolResult
@@ -297,7 +298,9 @@ class NativeAgentExecutor:
         state.current_answer = ""
         state.round_assistant_message = None
         tool_calls: List[ToolCall] = []
+        invalid_tool_calls: List[Any] = []
         step_tokens = TokenUsage()
+        state.terminal_reason = None
         # 记录本轮开始前 reasoning 长度，重试时截断本轮残片，避免两段拼接
         reasoning_before = len(state.reasoning)
 
@@ -310,6 +313,7 @@ class NativeAgentExecutor:
         retry_policy = RetryPolicy(max_retries=3, base_delay=2.0, max_delay=30.0)
         attempt = 0
         while True:
+            attempt_output_events: List[tuple[str, str]] = []
             try:
                 for event in self.model_client.stream_chat(
                     messages=state.messages,
@@ -317,7 +321,17 @@ class NativeAgentExecutor:
                     extra_body=self.extra_body or None,
                     abort_check=context.abort_check,
                 ):
-                    self._consume_llm_event(event, state, tool_calls, step_tokens)
+                    self._consume_llm_event(
+                        event, state, tool_calls, step_tokens, invalid_tool_calls,
+                        emit_output=False,
+                    )
+                    if event.type in {"reasoning", "token"}:
+                        attempt_output_events.append((event.type, event.content))
+                for event_type, content in attempt_output_events:
+                    if event_type == "reasoning":
+                        self.event_bus.emit_reasoning(content)
+                    else:
+                        self.event_bus.emit_token(content)
                 break  # stream completed successfully
 
             except Exception as e:
@@ -343,6 +357,8 @@ class NativeAgentExecutor:
                 state.current_answer = ""
                 state.reasoning = state.reasoning[:reasoning_before]
                 tool_calls = []
+                invalid_tool_calls = []
+                state.terminal_reason = None
                 step_tokens = TokenUsage()
                 time.sleep(delay)
 
@@ -358,8 +374,11 @@ class NativeAgentExecutor:
         # 本轮 reasoning 切片（跨轮 state.reasoning 累加，按本轮起点切片），写 memory 用
         state.round_reasoning = state.reasoning[reasoning_before:]
 
+        terminal = state.terminal_reason or TerminalReason.from_raw(
+            "tool_calls" if tool_calls or invalid_tool_calls else "stop"
+        )
         self.event_bus.emit_llm_step_end(
-            reason="tool_calls" if tool_calls else "stop",
+            reason=terminal.raw or terminal.code,
             tokens={
                 "prompt_tokens": step_tokens.prompt_tokens,
                 "completion_tokens": step_tokens.completion_tokens,
@@ -372,10 +391,70 @@ class NativeAgentExecutor:
         state.token_usage.completion_tokens += step_tokens.completion_tokens
         state.token_usage.total_tokens += step_tokens.total_tokens
 
+        if invalid_tool_calls:
+            # Keep the provider assistant snapshot (with the original malformed call) and
+            # return a structured tool error. Crucially, no ToolCall reaches execution.
+            assistant_message = getattr(state, "round_assistant_message", None)
+            if assistant_message:
+                state.messages.append(assistant_message)
+            for invalid in invalid_tool_calls:
+                feedback = (
+                    f"工具 `{invalid.name}` 的参数 JSON 无法解析，工具未执行。"
+                    f"请修正后重试。错误: {invalid.error}"
+                )
+                state.messages.append(
+                    self.message_builder.build_tool_result_message(invalid.id, feedback)
+                )
+                self.event_bus.emit_tool_result(
+                    tool_name=invalid.name,
+                    status="error",
+                    content=feedback,
+                    tool_input=invalid.raw_arguments,
+                    call_id=invalid.id,
+                )
+            state.iteration += 1
+            state.status = "awaiting_llm"
+            return state
+
+        if terminal.code == "max_tokens":
+            if state.max_token_continuation_count < state.max_token_continuations:
+                state.max_token_continuation_count += 1
+                partial = state.current_answer
+                if partial:
+                    state.final_output += partial
+                    state.messages.append(
+                        self.message_builder.build_assistant_tool_calls_message([], partial)
+                    )
+                state.messages.append(self.message_builder.build_user_message(
+                    "上一条回复因达到输出长度限制而中断。请直接从中断处继续，不要重复已有内容。"
+                ))
+                state.current_answer = ""
+                state.status = "awaiting_llm"
+                return state
+            state.final_output = (
+                state.final_output + state.current_answer
+                or "模型输出达到长度限制，未能完整完成。"
+            )
+            state.status = "failed"
+            return state
+
+        if terminal.code in {"filtered", "refused", "paused", "aborted", "error", "unknown"}:
+            labels = {
+                "filtered": "模型输出被内容过滤器截断。",
+                "refused": "模型拒绝了该请求。",
+                "paused": "模型暂停了当前回合，未正常完成。",
+                "aborted": "模型调用已中止。",
+                "error": "模型回合异常结束。",
+                "unknown": f"模型以未知原因结束: {terminal.raw or 'empty'}",
+            }
+            state.final_output = labels[terminal.code]
+            state.status = "failed"
+            return state
+
         if not tool_calls:
             # 终态轮（只有 LLM 回答，没有工具调用）：立即落 memory（history 只含完整轮）
             self._write_round_to_memory(state, tool_calls_records=[], is_final=True)
-            state.final_output = state.current_answer
+            state.final_output += state.current_answer
             # 记录最终一轮（只有 LLM 回答，没有工具调用）
             if self._journal_service is not None:
                 self._journal_service.record_turn(
@@ -412,11 +491,17 @@ class NativeAgentExecutor:
     def _on_awaiting_tool(self, state: AgentLoopState, context: RunContext) -> AgentLoopState:
         """顺序执行 pending_tool_calls，检测 DOOM LOOP / 连续失败。"""
         tool_calls = state.pending_tool_calls
+        completed_ask_calls = list(getattr(state, "_pending_completed_ask_calls", []) or [])
+        state._pending_completed_ask_calls = []
 
-        # 本轮工具结果 journal 条目
-        tool_result_entries = []
+        # 本轮工具结果 journal 条目（ASK 批准路径可预先完成首个结果）
+        tool_result_entries = list(getattr(state, "_pending_tool_result_entries", []) or [])
+        state._pending_tool_result_entries = []
         # 本轮工具记录（写 memory 用：tool_name/input/output/status）
-        round_tool_records: List[Dict[str, Any]] = []
+        round_tool_records: List[Dict[str, Any]] = list(
+            getattr(state, "_pending_round_tool_records", []) or []
+        )
+        state._pending_round_tool_records = []
 
         for idx, call in enumerate(tool_calls):
             # 中断（用户暂停）在工具阶段生效：执行到可中断点终止，本轮整轮丢弃不落 history
@@ -526,6 +611,7 @@ class NativeAgentExecutor:
             )
 
         # 本轮工具全部执行完毕：整轮（assistant + tool_results）原子落 memory（history 只含完整轮）
+        all_round_calls = completed_ask_calls + tool_calls
         self._write_round_to_memory(state, tool_calls_records=round_tool_records, is_final=False)
 
         # 本轮工具全部执行完毕，记录 journal
@@ -535,7 +621,7 @@ class NativeAgentExecutor:
                 turn_index=state.iteration,
                 checkpoint_id=state.checkpoint_id,
                 current_answer=state.current_answer,
-                tool_calls=tool_calls,
+                tool_calls=all_round_calls,
                 tool_result_entries=tool_result_entries,
                 token_usage=state.token_usage.model_dump(),
             )
@@ -581,11 +667,7 @@ class NativeAgentExecutor:
         """
         svc = self._background_task_service
         if svc is None:
-            try:
-                from floodmind.agent.runtime.services.background_task_service import get_background_task_service
-                svc = get_background_task_service()
-            except Exception:
-                return 0
+            return 0
         try:
             tasks = svc.drain_completions(state.session_id)
         except Exception as e:
@@ -780,12 +862,28 @@ class NativeAgentExecutor:
             authorized_ask_id=authorized_ask_id,
         )
         state.tool_results.append(result)
+        tool_input_str = json.dumps(first_call.arguments, ensure_ascii=False) if first_call.arguments else ""
+        if self._journal_service is not None:
+            inline_content, journal_entry = self._journal_service.process_tool_result(
+                session_id=context.session_id,
+                tool_call=first_call,
+                tool_result=result,
+            )
+            state._pending_tool_result_entries = [journal_entry]
+        else:
+            inline_content = result.content
+        state._pending_round_tool_records = [{
+            "tool_name": first_call.name,
+            "tool_input": tool_input_str,
+            "tool_output": inline_content or "",
+            "status": result.status,
+        }]
 
         self.event_bus.emit_tool_result(
             tool_name=first_call.name,
             status=result.status,
-            content=result.content,
-            tool_input=json.dumps(first_call.arguments, ensure_ascii=False) if first_call.arguments else "",
+            content=inline_content,
+            tool_input=tool_input_str,
             call_id=first_call.id,
         )
 
@@ -793,10 +891,11 @@ class NativeAgentExecutor:
             state.artifacts.extend(result.artifacts)
 
         state.messages.append(
-            self.message_builder.build_tool_result_message(first_call.id, result.content)
+            self.message_builder.build_tool_result_message(first_call.id, inline_content)
         )
 
-        # 移除已执行的第一个 call
+        # 移除已执行的第一个 call，并保留它供统一的轮末 journal/memory 处理
+        state._pending_completed_ask_calls = [first_call]
         state.pending_tool_calls = pending_calls[1:]
         # 继续执行剩余工具
         state.status = "awaiting_tool"
@@ -810,17 +909,24 @@ class NativeAgentExecutor:
         state: AgentLoopState,
         tool_calls_ref: List[ToolCall],
         step_tokens: TokenUsage,
+        invalid_tool_calls_ref: Optional[List[Any]] = None,
+        emit_output: bool = True,
     ) -> None:
         """消费单个 LLM 事件。"""
         if event.type == "reasoning":
             state.reasoning += event.content
-            self.event_bus.emit_reasoning(event.content)
+            if emit_output:
+                self.event_bus.emit_reasoning(event.content)
         elif event.type == "token":
             state.current_answer += event.content
-            self.event_bus.emit_token(event.content)
+            if emit_output:
+                self.event_bus.emit_token(event.content)
         elif event.type == "tool_call_done":
             if event.tool_call is not None:
                 tool_calls_ref.append(event.tool_call)
+        elif event.type == "invalid_tool_call":
+            if invalid_tool_calls_ref is not None and event.invalid_tool_call is not None:
+                invalid_tool_calls_ref.append(event.invalid_tool_call)
         elif event.type == "assistant_message_done":
             payload = event.raw or {}
             message = payload.get("message") if isinstance(payload, dict) else None
@@ -835,7 +941,8 @@ class NativeAgentExecutor:
             self.event_bus.emit_llm_step_end(reason="timeout")
             raise TimeoutError(event.content)
         elif event.type == "done":
-            pass
+            if event.terminal_reason is not None:
+                state.terminal_reason = event.terminal_reason
         elif event.type == "usage":
             try:
                 payload = json.loads(event.content) if event.content else {}

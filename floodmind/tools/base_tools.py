@@ -29,6 +29,7 @@ from typing import Optional, Dict, Any, List, Union
 from pydantic import BaseModel, Field
 
 from floodmind.tools.agent_tool import (
+    AgentTool,
     ToolRegistry,
     build_agent_tool,
     UpdateProjectInstructionsInput,
@@ -52,7 +53,10 @@ from floodmind.tools.session_context import (
 )
 from floodmind.agent.runtime.services._runtime_root import PROJECT_ROOT as _PROJECT_ROOT
 from floodmind.agent.runtime.services.workspace_service import get_workspace
-from floodmind.agent.runtime.services.exec_write_scanner import check_exec_write_targets
+from floodmind.agent.runtime.services.exec_write_scanner import (
+    check_exec_write_targets,
+    dangerous_command_reason,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -305,11 +309,6 @@ _SESSION_ROOT = _PROJECT_ROOT / "data" / "sessions"
 _REUSABLE_SCRIPT_EXTENSIONS = {".py"}
 
 
-def _find_skill(skill_name: str) -> Optional[Any]:
-    """查找技能（委托唯一权威源 SkillRegistry 单例）。"""
-    return get_skill_registry().get_skill(skill_name)
-
-
 def _session_root_path() -> Path:
     """当前 session_root：优先 workspace.session_root，回退 _SESSION_ROOT 常量。"""
     ws = get_workspace()
@@ -345,57 +344,8 @@ def _get_active_session_id() -> str:
 
 
 
-def _impl_get_skill(skill_name: str = "") -> str:
-    parsed = _parse_json_if_needed(skill_name)
-    if parsed:
-        skill_name = parsed.get('skill_name', skill_name)
-    
-    skill_name = str(skill_name).strip().strip('"').strip("'")
-    return _get_skill_cached(skill_name)
-
-
-get_skill = build_agent_tool(
-    name="GetSkill",
-    description=(
-        "获取技能的完整说明和执行方法。[必填] skill_name: 技能名称，如 'chronos'、'docx'。"
-        "返回内容包含：技能描述、使用说明、可用脚本（含完整路径）、参考文档。"
-    ),
-    args_schema=GetSkillInput,
-    func=_impl_get_skill,
-    is_readonly=True,
-    is_destructive=False,
-    is_concurrency_safe=True,
-    check_permissions_fn=make_readonly_permission_fn(),
-    permission_policy=ToolPermissionPolicy(policy_type="readonly"),
-)
-
-
-@lru_cache(maxsize=128)
-def _get_skill_cached(skill_name: str) -> str:
-    skill_name = str(skill_name).strip()
-    skill = _find_skill(skill_name)
-
-    if not skill:
-        # 记录失败使用（curator 接活：统计 skill 使用频率/成功率）
-        try:
-            from floodmind.skills.skill_curator import record_skill_usage
-            record_skill_usage(skill_name, success=False)
-        except Exception:
-            pass
-        available = [s.name for s in get_skill_registry().all_skills()]
-        return _finalize_tool_output(
-            "get_skill",
-            f"未找到技能 '{skill_name}'。可用技能：{available}",
-            skill_name=skill_name,
-        )
-
-    # 记录成功使用（curator 接活：累计 usage、re-activate stale）
-    try:
-        from floodmind.skills.skill_curator import record_skill_usage
-        record_skill_usage(skill_name, success=True)
-    except Exception:
-        pass
-
+def _render_skill(skill_name: str, skill: Any) -> str:
+    """Render one resolved skill using the historical GetSkill response format."""
     lines = [
         f"=== 技能【{skill_name}】完整说明 ===",
         "",
@@ -409,50 +359,25 @@ def _get_skill_cached(skill_name: str) -> str:
     lines.extend(["", "【使用说明】", skill.prompt])
 
     if skill.scripts:
-        lines.extend([
-            "",
-            "【可执行脚本】",
-            "使用 Bash 工具执行以下脚本：",
-        ])
+        lines.extend(["", "【可执行脚本】", "使用 Bash 工具执行以下脚本："])
         for script in skill.scripts:
-            if skill.skill_dir:
-                script_full = str(skill.skill_dir / "scripts" / script)
-            else:
-                script_full = script
+            script_full = str(skill.skill_dir / "scripts" / script) if skill.skill_dir else script
             lines.append(f"  - {script}  (完整路径: {script_full})")
-        lines.append("")
-        lines.append("示例：")
-        if skill.scripts:
-            first_script = skill.scripts[0]
-            if skill.skill_dir:
-                first_path = str(skill.skill_dir / "scripts" / first_script)
-            else:
-                first_path = first_script
-            lines.append(f"  Bash(command=\"python {first_path} --arg1 value1\")")
+        lines.extend(["", "示例："])
+        first_script = skill.scripts[0]
+        first_path = str(skill.skill_dir / "scripts" / first_script) if skill.skill_dir else first_script
+        lines.append(f'  Bash(command="python {first_path} --arg1 value1")')
 
     if skill.references:
-        lines.extend([
-            "",
-            "【参考文档】",
-            "使用 Read 工具读取以下文档：",
-        ])
+        lines.extend(["", "【参考文档】", "使用 Read 工具读取以下文档："])
         for ref in skill.references:
-            if skill.skill_dir:
-                full_path = str(skill.skill_dir / ref)
-            else:
-                full_path = ref
+            full_path = str(skill.skill_dir / ref) if skill.skill_dir else ref
             lines.append(f"  - {ref}  (完整路径: {full_path})")
 
     if skill.assets:
-        lines.extend([
-            "",
-            "【资源文件】",
-        ])
+        lines.extend(["", "【资源文件】"])
         for asset in skill.assets:
-            if skill.skill_dir:
-                full_path = str(skill.skill_dir / asset)
-            else:
-                full_path = asset
+            full_path = str(skill.skill_dir / asset) if skill.skill_dir else asset
             lines.append(f"  - {asset}  (完整路径: {full_path})")
 
     if skill.is_knowledge_only:
@@ -463,64 +388,99 @@ def _get_skill_cached(skill_name: str) -> str:
             "请根据上述说明直接回答用户问题，无需执行脚本。",
         ])
 
-    return _finalize_tool_output("get_skill", "\n".join(lines), skill_name=skill_name)
+    return "\n".join(lines)
 
 
-# refresh/register/set_disabled 后清 GetSkill 正文缓存，避免 stale（替代旧 set_skill_registry）
-get_skill_registry().add_refresh_callback(_get_skill_cached.cache_clear)
+def make_get_skill_tool(registry: Any, curator: Any) -> AgentTool:
+    """Build an instance-bound GetSkill tool and subscribe its cache to registry refreshes.
+
+    The returned ``AgentTool`` exposes an idempotent ``cleanup()`` callable which
+    unsubscribes the refresh callback and clears this tool's private cache.
+    """
+    @lru_cache(maxsize=128)
+    def cached(skill_name: str) -> str:
+        skill_name = str(skill_name).strip()
+        skill = registry.get_skill(skill_name)
+        if not skill:
+            try:
+                curator.record_usage(skill_name, success=False)
+            except Exception:
+                pass
+            available = [skill.name for skill in registry.all_skills()]
+            return _finalize_tool_output(
+                "get_skill",
+                f"未找到技能 '{skill_name}'。可用技能：{available}",
+                skill_name=skill_name,
+            )
+
+        try:
+            curator.record_usage(skill_name, success=True)
+        except Exception:
+            pass
+        return _finalize_tool_output(
+            "get_skill", _render_skill(skill_name, skill), skill_name=skill_name
+        )
+
+    def impl(skill_name: str = "") -> str:
+        parsed = _parse_json_if_needed(skill_name)
+        if parsed:
+            skill_name = parsed.get("skill_name", skill_name)
+        normalized = str(skill_name).strip().strip('"').strip("'")
+        return cached(normalized)
+
+    unsubscribe = registry.add_refresh_callback(cached.cache_clear)
+    cleaned_up = False
+
+    def cleanup() -> None:
+        nonlocal cleaned_up
+        if cleaned_up:
+            return
+        cleaned_up = True
+        cached.cache_clear()
+        if callable(unsubscribe):
+            unsubscribe()
+        elif hasattr(registry, "remove_refresh_callback"):
+            registry.remove_refresh_callback(cached.cache_clear)
+
+    tool = build_agent_tool(
+        name="GetSkill",
+        description=(
+            "获取技能的完整说明和执行方法。[必填] skill_name: 技能名称，如 'chronos'、'docx'。"
+            "返回内容包含：技能描述、使用说明、可用脚本（含完整路径）、参考文档。"
+        ),
+        args_schema=GetSkillInput,
+        func=impl,
+        is_readonly=True,
+        is_destructive=False,
+        is_concurrency_safe=True,
+        check_permissions_fn=make_readonly_permission_fn(),
+        permission_policy=ToolPermissionPolicy(policy_type="readonly"),
+    )
+    # AgentTool forbids undeclared pydantic fields through normal assignment. These
+    # runtime-only hooks are deliberately attached outside model serialization.
+    object.__setattr__(tool, "cleanup", cleanup)
+    object.__setattr__(tool, "_get_skill_cached", cached)
+    return tool
+
+
+def _global_skill_curator():
+    from floodmind.skills.skill_curator import get_skill_curator
+    return get_skill_curator()
+
+
+# Backward-compatible module singleton, now implemented by the explicit factory.
+get_skill = make_get_skill_tool(get_skill_registry(), _global_skill_curator())
+_get_skill_cached = get_skill._get_skill_cached
+_impl_get_skill = get_skill.func
 
 
 
 
-
-
-_DANGEROUS_COMMAND_PATTERNS = [
-    re.compile(r'\brm\s+-rf\b', re.IGNORECASE),
-    re.compile(r'\brm\s+-r\b', re.IGNORECASE),
-    re.compile(r'\brmdir\s+/[sS]', re.IGNORECASE),
-    re.compile(r'\bdel\s+/[sS]', re.IGNORECASE),
-    re.compile(r'\bdel\s+/[fF]', re.IGNORECASE),
-    re.compile(r'\bdel\s+/[qQ]', re.IGNORECASE),
-    re.compile(r'\bformat\s+[A-Za-z]:', re.IGNORECASE),
-    re.compile(r'\bshred\b', re.IGNORECASE),
-    re.compile(r'\bdd\s+if=', re.IGNORECASE),
-    re.compile(r'\bmkfs\b', re.IGNORECASE),
-    re.compile(r'>\s*/dev/sd', re.IGNORECASE),
-    re.compile(r'\bchmod\s+-R\s+777\b', re.IGNORECASE),
-    re.compile(r'\bchown\s+-R\b', re.IGNORECASE),
-    re.compile(r'\bgit\s+push\s+--force\b', re.IGNORECASE),
-    re.compile(r'\bgit\s+reset\s+--hard\b', re.IGNORECASE),
-    re.compile(r'\bdocker\s+system\s+prune', re.IGNORECASE),
-    re.compile(r'\bdocker\s+rm\s+-f\b', re.IGNORECASE),
-    re.compile(r'\bRemove-Item\s+.*-Recurse', re.IGNORECASE),
-    re.compile(r'\bRemove-Item\s+.*-Force', re.IGNORECASE),
-    re.compile(r'\brd\s+/[sS]', re.IGNORECASE),
-    re.compile(r'\brd\s+/[qQ]', re.IGNORECASE),
-    re.compile(r'\bnet\s+user\b', re.IGNORECASE),
-    re.compile(r'\bnet\s+localgroup\b', re.IGNORECASE),
-    re.compile(r'\bpip\s+uninstall\b', re.IGNORECASE),
-    re.compile(r'\bconda\s+remove\b', re.IGNORECASE),
-    re.compile(r'\bnpm\s+uninstall\b', re.IGNORECASE),
-    re.compile(r'\btaskkill\s+/[fF]', re.IGNORECASE),
-    re.compile(r'\breg\s+delete\b', re.IGNORECASE),
-    re.compile(r'\bregedit\b', re.IGNORECASE),
-    re.compile(r'\bmsiexec\b', re.IGNORECASE),
-    re.compile(r'\bcertutil\b', re.IGNORECASE),
-    re.compile(r'\bpowershell\s+-enc', re.IGNORECASE),
-    re.compile(r'\bpwsh\s+-enc', re.IGNORECASE),
-    re.compile(r'\bcmd\s+/c\s+del\b', re.IGNORECASE),
-    re.compile(r'\bicacls\b', re.IGNORECASE),
-    re.compile(r'\bcacls\b', re.IGNORECASE),
-    re.compile(r'\bwbadmin\b', re.IGNORECASE),
-    re.compile(r'\bdiskpart\b', re.IGNORECASE),
-]
 
 
 def _check_dangerous_command(command: str) -> str:
-    for pattern in _DANGEROUS_COMMAND_PATTERNS:
-        if pattern.search(command):
-            return f"检测到危险命令模式，已拦截: {pattern.pattern}"
-    return ""
+    reason = dangerous_command_reason(command)
+    return f"{reason}，已拦截" if reason else ""
 
 
 def _impl_exec_bash(command: str = "", workdir: str = "", timeout: int = 120, env: str = "{}", run_in_background: bool = False) -> str:
@@ -550,6 +510,7 @@ def _impl_exec_bash(command: str = "", workdir: str = "", timeout: int = 120, en
     _write_deny = check_exec_write_targets(
         command,
         resolver=lambda t: resolve_tool_path(t, access="write"),
+        allow_approved_unresolved=True,
     )
     if _write_deny:
         return _finalize_tool_output("exec_bash", _write_deny, command=command, timeout=timeout)
@@ -632,13 +593,20 @@ def _impl_exec_bash(command: str = "", workdir: str = "", timeout: int = 120, en
         # 已走完全部安全管线（危险命令/写目标/workdir/sandbox env），只是不 Popen+wait，
         # 改交 BackgroundTaskService 托管：立即返回 task_id，不受同步 120s 超时限制。
         if run_in_background:
-            from floodmind.agent.runtime.services.background_task_service import get_background_task_service
+            background_service = _get_bg_task_service()
+            if background_service is None:
+                return _finalize_tool_output(
+                    "exec_bash",
+                    "错误：后台任务服务不可用；RuntimeContext 未注入 background_service。",
+                    command=command,
+                    timeout=timeout,
+                )
 
             base_kwargs: Dict[str, Any] = {}
             if process_sandbox is not None:
                 base_kwargs = process_sandbox.wrap_popen_kwargs(base_kwargs)
             try:
-                task = get_background_task_service().start(
+                task = background_service.start(
                     session_id=session_id,
                     command=command,
                     shell_cmd=shell_cmd,
@@ -788,13 +756,18 @@ exec_bash = build_agent_tool(
 # TaskList 列出本会话任务，TaskKill 杀进程树。全部经 BackgroundTaskService。
 
 def _get_bg_task_service():
-    from floodmind.agent.runtime.services.background_task_service import get_background_task_service
-    return get_background_task_service()
+    from floodmind.tools.session_context import get_runtime_context
+
+    runtime_context = get_runtime_context()
+    return runtime_context.background_service if runtime_context is not None else None
 
 
 def _impl_task_output(task_id: str = "", tail_lines: int = 200) -> str:
+    service = _get_bg_task_service()
+    if service is None:
+        return "错误：后台任务服务不可用；RuntimeContext 未注入 background_service。"
     session_id = get_current_session_id() or SESSION_CONTEXT.get("session_id", "") or ""
-    task = _get_bg_task_service().get(session_id, task_id) if task_id else None
+    task = service.get(session_id, task_id) if task_id else None
     if task is None:
         return f"未找到后台任务 {task_id!r}（会话 {session_id}）。用 TaskList() 查看本会话任务。"
     lines = [
@@ -820,8 +793,11 @@ def _impl_task_output(task_id: str = "", tail_lines: int = 200) -> str:
 
 
 def _impl_task_list() -> str:
+    service = _get_bg_task_service()
+    if service is None:
+        return "错误：后台任务服务不可用；RuntimeContext 未注入 background_service。"
     session_id = get_current_session_id() or SESSION_CONTEXT.get("session_id", "") or ""
-    tasks = _get_bg_task_service().list(session_id)
+    tasks = service.list(session_id)
     if not tasks:
         return "本会话暂无后台任务。"
     lines = ["本会话后台任务（task_id | status | exit | command）："]
@@ -831,10 +807,13 @@ def _impl_task_list() -> str:
 
 
 def _impl_task_kill(task_id: str = "") -> str:
+    service = _get_bg_task_service()
+    if service is None:
+        return "错误：后台任务服务不可用；RuntimeContext 未注入 background_service。"
     session_id = get_current_session_id() or SESSION_CONTEXT.get("session_id", "") or ""
     if not task_id:
         return "错误：task_id 必填。用 TaskList() 查看本会话任务。"
-    ok = _get_bg_task_service().kill(session_id, task_id)
+    ok = service.kill(session_id, task_id)
     if not ok:
         return f"未找到运行中的后台任务 {task_id!r}（会话 {session_id}）。"
     return f"后台任务 {task_id} 已终止（进程树已 kill，meta.json 保留供审计）。"
@@ -1899,12 +1878,63 @@ def _register_all_tools():
         ToolRegistry.register_alias("add_task_experience", "AddTaskExperience")
 
 
+def make_task_experience_tools(store, *, skill_owner=None) -> list[AgentTool]:
+    """Bind all task-experience tools to one Agent-owned store/service."""
+    from floodmind.memory.experience_tree import ExperienceLeaf
+
+    def _search(query: str = "", path: str = "", top_k: int = 5) -> str:
+        if not store.has_experiences():
+            return "当前没有积累的任务执行经验。随着任务执行，经验会自动积累。"
+        leaves = store.search_keywords(query, path_filter=path, top_k=top_k)
+        store.bump_hotness(query, leaves)
+        return store.render_experience_markdown(leaves)
+
+    def _browse(path: str = "") -> str:
+        return store.browse_tree(path)
+
+    def _drill(summary_node_id: str = "") -> str:
+        return store.drill_down(summary_node_id)
+
+    def _add(
+        path: str = "", description: str = "", pitfalls: str = "",
+        solutions: str = "", steps_summary: str = "",
+        code_snippets: str = "", outcome: str = "success",
+    ) -> str:
+        path_parts = [part.strip() for part in path.split("/") if part.strip()]
+        if not path_parts:
+            return "路径不能为空"
+        pitfalls_list = [item.strip() for item in pitfalls.split(";") if item.strip()]
+        solutions_list = [item.strip() for item in solutions.split(";") if item.strip()]
+        code_list = [item.strip() for item in code_snippets.split(";") if item.strip()]
+        leaf = ExperienceLeaf(
+            node_id="", experience_id="", path=path_parts + [description[:30]],
+            label=description[:30], node_type="case", task_description=description,
+            domain_keywords=[], skill_used="", steps_summary=steps_summary,
+            pitfalls=pitfalls_list, solutions=solutions_list, code_snippets=code_list,
+            final_outcome=outcome, session_id="manual", created_at=datetime.now().isoformat(),
+            importance=0.7 if pitfalls_list else 0.4,
+        )
+        store.record_experience(leaf, path_parts, skill_owner=skill_owner)
+        return (f"经验已添加到: {'/'.join(path_parts)}\n描述: {description}\n"
+                f"坑点: {len(pitfalls_list)}个\n解决方案: {len(solutions_list)}个\n"
+                f"代码片段: {len(code_list)}个")
+
+    funcs = {
+        "SearchTaskExperience": _search,
+        "BrowseExperienceTree": _browse,
+        "DrillDownExperience": _drill,
+        "AddTaskExperience": _add,
+    }
+    return [ToolRegistry.get(name).model_copy(update={"func": func}) for name, func in funcs.items()]
+
+
 
 _register_all_tools()
 
 
 __all__ = [
     'get_skill',
+    'make_get_skill_tool',
     'exec_bash',
     'web_search',
     'fetch_webpage',

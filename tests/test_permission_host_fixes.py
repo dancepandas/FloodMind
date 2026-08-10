@@ -58,6 +58,81 @@ class TestPermissionHandlerHostAdjudication:
         sdk.check.assert_called_once()
 
 
+class TestAskRequestLifecycle:
+    @pytest.mark.parametrize("approved", [True, False])
+    def test_pending_survives_until_permission_resolved_event(self, approved):
+        import threading
+
+        from floodmind.agent.runtime.contracts.permissions import PermissionAskRequest, PermissionAskResponse
+        from floodmind.agent.runtime.services.ask_service import AskService
+
+        svc = AskService(timeout=1.0)
+        events = []
+
+        def emit(event):
+            events.append(event)
+            if event["type"] == "permission_resolved":
+                assert svc.is_pending(event["ask_id"])
+
+        svc.set_emit_fn(emit, session_id="s1")
+        result = []
+        worker = threading.Thread(
+            target=lambda: result.append(svc.request(PermissionAskRequest(
+                session_id="s1", call_id="c1", tool_name="Bash",
+                reason="confirm", tool_input={"command": "pwd"},
+            )))
+        )
+        worker.start()
+
+        for _ in range(100):
+            pending = svc.pending("s1")
+            if pending:
+                break
+            worker.join(0.01)
+        assert pending
+        ask_id = pending[0].ask_id
+        assert svc.respond(PermissionAskResponse(
+            session_id="s1", ask_id=ask_id, approved=approved,
+        ))
+        worker.join(timeout=1.0)
+
+        assert result == [approved]
+        assert [event["type"] for event in events] == [
+            "action_start", "permission_ask", "permission_resolved",
+        ]
+        assert events[-1] == {
+            "type": "permission_resolved",
+            "session_id": "s1",
+            "call_id": "c1",
+            "ask_id": ask_id,
+            "approved": approved,
+        }
+        assert not svc.is_pending(ask_id)
+        assert not svc.respond(PermissionAskResponse(
+            session_id="s1", ask_id=ask_id, approved=not approved,
+        ))
+
+    def test_timeout_emits_denial_then_rejects_late_response(self):
+        from floodmind.agent.runtime.contracts.permissions import PermissionAskRequest, PermissionAskResponse
+        from floodmind.agent.runtime.services.ask_service import AskService
+
+        svc = AskService(timeout=0.01)
+        events = []
+        svc.set_emit_fn(events.append, session_id="s1")
+
+        assert svc.request(PermissionAskRequest(
+            session_id="s1", call_id="c1", tool_name="Bash", reason="confirm",
+        )) is False
+
+        resolved = events[-1]
+        assert resolved["type"] == "permission_resolved"
+        assert resolved["approved"] is False
+        assert not svc.is_pending(resolved["ask_id"])
+        assert not svc.respond(PermissionAskResponse(
+            session_id="s1", ask_id=resolved["ask_id"], approved=True,
+        ))
+
+
 class TestAskTimeoutAutoReject:
     """ASK 无宿主响应时按 AskService 超时自动拒绝，不再无限轮询。"""
 
@@ -146,16 +221,18 @@ class TestBashWriteScope:
 
     def test_write_to_uploads_allowed_after_add_writable_root(self, tmp_path):
         from floodmind.agent.runtime.contracts.workspace import Workspace
-        from floodmind.agent.runtime.services.path_service import PathService, set_path_service
+        from floodmind.agent.runtime.contracts.runtime_context import RuntimeContext
+        from floodmind.agent.runtime.services.path_service import PathService
         from floodmind.tools.agent_tool import resolve_tool_path
+        from floodmind.tools.session_context import set_runtime_context
 
         ws = Workspace.from_folder(tmp_path / "ws", session_id="s1")
         uploads = tmp_path / "uploads"
         uploads.mkdir()
         ws.add_writable_root(uploads)
-        set_path_service(PathService(workspace=ws))
+        set_runtime_context(RuntimeContext("s1", "s1", "run", "thread", "turn", path_service=PathService(workspace=ws)))
         try:
             result = resolve_tool_path(str(uploads / "shot.png"), access="write")
             assert result.allowed, f"uploads/ 应可写: {result.reason}"
         finally:
-            set_path_service(PathService())
+            set_runtime_context(None)

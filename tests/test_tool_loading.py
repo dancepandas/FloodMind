@@ -55,7 +55,11 @@ def test_compact_prompt_catalog_omits_full_schema_in_eager_mode():
 
 def test_get_tool_real_end_to_end_malformed_key():
     """真实 GetTool 工具 + 畸形键（键名带尾引号）端到端：应清洗后正常执行。"""
+    from floodmind.agent.runtime.contracts.permissions import PermissionBehavior, PermissionDecision
+    from floodmind.agent.runtime.contracts.runtime_context import RuntimeContext
     from floodmind.agent.runtime.contracts.tools import ToolCall
+    from floodmind.tools.session_context import set_runtime_context
+    from unittest.mock import MagicMock
     from floodmind.agent.runtime.services.tool_execution_service import ToolExecutionService
 
     reg = Registry([])
@@ -64,10 +68,14 @@ def test_get_tool_real_end_to_end_malformed_key():
     reg.register(get_tool_spec)
     reg.register(_tool("Read", "读取文件内容。"))
 
-    svc = ToolExecutionService()
+    permission_service = MagicMock()
+    permission_service.check.return_value = PermissionDecision(behavior=PermissionBehavior.ALLOW)
+    set_runtime_context(RuntimeContext("c", "t", "r", "th", "turn", permission_service=permission_service))
+    svc = ToolExecutionService(permission_service=permission_service)
     call = ToolCall(id="c1", name="GetTool", arguments={'tool_name"': "Read"})
 
     result = svc.execute(call, context=None, registry=reg)
+    set_runtime_context(None)
 
     assert result.status == "completed"
     assert "`Read`" in result.content
