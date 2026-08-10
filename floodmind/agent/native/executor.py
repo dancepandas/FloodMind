@@ -22,6 +22,7 @@ from floodmind.agent.native.types import (
     TokenUsage,
 )
 from floodmind.agent.runtime.contracts.tools import ToolCall, ToolResult
+from floodmind.agent.runtime.contracts.run_state import RunState
 from floodmind.agent.runtime.contracts.identity import new_id
 from floodmind.agent.runtime.services.journal_authority import JournalAuthority
 from floodmind.agent.native.event_bus import EventBus
@@ -35,6 +36,46 @@ from floodmind.agent.runtime.services.tracing_service import TracingService
 from floodmind.agent.native.context_compressor import ContextCompressor
 
 logger = logging.getLogger(__name__)
+
+
+_RUN_TO_LOOP_STATUS = {
+    "created": "created",
+    "projecting_context": "created",
+    "awaiting_model": "awaiting_llm",
+    "streaming_model": "awaiting_llm",
+    "awaiting_tool": "awaiting_tool",
+    "awaiting_approval": "awaiting_permission",
+    "executing_tool": "awaiting_tool",
+    "compacting": "context_compress",
+    "paused": "paused",
+    "cancelling": "failed",
+    "cancelled": "failed",
+    "completed": "completed",
+    "failed": "failed",
+}
+
+
+def project_run_state_to_loop_state(
+    loop_state: AgentLoopState,
+    run_state: RunState,
+) -> AgentLoopState:
+    """Project authoritative reducer fields onto the mutable loop driver state."""
+    projected = loop_state.model_copy(deep=True)
+    projected.status = _RUN_TO_LOOP_STATUS[run_state.status.value]
+    projected.iteration = sum(
+        1 for turn in run_state.turns if turn.get("role") == "assistant"
+    )
+    projected.journal_cursor = run_state.last_committed_sequence
+    projected.pending_tool_calls = []
+    projected.pending_ask_id = None
+    projected.pending_tool_transaction_id = ""
+    if run_state.pending_tool_transactions:
+        projected.pending_tool_transaction_id = (
+            run_state.pending_tool_transactions[-1].transaction_id
+        )
+    if run_state.pending_approvals:
+        projected.pending_ask_id = run_state.pending_approvals[-1].ask_id
+    return projected
 
 
 class NativeAgentExecutor:
@@ -160,36 +201,11 @@ class NativeAgentExecutor:
         用户暂停 = abort（终态 failed，未完成轮丢弃不落 history）；无单独的 paused 软状态。
         """
         # Checkpoint snapshots are projections. Replay the canonical journal before
-        # driving the loop so authoritative status and iteration come from events.
+        # driving the loop so authoritative fields come from reducer state.
         if self._journal_authority is not None:
             run_state = self._journal_authority.replay()
             if run_state.last_committed_sequence:
-                status_map = {
-                    "created": "created",
-                    "projecting_context": "created",
-                    "awaiting_model": "awaiting_llm",
-                    "streaming_model": "awaiting_llm",
-                    "awaiting_tool": "awaiting_tool",
-                    "awaiting_approval": "awaiting_permission",
-                    "executing_tool": "awaiting_tool",
-                    "compacting": "context_compress",
-                    "paused": "paused",
-                    "cancelling": "failed",
-                    "cancelled": "failed",
-                    "completed": "completed",
-                    "failed": "failed",
-                }
-                state.status = status_map[run_state.status.value]
-                state.iteration = sum(
-                    1 for turn in run_state.turns if turn.get("role") == "assistant"
-                )
-                state.journal_cursor = run_state.last_committed_sequence
-                if run_state.pending_tool_transactions:
-                    state.pending_tool_transaction_id = (
-                        run_state.pending_tool_transactions[-1].transaction_id
-                    )
-                if run_state.pending_approvals:
-                    state.pending_ask_id = run_state.pending_approvals[-1].ask_id
+                state = project_run_state_to_loop_state(state, run_state)
 
         # 用户中断检查回调
         effective_abort = context.abort_check
@@ -1113,6 +1129,9 @@ class NativeAgentExecutor:
                     "turn_id": self._journal_authority.turn_id,
                     "runtime_dir": context.state_dir,
                 }
+            run_state = None
+            if self._journal_authority is not None:
+                run_state = self._journal_authority.replay()
             record = self._checkpoint_service.save(
                 state,
                 metadata={
@@ -1122,6 +1141,7 @@ class NativeAgentExecutor:
                 },
                 journal_cursor=journal_cursor,
                 reducer_version="1",
+                run_state=run_state,
             )
             if self._journal_authority is not None:
                 self._journal_authority.emit(

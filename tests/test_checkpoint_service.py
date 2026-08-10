@@ -7,9 +7,12 @@ from pathlib import Path
 import pytest
 
 from floodmind.agent.native.types import AgentLoopState, ExecutionPlan
+from floodmind.agent.runtime.adapters.checkpoint_api import handle_rollback_checkpoint
 from floodmind.agent.runtime.contracts.tools import ToolCall, ToolResult
+from floodmind.agent.runtime.reducer import initial_run_state
 from floodmind.agent.runtime.services.checkpoint_service import (
     CheckpointNotFoundError,
+    CheckpointRollbackUnsupportedError,
     CheckpointService,
 )
 
@@ -31,10 +34,20 @@ class TestCheckpointService:
             ],
         )
 
+    def _save(self, svc, state):
+        run_state = initial_run_state(state.run_id)
+        run_state.last_committed_sequence = 0
+        return svc.save(
+            state,
+            journal_cursor=0,
+            reducer_version="1",
+            run_state=run_state,
+        )
+
     def test_save_and_load_state(self):
         svc, _ = self._make_service()
         state = self._make_state()
-        record = svc.save(state)
+        record = self._save(svc, state)
 
         assert record.session_id == "test-session"
         assert record.status == "awaiting_llm"
@@ -52,10 +65,10 @@ class TestCheckpointService:
     def test_load_latest(self):
         svc, _ = self._make_service()
         state1 = self._make_state(status="awaiting_llm")
-        svc.save(state1)
+        self._save(svc, state1)
 
         state2 = self._make_state(status="awaiting_tool")
-        svc.save(state2)
+        self._save(svc, state2)
 
         loaded = svc.load("test-session", state_class=AgentLoopState)
         assert loaded.status == "awaiting_tool"
@@ -70,7 +83,7 @@ class TestCheckpointService:
         for i in range(5):
             state = self._make_state(status="awaiting_llm")
             state.iteration = i
-            svc.save(state)
+            self._save(svc, state)
 
         summaries = svc.list("test-session")
         # keep_count=3, 只保留最近 3 个
@@ -88,7 +101,7 @@ class TestCheckpointService:
         svc, base_dir = self._make_service()
         session_id = "test-session"
         state = self._make_state(session_id=session_id)
-        record = svc.save(state)
+        record = self._save(svc, state)
 
         checkpoint_dir = Path(base_dir) / session_id / "checkpoints" / record.checkpoint_id
         assert (checkpoint_dir / "state.json").exists()
@@ -101,7 +114,7 @@ class TestCheckpointService:
         assert manifest.files_snapshot_base_dirs == []
         assert svc.list(session_id)[0].has_files_snapshot is False
 
-    def test_rollback_files_noops_for_state_only_checkpoint(self):
+    def test_rollback_files_rejects_state_only_checkpoint(self):
         svc, base_dir = self._make_service()
         session_id = "test-session"
         workspace = Path(base_dir) / "workspace"
@@ -110,12 +123,36 @@ class TestCheckpointService:
         original_file.write_text("version 1", encoding="utf-8")
 
         state = self._make_state(session_id=session_id)
-        record = svc.save(state)
+        record = self._save(svc, state)
 
         original_file.write_text("version 2", encoding="utf-8")
-        restored = svc.rollback_files(session_id, record.checkpoint_id)
-        assert restored == []
+        with pytest.raises(CheckpointRollbackUnsupportedError, match="不包含文件快照"):
+            svc.rollback_files(session_id, record.checkpoint_id)
         assert original_file.read_text(encoding="utf-8") == "version 2"
+
+    def test_rollback_files_rejects_nonexistent_checkpoint(self):
+        svc, _ = self._make_service()
+        with pytest.raises(CheckpointNotFoundError):
+            svc.rollback_files("test-session", "ckpt-missing")
+
+    def test_rollback_adapter_returns_conflict_for_state_only_checkpoint(self):
+        svc, base_dir = self._make_service()
+        record = self._save(svc, self._make_state())
+
+        body, status = handle_rollback_checkpoint("test-session", record.checkpoint_id, base_dir)
+
+        assert status == 409
+        assert body["status"] == "unsupported"
+        assert body["message"]
+
+    def test_rollback_adapter_returns_not_found_for_unknown_checkpoint(self):
+        _, base_dir = self._make_service()
+
+        body, status = handle_rollback_checkpoint("test-session", "ckpt-missing", base_dir)
+
+        assert status == 404
+        assert body["status"] == "not_found"
+        assert body["message"]
 
     def test_execution_plan_in_state(self):
         svc, _ = self._make_service()
@@ -129,7 +166,7 @@ class TestCheckpointService:
         state = self._make_state()
         state.plan = plan
 
-        record = svc.save(state)
+        record = self._save(svc, state)
         loaded = svc.load("test-session", record.checkpoint_id, state_class=AgentLoopState)
 
         assert loaded.plan is not None
@@ -147,7 +184,7 @@ class TestAgentLoopStateSerialization:
             pending_ask_id="ask-123",
             pending_tool_calls=[ToolCall(id="tc1", name="Bash", arguments={"command": "ls"})],
         )
-        record = svc.save(state)
+        record = TestCheckpointService()._save(svc, state)
         loaded = svc.load("s1", record.checkpoint_id, state_class=AgentLoopState)
 
         assert loaded.pending_ask_id == "ask-123"

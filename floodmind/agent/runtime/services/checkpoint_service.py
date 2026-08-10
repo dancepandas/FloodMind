@@ -30,6 +30,8 @@ from floodmind.agent.runtime.contracts.checkpoints import (
     CheckpointRecord,
     CheckpointSummary,
 )
+from floodmind.agent.runtime.contracts.run_state import RunState
+from floodmind.agent.runtime.services.journal_authority import JournalAuthority
 from floodmind.agent.runtime.services.tracing_service import TracingService
 
 logger = logging.getLogger(__name__)
@@ -39,6 +41,7 @@ _DEFAULT_KEEP_COUNT = 10
 
 # 状态文件名
 _STATE_FILE = "state.json"
+_RUN_STATE_FILE = "run_state.json"
 _MANIFEST_FILE = "manifest.json"
 _FILES_DIR = "files"
 
@@ -73,6 +76,7 @@ class CheckpointService:
         *,
         journal_cursor: int = 0,
         reducer_version: str = "1",
+        run_state: Optional[RunState] = None,
     ) -> CheckpointRecord:
         """保存一个 checkpoint。
 
@@ -87,6 +91,14 @@ class CheckpointService:
         run_id = getattr(state, "run_id", "")
         if not session_id:
             raise ValueError("CheckpointService.save: state.session_id 不能为空")
+        if run_state is None:
+            raise ValueError("CheckpointService.save: run_state snapshot 不能为空")
+        if run_state.last_committed_sequence != journal_cursor:
+            raise CheckpointConsistencyError(
+                "RunState snapshot cursor 与 checkpoint journal_cursor 不一致"
+            )
+        if run_state.run_id != run_id:
+            raise CheckpointConsistencyError("RunState snapshot run_id 与 loop state 不一致")
 
         checkpoint_id = self._make_checkpoint_id()
         parent_checkpoint_id = getattr(state, "checkpoint_id", None)
@@ -107,6 +119,10 @@ class CheckpointService:
             state_path = tmp_dir / _STATE_FILE
             state_data = self._serialize_state(state)
             state_path.write_text(json.dumps(state_data, ensure_ascii=False, sort_keys=True, default=self._json_default), encoding="utf-8")
+            run_state_path = tmp_dir / _RUN_STATE_FILE
+            run_state_path.write_text(
+                run_state.model_dump_json(), encoding="utf-8"
+            )
 
             # 2. manifest（checkpoint 只保存 runtime state，不复制文件系统）
             manifest = CheckpointManifest(
@@ -122,6 +138,7 @@ class CheckpointService:
                 files_snapshot_base_dirs=[],
                 journal_cursor=journal_cursor,
                 reducer_version=reducer_version,
+                run_state_file=_RUN_STATE_FILE,
                 metadata=manifest_metadata,
             )
             manifest_path = tmp_dir / _MANIFEST_FILE
@@ -217,6 +234,75 @@ class CheckpointService:
                 raise CheckpointCorruptedError(f"无法反序列化 checkpoint {checkpoint_id}: {e}") from e
 
         return data
+
+    def load_run_state(self, session_id: str, checkpoint_id: str) -> RunState:
+        """Load the reducer snapshot bound to a checkpoint cursor."""
+        manifest = self.load_manifest(session_id, checkpoint_id)
+        snapshot_path = self._checkpoint_dir(session_id, checkpoint_id) / manifest.run_state_file
+        if not snapshot_path.exists():
+            raise CheckpointCorruptedError(
+                f"checkpoint {checkpoint_id} 缺少 {manifest.run_state_file}"
+            )
+        try:
+            return RunState.model_validate_json(snapshot_path.read_text(encoding="utf-8"))
+        except Exception as e:
+            raise CheckpointCorruptedError(
+                f"无法解析 checkpoint {checkpoint_id} reducer snapshot: {e}"
+            ) from e
+
+    def replay_from_checkpoint(
+        self,
+        authority: JournalAuthority,
+        session_id: str,
+        checkpoint_id: str,
+        *,
+        reducer_version: str = "1",
+    ) -> RunState:
+        """Validate a checkpoint projection, then replay only its journal suffix."""
+        manifest = self.load_manifest(session_id, checkpoint_id)
+        snapshot = self.load_run_state(session_id, checkpoint_id)
+        if manifest.reducer_version != reducer_version:
+            raise CheckpointConsistencyError(
+                f"reducer version 不匹配: {manifest.reducer_version} != {reducer_version}"
+            )
+        identity = manifest.metadata
+        expected = {
+            "run_id": authority.run_id,
+            "conversation_id": authority.conversation_id,
+            "thread_id": authority.thread_id,
+        }
+        snapshot_identity = {
+            "run_id": snapshot.run_id,
+            "conversation_id": snapshot.conversation_id,
+            "thread_id": snapshot.current_thread_id,
+        }
+        for key, value in expected.items():
+            if str(identity.get(key) or snapshot_identity[key]) != value:
+                raise CheckpointConsistencyError(f"checkpoint journal identity 不匹配: {key}")
+        if snapshot.run_id != manifest.run_id:
+            raise CheckpointConsistencyError("checkpoint RunState run_id 不匹配")
+        if snapshot.last_committed_sequence != manifest.journal_cursor:
+            raise CheckpointConsistencyError("checkpoint RunState cursor 不匹配")
+        rebuilt = authority.replay()
+        if rebuilt.last_committed_sequence < manifest.journal_cursor:
+            raise CheckpointConsistencyError("checkpoint cursor 超出 canonical journal tail")
+        prefix = authority.replay()
+        if manifest.journal_cursor != authority.cursor():
+            from floodmind.agent.runtime.reducer import initial_run_state, reduce
+
+            prefix = initial_run_state(
+                authority.run_id,
+                conversation_id=authority.conversation_id,
+                task_id=authority.task_id,
+                thread_id=authority.thread_id,
+            )
+            for event in authority.read_after(0):
+                if event.sequence > manifest.journal_cursor:
+                    break
+                prefix = reduce(prefix, event)
+        if prefix != snapshot:
+            raise CheckpointConsistencyError("checkpoint projection 与 canonical journal 不一致")
+        return authority.replay(after_sequence=manifest.journal_cursor, state=snapshot)
 
     def load_manifest(self, session_id: str, checkpoint_id: str) -> CheckpointManifest:
         """加载 checkpoint manifest。"""
@@ -377,6 +463,10 @@ class CheckpointNotFoundError(CheckpointError):
 
 class CheckpointRollbackUnsupportedError(CheckpointError):
     """Checkpoint has no usable legacy file snapshot."""
+
+
+class CheckpointConsistencyError(CheckpointError):
+    """Checkpoint projection does not match its canonical journal binding."""
 
 
 class CheckpointCorruptedError(CheckpointError):

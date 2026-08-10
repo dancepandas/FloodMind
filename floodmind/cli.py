@@ -195,17 +195,14 @@ def chat(model, reasoning, use_tui, use_web, verbose):
 @click.option(
     "--checkpoint",
     "resume_checkpoint_id",
-    help="已弃用：当前运行时仅支持按 session 的 memory 历史续接，不能从 checkpoint 恢复",
+    help="指定 checkpoint ID（需配合 --resume，按绑定 journal cursor 恢复）",
 )
 @click.option("--verbose", "-v", is_flag=True, help="显示详细日志")
 def run(task, model, resume_session_id, resume_checkpoint_id, verbose):
     """执行单次任务；--resume 按 session 续接 memory 历史。"""
     _setup_logging(verbose=verbose)
-    if resume_checkpoint_id is not None:
-        raise click.UsageError(
-            "--checkpoint 已不受支持：当前运行时只能通过 --resume SESSION_ID 从 memory 历史续接，"
-            "无法从 checkpoint 重建 AgentLoopState"
-        )
+    if resume_checkpoint_id is not None and not resume_session_id:
+        raise click.UsageError("--checkpoint 必须配合 --resume SESSION_ID 使用")
     os.environ.setdefault("DASHSCOPE_API_KEY", os.getenv("FLOODMIND_API_KEY", ""))
     _validate_api_key()
 
@@ -230,6 +227,70 @@ def run(task, model, resume_session_id, resume_checkpoint_id, verbose):
     )
     workspace = _build_cli_workspace(sid)
     agent = create_flood_agent(llm_service=llm, memory=memory, session_id=sid, workspace=workspace)
+
+    if resume_checkpoint_id is not None:
+        from floodmind.agent.native.executor import project_run_state_to_loop_state
+        from floodmind.agent.native.types import AgentLoopState
+        from floodmind.agent.runtime.services.checkpoint_service import CheckpointService
+        from floodmind.agent.runtime.services.journal_authority import open_journal_authority
+
+        svc = CheckpointService(base_dir=str(workspace.session_root))
+        try:
+            state = svc.load(sid, resume_checkpoint_id, state_class=AgentLoopState)
+            manifest = svc.load_manifest(sid, resume_checkpoint_id)
+            identity = manifest.metadata
+            required = (
+                "conversation_id", "task_id", "run_id", "thread_id", "turn_id", "runtime_dir"
+            )
+            missing = [key for key in required if not identity.get(key)]
+            if missing:
+                raise ValueError(f"checkpoint 缺少 journal identity: {', '.join(missing)}")
+            authority = open_journal_authority(
+                Path(identity["runtime_dir"]),
+                conversation_id=identity["conversation_id"],
+                task_id=identity["task_id"],
+                run_id=identity["run_id"],
+                thread_id=identity["thread_id"],
+                turn_id=identity["turn_id"],
+            )
+            run_state = svc.replay_from_checkpoint(authority, sid, resume_checkpoint_id)
+            authority.emit(
+                "thread.message.sent",
+                {"content": task, "turn_index": len(run_state.turns)},
+            )
+            run_state = authority.replay(
+                after_sequence=run_state.last_committed_sequence,
+                state=run_state,
+            )
+            state = project_run_state_to_loop_state(state, run_state)
+            state.user_message = task
+            state.original_input = state.original_input or task
+            state.messages.append({"role": "user", "content": task})
+            if state.status in {"completed", "failed"}:
+                state.status = "awaiting_llm"
+                state.final_output = ""
+            agent._journal_authority = authority
+            agent._orchestrator_executor._journal_authority = authority
+            agent._last_loop_state = state
+            context = agent._current_run_context
+            if context is None:
+                from floodmind.agent.native.types import RunContext
+
+                context = RunContext(
+                    session_id=sid,
+                    user_text=task,
+                    cwd=str(workspace.default_cwd),
+                    workspace_dir=str(workspace.workspace_dir),
+                    state_dir=str(workspace.state_dir),
+                    artifact_dir=str(workspace.artifact_dir),
+                    tmp_dir=str(workspace.tmp_dir),
+                    scripts_dir=str(workspace.scripts_dir),
+                )
+            result = agent._orchestrator_executor.run_from_state(context, state)
+            print(result.final_output)
+            return
+        except Exception as e:
+            raise click.ClickException(f"checkpoint 恢复失败: {e}") from e
 
     result = agent.run_with_resume(
         task,
@@ -292,20 +353,11 @@ def pause_session(session_id):
             thread_id=identity["thread_id"],
             turn_id=identity["turn_id"],
         )
-        run_state = authority.replay()
-        if run_state.last_committed_sequence < state.journal_cursor:
-            raise ValueError("checkpoint journal cursor 超出 canonical journal tail")
-        state.journal_cursor = run_state.last_committed_sequence
-        if state.status not in {"completed", "failed"}:
-            state.status = "paused"
-            svc.save(
-                state,
-                metadata=identity,
-                journal_cursor=authority.cursor(),
-                reducer_version=manifest.reducer_version,
-            )
-            click.echo(f"已暂停 session {session_id} 的最新 checkpoint")
-            return
+        svc.replay_from_checkpoint(authority, session_id, state.checkpoint_id)
+        click.echo(
+            f"session {session_id} 当前未运行；checkpoint 已按 canonical journal 校验，未写入非权威 pause 状态"
+        )
+        return
     except Exception as e:
         click.echo(f"暂停失败: {e}")
 
