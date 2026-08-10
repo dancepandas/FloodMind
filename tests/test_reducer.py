@@ -175,17 +175,67 @@ def test_token_accumulation_separate():
     assert s.token_usage["total_tokens"] == 22
 
 
-def test_reduce_does_not_mutate_input_on_every_path():
+def _dump_without_bookkeeping(state):
+    d = state.model_dump()
+    d.pop("last_committed_sequence", None)
+    d.pop("processed_event_ids", None)
+    return canonical_json(d)
+
+
+@pytest.mark.parametrize("setup,event_type,payload,kind", [
+    # 正常分支：状态改变
+    ([], "thread.message.sent", {"content": "hi", "turn_index": 0}, "changed"),
+    ([], "model.attempt.started", {"attempt_id": "a1"}, "changed"),
+    ([], "model.attempt.completed", {"attempt_id": "a1", "terminal_reason": "completed",
+        "content": "x", "reasoning": "", "tool_calls": [], "is_final": True,
+        "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}}, "changed"),
+    ([], "model.attempt.failed", {"attempt_id": "a1", "reason": "boom"}, "changed"),
+    ([], "tool.execution.started", {"transaction_id": "ttx_1", "call_id": "c1", "tool_id": "builtin:Read"}, "changed"),
+    ([("tool.execution.started", {"transaction_id": "ttx_1", "call_id": "c1", "tool_id": "builtin:Read"})],
+     "tool.execution.completed", {"transaction_id": "ttx_1", "call_id": "c1", "tool_id": "builtin:Read", "artifacts": []}, "changed"),
+    ([("tool.execution.started", {"transaction_id": "ttx_1", "call_id": "c1", "tool_id": "builtin:Read"})],
+     "tool.execution.failed", {"transaction_id": "ttx_1", "call_id": "c1", "tool_id": "builtin:Read"}, "changed"),
+    ([], "tool.approval.requested", {"ask_id": "ask_1", "call_id": "c1", "tool_name": "Bash"}, "changed"),
+    ([("tool.approval.requested", {"ask_id": "ask_1", "call_id": "c1", "tool_name": "Bash"})],
+     "tool.approval.resolved", {"ask_id": "ask_1"}, "changed"),
+    ([], "context.compaction.started", {}, "changed"),
+    ([], "context.compaction.completed", {}, "changed"),
+    ([], "run.completed", {"final_output": "done", "terminal_reason": "completed"}, "changed"),
+    ([], "run.failed", {"terminal_reason": "boom"}, "changed"),
+    # 未知事件：fail-closed，仅推进 cursor
+    ([], "some.future.event", {"anything": 1}, "cursor_only"),
+])
+def test_reduce_does_not_mutate_input_on_every_path(setup, event_type, payload, kind):
     s = initial_run_state("run_r")
-    events = [
-        _ev("thread.message.sent", 1, {"content": "hi", "turn_index": 0}),
-        _ev("model.attempt.started", 2, {"attempt_id": "a1"}),
-        _ev("tool.execution.started", 3, {"transaction_id": "ttx_1", "call_id": "c1", "tool_id": "builtin:Read"}),
-        _ev("tool.execution.completed", 4, {"transaction_id": "ttx_1", "call_id": "c1", "tool_id": "builtin:Read"}),
-        _ev("run.completed", 5, {"final_output": "done", "terminal_reason": "completed"}),
-    ]
-    for e in events:
-        before_obj = s
-        pre = canonical_json(before_obj.model_dump())
-        s = reduce(s, e)
-        assert canonical_json(before_obj.model_dump()) == pre
+    seq = 0
+    for et, p in setup:
+        seq += 1
+        s = reduce(s, _ev(et, seq, p))
+    seq += 1
+    target = _ev(event_type, seq, payload)
+    input_obj = s
+    before = canonical_json(input_obj.model_dump())
+    out = reduce(s, target)
+    # 输入不可变：reduce 不得修改入参对象
+    assert canonical_json(input_obj.model_dump()) == before
+    if kind == "changed":
+        assert canonical_json(out.model_dump()) != before
+    elif kind == "cursor_only":
+        # fail-closed：领域状态不变，仅推进 bookkeeping（cursor + processed_event_ids）
+        assert out.last_committed_sequence == seq
+        assert _dump_without_bookkeeping(out) == _dump_without_bookkeeping(input_obj)
+    else:  # unchanged（duplicate）
+        assert canonical_json(out.model_dump()) == before
+
+
+def test_reduce_does_not_mutate_input_on_duplicate():
+    s = initial_run_state("run_r")
+    ev = _ev("model.attempt.completed", 1, {"attempt_id": "a1", "terminal_reason": "completed",
+        "content": "x", "reasoning": "", "tool_calls": [], "is_final": True,
+        "usage": {"prompt_tokens": 5, "completion_tokens": 5, "total_tokens": 10}})
+    s = reduce(s, ev)
+    input_obj = s
+    before = canonical_json(input_obj.model_dump())
+    out = reduce(s, ev)  # 重复 event_id：不重放、不推进 cursor、不修改输入
+    assert canonical_json(input_obj.model_dump()) == before
+    assert canonical_json(out.model_dump()) == before
