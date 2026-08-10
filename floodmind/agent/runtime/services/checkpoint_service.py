@@ -70,6 +70,9 @@ class CheckpointService:
         self,
         state: Any,
         metadata: Optional[Dict[str, Any]] = None,
+        *,
+        journal_cursor: int = 0,
+        reducer_version: str = "1",
     ) -> CheckpointRecord:
         """保存一个 checkpoint。
 
@@ -88,7 +91,11 @@ class CheckpointService:
         checkpoint_id = self._make_checkpoint_id()
         parent_checkpoint_id = getattr(state, "checkpoint_id", None)
         state.checkpoint_id = checkpoint_id  # 更新状态指向新 checkpoint
+        if hasattr(state, "journal_cursor"):
+            state.journal_cursor = journal_cursor
         state.updated_at = datetime.now(timezone.utc)
+        manifest_metadata = dict(metadata or {})
+        manifest_metadata.update({"run_id": run_id, "journal_cursor": journal_cursor})
 
         checkpoint_dir = self._checkpoint_dir(session_id, checkpoint_id)
         session_cp_dir = self._session_checkpoints_dir(session_id)
@@ -113,7 +120,9 @@ class CheckpointService:
                 state_file=_STATE_FILE,
                 files_snapshot_dir=None,
                 files_snapshot_base_dirs=[],
-                metadata=metadata or {},
+                journal_cursor=journal_cursor,
+                reducer_version=reducer_version,
+                metadata=manifest_metadata,
             )
             manifest_path = tmp_dir / _MANIFEST_FILE
             manifest_path.write_text(manifest.model_dump_json(indent=2), encoding="utf-8")
@@ -146,6 +155,8 @@ class CheckpointService:
                 created_at=manifest.created_at,
                 state_path=str(state_path),
                 files_snapshot_path=None,
+                journal_cursor=manifest.journal_cursor,
+                reducer_version=manifest.reducer_version,
                 metadata=manifest.metadata,
             )
             logger.info(
@@ -194,6 +205,8 @@ class CheckpointService:
 
         try:
             data = json.loads(state_path.read_text(encoding="utf-8"))
+            manifest = self.load_manifest(session_id, checkpoint_id)
+            data["journal_cursor"] = manifest.journal_cursor
         except Exception as e:
             raise CheckpointCorruptedError(f"无法解析 checkpoint {checkpoint_id}: {e}") from e
 
@@ -233,20 +246,25 @@ class CheckpointService:
         checkpoint_id: str,
         target_base_dirs: Optional[List[str]] = None,
     ) -> List[str]:
-        """Legacy 文件快照回滚入口。
+        """Restore a legacy file snapshot without altering checkpoint history.
 
-        SDK-first checkpoint 不再创建文件快照；此方法仅兼容读取历史 checkpoint
-        中已经存在的 files/ 目录，不会触发新的文件复制。
+        New SDK-first checkpoints contain runtime state only and therefore cannot
+        be used for file rollback.  Callers must receive an explicit error rather
+        than treating a missing snapshot as a successful no-op.
         """
+        manifest = self.load_manifest(session_id, checkpoint_id)
         checkpoint_dir = self._checkpoint_dir(session_id, checkpoint_id)
         files_dir = checkpoint_dir / _FILES_DIR
-        if not files_dir.is_dir():
-            return []
+        if not manifest.files_snapshot_dir or not files_dir.is_dir():
+            raise CheckpointRollbackUnsupportedError(
+                f"checkpoint {checkpoint_id} 不包含文件快照，无法回滚文件"
+            )
 
-        manifest = self.load_manifest(session_id, checkpoint_id)
         base_dirs = target_base_dirs or manifest.files_snapshot_base_dirs or []
         if not base_dirs:
-            return []
+            raise CheckpointRollbackUnsupportedError(
+                f"checkpoint {checkpoint_id} 缺少文件快照目标目录，无法回滚文件"
+            )
 
         restored: List[str] = []
         # 快照中的相对路径是相对于每个 base_dir 的
@@ -307,6 +325,8 @@ class CheckpointService:
                         created_at=manifest.created_at,
                         state_path=str(entry / manifest.state_file),
                         files_snapshot_path=str(entry / manifest.files_snapshot_dir) if manifest.files_snapshot_dir else None,
+                        journal_cursor=manifest.journal_cursor,
+                        reducer_version=manifest.reducer_version,
                         metadata=manifest.metadata,
                     )
                 )
@@ -353,6 +373,10 @@ class CheckpointError(Exception):
 
 class CheckpointNotFoundError(CheckpointError):
     """Checkpoint 不存在。"""
+
+
+class CheckpointRollbackUnsupportedError(CheckpointError):
+    """Checkpoint has no usable legacy file snapshot."""
 
 
 class CheckpointCorruptedError(CheckpointError):

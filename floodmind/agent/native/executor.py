@@ -159,6 +159,38 @@ class NativeAgentExecutor:
         memory 是唯一历史源：每次 stream 从 memory 起步，无需 checkpoint resume。
         用户暂停 = abort（终态 failed，未完成轮丢弃不落 history）；无单独的 paused 软状态。
         """
+        # Checkpoint snapshots are projections. Replay the canonical journal before
+        # driving the loop so authoritative status and iteration come from events.
+        if self._journal_authority is not None:
+            run_state = self._journal_authority.replay()
+            if run_state.last_committed_sequence:
+                status_map = {
+                    "created": "created",
+                    "projecting_context": "created",
+                    "awaiting_model": "awaiting_llm",
+                    "streaming_model": "awaiting_llm",
+                    "awaiting_tool": "awaiting_tool",
+                    "awaiting_approval": "awaiting_permission",
+                    "executing_tool": "awaiting_tool",
+                    "compacting": "context_compress",
+                    "paused": "paused",
+                    "cancelling": "failed",
+                    "cancelled": "failed",
+                    "completed": "completed",
+                    "failed": "failed",
+                }
+                state.status = status_map[run_state.status.value]
+                state.iteration = sum(
+                    1 for turn in run_state.turns if turn.get("role") == "assistant"
+                )
+                state.journal_cursor = run_state.last_committed_sequence
+                if run_state.pending_tool_transactions:
+                    state.pending_tool_transaction_id = (
+                        run_state.pending_tool_transactions[-1].transaction_id
+                    )
+                if run_state.pending_approvals:
+                    state.pending_ask_id = run_state.pending_approvals[-1].ask_id
+
         # 用户中断检查回调
         effective_abort = context.abort_check
 
@@ -1066,12 +1098,30 @@ class NativeAgentExecutor:
         if self._checkpoint_service is None:
             return
         try:
+            journal_cursor = (
+                self._journal_authority.cursor()
+                if self._journal_authority is not None
+                else state.journal_cursor
+            )
+            identity_metadata = {}
+            if self._journal_authority is not None:
+                identity_metadata = {
+                    "conversation_id": self._journal_authority.conversation_id,
+                    "task_id": self._journal_authority.task_id,
+                    "run_id": self._journal_authority.run_id,
+                    "thread_id": self._journal_authority.thread_id,
+                    "turn_id": self._journal_authority.turn_id,
+                    "runtime_dir": context.state_dir,
+                }
             record = self._checkpoint_service.save(
                 state,
                 metadata={
                     "model_name": getattr(self.model_client, 'model_name', ''),
                     "status": state.status,
+                    **identity_metadata,
                 },
+                journal_cursor=journal_cursor,
+                reducer_version="1",
             )
             if self._journal_authority is not None:
                 self._journal_authority.emit(

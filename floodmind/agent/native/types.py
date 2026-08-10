@@ -203,6 +203,7 @@ class AgentLoopState(BaseModel):
     session_id: str = ""
     run_id: str = ""
     checkpoint_id: str = ""
+    journal_cursor: int = 0
     status: AgentLoopStatus = "created"
     iteration: int = 0
     attempt_id: str = ""

@@ -11,6 +11,7 @@ from floodmind.agent.native.model_client import ModelClient
 from floodmind.agent.native.types import (
     AgentResult, InvalidToolCall, ModelEvent, RunContext, TerminalReason, ToolCall,
 )
+from floodmind.agent.runtime.reducer import initial_run_state
 
 
 class TestNativeAgentExecutor:
@@ -63,6 +64,7 @@ class TestNativeAgentExecutor:
         mc.model_name = "test-model"
         mc.stream_chat.return_value = [ModelEvent(type="token", content="done"), ModelEvent(type="done")]
         authority = MagicMock()
+        authority.replay.return_value = initial_run_state("run-test")
         executor = self._make_executor(mc, tools_schema=[])
         executor._journal_authority = authority
 

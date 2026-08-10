@@ -24,6 +24,8 @@ load_dotenv()
 
 import click
 
+from floodmind import __version__
+
 
 # ── 日志 ────────────────────────────────────────────────────
 
@@ -39,8 +41,17 @@ def _setup_logging(verbose: bool = False):
     logging.getLogger("urllib3").setLevel(logging.WARNING)
 
 
+def _initialize_cli_config() -> None:
+    """Initialize and migrate user config for config-dependent CLI work."""
+    from floodmind.config.settings import initialize_floodmind_home, migrate_settings
+
+    initialize_floodmind_home()
+    migrate_settings()
+
+
 def _validate_api_key() -> None:
     """校验 API Key 是否已配置，未配置则友好提示并退出。"""
+    _initialize_cli_config()
     from floodmind.config.settings import settings, get_config
 
     api_key = settings.model.api_key
@@ -57,7 +68,7 @@ def _validate_api_key() -> None:
     dashscope_fallback = "  或  DASHSCOPE_API_KEY" if provider == "dashscope" else ""
 
     click.echo(f"""
-  FloodMind v1.1.9
+  FloodMind v{__version__}
 
   [!] 未配置 API Key
 
@@ -92,7 +103,7 @@ _BANNER = r"""
 ╚═╝      ╚══════╝  ╚═════╝   ╚═════╝  ╚═════╝  ╚═╝     ╚═╝ ╚═╝ ╚═╝  ╚═══╝ ╚═════╝
 """
 
-_BANNER_SUB = "基于大语言模型的智能洪水预报系统  |  v1.1.9"
+_BANNER_SUB = f"基于大语言模型的智能洪水预报系统  |  v{__version__}"
 
 
 @click.group(invoke_without_command=True)
@@ -103,7 +114,7 @@ _BANNER_SUB = "基于大语言模型的智能洪水预报系统  |  v1.1.9"
 @click.option("--model", "-m", help="模型名称 (provider:model)", hidden=True)
 @click.option("--reasoning/--no-reasoning", default=None, help="启用推理模式", hidden=True)
 @click.option("--verbose", "-v", is_flag=True, help="显示详细日志", hidden=True)
-@click.version_option(version="1.1.9", prog_name="floodmind")
+@click.version_option(version=__version__, prog_name="floodmind")
 @click.pass_context
 def main(ctx, tui, web_mode, port, host, model, reasoning, verbose):
     """FloodMind — 智能洪水预报 Agent 系统
@@ -180,12 +191,21 @@ def chat(model, reasoning, use_tui, use_web, verbose):
 @main.command()
 @click.argument("task")
 @click.option("--model", "-m", help="模型名称")
-@click.option("--resume", "resume_session_id", help="从指定 session 的 checkpoint 恢复")
-@click.option("--checkpoint", "resume_checkpoint_id", help="指定 checkpoint ID（配合 --resume）")
+@click.option("--resume", "resume_session_id", help="续接指定 session 的 memory 对话历史")
+@click.option(
+    "--checkpoint",
+    "resume_checkpoint_id",
+    help="已弃用：当前运行时仅支持按 session 的 memory 历史续接，不能从 checkpoint 恢复",
+)
 @click.option("--verbose", "-v", is_flag=True, help="显示详细日志")
 def run(task, model, resume_session_id, resume_checkpoint_id, verbose):
-    """执行单次任务，支持从 checkpoint 恢复"""
+    """执行单次任务；--resume 按 session 续接 memory 历史。"""
     _setup_logging(verbose=verbose)
+    if resume_checkpoint_id is not None:
+        raise click.UsageError(
+            "--checkpoint 已不受支持：当前运行时只能通过 --resume SESSION_ID 从 memory 历史续接，"
+            "无法从 checkpoint 重建 AgentLoopState"
+        )
     os.environ.setdefault("DASHSCOPE_API_KEY", os.getenv("FLOODMIND_API_KEY", ""))
     _validate_api_key()
 
@@ -245,6 +265,7 @@ def pause_session(session_id):
     _setup_logging()
     from floodmind.agent import create_flood_agent
     from floodmind.agent.runtime.services.checkpoint_service import CheckpointService
+    from floodmind.agent.runtime.services.journal_authority import open_journal_authority
     from floodmind.agent.native.types import AgentLoopState
 
     # 尝试通过 agent.pause 暂停当前运行
@@ -257,9 +278,32 @@ def pause_session(session_id):
     svc = CheckpointService()
     try:
         state = svc.load(session_id, state_class=AgentLoopState)
+        manifest = svc.load_manifest(session_id, state.checkpoint_id)
+        identity = manifest.metadata
+        required = ("conversation_id", "task_id", "run_id", "thread_id", "turn_id", "runtime_dir")
+        missing = [key for key in required if not identity.get(key)]
+        if missing:
+            raise ValueError(f"checkpoint 缺少 journal identity: {', '.join(missing)}")
+        authority = open_journal_authority(
+            Path(identity["runtime_dir"]),
+            conversation_id=identity["conversation_id"],
+            task_id=identity["task_id"],
+            run_id=identity["run_id"],
+            thread_id=identity["thread_id"],
+            turn_id=identity["turn_id"],
+        )
+        run_state = authority.replay()
+        if run_state.last_committed_sequence < state.journal_cursor:
+            raise ValueError("checkpoint journal cursor 超出 canonical journal tail")
+        state.journal_cursor = run_state.last_committed_sequence
         if state.status not in {"completed", "failed"}:
             state.status = "paused"
-            svc.save(state)
+            svc.save(
+                state,
+                metadata=identity,
+                journal_cursor=authority.cursor(),
+                reducer_version=manifest.reducer_version,
+            )
             click.echo(f"已暂停 session {session_id} 的最新 checkpoint")
             return
     except Exception as e:
@@ -304,19 +348,14 @@ version: 1.0
 @click.option("--dir", "-d", default=".", help="目标目录")
 def init(dir):
     """在当前目录初始化 FloodMind 配置"""
-    from floodmind.config.settings import _config_path, _load_json_config, _template_path, get_floodmind_home, save_config
+    _initialize_cli_config()
+    from floodmind.config.settings import _config_path, get_floodmind_home
 
     target = Path(dir).resolve()
 
     config_dir = get_floodmind_home()
     config_path = _config_path()
-    if not config_path.exists():
-        config_dir.mkdir(parents=True, exist_ok=True)
-        template_cfg = _load_json_config(_template_path()) or {}
-        save_config(template_cfg)
-        click.echo(f"[OK] 配置已创建: {config_path}")
-    else:
-        click.echo(f"  配置已存在: {config_path}")
+    click.echo(f"  配置已存在: {config_path}")
 
     skills_dir = target / "skills"
     skills_dir.mkdir(exist_ok=True)
@@ -380,6 +419,7 @@ def list(dir):
 @main.command("providers")
 def list_providers():
     """列出所有可用的 AI Provider (provider:model)"""
+    _initialize_cli_config()
     from floodmind.config.provider_registry import list_available_providers
     providers = list_available_providers()
     if not providers:
@@ -400,7 +440,7 @@ def list_providers():
 @main.group()
 def config():
     """配置管理"""
-    pass
+    _initialize_cli_config()
 
 
 @config.command()
@@ -472,7 +512,7 @@ def _run_chat_legacy(model=None, reasoning=None) -> int:
     if reasoning is not None:
         settings.model.enable_reasoning = reasoning
 
-    click.echo(f"\n  FloodMind v1.1.9  —  {settings.model.model_name}")
+    click.echo(f"\n  FloodMind v{__version__}  —  {settings.model.model_name}")
     click.echo("  输入 'exit' 退出, 'clear' 清空记忆, 'memory' 查看记忆\n")
 
     llm = ModelClient.from_settings(

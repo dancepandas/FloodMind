@@ -28,6 +28,8 @@ class CheckpointRecord(BaseModel):
     created_at: datetime
     state_path: str
     files_snapshot_path: Optional[str] = None
+    journal_cursor: int = 0
+    reducer_version: str = "1"
     metadata: Dict[str, Any] = Field(default_factory=dict)
 
 
@@ -57,6 +59,8 @@ class CheckpointManifest(BaseModel):
     # Legacy fields retained for old manifests/routes. New SDK-first checkpoints leave these empty.
     files_snapshot_dir: Optional[str] = None
     files_snapshot_base_dirs: List[str] = Field(default_factory=list)
+    journal_cursor: int = 0
+    reducer_version: str = "1"
     metadata: Dict[str, Any] = Field(default_factory=dict)
 
 
