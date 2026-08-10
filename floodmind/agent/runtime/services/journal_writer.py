@@ -42,6 +42,20 @@ def _hash_input(event: EventEnvelope) -> str:
     return canonical_json(d)
 
 
+def _retry_hash(event: EventEnvelope) -> str:
+    """Content hash used to prove a whole-group retry.
+
+    Ignores journal-assigned fields (sequence, recorded_at, integrity) so a
+    caller re-sending the same logical events — even freshly reconstructed —
+    matches the sealed envelopes on event_type, payload, and identity fields.
+    """
+    d = event.model_dump()
+    d["sequence"] = 0
+    d["recorded_at"] = ""
+    d["integrity"] = {}
+    return canonical_json(d)
+
+
 class JournalWriter:
     def __init__(
         self,
@@ -100,12 +114,14 @@ class JournalWriter:
         self._last_event_sha256 = ""
         self._current_segment = 1
         self._sealed = {}
+        self._groups = []
         if self._index_path.exists():
             try:
                 data = json.loads(self._index_path.read_text(encoding="utf-8"))
                 self._last_sequence = int(data.get("last_sequence", 0))
                 self._last_event_sha256 = str(data.get("last_event_sha256", ""))
                 self._current_segment = int(data.get("current_segment", 1))
+                self._groups = [list(g) for g in data.get("groups", [])]
             except (ValueError, OSError):
                 pass
         self._reconcile_from_journal()
@@ -162,6 +178,7 @@ class JournalWriter:
             "last_event_sha256": self._last_event_sha256,
             "current_segment": self._current_segment,
             "event_ids": sorted(self._sealed),
+            "groups": self._groups,
         }
         tmp = self._index_path.with_suffix(".tmp")
         tmp.write_text(json.dumps(index, indent=2), encoding="utf-8")
@@ -228,41 +245,75 @@ class JournalWriter:
         *,
         expected_last_sequence: Optional[int] = None,
     ) -> List[EventEnvelope]:
-        """原子追加一组事件：单次锁、单次 CAS、sequence 连续、哈希链连续、一次 fsync。"""
+        """原子追加一组事件：单次锁、单次 CAS、sequence 连续、哈希链连续、一次 fsync。
+
+        三种情形精确区分：
+        - 全新组：无任何 id 已封存 → CAS 校验后整体写入；
+        - 整组重试：全部 id 已封存、内容语义一致、且该 id 集合确以整组提交过 → 原样返回已封存信封；
+        - 其余（部分重叠 / 内容不符 / 从无关组拼装）→ ValueError，绝不静默当作幂等。
+        """
         if not events:
             return []
         with self._locked():
             self._reconcile_from_journal()
-            # 幂等：整组已封存则原样返回（组已提交，重试为 no-op，无需 CAS）
-            if all(e.event_id in self._sealed for e in events):
-                return [self._sealed[e.event_id] for e in events]
+            # 组内 event_id 不得重复
+            seen_ids = set()
+            for event in events:
+                if event.event_id in seen_ids:
+                    raise ValueError(f"append_many: duplicate event_id in group: {event.event_id!r}")
+                seen_ids.add(event.event_id)
+
+            sealed_ids = [e.event_id for e in events if e.event_id in self._sealed]
+            if len(sealed_ids) == len(events):
+                # 全部已封存：必须是“同一整组”的重试且内容语义一致，否则拒绝。
+                for event in events:
+                    sealed = self._sealed[event.event_id]
+                    if _retry_hash(sealed) != _retry_hash(event):
+                        raise ValueError("append_many: partial or mismatched group retry")
+                group_ids = {e.event_id for e in events}
+                if len(events) == 1 or any(set(g) == group_ids for g in self._groups):
+                    return [self._sealed[e.event_id] for e in events]
+                raise ValueError("append_many: partial or mismatched group retry")
+            if sealed_ids:
+                raise ValueError("append_many: partial or mismatched group retry")
+
+            # 全新组：先 CAS，再在本地副本上构造，落盘成功后才发布到内存权威状态。
             if expected_last_sequence is not None and expected_last_sequence != self._last_sequence:
                 raise JournalWriteConflict(
                     f"expected last sequence {expected_last_sequence}, got {self._last_sequence}"
                 )
             sealed_group: List[EventEnvelope] = []
+            seq = self._last_sequence
+            last_hash = self._last_event_sha256
             for event in events:
-                existing = self._sealed.get(event.event_id)
-                if existing is not None:
-                    sealed_group.append(existing)
-                    continue
-                event.sequence = self._last_sequence + 1
-                event.integrity.payload_sha256 = canonical_payload_sha256(event.payload)
-                event.integrity.previous_event_sha256 = self._last_event_sha256
-                event.integrity.event_sha256 = hashlib.sha256(
-                    f"{self._last_event_sha256}|{_hash_input(event)}".encode("utf-8")
+                copy = event.model_copy(deep=True)
+                seq += 1
+                copy.sequence = seq
+                copy.integrity.payload_sha256 = canonical_payload_sha256(copy.payload)
+                copy.integrity.previous_event_sha256 = last_hash
+                copy.integrity.event_sha256 = hashlib.sha256(
+                    f"{last_hash}|{_hash_input(copy)}".encode("utf-8")
                 ).hexdigest()
-                self._last_sequence = event.sequence
-                self._last_event_sha256 = event.integrity.event_sha256
-                self._sealed[event.event_id] = event
-                sealed_group.append(event)
+                last_hash = copy.integrity.event_sha256
+                sealed_group.append(copy)
             path = self._segment_path(self._current_segment)
-            with path.open("a", encoding="utf-8") as f:
-                for event in sealed_group:
-                    f.write(canonical_json(event.model_dump()) + "\n")
-                f.flush()
-                os.fsync(f.fileno())
-            if path.stat().st_size > self._max_segment_bytes:
+            try:
+                with path.open("a", encoding="utf-8") as f:
+                    for copy in sealed_group:
+                        f.write(canonical_json(copy.model_dump()) + "\n")
+                    f.flush()
+                    os.fsync(f.fileno())
+                should_roll = path.stat().st_size > self._max_segment_bytes
+            except Exception:
+                self._reconcile_from_journal()
+                raise
+            # 落盘成功后才推进内存权威状态。
+            self._last_sequence = sealed_group[-1].sequence
+            self._last_event_sha256 = sealed_group[-1].integrity.event_sha256
+            for copy in sealed_group:
+                self._sealed[copy.event_id] = copy
+            self._groups.append([e.event_id for e in events])
+            if should_roll:
                 self.roll_segment()
             else:
                 self._save_index()

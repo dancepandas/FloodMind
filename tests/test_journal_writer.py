@@ -158,10 +158,6 @@ def test_unsafe_run_id_rejected(tmp_path: Path):
         JournalWriter(tmp_path, "../evil")
 
 
-from floodmind.agent.runtime.contracts.canonical_events import EventEnvelope
-from floodmind.agent.runtime.services.journal_writer import JournalWriter, JournalWriteConflict
-
-
 def _mk_event(event_type: str, payload: dict) -> EventEnvelope:
     return EventEnvelope(event_id=f"evt_{payload.get('k', event_type)}", event_type=event_type, payload=payload, sequence=0)
 
@@ -198,9 +194,67 @@ def test_append_many_idempotent_retry(tmp_path):
     assert len(w.read_from(0)) == 2  # 未重复写
 
 
+def test_append_many_mismatched_retry_rejected(tmp_path):
+    w = JournalWriter(tmp_path, "run_1")
+    evs = [_mk_event("thread.message.sent", {"k": "a", "content": "hi"}),
+           _mk_event("model.attempt.completed", {"k": "b", "content": "ok"})]
+    w.append_many(evs, expected_last_sequence=0)
+    evs_changed = [_mk_event("thread.message.sent", {"k": "a", "content": "CHANGED"}),
+                   _mk_event("model.attempt.completed", {"k": "b", "content": "ok"})]
+    with pytest.raises(ValueError):
+        w.append_many(evs_changed, expected_last_sequence=0)
+
+
+def test_append_many_ids_from_unrelated_groups_rejected(tmp_path):
+    w = JournalWriter(tmp_path, "run_1")
+    w.append_many([_mk_event("thread.message.sent", {"k": "a", "content": "hi"})], expected_last_sequence=0)
+    w.append_many([_mk_event("model.attempt.completed", {"k": "b", "content": "ok"})], expected_last_sequence=1)
+    # 组装一个从未以整组提交过的 id 集合（内容与各自已封存事件一致）→ 不能证明是整组重试
+    with pytest.raises(ValueError):
+        w.append_many([_mk_event("thread.message.sent", {"k": "a", "content": "hi"}),
+                       _mk_event("model.attempt.completed", {"k": "b", "content": "ok"})],
+                      expected_last_sequence=0)
+
+
+def test_append_many_partial_overlap_rejected(tmp_path):
+    w = JournalWriter(tmp_path, "run_1")
+    w.append_many([_mk_event("thread.message.sent", {"k": "a", "content": "hi"})], expected_last_sequence=0)
+    with pytest.raises(ValueError):
+        w.append_many([_mk_event("thread.message.sent", {"k": "a", "content": "hi"}),
+                       _mk_event("model.attempt.completed", {"k": "b", "content": "ok"})],
+                      expected_last_sequence=0)
+
+
+def test_append_many_duplicate_ids_rejected(tmp_path):
+    w = JournalWriter(tmp_path, "run_1")
+    ev = _mk_event("thread.message.sent", {"k": "a", "content": "hi"})
+    with pytest.raises(ValueError):
+        w.append_many([ev, ev], expected_last_sequence=0)
+
+
+def test_append_many_no_duplicate_rows_and_contiguous_sequences(tmp_path):
+    w = JournalWriter(tmp_path, "run_1")
+    g1 = [_mk_event("thread.message.sent", {"k": "a", "content": "hi"}),
+          _mk_event("model.attempt.completed", {"k": "b", "content": "ok"})]
+    g2 = [_mk_event("tool.execution.completed", {"k": "c", "content": "done"})]
+    w.append_many(g1, expected_last_sequence=0)
+    w.append_many(g2, expected_last_sequence=2)
+    w.append_many(g1, expected_last_sequence=2)  # 整组重试：跳过 CAS，不重复写
+    events = w.read_from(0)
+    assert [e.sequence for e in events] == [1, 2, 3]
+    ids = [e.event_id for e in events]
+    assert len(ids) == len(set(ids))  # 无重复行
+    seg = tmp_path / "runs" / "run_1" / "journal" / "events-000001.jsonl"
+    lines = [l for l in seg.read_text(encoding="utf-8").splitlines() if l.strip()]
+    assert len(lines) == 3  # 每事件恰好一行
+
+
 def test_journal_dir_override(tmp_path):
     custom = tmp_path / "custom" / "runs" / "run_9" / "journal"
+    default_dir = tmp_path / "runs" / "run_9" / "journal"
     w = JournalWriter(tmp_path, "run_9", journal_dir=custom)
     w.append(_mk_event("thread.message.sent", {"k": "z", "content": "hi"}))
-    assert custom.exists()
+    assert (custom / "events-000001.jsonl").exists()
+    assert (custom / "index.json").exists()
+    assert not default_dir.exists()  # 默认路径未被创建
     assert len(w.read_from(0)) == 1
