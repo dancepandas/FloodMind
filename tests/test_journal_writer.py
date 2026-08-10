@@ -89,3 +89,15 @@ def test_crash_between_append_and_index_save_recovers_sequence(tmp_path: Path):
     assert w2.current_sequence() == 1
     w2.append(_evt(2))
     assert [e.sequence for e in w2.read_from()] == [1, 2]
+
+
+def test_concurrent_rollover_is_not_missed(tmp_path: Path):
+    w1 = JournalWriter(tmp_path, "run_1", max_segment_bytes=1024)
+    w2 = JournalWriter(tmp_path, "run_1")  # constructed before w1 rolls
+    for i in range(1, 30):
+        w1.append(_evt(i))
+    assert w1.segment_count() > 1
+    # w2 cached current_segment=1; its append must observe w1's rolled tail.
+    w2.append(_evt(100))
+    seqs = [e.sequence for e in w2.read_from()]
+    assert seqs == list(range(1, 30)) + [30]

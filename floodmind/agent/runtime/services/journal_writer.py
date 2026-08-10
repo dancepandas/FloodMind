@@ -104,17 +104,20 @@ class JournalWriter:
         self._reconcile_from_journal()
 
     def _reconcile_from_journal(self) -> None:
-        """Rebuild the tail from the authoritative JSONL.
+        """Rebuild the tail from the authoritative JSONL segments.
 
-        The journal segments are the source of truth: a crash between a segment
-        append and an index save, or a corrupted index, must not let the writer
-        re-use a sequence or a previous-event hash. A corrupt line is treated as
-        the end of the authoritative tail.
+        All on-disk segments are scanned — not just up to the cached current
+        segment — so a concurrent writer that rolled a segment is never missed.
+        The journal is authoritative: if any events exist they override index
+        values, and the current segment advances to the highest one on disk.
+        A corrupt line is treated as the end of that segment's tail.
         """
         last_sequence = 0
         last_hash = ""
+        highest_segment = 0
         sealed: Dict[str, EventEnvelope] = {}
-        for number in range(1, self._current_segment + 1):
+        for number in self._segment_numbers_on_disk():
+            highest_segment = max(highest_segment, number)
             path = self._segment_path(number)
             if not path.exists():
                 continue
@@ -130,10 +133,20 @@ class JournalWriter:
                 if event.sequence > last_sequence:
                     last_sequence = event.sequence
                     last_hash = event.integrity.event_sha256
-        if last_sequence >= self._last_sequence:
+        if last_sequence:
             self._last_sequence = last_sequence
             self._last_event_sha256 = last_hash
+            self._current_segment = max(self._current_segment, highest_segment)
         self._sealed.update(sealed)
+
+    def _segment_numbers_on_disk(self) -> List[int]:
+        numbers: List[int] = []
+        if self._journal_dir.exists():
+            for p in self._journal_dir.glob(f"{_SEGMENT_PREFIX}*{_SEGMENT_SUFFIX}"):
+                name = p.name[len(_SEGMENT_PREFIX):-len(_SEGMENT_SUFFIX)]
+                if name.isdigit():
+                    numbers.append(int(name))
+        return sorted(numbers)
 
     def _save_index(self) -> None:
         index = {
