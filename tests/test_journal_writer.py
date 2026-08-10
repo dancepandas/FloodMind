@@ -117,7 +117,19 @@ def test_repair_tail_truncates_half_write(tmp_path: Path):
     w = JournalWriter(tmp_path, "run_1")
     w.append(_evt(1))
     seg = tmp_path / "runs" / "run_1" / "journal" / "events-000001.jsonl"
-    with seg.open("a", encoding="utf-8") as f:
-        f.write('{"event_id": "evt_partial"')  # half-written line
+    expected = seg.read_bytes()
+    with seg.open("ab") as f:
+        f.write(b'{"event_id": "evt_partial"')  # half-written line
     w.repair_tail()
+    # Byte assertion proves the tail was truly removed and the full event kept.
+    assert seg.read_bytes() == expected
     assert [e.sequence for e in w.read_from()] == [1]
+
+
+def test_repair_tail_clears_segment_with_only_half_write(tmp_path: Path):
+    w = JournalWriter(tmp_path, "run_1")
+    seg = tmp_path / "runs" / "run_1" / "journal" / "events-000001.jsonl"
+    with seg.open("ab") as f:
+        f.write(b'{"event_id": "evt_partial"')  # only content is a half-write
+    w.repair_tail()
+    assert seg.read_bytes() == b""
