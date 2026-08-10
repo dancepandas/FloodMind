@@ -185,6 +185,8 @@ class RunState(BaseModel):
     token_usage: Dict[str, int] = Field(default_factory=dict)
     cancellation_state: str = ""
     resumability: str = ""
+    # 幂等：已处理的 event_id（Reducer 幂等边界，§25.1"重复 Event ID 不重复副作用"）
+    processed_event_ids: List[str] = Field(default_factory=list)
     # 派生对话历史：扁平 user/assistant 条目，与现 DualMemory._turns 形状 wire 兼容
     turns: List[Dict[str, Any]] = Field(default_factory=list)
 ```
@@ -352,7 +354,7 @@ def _reduce_thread_message_sent(state: RunState, payload: Dict[str, Any]) -> Run
 
 def _reduce_attempt_started(state: RunState, payload: Dict[str, Any]) -> RunState:
     ns = _clone(state)
-    ns.active_attempt_id = str(payload.get("attempt_id", new_id("attempt")))
+    ns.active_attempt_id = str(payload.get("attempt_id") or "")
     ns.status = RunStatus.streaming_model
     return ns
 
@@ -414,10 +416,6 @@ def _reduce_tool_completed(state: RunState, payload: Dict[str, Any]) -> RunState
     return ns
 
 
-def _reduce_tool_failed(state: RunState, payload: Dict[str, Any]) -> RunState:
-    return _reduce_tool_completed(state, payload)
-
-
 def _reduce_approval_requested(state: RunState, payload: Dict[str, Any]) -> RunState:
     ns = _clone(state)
     ns.pending_approvals.append(PendingApproval(
@@ -453,8 +451,12 @@ def _reduce_run_terminal(state: RunState, payload: Dict[str, Any], event_type: s
 
 
 def reduce(state: RunState, event: EventEnvelope) -> RunState:
-    """确定性折叠。未知事件 fail closed：保持不变但推进 cursor。"""
+    """确定性折叠。幂等：重复 event_id 直接返回原状态，不重复副作用、不推进 cursor。
+    未知事件 fail closed：仅推进 cursor。"""
+    if event.event_id in state.processed_event_ids:
+        return state
     ns = _clone(state)
+    ns.processed_event_ids = ns.processed_event_ids + [event.event_id]
     ns.last_committed_sequence = event.sequence
     et = event.event_type
     if et == "thread.message.sent":
@@ -1186,6 +1188,8 @@ def _emit_round_events(self, state, *, tool_calls_records, is_final, attempt_id)
 ```
 
 调用点 `:456` 与 `:615` 改为 `self._emit_round_events(state, tool_calls_records=..., is_final=..., attempt_id=state.attempt_id)`。LLM 起点（`:307-310` 附近）`emit("model.attempt.started", {"model": ..., "iteration": state.iteration, "messages_count": len(state.messages)})`，并 `state.attempt_id = new_id("attempt")`。executor 构造函数增 `journal_authority: Optional[JournalAuthority] = None` 参数。
+
+**同时移除 round 级旧 journal 写入（避免双写）**：删除 `:459-468` 与 `:617-627` 的 `self._journal_service.record_turn(...)` 调用（round 事实已由 `model.attempt.completed` 承载）。`process_tool_result`（`:580-587/:870-876`）仍保留到 Task 7 再替换为 tool 事件。
 
 **3d. `dual_memory.py` 切换**：
 - 删除：`self._turns`、`_turn_index`（改为投影派生）、`add_user_message`/`add_assistant_round`/`add_ai_message`/`add_ai_message_with_trace` 的历史写入体、`save_chat_history`、`_load_from_disk`（对 `chat_history.json` 的读写全部删除，无回退）。
