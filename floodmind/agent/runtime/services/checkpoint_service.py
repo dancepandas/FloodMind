@@ -76,6 +76,7 @@ class CheckpointService:
         *,
         journal_cursor: int = 0,
         reducer_version: str = "1",
+        tool_registry_version: str = "",
         run_state: Optional[RunState] = None,
     ) -> CheckpointRecord:
         """保存一个 checkpoint。
@@ -138,6 +139,7 @@ class CheckpointService:
                 files_snapshot_base_dirs=[],
                 journal_cursor=journal_cursor,
                 reducer_version=reducer_version,
+                tool_registry_version=tool_registry_version,
                 run_state_file=_RUN_STATE_FILE,
                 metadata=manifest_metadata,
             )
@@ -257,6 +259,7 @@ class CheckpointService:
         checkpoint_id: str,
         *,
         reducer_version: str = "1",
+        expected_tool_registry_version: str = "",
     ) -> RunState:
         """Validate a checkpoint projection, then replay only its journal suffix."""
         manifest = self.load_manifest(session_id, checkpoint_id)
@@ -264,6 +267,13 @@ class CheckpointService:
         if manifest.reducer_version != reducer_version:
             raise CheckpointConsistencyError(
                 f"reducer version 不匹配: {manifest.reducer_version} != {reducer_version}"
+            )
+        if expected_tool_registry_version and (
+            manifest.tool_registry_version != expected_tool_registry_version
+        ):
+            raise CheckpointConsistencyError(
+                "tool registry version 不匹配: "
+                f"{manifest.tool_registry_version} != {expected_tool_registry_version}"
             )
         identity = manifest.metadata
         expected = {

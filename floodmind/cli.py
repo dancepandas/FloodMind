@@ -233,6 +233,7 @@ def run(task, model, resume_session_id, resume_checkpoint_id, verbose):
         from floodmind.agent.native.types import AgentLoopState
         from floodmind.agent.runtime.services.checkpoint_service import CheckpointService
         from floodmind.agent.runtime.services.journal_authority import open_journal_authority
+        from floodmind.agent.runtime.services.resume_service import ResumeService
 
         svc = CheckpointService(base_dir=str(workspace.session_root))
         try:
@@ -245,6 +246,21 @@ def run(task, model, resume_session_id, resume_checkpoint_id, verbose):
             missing = [key for key in required if not identity.get(key)]
             if missing:
                 raise ValueError(f"checkpoint 缺少 journal identity: {', '.join(missing)}")
+            # ResumeService：fencing lease + replay + reconcile + resume.started/completed 事件；
+            # user_message 作为新的 thread.message.sent 事件落进 canonical journal。
+            outcome = ResumeService().resume(
+                runtime_dir=Path(identity["runtime_dir"]),
+                conversation_id=identity["conversation_id"],
+                task_id=identity["task_id"],
+                run_id=identity["run_id"],
+                thread_id=identity["thread_id"],
+                turn_id=identity["turn_id"],
+                checkpoint_id=resume_checkpoint_id,
+                user_message=task,
+                session_id=sid,
+                checkpoint_service=svc,
+            )
+            run_state = outcome.run_state
             authority = open_journal_authority(
                 Path(identity["runtime_dir"]),
                 conversation_id=identity["conversation_id"],
@@ -252,15 +268,6 @@ def run(task, model, resume_session_id, resume_checkpoint_id, verbose):
                 run_id=identity["run_id"],
                 thread_id=identity["thread_id"],
                 turn_id=identity["turn_id"],
-            )
-            run_state = svc.replay_from_checkpoint(authority, sid, resume_checkpoint_id)
-            authority.emit(
-                "thread.message.sent",
-                {"content": task, "turn_index": len(run_state.turns)},
-            )
-            run_state = authority.replay(
-                after_sequence=run_state.last_committed_sequence,
-                state=run_state,
             )
             state = project_run_state_to_loop_state(state, run_state)
             state.user_message = task

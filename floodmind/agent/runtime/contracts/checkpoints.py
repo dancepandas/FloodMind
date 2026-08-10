@@ -61,6 +61,7 @@ class CheckpointManifest(BaseModel):
     files_snapshot_base_dirs: List[str] = Field(default_factory=list)
     journal_cursor: int
     reducer_version: str
+    tool_registry_version: str = ""
     run_state_file: str = "run_state.json"
     metadata: Dict[str, Any] = Field(default_factory=dict)
 
