@@ -34,3 +34,16 @@ Pending at report-write time; SHA added after commit by the final status respons
 
 ## Concerns
 Conversation-wide ordering uses event `recorded_at`, then per-run sequence and event ID because sequence numbers restart per run. User pre-existing mixed-file changes remain unstaged where separable.
+
+## Fix round 1
+
+- Finding 1: `NativeFloodAgent` now retains the active authority and exposes `enqueue_user_message`; the queued chat route calls this agent-held bridge instead of reading a thread-local `ContextVar` from the Flask thread.
+- Finding 2: `model.attempt.started` now has exactly `{model, iteration, messages_count}` in its payload; `attempt_id` remains envelope scope only.
+- Finding 3: removed the fabricated configuration `model.attempt.completed` event. Configuration notices, when an active authority exists, are queued as `thread.message.sent` through `agent.enqueue_user_message`.
+- Finding 4: documented the sequential-run/monotonic-time projection assumption. Tests now assert full user/assistant adjacency across runs and deterministic repeatability when timestamps tie.
+- Finding 5: projection turns always contain `role`, and `chat_history.json` is no longer read. Therefore the legacy no-role branch plus `_legacy_turns_to_frontend` and `_legacy_messages_to_frontend` were dead compatibility paths and were removed. `_turns_to_frontend` itself remains as required.
+- TDD: the new enqueue tests failed first with missing `enqueue_user_message`, then passed after implementation.
+- Focused verification: 7 projection/authority tests passed; targeted executor payload verification passed.
+- Full suite: `952 passed, 1 skipped` in 52.01s.
+- Concern: cross-run ordering still assumes sequential runs; concurrent runs for the same conversation remain explicitly out of scope until child threads share one run.
+- Fix commit: pending at section-write time; final response records the SHA.

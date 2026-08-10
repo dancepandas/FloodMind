@@ -311,6 +311,7 @@ class NativeFloodAgent:
         self.llm_service = llm_service
         self.memory = memory
         self.session_id = session_id
+        self._journal_authority = None
         # 宿主显式注入的 workspace（线程无关，存为实例属性）。子线程 _run_loop 据此重绑
         # floodmind_workspace contextvar，修复桌面端跨线程丢失的问题；None 时回退
         # contextvar（网页版 set_workspace 注入）。与 PathService 同模式。
@@ -2749,6 +2750,14 @@ class NativeFloodAgent:
             "scripts_dir": str(ws.scripts_dir or ""),
         }
 
+    def enqueue_user_message(self, content: str) -> bool:
+        """Append a queued user message through the active run's Journal authority."""
+        authority = self._journal_authority
+        if authority is None:
+            return False
+        authority.emit("thread.message.sent", {"content": content, "turn_index": 0})
+        return True
+
     def stream(
         self,
         user_input: str,
@@ -2816,6 +2825,7 @@ class NativeFloodAgent:
                         session_dir = runtime_dir / "sessions" / effective_session_id
                     ident = resolve_identity(effective_session_id, session_dir)
                     auth = open_journal_authority(runtime_dir, **ident)
+                    self._journal_authority = auth
                     auth.emit("thread.message.sent", {"content": user_input, "turn_index": 0})
                     self.memory.bind_journal(auth, runtime_dir, ident["conversation_id"])
                     self._orchestrator_executor._journal_authority = auth

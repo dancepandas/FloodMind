@@ -519,19 +519,9 @@ class SessionManager:
 
     @staticmethod
     def _turns_to_frontend(turns: List[Dict[str, Any]]) -> List[Dict[str, str]]:
-        """将对话历史转为前端消息列表。
-
-        支持两种 _turns 格式：
-        - 扁平条目（role/content）：当前架构，一次 LLM 调用一条 assistant 条目。
-          同一用户轮的多条 assistant 条目合并为一条 FloodMind 消息（保留原 per-turn UX）。
-        - 旧 per-turn 字典（user_input/final_answer）：迁移前的格式，按原逻辑渲染。
-        前端 fromServerMessage 据此构建 thought/action/answer blocks 并自动折叠。
-        """
+        """Convert canonical projected turns into frontend messages."""
         if not turns:
             return []
-        # 旧格式（无 role 键）：per-turn 字典
-        if "role" not in turns[0]:
-            return SessionManager._legacy_turns_to_frontend(turns)
 
         # 扁平条目：按用户轮聚合 assistant 条目
         result: List[Dict[str, Any]] = []
@@ -569,47 +559,6 @@ class SessionManager:
         _flush()
         return result
 
-    @staticmethod
-    def _legacy_turns_to_frontend(turns: List[Dict[str, Any]]) -> List[Dict[str, str]]:
-        """旧 per-turn 格式（user_input/final_answer）转前端消息列表。"""
-        result: List[Dict[str, Any]] = []
-        for turn in turns:
-            if turn.get("user_input"):
-                result.append({"role": "human", "content": turn["user_input"]})
-            ai_parts: Dict[str, Any] = {"role": "FloodMind", "content": ""}
-            if turn.get("reasoning"):
-                ai_parts["reasoning"] = turn["reasoning"]
-            tool_calls = turn.get("tool_calls", [])
-            if tool_calls:
-                ai_parts["tool_calls"] = [
-                    {
-                        "tool_name": tc.get("tool_name", tc.get("name", "unknown")),
-                        "tool_output": tc.get("tool_output", tc.get("result", "")),
-                    }
-                    for tc in tool_calls
-                ]
-            if turn.get("final_answer"):
-                ai_parts["content"] = turn["final_answer"]
-            if ai_parts.get("reasoning") or ai_parts.get("tool_calls") or ai_parts.get("content"):
-                result.append(ai_parts)
-        return result
-
-    @staticmethod
-    def _legacy_messages_to_frontend(messages: list) -> List[Dict[str, str]]:
-        """将旧格式消息转为前端格式"""
-        result = []
-        for m in messages:
-            msg_data = {
-                "role": "human" if m.get("type") == "human" else "FloodMind",
-                "content": m.get("content", "")
-            }
-            if m.get("reasoning"):
-                msg_data["reasoning"] = m.get("reasoning", "")
-            if m.get("tool_calls"):
-                msg_data["tool_calls"] = m.get("tool_calls", [])
-            result.append(msg_data)
-        return result
-    
     def delete_session(self, session_id: str):
         """删除会话（包括所有数据和工作树）"""
         session_id = validate_session_id(session_id)

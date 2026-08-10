@@ -1,3 +1,5 @@
+from datetime import datetime, timezone
+
 from floodmind.agent.runtime.services.journal_authority import open_journal_authority
 from floodmind.agent.runtime.services.history_projection import (
     project_conversation,
@@ -73,10 +75,55 @@ def test_project_conversation_aggregates_runs(tmp_path):
         turn_id="turn_2",
     )
     second.emit("thread.message.sent", {"content": "second", "turn_index": 0})
+    second.emit(
+        "model.attempt.completed",
+        {
+            "attempt_id": "a2",
+            "terminal_reason": "completed",
+            "content": "two",
+            "reasoning": "",
+            "tool_calls": [],
+            "is_final": True,
+            "usage": {},
+        },
+    )
 
     turns = project_conversation(tmp_path, "conv_9")
 
-    assert [turn["content"] for turn in turns if turn["role"] == "user"] == [
-        "first",
-        "second",
+    assert [(turn["role"], turn["content"]) for turn in turns] == [
+        ("user", "first"),
+        ("assistant", "one"),
+        ("user", "second"),
+        ("assistant", "two"),
     ]
+
+
+def test_project_conversation_equal_recorded_at_is_deterministic(tmp_path, monkeypatch):
+    fixed = datetime(2026, 8, 10, tzinfo=timezone.utc)
+    monkeypatch.setattr(
+        "floodmind.agent.runtime.services.journal_authority.utcnow", lambda: fixed
+    )
+    first = open_journal_authority(
+        tmp_path,
+        conversation_id="conv_tie",
+        task_id="task_a",
+        run_id="run_a",
+        thread_id="thread_a",
+        turn_id="turn_a",
+    )
+    second = open_journal_authority(
+        tmp_path,
+        conversation_id="conv_tie",
+        task_id="task_b",
+        run_id="run_b",
+        thread_id="thread_b",
+        turn_id="turn_b",
+    )
+    second.emit("thread.message.sent", {"content": "second", "turn_index": 1})
+    first.emit("thread.message.sent", {"content": "first", "turn_index": 0})
+
+    projected_once = project_conversation(tmp_path, "conv_tie")
+    projected_twice = project_conversation(tmp_path, "conv_tie")
+
+    assert projected_once == projected_twice
+    assert sorted(turn["content"] for turn in projected_once) == ["first", "second"]

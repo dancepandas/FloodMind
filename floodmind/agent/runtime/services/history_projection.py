@@ -14,7 +14,13 @@ def project_current(auth: JournalAuthority) -> List[Dict]:
 
 
 def project_conversation(runtime_dir, conversation_id: str) -> List[Dict]:
-    """Project every run below a conversation into one flat turn stream."""
+    """Project every run below a conversation into one flat turn stream.
+
+    Conversation runs are assumed sequential and ``recorded_at`` monotonic. Equal
+    timestamps are resolved deterministically by sequence and event ID. Concurrent
+    runs for one conversation are not projected causally and remain out of scope
+    until child-thread work lands within the same run.
+    """
     runs_root = Path(runtime_dir) / "conversations" / conversation_id / "tasks"
     if not runs_root.is_dir():
         return []

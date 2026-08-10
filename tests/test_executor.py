@@ -56,6 +56,27 @@ class TestNativeAgentExecutor:
         assert "Hello" in result.final_output
         assert not result.is_timeout
 
+    def test_attempt_started_payload_uses_envelope_scope_for_attempt_id(self):
+        mc = MagicMock(spec=ModelClient)
+        mc.model_name = "test-model"
+        mc.stream_chat.return_value = [ModelEvent(type="token", content="done"), ModelEvent(type="done")]
+        authority = MagicMock()
+        executor = self._make_executor(mc, tools_schema=[])
+        executor._journal_authority = authority
+
+        executor.run(self._make_context(), "hello")
+
+        started = next(
+            call for call in authority.emit.call_args_list
+            if call.args[0] == "model.attempt.started"
+        )
+        assert started.args[1] == {
+            "model": "test-model",
+            "iteration": 0,
+            "messages_count": 2,
+        }
+        assert started.kwargs["attempt_id"].startswith("attempt_")
+
     def test_is_retryable_error_recognizes_peer_closed_connection(self):
         """流式中断（peer closed connection / chunked read / remote protocol）可重试。"""
         from floodmind.agent.native.retry import is_retryable_error

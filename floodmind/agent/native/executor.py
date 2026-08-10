@@ -312,7 +312,6 @@ class NativeAgentExecutor:
             self._journal_authority.emit(
                 "model.attempt.started",
                 {
-                    "attempt_id": state.attempt_id,
                     "model": getattr(self.model_client, "model_name", ""),
                     "iteration": state.iteration,
                     "messages_count": len(state.messages),
