@@ -26,9 +26,21 @@ def test_parallel_tool_group_kept():
             {"id": "c1", "name": "A", "arguments": {}}, {"id": "c2", "name": "B", "arguments": {}}]},
         _tool_result("c1"), _tool_result("c2"),
     ]
+    # 1) build() 必须产出单个 parallel_tool 组，覆盖 assistant + 两个 tool result 全部三条
+    groups = AtomicGroups().build(msgs)
+    parallel = [g for g in groups if g.kind == "parallel_tool"]
+    assert len(parallel) == 1
+    assert parallel[0].indices == [1, 2, 3]  # assistant + tool c1 + tool c2
+    assert parallel[0].required_together is True
+
+    # 2) aligned_ranges() 不得把并行组拆散：任何包含 assistant 的 range 必须同时含两个 tool result
     ranges = AtomicGroups().aligned_ranges(msgs)
     for start, end in ranges:
         sliced = msgs[start:end]
-        tc = [m for m in sliced if m.get("tool_calls")]
-        if tc:
-            assert len(tc[0]["tool_calls"]) == 2  # 并行组整体保留
+        if any(m.get("tool_calls") for m in sliced):
+            tool_ids = [m.get("tool_call_id") for m in sliced if m.get("role") == "tool"]
+            assert tool_ids == ["c1", "c2"]  # 两个 result 必须整体保留在同一 range
+    # 等价断言：不存在落在索引 1..3 之间的切点（assistant 与任一 result 分离）
+    boundaries = {start for start, _ in ranges} | {end for _, end in ranges}
+    for b in boundaries:
+        assert not (1 < b < 3), f"range 边界 {b} 落在并行工具组内部，拆散了 assistant 与其 tool results"
