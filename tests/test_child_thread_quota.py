@@ -175,7 +175,7 @@ def test_parallel_children_do_not_cross_cancel_reasons(tmp_path):
 
     child_a = ChildThread(
         thread_id="th_child_a", parent_thread_id="th_main", parent_call_id="sa",
-        max_turns=10, max_tokens=10**6, wall_clock_budget_seconds=30.0,
+        max_turns=100, max_tokens=10**6, wall_clock_budget_seconds=30.0,
     )
     child_b = ChildThread(
         thread_id="th_child_b", parent_thread_id="th_main", parent_call_id="sb",
