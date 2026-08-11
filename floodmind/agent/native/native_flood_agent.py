@@ -2049,7 +2049,13 @@ class NativeFloodAgent:
             # 子代理默认 cwd：delegate_cwd 优先，否则 sandbox outputs
             sub_cwd = str(sandbox_ctx.delegate_cwd) if sandbox_ctx.delegate_cwd else str(sandbox_ctx.outputs_dir)
             from floodmind.agent.runtime.contracts.runtime_context import RuntimeContext
+            from floodmind.agent.runtime.services.artifact_service import ArtifactService
 
+            sub_artifact_service = ArtifactService(
+                runtime_dir / "artifacts",
+                authority=child_auth,
+                allowed_roots=[str(sandbox_ctx.workspace_dir)],
+            )
             sub_runtime_context = RuntimeContext(
                 conversation_id=parent_runtime_context.conversation_id,
                 task_id=parent_runtime_context.task_id,
@@ -2065,6 +2071,7 @@ class NativeFloodAgent:
                 permission_service=self._permission_service,
                 path_service=self._path_service,
                 background_service=self._background_task_service,
+                artifact_service=sub_artifact_service,
                 journal_authority=child_auth,
             )
             sub_context = RunContext(

@@ -68,6 +68,16 @@ def test_kill_subscriber_never_observes_intermediate_status(tmp_path):
     assert all(s in ("killed", "kill_failed", "completed", "failed") for s in seen)
 
 
+def test_task_captures_thread_authority_and_meta_excludes_it(tmp_path):
+    authority = object()
+    svc = BackgroundTaskService(base_dir=str(tmp_path))
+    svc.bind_thread_authority(authority)
+    task = svc.start("sess_1", "true", _sleep_cmd(0.1), cwd=str(tmp_path))
+    svc.unbind_thread_authority()
+    assert task.journal_authority is authority
+    assert "journal_authority" not in task.to_meta_dict()
+
+
 def test_completion_emits_completed_event(tmp_path):
     sink = _Sink()
     svc = BackgroundTaskService(base_dir=str(tmp_path), event_sink=sink)

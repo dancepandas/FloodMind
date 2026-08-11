@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import ctypes
-import errno
 import logging
 import os
 import platform
@@ -38,7 +37,9 @@ _LL_MAKE_CHAR = 1 << 6
 _LL_MAKE_DIR = 1 << 7
 _LL_MAKE_REG = 1 << 8
 _LL_MAKE_SYM = 1 << 9
-_LL_ALL = (
+_LL_REFER = 1 << 10
+_LL_TRUNCATE = 1 << 11
+_LL_BASE = (
     _LL_EXECUTE | _LL_WRITE_FILE | _LL_READ_FILE | _LL_READ_DIR | _LL_REMOVE_DIR
     | _LL_REMOVE_FILE | _LL_MAKE_CHAR | _LL_MAKE_DIR | _LL_MAKE_REG | _LL_MAKE_SYM
 )
@@ -74,14 +75,27 @@ def _landlock_functions():
     return call(444), call(445), call(446), libc
 
 
-def _landlock_available() -> bool:
+def _landlock_abi() -> int:
     funcs = _landlock_functions()
     if funcs is None:
-        return False
+        return 0
     create_ruleset, _, _, _ = funcs
     ctypes.set_errno(0)
-    result = create_ruleset(None, 0, _LL_CREATE_RULESET_VERSION)
-    return int(result) >= 1
+    result = int(create_ruleset(None, 0, _LL_CREATE_RULESET_VERSION))
+    return result if result >= 1 else 0
+
+
+def _landlock_access_for_abi(abi: int) -> int:
+    access = _LL_BASE
+    if abi >= 2:
+        access |= _LL_REFER
+    if abi >= 3:
+        access |= _LL_TRUNCATE
+    return access
+
+
+def _landlock_available() -> bool:
+    return _landlock_abi() >= 1
 
 
 def _add_landlock_path(add_rule, ruleset_fd: int, path: Path, access: int) -> None:
@@ -97,21 +111,23 @@ def _add_landlock_path(add_rule, ruleset_fd: int, path: Path, access: int) -> No
 
 
 def _apply_landlock(root: Path) -> None:
-    """Restrict the child after fork and before exec; failures degrade with warning."""
+    """Restrict the child after fork and before exec; active enforcement fails closed."""
     funcs = _landlock_functions()
     if funcs is None:
         return
     create_ruleset, add_rule, restrict_self, libc = funcs
+    abi = _landlock_abi()
+    if abi < 1:
+        return
+    handled_access = _landlock_access_for_abi(abi)
     ruleset_fd = -1
     try:
-        if not _landlock_available():
-            return
-        attr = _RulesetAttr(handled_access_fs=_LL_ALL)
+        attr = _RulesetAttr(handled_access_fs=handled_access)
         ruleset_fd = create_ruleset(ctypes.byref(attr), ctypes.sizeof(attr), 0)
         if ruleset_fd < 0:
             err = ctypes.get_errno()
             raise OSError(err, os.strerror(err))
-        _add_landlock_path(add_rule, ruleset_fd, root, _LL_ALL)
+        _add_landlock_path(add_rule, ruleset_fd, root, handled_access)
         # The restriction is installed pre-exec. Permit the host runtime to be read and
         # executed, but never written; mutable access remains exclusive to file_root.
         for runtime_root in (Path("/bin"), Path("/lib"), Path("/lib64"), Path("/usr")):
@@ -123,11 +139,6 @@ def _apply_landlock(root: Path) -> None:
         if restrict_self(ruleset_fd, 0) < 0:
             err = ctypes.get_errno()
             raise OSError(err, os.strerror(err))
-    except OSError as exc:
-        if exc.errno not in (errno.ENOSYS, errno.EOPNOTSUPP):
-            logger.warning("Landlock filesystem restriction unavailable: %s", exc)
-    except Exception as exc:
-        logger.warning("Landlock filesystem restriction unavailable: %s", exc)
     finally:
         if ruleset_fd >= 0:
             os.close(ruleset_fd)
@@ -184,10 +195,11 @@ class _BoundedReader(threading.Thread):
 class LocalRestrictedSandbox:
     """Local process sandbox.
 
-    Linux Landlock enforces mutable filesystem containment. Process-tree, wall-time,
-    output, environment, temp, and cancellation boundaries are cross-platform.
-    Network, CPU, memory, and fully cross-platform filesystem isolation require a
-    container backend (for example Docker or Windows Sandbox) behind SandboxBackend.
+    On Linux with Landlock, create/remove/rename/truncate/make operations are confined
+    to ``file_root`` and an installation failure refuses the child (fail closed). On
+    platforms without Landlock, ``filesystem_root`` is absent from capability
+    reflection. Cross-platform filesystem isolation and network/CPU/memory enforcement
+    require a container backend behind SandboxBackend.
     """
 
     def __init__(self) -> None:
@@ -238,6 +250,8 @@ class LocalRestrictedSandbox:
                 )
             except FileNotFoundError as exc:
                 return ExecutionResult(sandbox_violation=f"command not found: {exc}")
+            except subprocess.SubprocessError as exc:
+                return ExecutionResult(sandbox_violation=f"sandbox enforcement failed: {exc}")
             process_sandbox.register_process(proc)
             budget = _ByteBudget(policy.resources.max_output_bytes)
             out = _BoundedReader(proc.stdout, budget)

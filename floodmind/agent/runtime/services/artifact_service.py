@@ -157,7 +157,9 @@ class ArtifactService:
 
     def resolve(self, artifact_id: str) -> ArtifactManifest:
         self._validate_artifact_id(artifact_id)
-        return self._read_manifest(artifact_id)
+        manifest = self._read_manifest(artifact_id)
+        self._validated_object_path(manifest.storage_uri)
+        return manifest
 
     def read_path(self, artifact_id: str) -> Path:
         """返回对象路径；下载方必须先 verify 再外发（§25.8 防路径穿越）。"""

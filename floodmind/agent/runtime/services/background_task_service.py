@@ -65,6 +65,7 @@ class BackgroundTask:
     tail: str = ""
     error: str = ""
     process_identity: Optional[Dict[str, Any]] = None  # {pid, create_time}
+    journal_authority: Optional[Any] = None
 
     @property
     def running(self) -> bool:
@@ -74,6 +75,7 @@ class BackgroundTask:
         d = asdict(self)
         d.pop("tail", None)
         d.pop("error", None)
+        d.pop("journal_authority", None)
         return d
 
 
@@ -95,6 +97,7 @@ class BackgroundTaskService:
         self._completed_retention = max(completed_retention, 1)
         self._finalized_retention = max(finalized_retention, self._completed_retention)
         self._event_sink = event_sink
+        self._thread_authority = threading.local()
 
         self._lock = threading.RLock()
         self._active_tasks: Dict[str, BackgroundTask] = {}
@@ -117,8 +120,22 @@ class BackgroundTaskService:
             except Exception as e:
                 logger.warning("BackgroundTask event_sink error: %s", e)
 
-    def set_event_sink(self, event_sink: Optional[Callable[[str, Dict[str, Any]], None]]) -> None:
-        self._event_sink = event_sink
+    def _emit_for(self, task: BackgroundTask, event_type: str, payload: Dict[str, Any]) -> None:
+        authority = task.journal_authority
+        if authority is not None:
+            try:
+                authority.emit(event_type, payload)
+            except Exception as e:
+                logger.warning("BackgroundTask journal emit error: %s", e)
+            return
+        self._emit(event_type, payload)
+
+    def bind_thread_authority(self, authority: Any) -> None:
+        self._thread_authority.value = authority
+
+    def unbind_thread_authority(self) -> None:
+        if hasattr(self._thread_authority, "value"):
+            del self._thread_authority.value
 
     # ── 公开 API ─────────────────────────────────────────────────────
 
@@ -198,8 +215,9 @@ class BackgroundTaskService:
                 started_at=time.time(),
                 max_lifetime_seconds=lifetime,
                 process_identity={"pid": process.pid, "create_time": process_create_time(process.pid)},
+                journal_authority=getattr(self._thread_authority, "value", None),
             )
-            self._emit("background.start.requested", {
+            self._emit_for(task, "background.start.requested", {
                 "task_id": task_id,
                 "session_id": session_id,
                 "command_sha256": hashlib.sha256(command.encode("utf-8")).hexdigest(),
@@ -213,7 +231,7 @@ class BackgroundTaskService:
                 self._processes[task_id] = process
             # M1: started 在 watcher 启动前发出，避免近瞬时退出任务 completed 先于 started
             # 落 Journal，导致 reducer terminal 事件空转、active_background_tasks 残留。
-            self._emit("background.started", {
+            self._emit_for(task, "background.started", {
                 "task_id": task.task_id,
                 "session_id": task.session_id,
                 "pid": task.pid,
@@ -249,7 +267,7 @@ class BackgroundTaskService:
                     pass
             task.finished_at = time.time()
             # M2 同类：started 已发出，watcher 未能启动也须发终态事件，避免 reducer 残留
-            self._emit("background.killed", {
+            self._emit_for(task, "background.killed", {
                 "task_id": task.task_id,
                 "session_id": task.session_id,
                 "reason": "watcher_start_failed",
@@ -298,7 +316,7 @@ class BackgroundTaskService:
             return True  # 已自然终态（completed/failed），无可杀
 
         task.status = "kill_requested"
-        self._emit("background.kill.requested", {
+        self._emit_for(task, "background.kill.requested", {
             "task_id": task_id,
             "session_id": task.session_id,
             "reason": "user_kill",
@@ -316,7 +334,7 @@ class BackgroundTaskService:
             if confirmed:
                 task.status = "killed"
                 task.exit_code = int(process.returncode) if process is not None else 0
-                self._emit("background.killed", {
+                self._emit_for(task, "background.killed", {
                     "task_id": task_id,
                     "session_id": task.session_id,
                     "exit_code": task.exit_code,
@@ -324,7 +342,7 @@ class BackgroundTaskService:
             else:
                 task.status = "kill_failed"
                 task.error = f"进程树终止后 {confirm_timeout}s 内未确认退出"
-                self._emit("background.kill.failed", {
+                self._emit_for(task, "background.kill.failed", {
                     "task_id": task_id,
                     "session_id": task.session_id,
                     "error": task.error,
@@ -466,7 +484,7 @@ class BackgroundTaskService:
                     task.exit_code = None
                     task.error = f"超过最大存活时间 {lifetime}s，已被强制终止"
                     # M2: 兜底 kill 也是终态，须发 killed 事件，否则 reducer 残留 active_background_tasks
-                    self._emit("background.killed", {
+                    self._emit_for(task, "background.killed", {
                         "task_id": task.task_id,
                         "session_id": task.session_id,
                         "reason": "max_lifetime",
@@ -489,7 +507,7 @@ class BackgroundTaskService:
             self._write_meta(task)
             # Completion 先写 Journal（§12）；kill 已由 kill() 发 killed/kill_failed。
             if task.status in ("completed", "failed"):
-                self._emit("background.completed", {
+                self._emit_for(task, "background.completed", {
                     "task_id": task.task_id,
                     "session_id": task.session_id,
                     "status": task.status,

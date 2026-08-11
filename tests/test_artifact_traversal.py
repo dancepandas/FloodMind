@@ -38,6 +38,8 @@ def test_manifest_storage_uri_escape_rejected(tmp_path):
     )
 
     with pytest.raises(ValueError):
+        svc.resolve(artifact_id)
+    with pytest.raises(ValueError):
         svc.read_path(artifact_id)
     with pytest.raises(ValueError):
         svc.verify(artifact_id)

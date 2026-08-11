@@ -33,12 +33,10 @@ def test_acceptance_cleanup_no_residual_subscriptions(tmp_path):
     unsub()
     t = svc.start("sess_a", "true", _sleep_cmd(0.1), cwd=str(tmp_path))
     deadline = time.time() + 10
-    while t.status == "running" and time.time() < deadline:
+    while t.status in ("running", "starting") and time.time() < deadline:
         time.sleep(0.05)
-    settle_deadline = time.time() + 0.2
-    while t.task_id not in got and time.time() < settle_deadline:
-        time.sleep(0.01)
-    assert t.task_id not in got  # 已退订，无残留
+    assert t.status == "completed"
+    assert got == []
 
 
 def test_acceptance_kill_verification_chain(tmp_path):

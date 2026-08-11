@@ -59,12 +59,11 @@ class TestNativeAgentExecutor:
         assert "Hello" in result.final_output
         assert not result.is_timeout
 
-    def test_run_from_state_wires_background_service_to_journal(self, tmp_path):
+    def test_run_from_state_captures_background_authority_per_task(self, tmp_path):
         from floodmind.agent.runtime.services.background_task_service import BackgroundTaskService
         from floodmind.agent.runtime.services.journal_authority import open_journal_authority
 
         mc = MagicMock(spec=ModelClient)
-        mc.stream_chat.return_value = [ModelEvent(type="token", content="done"), ModelEvent(type="done")]
         service = BackgroundTaskService(base_dir=str(tmp_path / "sessions"))
         authority = open_journal_authority(
             tmp_path / "runtime", conversation_id="c", task_id="t",
@@ -73,14 +72,29 @@ class TestNativeAgentExecutor:
         executor = self._make_executor(mc, tools_schema=[])
         executor._background_task_service = service
         executor._journal_authority = authority
+        captured = {}
 
+        def stream_chat(*args, **kwargs):
+            task = service.start(
+                "test-session", "true",
+                [__import__("sys").executable, "-c", "pass"], cwd=str(tmp_path),
+            )
+            captured["task"] = task
+            return [ModelEvent(type="token", content="done"), ModelEvent(type="done")]
+
+        mc.stream_chat.side_effect = stream_chat
         executor.run(self._make_context(), "hello")
 
-        assert service._event_sink is not None
-        service._event_sink("background.started", {"task_id": "bg_1", "session_id": "test-session"})
-        events = authority.read_after(0)
-        event = next(e for e in events if e.event_type == "background.started")
-        assert event.thread_id == "th_1"
+        task = captured["task"]
+        assert task.journal_authority is authority
+        assert not hasattr(service._thread_authority, "value")
+        deadline = __import__("time").time() + 10
+        types = []
+        while "background.completed" not in types and __import__("time").time() < deadline:
+            types = [event.event_type for event in authority.read_after(0)]
+            __import__("time").sleep(0.05)
+        assert "background.started" in types
+        assert "background.completed" in types
 
     def test_attempt_started_payload_uses_envelope_scope_for_attempt_id(self):
         mc = MagicMock(spec=ModelClient)
