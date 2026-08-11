@@ -1,8 +1,8 @@
 # FloodMind
 
-**SDK-first 的智能水文 Agent Runtime — v1.1.9**
+**SDK-first 的智能水文 Agent Runtime — v2.0.0**
 
-FloodMind 正在收敛为面向 Python 宿主系统的纯 SDK：以 `Agent` / `ModelClient` / `Workspace` / `build_agent_tool` 为公共入口，把水文模型、数据分析、文档生成、MCP 工具与 Skill 体系嵌入到业务平台或桌面助手中。Web / TUI 入口已进入 legacy 迁移路径，不再作为核心产品形态推进。
+FloodMind 收敛为面向 Python 宿主系统的纯 SDK：以 `Agent` / `ModelClient` / `Workspace` / `build_agent_tool` 为公共入口，把水文模型、数据分析、文档生成、MCP 工具与 Skill 体系嵌入到业务平台或桌面助手中。Web / TUI 前端已随 v2.0.0 移除，FloodMind 为纯 SDK 形态。
 
 <p align="center">
   <img src="figure/floodmind-icon.png" width="80" alt="FloodMind">
@@ -14,11 +14,11 @@ FloodMind 正在收敛为面向 Python 宿主系统的纯 SDK：以 `Agent` / `M
 
 - **Python SDK 公共入口** — `Agent`、`ModelClient`、`Workspace`、`build_folder_workspace`、`build_agent_tool`、`ToolLoadingConfig`、Provider Pipeline 等可直接顶层导入
 - **Native Agent Runtime** — 自研 Agent 执行引擎，支持工具调用循环、流式输出、规划与委派
-- **Skill 系统** — 自动发现式技能注册，10 个内置 Skill（数据科学、文档生成、图表绘制、创意设计）；Chronos 等模型能力通过 MCP 协议外置为独立服务 (→ `contrib/`)
+- **Skill 系统** — 每个 `Agent` 持有独立 `SkillRegistry` + `SkillCurator`，支持宿主显式 Skill roots、按优先级发现、渐进式目录与 `GetSkill` 加载；全局注册 API 仅作兼容
 - **MCP 协议接入** — 标准 FastMCP Server（知识库检索 / 文档入库），作为 MCP 客户端通过 stdio/SSE 连接外部工具，支持运行时动态接入（LoadMcpServer）
 - **任务经验树** — 树状层级经验组织，渐进压缩摘要、去重合并、热度衰减、经验→Skill 自动生成
 - **扁平对话记忆** — `_turns` 扁平历史 + LLM 上下文压缩，单一历史源，整轮原子写入
-- **Agent 工作区** — Harness 级 `Workspace` 抽象；SDK/CLI 默认 folder-first（启动路径即工作区、相对路径默认 cwd、`.floodmind/` 收纳会话状态/脚本/临时文件/产物索引），工作区外访问必须通过 `readable_roots` / `writable_roots` 显式授权；Web 保持 `data/sessions` legacy 兼容
+- **Agent 工作区** — Harness 级 `Workspace` 抽象；SDK/CLI 默认 folder-first（启动路径即工作区、相对路径默认 cwd、`.floodmind/` 收纳会话状态/脚本/临时文件/产物索引），工作区外访问必须通过 `readable_roots` / `writable_roots` 显式授权
 - **Git Worktree 会话隔离** — `SessionManager` 支持为会话创建 git worktree 分支，自由实验不污染主会话（create/list/remove/fork_to_worktree）
 - **水文模型集成** — 敖江水文模型、时序预测；Chronos 已外置为 MCP 服务 (→ `contrib/`)
 - **RAG 知识库** — 独立 FastAPI REST 服务（ChromaDB + BGE Embedding），通过 MCP 协议接入，可快速插拔更换
@@ -27,7 +27,7 @@ FloodMind 正在收敛为面向 Python 宿主系统的纯 SDK：以 `Agent` / `M
 - **Token 用量统计** — 实时展示单条消息和会话级 prompt / completion / total tokens
 - **定时任务调度** — 每日重复 / 一次性定时任务，后台自动执行并记录产物
 - **文档自动生成** — 支持 Excel、Word、PDF、PPT 等格式
-- **最小 CLI** — `floodmind run` 作为 SDK-oriented 本地执行入口；Web/TUI 命令仅保留 legacy 提示
+- **最小 CLI** — `floodmind run` 作为 SDK-oriented 本地执行入口
 - **多模型支持** — 配置即用：任意 OpenAI 兼容接口均可接入
 - **厂商 Pipeline 自动路由** — 按 base_url / provider / 模型名自动选择厂商专属调用管线（DashScope/DeepSeek/Kimi/MiniMax + OpenAI 兜底），翻译思考开关方言、流式 reasoning 解析、`<think>` 标签剥离、usage 位置兼容
 - **渐进式工具加载** — 提示目录直接列出全部工具名称与基本描述，`GetTool` 按需加载目标工具完整 schema，减少请求体与提示词膨胀；未加载工具 fail-closed
@@ -35,8 +35,8 @@ FloodMind 正在收敛为面向 Python 宿主系统的纯 SDK：以 `Agent` / `M
 - **DOOM LOOP 检测** — 连续相同工具+相同参数 3 次自动终止
 - **自动重试** — LLM 调用失败（网络/503）指数退避重试
 - **Plugin 系统** — Python 原生插件扩展，注册工具/hook/Agent 初始化
-- **SyncEvent 溯源** — 事件持久化到 SQLite，支持断线回放
-- **Cursor 分页** — 消息和事件游标分页 API
+- **Canonical Journal** — 事件以 JSONL Journal 为唯一权威事实源，SQLite 派生索引可重建，支持断线回放
+- **Journal 派生公共事件** — `Agent.events_after(sequence)` 返回带 canonical `sequence` 的 committed 公共事件，宿主可据 `after_sequence` 重放与 Preview/Committed 对账
 - **精简系统提示词** — 8 段核心指导，工具描述由 ToolRegistry 自动注入
 
 ---
@@ -48,9 +48,8 @@ FloodMind 正在收敛为面向 Python 宿主系统的纯 SDK：以 `Agent` / `M
 | 语言 | Python 3.10+ |
 | SDK Runtime | 自研 Native Agent（流式 + Queue 驱动 + DOOM LOOP + 自动重试 + 并行委派） |
 | CLI | Click；`floodmind run` 为核心本地执行入口 |
-| Legacy Web/TUI | Flask / React / Textual 代码仍在仓库中保留，但已从 SDK 核心路径隔离 |
 | LLM | OpenAI 兼容接口（DashScope、DeepSeek、OpenAI、Ollama 等） |
-| 存储 | SQLite（SyncEvent 回放）+ JSON（会话历史 / 配置）+ 文件系统 |
+| 存储 | Canonical JSONL Journal（唯一权威）+ SQLite 派生索引 + 文件系统 |
 | 时序预测 | Chronos 2（MCP 外部服务）、TSLM、PyTorch |
 | 容器化 | Docker + NVIDIA GPU 支持 |
 
@@ -66,16 +65,15 @@ FloodMind 正在收敛为面向 Python 宿主系统的纯 SDK：以 `Agent` / `M
 ### 1. 安装
 
 ```bash
-# 安装 SDK 核心（不安装 Web/TUI 旧栈）
+# 安装 SDK 核心
 pip install -e .
 
-# 如果仍使用 requirements.txt，它同样只代表 SDK/core 默认依赖
+# 如果仍使用 requirements.txt，它只代表 SDK/core 默认依赖
 pip install -r requirements.txt
 
 # 按需安装可选能力
 pip install "floodmind[doc]"       # 文档处理
 pip install "floodmind[gpu]"       # GPU/时序预测相关能力
-pip install "floodmind[legacy]"    # 临时兼容旧 Web/TUI 适配器
 ```
 
 ### 2. 配置 API 密钥
@@ -118,7 +116,8 @@ pip install "floodmind[legacy]"    # 临时兼容旧 Web/TUI 适配器
 Python SDK 是主入口：
 
 ```python
-from floodmind import Agent, ModelClient, Workspace, build_agent_tool
+from floodmind import Agent, ModelClient, SkillRegistry, SkillRoot, Workspace, build_agent_tool
+from pathlib import Path
 
 llm = ModelClient(
     api_key="sk-xxx",
@@ -128,9 +127,19 @@ llm = ModelClient(
 )
 
 workspace = Workspace.from_folder("D:/work/project-a", session_id="sdk-agent")
-agent = Agent(llm=llm, workspace=workspace)
+agent = Agent(
+    llm=llm,
+    workspace=workspace,
+    skill_roots=[Path("D:/host/ls-agent/skills")],
+    skill_writable_root=Path("D:/host/floodmind-skills"),
+)
+print(agent.skill_registry.catalog())
 print(agent.run("分析当前工作区的数据并生成摘要"))
 ```
+
+`skill_roots` 是宿主部署 Skill 的显式只读入口，路径在构造时归一化为绝对路径，因此不受后续 CWD 变化影响；`workspace` 只定义普通任务文件的工作范围，**不会被隐式扫描为 Skill 根**。合并优先级固定为 **内置 > 宿主 > 项目 > `.claude` 兼容 > ephemeral**。运行时会把所有 Skill 根加入可读授权，但不会因此向普通 `Write` / `Edit` / `Bash` 授予写权限；只有 `skill_writable_root` 可由完整 runtime 的 Skill CRUD 写入，内置、只读宿主根及 ephemeral Skill 均不能更新或移除，所有 CRUD 都执行 canonical path、symlink 与 containment 校验。
+
+bare 与 full runtime 都注入 Skill catalog 并提供实例绑定的 `GetSkill`；full runtime 额外只向 orchestrator 注册 CRUD，specialist 仍只有 `GetSkill`。每个 Agent 的 `GetSkill` 缓存、Curator 统计、TaskExperience 以及状态路径彼此隔离。`get_skill_registry()` / `register_skill()` 继续使用历史默认全局 Registry 与原状态路径，仅供旧调用方兼容。顶层公共导出包括 `SkillRegistry`、`SkillRoot`、`create_skill_registry`。LS_Agent 等宿主可把已部署的 `SKILL.md` 目录传入 `skill_roots`，本仓库不修改 LS_Agent 自身。
 
 本地一次性任务可用最小 CLI：
 
@@ -140,11 +149,7 @@ floodmind providers
 floodmind config show
 ```
 
-`floodmind web` / `floodmind serve` / `floodmind tui` 当前只输出 legacy 迁移提示；如确需旧界面，请安装 legacy extra 或使用兼容分支。
-
-### 4. Legacy Web / TUI
-
-Web/TUI 代码仍保留在仓库中，便于迁移期兼容和参考，但不再属于 SDK 核心公共面。新集成应优先使用 Python SDK 或 `floodmind run`，自行对接桌面端、平台端或业务系统界面。
+`floodmind web` / `floodmind serve` / `floodmind tui` 命令已随 v2.0.0 移除；前端集成请通过 Python SDK 或 `floodmind run` 完成。
 
 ---
 
@@ -160,7 +165,6 @@ Web/TUI 代码仍保留在仓库中，便于迁移期兼容和参考，但不再
 | `floodmind skill create <name>` | 从模板创建新 Skill |
 | `floodmind skill list` | 列出已安装的 Skill |
 | `floodmind providers` | 列出可用 AI Provider |
-| `floodmind web` / `serve` / `tui` | Legacy 入口提示；不再启动核心 Web/TUI |
 
 ```bash
 # 脚本调用（单次任务）
@@ -171,7 +175,7 @@ floodmind run "分析水库水位数据" -m deepseek-v4-flash
 
 ## 二次开发
 
-FloodMind 的核心集成方式是 Python SDK；旧 Web/TUI 适配器已进入 legacy 迁移期，不建议新系统继续基于 HTTP UI 层扩展。
+FloodMind 的核心集成方式是 Python SDK。
 
 ### Python SDK（嵌入式 Agent）
 
@@ -336,21 +340,6 @@ for chunk in agent.stream("分析水位数据"):
 # 单次执行
 result = agent.run("生成水文报告")
 ```
-
-### Legacy HTTP API
-
-HTTP API 属于旧 Web 适配器迁移路径。新系统请优先直接嵌入 Python SDK；如迁移期仍需 HTTP 层，可参考 `floodmind/server/` 中的 legacy routes，并安装 `floodmind[legacy]`。
-
-旧 Web 适配器曾提供以下端点：
-
-| 端点 | 方法 | 说明 |
-|------|------|------|
-| `/api/chat` | POST | 流式聊天（SSE/NDJSON） |
-| `/api/init` | POST | 初始化会话 Agent |
-| `/api/sessions` | GET | 列出所有会话 |
-| `/api/upload` | POST | 上传文件 |
-| `/api/models` | GET | 模型列表 |
-| `/api/health` | GET | 健康检查 |
 
 ### 自定义 Skill
 
@@ -609,24 +598,16 @@ FloodMind/
 │   │   ├── runtime/               #   Runtime 服务
 │   │   │   ├── contracts/         #     数据契约（tools, messages, events, permissions, workspace）
 │   │   │   ├── services/          #     工具执行/权限/询问/路径/检查点/日志/追踪/沙箱/工作区
-│   │   │   └── adapters/          #     中性 runtime API 适配器；Flask/SSE 旧模块仅为 legacy shim
+│   │   │   └── adapters/          #     中性 runtime API 适配器
 │   │   ├── mcp_client.py          #   MCP 客户端池 + build_mcp_tool_specs
 │   │   ├── agent_registry.py      #   Agent 类型注册
-│   │   ├── api.py                 #   Agent SDK 类（嵌入式 bare 模式入口）
+│   │   ├── api.py                 #   Agent SDK 类（嵌入式入口）
 │   │   └── scheduled_task_runtime.py  # 定时任务运行时
 │   ├── config/                    # 全局配置
 │   │   ├── settings.py            #   主配置模型
 │   │   ├── search_config.py       #   WebSearch 配置
 │   │   ├── model_presets.py       #   模型预设
 │   │   └── settings_template.json #   初始模板
-│   ├── server/                    # Web 后端模块化
-│   │   ├── __init__.py            #   Flask create_app() 工厂
-│   │   ├── agent_factory.py       #   Agent 创建/复用
-│   │   ├── session_state.py       #   运行时状态（流控/中断/token）
-│   │   ├── sanitize.py            #   SSE 脱敏
-│   │   ├── config.py              #   常量 & 配置
-│   │   ├── file_utils.py          #   文件工具 & 产物提取
-│   │   └── routes/                #   Blueprint 路由（chat/sessions/files/models/memory/permission/checkpoints/tasks）
 │   ├── profile/                   # 身份与提示词定制
 │   │   ├── soul.py                #   SOUL.md 加载与种子
 │   │   └── guidance.py            #   行为指导常量
@@ -643,7 +624,7 @@ FloodMind/
 │   ├── models/                    # 已弃用的 model 目录
 │   ├── skills/                    # Skill 系统（10 个内置 Skill）
 │   │   ├── base.py                #   Skill dataclass + 发现 + catalog
-│   │   ├── registry.py            #   SkillRegistry 单例
+│   │   ├── registry.py            #   SkillRoot + 每 Agent SkillRegistry + 全局兼容 getter
 │   │   ├── skill_curator.py       #   SkillCurator 生命周期
 │   │   └── <skill-name>/          #   各 Skill 子目录（csv/docx/pdf/pptx/xlsx/...）
 │   ├── tools/                     # Agent 工具层
@@ -651,15 +632,10 @@ FloodMind/
 │   │   ├── base_tools.py          #   内置工具（GetSkill/Bash/Write/Read/...）
 │   │   ├── file_tools.py          #   文件工具
 │   │   └── memory_tools.py        #   记忆工具
-│   ├── tui/                       # 终端 TUI (Textual)
 │   └── cli.py                     # CLI 入口
 ├── contrib/                       # 已外置为 MCP 服务的脚本（chronos/hydro_case_client）
-├── web/                           # React 前端
-├── tests/                         # 633 passed / 1 legacy Web optional skip（v1.1.9 core-only 环境）
-├── web_server.py                  # Flask 入口（日志 + SessionManager + waitress）
-├── scheduler.py                   # 后台调度
+├── tests/                         # v2.0.0 完整回归 1154 passed / 1 skipped
 ├── main.py                        # CLI 交互入口
-├── start.py                       # 统一启动入口
 ├── Dockerfile                     # Docker 构建
 ├── docs/                          # 文档
 │   ├── DEVELOPER_GUIDE.md         #   二次开发指南
@@ -670,42 +646,29 @@ FloodMind/
 
 ---
 
-## API 概览
+## SDK API 概览
 
-| 端点 | 方法 | 说明 |
-|------|------|------|
-| `/api/chat` | POST | 流式聊天（SSE/NDJSON） |
-| `/api/init` | POST | 初始化会话 Agent |
-| `/api/sessions` | GET | 列出所有会话 |
-| `/api/sessions/<id>` | GET / DELETE | 会话详情 / 删除 |
-| `/api/session/config` | POST | 更新会话配置（模型切换） |
-| `/api/sessions/<id>/messages` | GET | 分页获取消息（cursor-based） |
-| `/api/sessions/<id>/events` | GET | 事件溯源回放 |
-| `/api/upload` | POST | 上传文件 |
-| `/api/files` | GET | 列会话文件 |
-| `/api/files/<id>/download` | GET | 文件下载 |
-| `/api/models` | GET | 模型列表 |
-| `/api/scheduled-tasks` | GET / PATCH / DELETE | 定时任务管理 |
-| `/api/token-usage` | GET | 获取会话 Token 用量统计 |
-| `/api/memory/search` | POST | 搜索记忆 |
-| `/api/permission/respond` | POST | 工具权限确认 |
-| `/api/health` | GET | 健康检查 |
+FloodMind 面向宿主暴露的标准 SDK 契约（desktop / 业务平台据此集成）：
+
+| API | 说明 |
+|------|------|
+| `floodmind.Agent` | 嵌入式 Agent（`run` / `stream` / `chat` / `resume`） |
+| `Agent.conversation_id` / `task_id` / `run_id` / `thread_id` | 标准身份 |
+| `Agent.events_after(sequence)` | 返回 Journal 派生的 committed 公共事件（带 canonical `sequence`，可重放/对账） |
+| `Agent.resume(checkpoint_id, user_message)` | Journal Replay + Reconciliation 恢复 |
+| `floodmind.ModelClient` / `resolve_model` | LLM 客户端与模型解析 |
+| `floodmind.Workspace` / `build_folder_workspace` | 工作区契约 |
+| `floodmind.build_agent_tool` / `Skill` / `SkillRegistry` | 工具与 Skill 注册 |
 
 ---
 
 ## 开发指南
 
 ```bash
-# 前端开发
-cd web && npm run dev      # Vite 开发服务器 (:5173)
-
 # 运行测试
 python -m pytest tests/ -q
-# v1.1.9 core-only 验证结果：633 passed, 1 skipped
-# skipped = legacy Web adapter 需要可选 floodmind[web] / Flask extra
-
-# 前端构建（legacy Web，仅迁移期参考）
-cd web && npm run build
+# v2.0.0 完整回归：1154 passed, 1 skipped
+# 唯一 skipped = Linux Landlock 平台测试，Windows 环境跳过
 
 # 新增 Skill（无需改代码）
 mkdir skills/my-skill

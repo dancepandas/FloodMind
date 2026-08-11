@@ -1,12 +1,12 @@
-# FloodMind 架构总览（SDK-first）v4.1
+# FloodMind 架构总览（SDK-first）v4.2
 
-> **更新日期**: 2026-08-06
-> **变更摘要**: SDK v1.1.9；新增后台任务（`Bash run_in_background=True` + `BackgroundTaskService`，stdout/stderr 直写文件，TaskOutput/TaskList/TaskKill，executor 完成通知注入 user 消息，EventBus `background_task_completed` 空闲唤醒）；宿主权限四修复——① `permission_handler` 改为宿主最高裁决（True=直接 ALLOW 跳过 permission_service，False=DENY，None/异常=交 SDK）；② ASK 无宿主响应超时自动拒绝（不再无限轮询卡死）；③ Bash 写范围可配（`Workspace.add_writable_root` 运行时扩展 + web_session 自动含会话目录含 uploads/）；④ 后台任务 kill/失败状态变化立即通知 Agent（`[后台任务完成/失败/被终止]`）；加五项健壮性修复——① `exec_bash` 子进程关 stdin（`stdin=DEVNULL`，裸 python/交互命令不再挂起到超时）；② Bash 描述动态带 shell 类型（Windows=PowerShell 语法）+ 声明 stdin 已关；③ 完整模式注册宿主自定义 tools（此前被静默丢弃）；④ 完整模式保留宿主 system_prompt（热插拔重建不丢）；⑤ 未声明 permission_policy 回退 is_readonly（只读放行，不再一刀切 DENY）。v1.1.7 彻底修复 MiniMax `tool id not found (2013)` 三层叠加根因——① 流式 tool call 空 id 时历史 id 不一致（fallback id 写回 accumulator）；② `ContextCompressor` 机械切尾部拆散工具调用原子组留下孤儿 tool（现按原子组对齐切分 `_aligned_split_points`，head 至少保留首条 user）；③ `context_window` 误用全局默认模型窗口（现 `_resolve_context_window` 跟随注入模型 preset）。v1.1.6 移除 `SearchTools` 工具，工具发现与 skill 一致——`## 可用工具` 提示目录直接列出全部工具名称与基本描述，参数统一由 `GetTool` 查看并加载，模型无需搜索；移除工具输出静默字符截断（`_finalize_tool_output` 8000 字符上限 + journal 1000 字符内联阈值），模型始终看到完整工具结果，上下文由 token 级 `ContextCompressor` 兜底；`short_description` 剥离 `[必填]/[可选]` 参数提示前缀。v1.1.5 含四项健壮性/权限收敛：① `ToolExecutionService` 统一清洗工具调用参数键名（模型偶发畸形键如 `{"tool_name"": ...}` 不再 `**kwargs` 崩，改走正常执行/清晰校验反馈）；② exec 命令体写目标检查（`>`/`Set-Content`/`Copy-Item` 等越权写被 DENY，堵住"只读授权被 Bash 绕过"漏洞，`exec_write_scanner`）；③ folder-first 读白名单加入已装 skill 注册表（可直读 SKILL.md/references）；④ PathService 读取拒绝原因附可操作引导。v1.1.4 含 create() 连接阶段 LLM 流式重试；v1.1.3 含 mid-stream 断流重试关键词；v1.1.2 含 CreateScheduledTask 描述修正 + 调度 workspace unknown 修复。
+> **更新日期**: 2026-08-11
+> **变更摘要**: SDK v2.0.0；发布宿主项目 Skill roots：`Agent(skill_roots=[...], skill_writable_root=...)` 与公共 `agent.skill_registry`。Agent runtime 使用每实例独立 Registry + Curator，隔离 bound GetSkill cache、Curator、TaskExperience 及状态路径；默认全局 `get_skill_registry/register_skill` 仅保留兼容旧行为与历史状态路径。Skill 优先级固定为内置 > 宿主 > 项目 > `.claude` > ephemeral；显式根规范化为 CWD 无关绝对路径，workspace 不等于 Skill roots 且不会被隐式扫描。roots 在 runtime 只读，普通 Write/Edit/Bash 不获写权；CRUD 仅操作 writable source，并拒绝 builtin/readonly/ephemeral Update/Remove，执行 symlink/containment 检查。bare/full 均提供 catalog + GetSkill；full 仅向 orchestrator 增加 CRUD，specialist 只有 GetSkill。顶层导出 `SkillRegistry` / `SkillRoot` / `create_skill_registry`；LS_Agent 可通过显式 roots 部署 SKILL.md，本仓库不修改 LS_Agent。完整回归：**1154 passed, 1 skipped**（skipped = Linux Landlock 平台测试，Windows 环境跳过）。
 > 详细评估见 [`ASSESSMENT.md`](./ASSESSMENT.md)；CC 风格文件管理差距与改造方案见 [`CC_FILE_MANAGEMENT_GAP_ANALYSIS.md`](./CC_FILE_MANAGEMENT_GAP_ANALYSIS.md)。
 
 ## 1. 系统定位
 
-FloodMind 是一个 **SDK-first 中文水文预报 AI Agent Runtime**：宿主系统通过 Python SDK 创建 `Agent`，注入 `ModelClient`、业务工具、Skill/MCP 能力和 `Workspace`，由 Agent 完成规划→调用工具/技能（读数据、跑模型、出图、写报告）→交付产物。Web/TUI 代码仅作为 legacy adapter 保留；新平台、桌面助手或服务端集成应直接嵌入 SDK。
+FloodMind 是一个 **SDK-first 中文水文预报 AI Agent Runtime**：宿主系统通过 Python SDK 创建 `Agent`，注入 `ModelClient`、业务工具、Skill/MCP 能力和 `Workspace`，由 Agent 完成规划→调用工具/技能（读数据、跑模型、出图、写报告）→交付产物。旧 Web/TUI 实现已在 v2.0.0 移除；新平台、桌面助手或服务端集成直接嵌入 SDK，命令行任务使用 `floodmind run`。
 
 ## 2. 进程拓扑
 
@@ -31,12 +31,9 @@ FloodMind 是一个 **SDK-first 中文水文预报 AI Agent Runtime**：宿主�
 └──────────────────────────────┬───────────────────────────────────────┘
                                │
         folder-first: <workspace>/.floodmind/{sessions,artifacts,tmp,scripts,sandboxes}
-        web legacy:   data/sessions/<sid>/{outputs,uploads,memory,journal,checkpoints,trace}
-
-Legacy adapter（迁移期保留，不属于 SDK 核心依赖）:
-  floodmind/server/ + web_server.py + web/React
-  floodmind/tui/ Textual
 ```
+
+v2.0.0 已移除旧 Web/TUI 进程与前端；集成边界统一为 Python SDK / `floodmind run`。
 
 ## 3. 六大子系统（更新后）
 
@@ -45,45 +42,37 @@ Legacy adapter（迁移期保留，不属于 SDK 核心依赖）:
 | **SDK API** | `floodmind/__init__.py`, `floodmind/agent/api.py` | 顶层公共入口：`Agent` / `ModelClient` / `Workspace` / `build_agent_tool` / Provider Pipeline / MCP helpers | SDK-first 主入口；base install 不依赖 Web/TUI |
 | **Agent 执行核心** | `floodmind/agent/native/` | 状态机 executor + NativeFloodAgent（prompt 分层、工具注册、MCP/Skill 管理、委派、流式） | `Agent` 封装普通用法；`NativeFloodAgent` 为 advanced runtime |
 | **Runtime 服务** | `floodmind/agent/runtime/{contracts,services,adapters}/` | 工具执行/权限/询问/路径/检查点/日志/追踪/沙箱/工作区 | Harness 级 Workspace；folder-first cwd-first 路径解析；`.floodmind` 收纳；Checkpoint state-only，不复制 workspace 文件 |
-| **记忆与会话** | `floodmind/memory/` | DualMemory（扁平 _turns）+ SessionManager + session_store(SQLite) + task_experience | 删除 SimpleMemory、遗留压缩子系统 (b)；SessionManager 新增 git worktree 会话隔离 (create/remove/fork) |
-| **工具与技能** | `floodmind/tools/` + `floodmind/skills/` + `contrib/` | AgentTool↔ToolSpec 双抽象 + SkillRegistry 单例 + SkillCurator 生命周期 | **重写**: AgentTool.to_tool_spec() 唯一转换点；SkillRegistry 替代双 registry；Curator 整合；chronos 迁至 contrib/ |
+| **记忆与会话** | `floodmind/memory/` | DualMemory（扁平 _turns）+ SessionManager + task_experience | 删除 SimpleMemory、遗留压缩子系统 (b)；SessionManager 提供 git worktree 会话隔离 (create/remove/fork) |
+| **工具与技能** | `floodmind/tools/` + `floodmind/skills/` + `contrib/` | AgentTool↔ToolSpec 双抽象 + 每 Agent SkillRegistry/SkillCurator + 默认全局兼容 API | Agent 实例隔离；宿主显式 roots；bound GetSkill；orchestrator-only CRUD；chronos 迁至 contrib/ |
 | **MCP 集成** | `floodmind/agent/mcp_client.py` | McpClientPool 单例 + build_mcp_tool_specs + 生命周期原语 | **重写**: 连接/注册解耦；list/disconnect 原语；Agent 工具暴露 |
-| **Legacy Web Adapter** | `web_server.py` + `floodmind/server/` + `web/` | 旧 HTTP/React 适配层 | 迁移期保留；SDK 核心不得依赖 |
-| **Legacy TUI Adapter** | `floodmind/tui/` | 旧 Textual 终端界面 | 迁移期保留；命令行入口仅输出 legacy 提示 |
 
 ## 4. 核心调用图（一次用户轮次，更新后）
 
 ```mermaid
 flowchart TD
-  U["用户输入<br/>POST /api/chat"] --> CHAT["chat_bp.chat()<br/>floodmind/server/routes/chat.py"]
-  CHAT --> QC{is_queued?}
-  QC -- 是 --> Q["memory.add_user_message<br/>return 202 queued"]
-  QC -- 否 --> AF["get_or_create_agent<br/>floodmind/server/agent_factory.py<br/>(配置漂移则重建)"]
-  AF --> PUMP["pump 线程 _run_agent_pump<br/>floodmind/server/routes/chat.py"]
-  PUMP --> ST["agent.stream(user_input, abort_check=session_abort_flags)"]
-  ST --> AUM["memory.add_user_message → _turns += user"]
-  ST --> RLC["_run_loop 线程"]
-  RLC --> BUILD["构建 state.messages = [system×N, experience, 精简history, user]"]
-  BUILD --> EXEC["executor.run_from_state(state)"]
+  HOST["Python 宿主 / floodmind run"] --> API["Agent.run / chat / stream"]
+  API --> ID["标准身份<br/>conversation_id / task_id / run_id / thread_id"]
+  API --> BUILD["构建 state.messages<br/>system + experience + history + user"]
+  BUILD --> EXEC["NativeAgentExecutor.run_from_state(state)"]
 
   subgraph LOOP["状态机循环 created→awaiting_llm↔awaiting_tool→completed"]
     EXEC --> INJ["_inject_queued_user_messages"]
     INJ --> LLM["_on_awaiting_llm → model_client.stream_chat"]
-    LLM --> EVT["ModelEvent → EventBus → queue → SSE"]
+    LLM --> EVT["ModelEvent → EventBus → Agent.stream"]
     LLM --> TC{有 tool_calls?}
-    TC -- 否(终态) --> WR1["_write_round_to_memory is_final=True"]
+    TC -- 否 --> WR1["_write_round_to_memory is_final=True"]
     TC -- 是 --> AT["_on_awaiting_tool"]
-    AT --> PERM["ToolExecutionService.execute → PermissionService → AskService(可选)"]
-    PERM --> TOOL["tool.func (含 MCP/Skill CRUD)"]
-    TOOL --> WR2["_write_round_to_memory is_final=False → add_assistant_round"]
-    WR2 --> JOURNAL["journal.record_turn"]
+    AT --> PERM["ToolExecutionService → PermissionService → AskService"]
+    PERM --> TOOL["tool.func<br/>内置 / MCP / Skill"]
+    TOOL --> WR2["_write_round_to_memory is_final=False"]
+    WR2 --> JOURNAL["Journal 记录 committed 事件"]
     WR2 --> INJ
   end
 
-  EVT --> SSE["Flask 生成器 yield NDJSON → sanitize_payload"]
-  SSE --> FE["前端 consumeSseStream → message-blocks 渲染"]
-  WR1 --> DONE["stream_end → 前端"]
-  ABORT["⏸ /api/session/pause → session_abort_flags=True"] -.中断.-> EXEC
+  EVT --> HOST
+  JOURNAL --> EVENTS["Agent.events_after(sequence)"]
+  CHECKPOINT["Agent.resume(checkpoint_id)"] --> EXEC
+  WR1 --> DONE["最终文本 / committed 事件"]
 ```
 
 ## 5. 状态机 (NativeAgentExecutor)
@@ -107,8 +96,8 @@ created → awaiting_llm ──┐
 
 1. `memory.add_user_message` → `_turns += {role:user}`
 2. `get_chat_history_for_system_prompt` → **精简上下文**（早期轮压缩摘要 + 近 6 条原文），注入 system 消息
-3. LLM 流式产出 → EventBus → queue → 前端增量渲染
-4. 工具调用经 `ToolExecutionService`（权限→校验→300s 线程）→ journal 归档
+3. LLM 流式产出 → EventBus → `Agent.stream()` 结构化事件
+4. 工具调用经 `ToolExecutionService`（权限→校验→执行）→ Journal 归档
 5. **整轮原子完成** → `add_assistant_round(content, reasoning, tool_calls, is_final)` → `_turns += {role:assistant}` + `save_chat_history`
 6. 后台：task_experience 捕获 → 经验树 → 可能生成 skill（触发 `refresh_skills`）
 
@@ -158,50 +147,34 @@ created → awaiting_llm ──┐
 
 **设计原则**：系统运行状态下随时接入随时发现，不需要重启。连接与注册解耦，Agent 可自维护 MCP 服务。
 
-## 9. Skill 体系统一架构（新）
+## 9. Skill 体系统一架构（v2.0.0）
 
-```
-┌─────────────────────────────────────────────────────────────────┐
-│                SkillRegistry (全局单例)                           │
-│                                                                 │
-│  roots = [floodmind/skills/, PROJECT_ROOT/skills/,               │
-│           PROJECT_ROOT/.claude/skills/]  ← CWD 无关, 包定位      │
-│  writable_root = PROJECT_ROOT/skills  ← CreateSkill 落盘目标     │
-│                                                                 │
-│  _scan() → discover_skills_from_roots → _parse_skill_md          │
-│         → 合并 ephemeral (编程式) → filter disabled              │
-│         → generate_skill_catalog (单 catalog)                    │
-│                                                                 │
-│  refresh() → _scan + _notify_changed (清 GetSkill 缓存)         │
-│  register_skill(skill) → 编程式注册 (去重)                       │
-│  set_disabled(name, bool) → 禁用/启用 (内存标记)                 │
-│  list_skills() / get_skill(name) / catalog()                     │
-└──────────────┬──────────────────────────────────────────────────┘
-               │
-    ┌──────────┴──────────┐
-    │                     │
-    ▼                     ▼
-┌──────────────┐  ┌──────────────────────────────────────┐
-│ Agent CRUD   │  │ SkillCurator (单例)                   │
-│              │  │                                      │
-│ ListSkills   │  │ record_usage(name, success)          │
-│ CreateSkill  │  │   ← GetSkill 每次调用自动触发         │
-│ UpdateSkill  │  │                                      │
-│ RemoveSkill  │  │ run_maintenance_if_needed()          │
-│ RefreshSkills│  │   ← _init_tools 时调用 (6h 间隔)     │
-│              │  │   → stale 标记 → 过期归档 → 重复检测  │
-│              │  │                                      │
-│ 全部 state_  │  │ archive_skill(name) → .archived/     │
-│ write; 仅    │  │ restore_skill(name) → writable_root  │
-│ orchestrator │  │ find_duplicates() → 相似度检测        │
-└──────────────┘  └──────────────────────────────────────┘
+```text
+Agent(skill_roots=[...], skill_writable_root=...)
+  ├─ SkillRegistry（每 Agent 独立；公开 agent.skill_registry）
+  │    roots: builtin > host > project > .claude > ephemeral
+  │    显式路径：构造时绝对化，CWD-independent
+  │    workspace：不作为 Skill root，不隐式扫描
+  │    catalog / ephemeral / refresh callbacks：实例隔离
+  ├─ SkillCurator(registry=该实例)
+  │    usage / stale / archive / duplicate / state path：实例隔离
+  ├─ bound GetSkill
+  │    bare + full 都可用；cache 由该 Registry refresh 单独清理
+  └─ Skill CRUD
+       仅 full orchestrator；specialist 无 CRUD
+       仅 skill_writable_root；canonical/symlink/containment 校验
 ```
 
-**关键设计**：
-- **单一发现源**：`SkillRegistry` 是唯一权威，替代旧双 registry（`skills.SKILL_REGISTRY` + `tools._SKILL_REGISTRY`）
-- **热插拔闭环**：auto-gen 写 `writable_root` → 即发现 → `_on_skill_generated` 回调触发 `refresh_skills`
-- **只归档不删除**：curator 只做 `shutil.move` 到 `.archived/`，可恢复
-- **线程安全**：`SkillRegistry` 用 `threading.Lock`；`SkillCurator` 用 `threading.RLock`（支持 `run_maintenance` → `archive_skill` 重入）
+**权限与兼容边界**：
+
+- roots 在 runtime 只获得读授权，普通 `Write` / `Edit` / `Bash` 不因此获得写权限；
+- builtin、readonly root 与 ephemeral Skill 不能 Update/Remove；
+- `TaskExperience` 的生成目标和状态路径绑定当前 Agent writable root；
+- `get_skill_registry()` / `register_skill()` 继续使用历史默认全局 Registry 与原状态路径，仅服务旧 API；Agent runtime 不再使用全局 Skill 单例；
+- 顶层公共导出：`SkillRegistry`、`SkillRoot`、`create_skill_registry`；
+- LS_Agent 可部署 `SKILL.md` 后把目录作为显式 roots 注入，本仓库不修改 LS_Agent。
+
+详细发现、消费、CRUD 和隔离数据流见 [`SKILL_ARCHITECTURE.md`](./SKILL_ARCHITECTURE.md)。
 
 ## 10. 工具体系：AgentTool ↔ ToolSpec
 
@@ -247,7 +220,7 @@ MCP 工具: 直造 ToolSpec（业界标准协议，inputSchema 已是终点 JSON
 2. **PermissionService.check**：policy_type (readonly/write/exec/ask/network/internal/state_write/skill_script) → 子代理分层白名单 → planning 模式硬门禁 write/exec/state_write/SubAgent/ParallelTask
 3. **ToolSpec.check_permissions 兜底**
 
-`ask` 策略 → AskService（`threading.Event` 阻塞）→ 前端 PermissionBanner → 用户批准/拒绝。
+`ask` 策略 → AskService（`threading.Event` 阻塞）→ 宿主通过 `permission_ask` 事件批准/拒绝。
 
 ## 12. 持久化布局
 
@@ -271,21 +244,20 @@ skills/                               ⭐ Skill 写入根 (PROJECT_ROOT/skills)
 contrib/                              chronos 等已外置为 MCP 服务的脚本（迁移出 floodmind/skills/）
 ```
 
-Checkpoint 在 v1.1.9 中只保存 Agent runtime state：`state.json` 是 `AgentLoopState` 序列化，`manifest.json` 记录 checkpoint 元数据和父 checkpoint 链。它不复制 workspace 文件，也不承担文件回滚职责；产物通过 artifact/journal 记录引用，文件版本化或回滚如需支持应由独立 change journal / artifact versioning 能力承担。
+Checkpoint 自 v1.1.9 起只保存 Agent runtime state：`state.json` 是 `AgentLoopState` 序列化，`manifest.json` 记录 checkpoint 元数据和父 checkpoint 链。它不复制 workspace 文件，也不承担文件回滚职责；产物通过 artifact/journal 记录引用，文件版本化或回滚如需支持应由独立 change journal / artifact versioning 能力承担。
 
-## 13. 线程模型
+## 13. 并发与后台执行
 
-- **Flask 请求线程**（waitress 8 / gunicorn 4）
-- **pump 线程** `agent-pump-<sid>`：daemon，跑 `_run_agent_pump`（`floodmind/server/routes/chat.py`）
-- **agent 子线程** `_run_loop`：`copy_context().run()`，SDK 内部跑 executor 状态机
-- **心跳线程** `heartbeat-<sid>`：每 8s
-- **标题生成线程**：首条消息后异步 LLM（`floodmind/server/routes/chat.py`）
-- **cleanup 线程**：SessionManager 后台清理
-- 同步锁：`SkillRegistry._lock` (Lock)、`SkillCurator._lock` (RLock)、`McpClientPool._lock` (Lock)、`_InstanceToolRegistry._lock` (Lock)、`session_streaming_lock` (Lock)、`session_abort_flags_lock` (Lock)
+- Agent 执行循环由 SDK 内部驱动，宿主通过 `run()` / `chat()` / `stream()` 调用。
+- `ChildThreadRuntime` 提供子线程运行时与隔离上下文。
+- `BackgroundTaskService` 托管后台进程、完成通知与进程树终止。
+- `SandboxService` 与 `ArtifactService` 提供隔离工作区和 content-addressed 产物发布。
+- SDK 调度能力仍由 `floodmind/agent/scheduled_task_runtime.py` 和 `base_tools` 调度工具提供。
+- 同步锁：`SkillRegistry._lock` (Lock)、`SkillCurator._lock` (RLock)、`McpClientPool._lock` (Lock)、`_InstanceToolRegistry._lock` (Lock)。
 
-## 14. 脱敏
+## 14. 事件与数据边界
 
-`_sanitize_payload`（SSE 递归白名单）+ `sanitize_output`（路径→basename、内部 id→占位、移除注入块）+ `_sanitize_deep`。
+公共事件由 Journal committed 记录派生，通过 `Agent.events_after(sequence)` 读取；宿主负责面向用户的渲染与额外脱敏。
 
 ## 15. 关键文件索引（更新后）
 
@@ -305,19 +277,14 @@ Checkpoint 在 v1.1.9 中只保存 Agent runtime state：`state.json` 是 `Agent
 | 沙箱 | `floodmind/agent/runtime/services/sandbox_service.py` + `process_sandbox.py` |
 | 记忆 | `floodmind/memory/dual_memory.py` |
 | 会话管理 | `floodmind/memory/session_manager.py` |
+| Journal 索引 | `floodmind/agent/runtime/services/journal_index.py` (`SqliteJournalIndex`；SQLite 派生且可重建，JSONL 权威) |
+| 子线程运行时 | `floodmind/agent/runtime/services/child_thread_runtime.py` |
+| 沙箱 / 产物 / 后台任务 | `floodmind/agent/runtime/services/{sandbox_service,artifact_service,background_task_service}.py` |
+| SDK 调度 | `floodmind/agent/scheduled_task_runtime.py` + `floodmind/tools/base_tools.py` |
 | 经验树 | `floodmind/memory/task_experience.py` + `experience_tree.py` |
 | 技能发现 | `floodmind/skills/base.py` |
-| ⭐ 技能注册表 | `floodmind/skills/registry.py` (单例 SkillRegistry) |
-| ⭐ 技能策展 | `floodmind/skills/skill_curator.py` (SkillCurator + 巡检) |
-| Web 入口 | `web_server.py`（legacy Flask 入口；core package 不依赖） |
-| Web 路由 | `floodmind/server/routes/{chat,sessions,files,models,memory,permission,checkpoints,tasks}.py` |
-| Web Agent 工厂 | `floodmind/server/agent_factory.py` (get_or_create_agent) |
-| Web 运行时状态 | `floodmind/server/session_state.py` (流控/中断标志/token 用量) |
-| Web 脱敏 | `floodmind/server/sanitize.py` |
-| Web 文件工具 | `floodmind/server/file_utils.py` (产物提取/预览) |
-| 调度 | `scheduler.py` |
+| ⭐ 技能注册表 | `floodmind/skills/registry.py` (`SkillRoot` + 每 Agent `SkillRegistry` + 默认全局兼容 getter) |
+| ⭐ 技能策展 | `floodmind/skills/skill_curator.py` (Registry-bound `SkillCurator` + 兼容全局 getter) |
 | 配置 | `floodmind/config/settings.py` |
-| 嵌入式 SDK 入口 | `floodmind/agent/api.py` (Agent 类 → bare=True) |
-| 前端 SSE | `web/src/features/chat/lib/{sse-reader,stream-events}.ts` |
-| 前端消息块 | `web/src/features/chat/lib/message-blocks.ts` |
+| 嵌入式 SDK 入口 | `floodmind/agent/api.py` (`Agent.run/stream/chat/resume/events_after` + 标准身份) |
 | 外置脚本 | `contrib/{chronos,hydro_case_client,validate_skill_methods}.py` |

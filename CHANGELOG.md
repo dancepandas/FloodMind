@@ -2,6 +2,49 @@
 
 All notable changes to FloodMind are documented in this file.
 
+## [2.0.0] - 2026-08-11
+
+> 重大版本：按 `FM_ARCHITECTURE_BASELINE.md` 完成 **forward-only 架构迁移（P0–P8）**。不向后兼容、不 fallback、不保留 legacy adapter，直接落 TARGET 契约。
+
+### Added（TARGET 架构交付）
+
+- **Canonical Event Journal + Deterministic Reducer**：JSONL Journal 为唯一运行事实源；确定性 `reduce(state, event)` 派生状态；`_turns` 变为 Reducer 派生投影，旧 `chat_history.json` 历史源下线且无读取回退。
+- **身份层级**：`conversation_id / task_id / run_id / thread_id / turn_id / attempt_id / call_id / transaction_id / artifact_id / checkpoint_id`（§3.1）。
+- **Tool Transaction + Approval Fingerprint + 幂等**：`proposed→…→succeeded/failed/denied/cancelled/indeterminate` 终态机，Pending Reconciliation，Checkpoint Resume（Journal Replay + Reconciliation）。
+- **Model Layer 四层**：`ModelTransport → ProviderCodec → ResponsePipeline → ModelCapabilities`；Provider 原生块无损保存。
+- **Context / Memory**：Projection Manifest、输入预算、Journal-backed Compact（Atomic Groups + Summary Event）、Soul/Core/AGENTS 版本化 + Provenance。
+- **Sandbox / Artifact / Background**：`SandboxBackend`（OS/Container 边界，Landlock fail-closed）、`ArtifactService`（内容寻址 + 原子发布）、Background Kill 验证链 + Restart PID Reconcile。
+- **ChildThread Runtime**：`ChildThreadRuntime` 替换 ad-hoc Specialist —— quota（max_turns/max_tokens/wall_clock）、Typed `SubagentResult`、父取消树（验证式清理）、child background namespace、严格子集权限隔离、SandboxBackend 会话绑定。
+- **标准 SDK 公共 API**：`Agent` 标准身份 + `events_after(sequence)`（Journal 派生 committed 事件，可重放/对账）+ `resume(checkpoint_id)`（ResumeService 真实路径）。
+- **SQLite 派生 Journal 索引**：`SqliteJournalIndex` 可重建、count 完整性校验、跨线程安全；JSONL 仍为唯一权威（§18）。
+
+### Removed
+
+- **Web / TUI 前端**：`floodmind/server/`、`floodmind/tui/`、`web_server.py`、`start.py`、web 调度器与 web SSE 存储（`sync_events`）整体移除；CLI `web` / `serve` / `tui` 命令删除。
+- **历史源 / legacy 适配层**：`chat_history.json` 读取回退、ContextVar 全局 getter 的 fallback、旧 `AgentTool→ToolSpec` 兼容、Shadow Journal 双写过渡。
+
+### Verification
+
+- v2.0.0 完整回归：**1154 passed, 1 skipped**（唯一 skipped = Linux Landlock 平台测试，Windows 环境跳过）。
+
+## [1.2.0] - 2026-08-08
+
+### Added
+
+- **宿主项目 Skill roots 公共 API**：`Agent(skill_roots=[...], skill_writable_root=...)` 支持宿主显式部署一个或多个 `SKILL.md` 根，并通过公开的 `agent.skill_registry` 检查实例目录与解析结果。顶层新增稳定导出 `SkillRegistry`、`SkillRoot`、`create_skill_registry`。
+- **每 Agent Skill 运行时隔离**：每个 Agent 构造独立 `SkillRegistry` 与 `SkillCurator`；实例绑定的 `GetSkill` 缓存、Curator 使用统计、TaskExperience 与状态路径不再共享。bare/full 均提供 catalog + `GetSkill`，full 仅向 orchestrator 追加 CRUD，specialist 仍只有 `GetSkill`。
+
+### Changed
+
+- **发现优先级固定**：同名 Skill 按 `builtin > host > project > .claude > ephemeral` 选择；显式根在构造时规范化为绝对路径，后续切换 CWD 不改变含义。`workspace` 与 Skill roots 相互独立，运行时不会隐式扫描 workspace。
+- **Skill 根默认只读**：发现根只加入运行时读授权，不会给普通 `Write` / `Edit` / `Bash` 增加写权限；只有 `skill_writable_root` 是 CRUD 写源。内置、只读根与 ephemeral Skill 不能 Update/Remove；CRUD 对 canonical path、symlink 与 containment 做约束检查。
+- **全局 API 保持兼容**：`get_skill_registry()` / `register_skill()` 仍操作历史默认全局 Registry，并保留原状态路径与旧调用行为；Agent runtime 不再依赖该全局单例。
+- **宿主集成边界**：LS_Agent 可把已部署的 `SKILL.md` 目录作为显式 `skill_roots` 传入 FloodMind，本仓库不修改 LS_Agent。
+
+### Verification
+
+- 版本与 CLI 定向测试已执行；v1.2.0 完整回归数量由发布主流程确认，不在此预填。
+
 ## [1.1.9] - 2026-08-06
 
 > 注：无 v1.1.8——其内容（ContextCompressor 原子组 + context_window 跟随注入模型）经确认属 v1.1.7 的 MiniMax 2013 根因链，已并入 v1.1.7。
