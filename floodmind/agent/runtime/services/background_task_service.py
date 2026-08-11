@@ -524,6 +524,18 @@ class BackgroundTaskService:
 
         return unsubscribe
 
+    def clear_session_subscriptions(self, session_id: str) -> int:
+        """移除该 session 的全部订阅（子代理结束清理用，§25.7 Cleanup 无残留订阅）。
+
+        仅移除 session_id 精确匹配的订阅；legacy 全局订阅（session_id=None）不受影响。
+        返回移除数。
+        """
+        session_id = validate_session_id(session_id)
+        with self._lock:
+            before = len(self._subscribers)
+            self._subscribers = [s for s in self._subscribers if s[0] != session_id]
+            return before - len(self._subscribers)
+
     # ── 内部 ─────────────────────────────────────────────────────────
 
     def _watch(self, task: BackgroundTask, process: subprocess.Popen, out_f, err_f, lifetime: int) -> None:

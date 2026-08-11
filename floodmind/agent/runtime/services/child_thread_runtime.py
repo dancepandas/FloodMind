@@ -368,6 +368,11 @@ class ChildThreadRuntime:
             )
         except Exception:
             pass
+        # §25.7 Cleanup 无残留订阅：子代理结束移除其 session 的全部订阅。
+        try:
+            self._background_task_service.clear_session_subscriptions(child_session_id)
+        except Exception:
+            pass
         background_verified = False
         try:
             deadline = time.monotonic() + 10.0

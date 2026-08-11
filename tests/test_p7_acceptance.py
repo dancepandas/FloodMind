@@ -1,4 +1,5 @@
 """P7 acceptance proof for §25.7 child/background isolation."""
+import sys
 from unittest.mock import MagicMock
 
 from floodmind.agent.native.event_bus import EventBus
@@ -35,8 +36,9 @@ def _loader():
     return MagicMock()
 
 
-def _runtime(tmp_path, model_client, *, tool_runtime_factory=None):
-    parent_authority = open_journal_authority(
+def _runtime(tmp_path, model_client, *, tool_runtime_factory=None,
+             background_task_service=None, parent_authority=None, sandbox_service=None):
+    parent_authority = parent_authority or open_journal_authority(
         tmp_path / "runtime",
         conversation_id="c",
         task_id="t",
@@ -53,18 +55,17 @@ def _runtime(tmp_path, model_client, *, tool_runtime_factory=None):
         system_prompts=["test prompt"],
         checkpoint_service=None,
         tracing_service=None,
-        background_task_service=BackgroundTaskService(
-            base_dir=str(tmp_path / "sessions")
-        ),
+        background_task_service=background_task_service
+        or BackgroundTaskService(base_dir=str(tmp_path / "sessions")),
         journal_authority=parent_authority,
-        sandbox_service=SandboxService(base_dir=str(tmp_path / "sbx")),
+        sandbox_service=sandbox_service or SandboxService(base_dir=str(tmp_path / "sbx")),
         permission_service=PermissionService(),
         path_service=PathService(project_root=tmp_path),
         artifact_store_root=tmp_path / "artifacts",
         runtime_dir=tmp_path / "runtime",
         tool_runtime_factory=tool_runtime_factory or (lambda: (_registry(), _loader())),
     )
-    return runtime
+    return runtime, parent_authority
 
 
 def _context(session_id="sess_main"):
@@ -113,7 +114,7 @@ def test_acceptance_child_does_not_share_parent_tool_loader(tmp_path):
         child_loaders.append(child_loader)
         return _registry(), child_loader
 
-    runtime = _runtime(
+    runtime, _ = _runtime(
         tmp_path,
         _successful_model_client(),
         tool_runtime_factory=make_child_tool_runtime,
@@ -191,14 +192,50 @@ def test_acceptance_artifact_survives_sandbox_destroy(tmp_path):
     ) == "a,b\n1,2\n"
 
 
-def test_acceptance_cleanup_no_residual_subscriptions_and_tasks(tmp_path):
-    """A completed child leaves neither active tasks nor event subscriptions."""
-    runtime = _runtime(tmp_path, _successful_model_client())
+def _sleep_cmd(seconds):
+    return [sys.executable, "-c", f"import time; time.sleep({seconds})"]
 
+
+def test_acceptance_cleanup_no_residual_subscriptions_and_tasks(tmp_path):
+    """§25.7 Cleanup 无残留订阅/任务：子代理结束清理其 session 的活动任务与订阅。"""
+    sbx = SandboxService(base_dir=str(tmp_path / "sbx"))
+    bg = BackgroundTaskService(base_dir=str(tmp_path / "sessions"))
+    auth = open_journal_authority(
+        tmp_path / "runtime", conversation_id="c", task_id="t",
+        run_id="run_1", thread_id="th_main", turn_id="tu_main",
+    )
+    captured = {}
+    mc = MagicMock(spec=ModelClient)
+
+    def stream(*a, **k):
+        # 从 child_thread.accepted 事件读取子 session id
+        session_id = None
+        for e in auth.read_after(0):
+            if e.event_type == "child_thread.accepted":
+                session_id = e.payload["session_id"]
+        captured["session_id"] = session_id
+        # 子代理启动一个活动后台任务（cwd 落在子 workspace 内，通过 session sandbox 强制）
+        # + 安装该 session 的订阅
+        captured["unsub"] = bg.subscribe(lambda t: None, session_id=session_id)
+        captured["task"] = bg.start(
+            session_id, "sleep", _sleep_cmd(0.2),
+            cwd=str(sbx.workspace_for(session_id)),
+        )
+        return [ModelEvent(type="token", content="ok"), ModelEvent(type="done")]
+
+    mc.stream_chat.side_effect = stream
+    runtime, _ = _runtime(
+        tmp_path, mc, background_task_service=bg, parent_authority=auth,
+        sandbox_service=sbx,
+    )
     result = runtime.run(_child(), _context())
 
-    background_service = runtime._background_task_service
-    assert result.session_id.startswith("sub-")
-    assert background_service.list(result.session_id) == []
-    assert background_service.has_active(result.session_id) is False
-    assert background_service._subscribers == []
+    session_id = captured["session_id"]
+    # 后台任务确实被创建（防空转：缺 sys import / cwd 逃逸都会让 task 为 None）
+    assert captured["task"] is not None
+    assert captured["task"].session_id == session_id
+    assert result.session_id == session_id
+    # 活动后台任务已清理（0.2s 任务在有界等待内自然结束 -> 无 active）
+    assert bg.has_active(session_id) is False
+    # 子代理订阅已被 runtime 清理（§25.7 Cleanup 无残留订阅）
+    assert not any(sid == session_id for (sid, _cb) in bg._subscribers)
