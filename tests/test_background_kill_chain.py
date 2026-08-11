@@ -54,6 +54,20 @@ def test_kill_missing_task_returns_false(tmp_path):
     assert svc.kill("sess_1", "bg_nope") is False
 
 
+def test_kill_subscriber_never_observes_intermediate_status(tmp_path):
+    """F1: kill() 收尾时订阅者不得收到 kill_requested/terminating 中间态。"""
+    svc = BackgroundTaskService(base_dir=str(tmp_path))
+    seen = []
+    svc.subscribe(lambda t: seen.append(t.status))
+    task = svc.start("sess_1", "sleep 30", _sleep_cmd(30), cwd=str(tmp_path))
+    assert svc.kill("sess_1", task.task_id) is True
+    # 给 _watch 线程 finally 一个完成窗口；_finalize 幂等，不改变已收尾状态
+    time.sleep(0.2)
+    assert seen, "kill() 应立即可达订阅者"
+    assert all(s not in ("kill_requested", "terminating") for s in seen)
+    assert all(s in ("killed", "kill_failed", "completed", "failed") for s in seen)
+
+
 def test_completion_emits_completed_event(tmp_path):
     sink = _Sink()
     svc = BackgroundTaskService(base_dir=str(tmp_path), event_sink=sink)

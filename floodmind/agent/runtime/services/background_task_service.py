@@ -208,6 +208,13 @@ class BackgroundTaskService:
                 self._pending_tasks.pop(task_id, None)
                 self._active_tasks[task_id] = task
                 self._processes[task_id] = process
+            # M1: started 在 watcher 启动前发出，避免近瞬时退出任务 completed 先于 started
+            # 落 Journal，导致 reducer terminal 事件空转、active_background_tasks 残留。
+            self._emit("background.started", {
+                "task_id": task.task_id,
+                "session_id": task.session_id,
+                "pid": task.pid,
+            })
         except Exception:
             for stream in (out_f, err_f):
                 if stream is not None:
@@ -238,14 +245,16 @@ class BackgroundTaskService:
                 except Exception:
                     pass
             task.finished_at = time.time()
+            # M2 同类：started 已发出，watcher 未能启动也须发终态事件，避免 reducer 残留
+            self._emit("background.killed", {
+                "task_id": task.task_id,
+                "session_id": task.session_id,
+                "reason": "watcher_start_failed",
+                "exit_code": task.exit_code,
+            })
             self._write_meta(task)
             self._finalize(task)
             raise
-        self._emit("background.started", {
-            "task_id": task.task_id,
-            "session_id": task.session_id,
-            "pid": task.pid,
-        })
         logger.info("BackgroundTask started: task=%s session=%s pid=%s", task_id, session_id, process.pid)
         return task
 
@@ -292,31 +301,35 @@ class BackgroundTaskService:
             "reason": "user_kill",
         })
 
-        self._kill_process(process)
-        # 确认退出：轮询至多 confirm_timeout 秒
-        task.status = "terminating"
-        confirmed = self._wait_exit(process, confirm_timeout)
-        task.finished_at = time.time()
-        task.tail = self._read_tail(task.stdout_path)
+        confirmed = False
+        try:
+            self._kill_process(process)
+            # 确认退出：轮询至多 confirm_timeout 秒
+            task.status = "terminating"
+            confirmed = self._wait_exit(process, confirm_timeout)
+            task.finished_at = time.time()
+            task.tail = self._read_tail(task.stdout_path)
 
-        if confirmed:
-            task.status = "killed"
-            task.exit_code = int(process.returncode) if process is not None else 0
-            self._emit("background.killed", {
-                "task_id": task_id,
-                "session_id": task.session_id,
-                "exit_code": task.exit_code,
-            })
-        else:
-            task.status = "kill_failed"
-            task.error = f"进程树终止后 {confirm_timeout}s 内未确认退出"
-            self._emit("background.kill.failed", {
-                "task_id": task_id,
-                "session_id": task.session_id,
-                "error": task.error,
-            })
-        self._write_meta(task)
-        self._finalize(task)  # 用户主动关闭：立即推送，不等 _watch 线程
+            if confirmed:
+                task.status = "killed"
+                task.exit_code = int(process.returncode) if process is not None else 0
+                self._emit("background.killed", {
+                    "task_id": task_id,
+                    "session_id": task.session_id,
+                    "exit_code": task.exit_code,
+                })
+            else:
+                task.status = "kill_failed"
+                task.error = f"进程树终止后 {confirm_timeout}s 内未确认退出"
+                self._emit("background.kill.failed", {
+                    "task_id": task_id,
+                    "session_id": task.session_id,
+                    "error": task.error,
+                })
+        finally:
+            # F1: 即使 _kill_process/_wait_exit 异常也必须以终态收尾（_finalize 幂等）
+            self._write_meta(task)
+            self._finalize(task)  # 用户主动关闭：立即推送，不等 _watch 线程
         return confirmed
 
     @staticmethod
@@ -404,6 +417,13 @@ class BackgroundTaskService:
                     task.status = "killed"
                     task.exit_code = None
                     task.error = f"超过最大存活时间 {lifetime}s，已被强制终止"
+                    # M2: 兜底 kill 也是终态，须发 killed 事件，否则 reducer 残留 active_background_tasks
+                    self._emit("background.killed", {
+                        "task_id": task.task_id,
+                        "session_id": task.session_id,
+                        "reason": "max_lifetime",
+                        "exit_code": task.exit_code,
+                    })
         except Exception as e:
             logger.warning("BackgroundTask %s wait 异常: %s", task.task_id, e)
             if task.status == "running":
@@ -419,7 +439,10 @@ class BackgroundTaskService:
             task.finished_at = task.finished_at or time.time()
             task.tail = self._read_tail(task.stdout_path)
             self._write_meta(task)
-            self._finalize(task)
+            # F1: kill() 正在验证链中（kill_requested/terminating），由 kill() 以终态收尾；
+            # 若此时 finalize，订阅者会收到非终态状态。kill() 两个终态分支都会 finalize。
+            if task.status not in ("kill_requested", "terminating"):
+                self._finalize(task)
             # Completion 先写 Journal（§12）；kill 已由 kill() 发 killed/kill_failed
             if task.status in ("completed", "failed"):
                 self._emit("background.completed", {
