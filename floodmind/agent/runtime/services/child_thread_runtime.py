@@ -282,12 +282,10 @@ class ChildThreadRuntime:
             # 确保最后一个完整 turn 的计数参与终态判定。
             if sub_context.abort_check is not None:
                 sub_context.abort_check()
-            # 6. 终态分类 + Typed Handoff
-            return self._finish(
+            # 6. 终态分类 + 已验证清理 + Typed Handoff
+            terminal_event, payload, subagent_result = self._classify(
                 child_thread=child_thread,
                 child_session_id=child_session_id,
-                child_auth=child_auth,
-                parent_auth=parent_auth,
                 result=result,
                 execution_error=execution_error,
                 artifact_ids=artifact_ids,
@@ -295,6 +293,13 @@ class ChildThreadRuntime:
                 abort=bool(context.abort_check and context.abort_check()),
                 run_state=run_state,
             )
+            self._cleanup_child(child_session_id, sandbox_ctx)
+            if child_auth is not None:
+                child_auth.emit(terminal_event, payload)
+            parent_auth.emit(
+                terminal_event, payload, thread_id=child_thread.thread_id,
+            )
+            return subagent_result
         except Exception as exc:
             logger.exception("child thread runtime 异常")
             terminal = (
@@ -365,9 +370,10 @@ class ChildThreadRuntime:
             return False
         return check
 
-    def _finish(self, *, child_thread, child_session_id, child_auth, parent_auth,
-                result, execution_error, artifact_ids, tool_summaries, abort,
-                run_state):
+    def _classify(self, *, child_thread, child_session_id, result,
+                  execution_error, artifact_ids, tool_summaries, abort,
+                  run_state):
+        """Classify a child terminal state without publishing journal events."""
         has_tool_success = any(
             getattr(tr, "status", "") == "completed" for tr in (result.tool_results or [])
         )
@@ -405,10 +411,7 @@ class ChildThreadRuntime:
             "artifact_ids": artifact_ids,
             "reason": reason,
         }
-        if child_auth is not None:
-            child_auth.emit(terminal_event, payload)
-        parent_auth.emit(terminal_event, payload, thread_id=child_thread.thread_id)
-        return SubagentResult(
+        return terminal_event, payload, SubagentResult(
             thread_id=child_thread.thread_id,
             parent_call_id=child_thread.parent_call_id,
             session_id=child_session_id,

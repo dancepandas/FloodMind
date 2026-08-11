@@ -42,6 +42,67 @@ def test_parent_cancel_propagates_to_child_and_verifies_cleanup(tmp_path):
     assert "child_thread.cancelled" in [e.event_type for e in parent_auth.read_after(0)]
 
 
+def test_cancelled_event_only_after_verified_cleanup(tmp_path):
+    abort_flag = {"on": False}
+    release = threading.Event()
+    started = {}
+    mc = MagicMock(spec=ModelClient)
+    runtime, bg, parent_auth = _runtime(tmp_path, mc)
+
+    def stream(*args, **kwargs):
+        accepted = next(
+            event for event in parent_auth.read_after(0)
+            if event.event_type == "child_thread.accepted"
+        )
+        child_session_id = accepted.payload["session_id"]
+        started["task"] = bg.start(
+            child_session_id,
+            "sleep",
+            _sleep_cmd(30),
+            cwd=str(tmp_path),
+        )
+        started["session_id"] = child_session_id
+        release.wait(timeout=10)
+        return [ModelEvent(type="done")]
+
+    mc.stream_chat.side_effect = stream
+    outcome = {}
+
+    def run_child():
+        outcome["result"] = runtime.run(
+            _child(),
+            _ctx("sess_main", abort_check=lambda: abort_flag["on"]),
+        )
+
+    runner = threading.Thread(target=run_child)
+    runner.start()
+    deadline = time.monotonic() + 10
+    while "session_id" not in started and time.monotonic() < deadline:
+        time.sleep(0.01)
+    assert "session_id" in started
+    assert bg.has_active(started["session_id"])
+
+    abort_flag["on"] = True
+    release.set()
+    deadline = time.monotonic() + 10
+    saw_alive_without_event = False
+    while bg.has_active(started["session_id"]) and time.monotonic() < deadline:
+        event_types = [event.event_type for event in parent_auth.read_after(0)]
+        if "child_thread.cancelled" not in event_types:
+            saw_alive_without_event = True
+            break
+        time.sleep(0.01)
+
+    runner.join(timeout=20)
+    assert not runner.is_alive()
+    assert saw_alive_without_event is True
+    assert outcome["result"].event_type == SubagentEventType.cancelled
+    assert "child_thread.cancelled" in [
+        event.event_type for event in parent_auth.read_after(0)
+    ]
+    assert not bg.has_active(started["session_id"])
+
+
 def test_child_bg_tasks_killed_and_verified_on_cancel(tmp_path):
     mc = MagicMock(spec=ModelClient)
     runtime, bg, parent_auth = _runtime(tmp_path, mc)
