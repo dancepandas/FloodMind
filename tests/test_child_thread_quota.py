@@ -150,8 +150,10 @@ def test_parallel_children_do_not_cross_cancel_reasons(tmp_path):
     def stream(*args, **kwargs):
         with lock:
             calls["n"] += 1
-        barrier.wait(timeout=10)
-        parent_cancel.set()
+            call_number = calls["n"]
+        if call_number > 1:
+            barrier.wait(timeout=10)
+            parent_cancel.set()
         return [
             ModelEvent(type="token", content="x"),
             ModelEvent(type="usage", raw={"prompt_tokens": 0, "completion_tokens": 0,
@@ -161,6 +163,16 @@ def test_parallel_children_do_not_cross_cancel_reasons(tmp_path):
 
     mc.stream_chat.side_effect = stream
     rt = _runtime(tmp_path, mc)
+
+    # 先用高限额运行一次：旧实现会把该 quota 缓存在 runtime 上，令后续 B
+    # 错误继承 max_turns=100；新实现每次 run 都创建独立 quota，不受此运行影响。
+    seed = ChildThread(
+        thread_id="th_z", parent_thread_id="th_main", parent_call_id="sz",
+        max_turns=100, max_tokens=10**6, wall_clock_budget_seconds=30.0,
+    )
+    seed_result = rt.run(seed, _parent_context(session_id="sess_z"))
+    assert seed_result.event_type == SubagentEventType.result
+
     child_a = ChildThread(
         thread_id="th_child_a", parent_thread_id="th_main", parent_call_id="sa",
         max_turns=10, max_tokens=10**6, wall_clock_budget_seconds=30.0,
@@ -179,6 +191,6 @@ def test_parallel_children_do_not_cross_cancel_reasons(tmp_path):
         result_a = future_a.result(timeout=20)
         result_b = future_b.result(timeout=20)
 
-    assert calls["n"] == 2
+    assert calls["n"] == 3
     assert result_a.reason == "parent_cancelled"
     assert "quota:max_turns" in result_b.reason
