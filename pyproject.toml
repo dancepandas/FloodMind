@@ -26,9 +26,6 @@ dependencies = [
     "tiktoken>=0.5",
     # MCP
     "mcp>=1.0",
-    # RAG
-    "chromadb>=0.4",
-    "sentence-transformers>=2.2",
     # Data
     "pandas>=2.0",
     "openpyxl>=3.1",
