@@ -45,9 +45,11 @@ def open_journal_authority(
     if index:
         from floodmind.agent.runtime.services.journal_index import SqliteJournalIndex
         journal_index = SqliteJournalIndex(journal_dir, run_id)
+        journal_index.rebuild_from(journal_dir)
     return JournalAuthority(
         writer=writer,
         index=journal_index,
+        journal_dir=journal_dir,
         conversation_id=conversation_id,
         task_id=task_id,
         run_id=run_id,
@@ -63,6 +65,7 @@ class JournalAuthority:
         *,
         writer: JournalWriter,
         index: Optional[Any] = None,
+        journal_dir: Optional[Path] = None,
         conversation_id: str,
         task_id: str,
         run_id: str,
@@ -72,6 +75,7 @@ class JournalAuthority:
     ):
         self._writer = writer
         self._index = index
+        self._journal_dir = Path(journal_dir) if journal_dir is not None else None
         self.conversation_id = conversation_id
         self.task_id = task_id
         self.run_id = run_id
@@ -130,7 +134,17 @@ class JournalAuthority:
 
     def read_after(self, after_sequence: int = 0) -> List[EventEnvelope]:
         if self._index is not None:
-            return self._index.read_after(after_sequence)
+            try:
+                if self._index.max_sequence() >= self._writer.current_sequence():
+                    return self._index.read_after(after_sequence)
+            except Exception:
+                pass
+            events = self._writer.read_from(after_sequence)
+            try:
+                self._index.rebuild_from(self._journal_dir)
+            except Exception:
+                pass
+            return events
         return self._writer.read_from(after_sequence)
 
     def replay(self, after_sequence: int = 0, state: Optional[RunState] = None) -> RunState:

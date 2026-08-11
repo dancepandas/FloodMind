@@ -43,6 +43,18 @@ def _segment_name(number: int) -> str:
     return f"{_SEGMENT_PREFIX}{number:06d}{_SEGMENT_SUFFIX}"
 
 
+def segment_files(journal_dir: Path) -> List[Path]:
+    """Return numeric journal segments in authoritative read order."""
+    journal_dir = Path(journal_dir)
+    numbered: List[tuple[int, Path]] = []
+    if journal_dir.exists():
+        for path in journal_dir.glob(f"{_SEGMENT_PREFIX}*{_SEGMENT_SUFFIX}"):
+            suffix = path.name[len(_SEGMENT_PREFIX):-len(_SEGMENT_SUFFIX)]
+            if suffix.isdigit():
+                numbered.append((int(suffix), path))
+    return [path for _, path in sorted(numbered)]
+
+
 def _hash_input(event: EventEnvelope) -> str:
     d = event.model_dump()
     d["integrity"] = {}
@@ -168,13 +180,10 @@ class JournalWriter:
         self._sealed.update(sealed)
 
     def _segment_numbers_on_disk(self) -> List[int]:
-        numbers: List[int] = []
-        if self._journal_dir.exists():
-            for p in self._journal_dir.glob(f"{_SEGMENT_PREFIX}*{_SEGMENT_SUFFIX}"):
-                name = p.name[len(_SEGMENT_PREFIX):-len(_SEGMENT_SUFFIX)]
-                if name.isdigit():
-                    numbers.append(int(name))
-        return sorted(numbers)
+        return [
+            int(path.name[len(_SEGMENT_PREFIX):-len(_SEGMENT_SUFFIX)])
+            for path in segment_files(self._journal_dir)
+        ]
 
     def _save_index(self) -> None:
         index = {

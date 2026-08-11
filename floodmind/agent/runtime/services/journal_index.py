@@ -10,9 +10,7 @@ from pathlib import Path
 from typing import List
 
 from floodmind.agent.runtime.contracts.canonical_events import EventEnvelope
-from floodmind.agent.runtime.services.journal_writer import (
-    _SEGMENT_PREFIX, _SEGMENT_SUFFIX,
-)
+from floodmind.agent.runtime.services.journal_writer import segment_files
 
 
 class SqliteJournalIndex:
@@ -22,7 +20,7 @@ class SqliteJournalIndex:
         self._journal_dir = Path(journal_dir)
         self._db = self._journal_dir / "journal.sqlite3"
         self._run_id = run_id
-        self._conn = sqlite3.connect(str(self._db))
+        self._conn = sqlite3.connect(str(self._db), check_same_thread=False)
         self._lock = threading.Lock()
         self._init_schema()
 
@@ -50,6 +48,14 @@ class SqliteJournalIndex:
             )
             self._conn.commit()
 
+    def max_sequence(self) -> int:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT COALESCE(MAX(sequence), 0) FROM journal_events WHERE run_id=?",
+                (self._run_id,),
+            ).fetchone()
+        return int(row[0])
+
     def read_after(self, after_sequence: int = 0) -> List[EventEnvelope]:
         with self._lock:
             rows = self._conn.execute(
@@ -65,7 +71,7 @@ class SqliteJournalIndex:
         with self._lock:
             self._conn.execute("DELETE FROM journal_events WHERE run_id=?", (self._run_id,))
             count = 0
-            for seg in sorted(journal_dir.glob(f"{_SEGMENT_PREFIX}*{_SEGMENT_SUFFIX}")):
+            for seg in segment_files(journal_dir):
                 for line in seg.read_text(encoding="utf-8").splitlines():
                     line = line.strip()
                     if not line:
