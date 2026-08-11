@@ -425,6 +425,34 @@ def _reduce_run_terminal(
     return ns
 
 
+def _reduce_artifact_declared(
+    state: RunState, payload: Dict[str, Any],
+) -> RunState:
+    """artifact.declared：计入 run 级 artifacts 列表（去重）。"""
+    artifact_id = payload.get("artifact_id", "")
+    if not artifact_id:
+        return state
+    if artifact_id in state.artifacts:
+        return state
+    ns = state.model_copy(deep=True)
+    ns.artifacts = state.artifacts + [artifact_id]
+    return ns
+
+
+def _reduce_artifact_committed(
+    state: RunState, payload: Dict[str, Any],
+) -> RunState:
+    """artifact.committed：正式落库，计入 artifacts（去重）。"""
+    artifact_id = payload.get("artifact_id", "")
+    if not artifact_id:
+        return state
+    if artifact_id in state.artifacts:
+        return state
+    ns = state.model_copy(deep=True)
+    ns.artifacts = state.artifacts + [artifact_id]
+    return ns
+
+
 def reduce(state: RunState, event: EventEnvelope) -> RunState:
     """确定性折叠。未知事件 fail closed：保持不变但推进 cursor。"""
     if event.event_id in state.processed_event_ids:
@@ -473,4 +501,8 @@ def reduce(state: RunState, event: EventEnvelope) -> RunState:
         return _reduce_compaction(ns, event.payload, et, event.thread_id)
     if et in ("run.completed", "run.failed"):
         return _reduce_run_terminal(ns, event.payload, et, event.thread_id)
+    if et in ("artifact.declared", "artifact.committed"):
+        if et == "artifact.declared":
+            return _reduce_artifact_declared(ns, event.payload)
+        return _reduce_artifact_committed(ns, event.payload)
     return ns  # 其他事件（usage/checkpoint/thread.*）不改状态，仅推进 cursor

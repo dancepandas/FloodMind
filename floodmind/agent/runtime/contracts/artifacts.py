@@ -23,3 +23,17 @@ class ArtifactManifest(BaseModel):
     supersedes: Optional[str] = None
     retention: Dict[str, Any] = Field(default_factory=dict)
     metadata: Dict[str, Any] = Field(default_factory=dict)
+
+
+class ArtifactDeclaration(BaseModel):
+    """一次待发布的 Artifact 声明（§15.2 管线输入）。"""
+
+    logical_name: str
+    source_path: str
+    media_type: str = ""            # 空则按扩展名分类
+    sensitivity: str = "internal"
+    producer_call_id: str = ""
+    producer_thread_id: str = ""
+    supersedes: Optional[str] = None
+    retention: Dict[str, Any] = Field(default_factory=dict)
+    metadata: Dict[str, Any] = Field(default_factory=dict)
