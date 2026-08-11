@@ -2,7 +2,7 @@
 from unittest.mock import MagicMock
 
 from floodmind.agent.native.executor import NativeAgentExecutor
-from floodmind.agent.native.event_bus import EventBus
+from floodmind.agent.native.event_bus import EventBus, StepEventBus
 from floodmind.agent.native.message_builder import MessageBuilder
 from floodmind.agent.native.model_client import ModelClient
 from floodmind.agent.native.types import ModelEvent, RunContext
@@ -110,6 +110,60 @@ def test_runtime_typed_lifecycle_result(tmp_path):
     types = [e.event_type for e in parent_auth.read_after(0)]
     assert types.index("child_thread.accepted") < types.index("child_thread.running") \
         < types.index("child_thread.result")
+
+
+def test_runtime_child_executor_uses_trace_scoped_event_bus(tmp_path, monkeypatch):
+    mc = MagicMock(spec=ModelClient)
+    mc.stream_chat.return_value = [
+        ModelEvent(type="token", content="child result here"),
+        ModelEvent(type="done"),
+    ]
+    parent_auth = open_journal_authority(
+        tmp_path / "runtime", conversation_id="c", task_id="t",
+        run_id="run_1", thread_id="th_main", turn_id="tu_main",
+    )
+    rt = ChildThreadRuntime(
+        model_client=mc,
+        tool_executor=MagicMock(),
+        event_bus=EventBus(),
+        message_builder=MessageBuilder(),
+        max_iterations=5,
+        system_prompts=["test prompt"],
+        checkpoint_service=None,
+        tracing_service=None,
+        background_task_service=BackgroundTaskService(base_dir=str(tmp_path / "sessions")),
+        journal_authority=parent_auth,
+        sandbox_service=SandboxService(base_dir=str(tmp_path / "sbx")),
+        permission_service=PermissionService(),
+        path_service=PathService(),
+        artifact_store_root=tmp_path / "artifacts",
+        runtime_dir=tmp_path / "runtime",
+        tool_runtime_factory=lambda: _stub_registry_and_loader(),
+    )
+    captured = {}
+    original = rt._build_child_executor
+
+    def capture(child_auth, registry, tool_loader, event_bus):
+        captured["event_bus"] = event_bus
+        return original(child_auth, registry, tool_loader, event_bus)
+
+    monkeypatch.setattr(rt, "_build_child_executor", capture)
+    result = rt.run(
+        ChildThread(
+            thread_id="th_child", parent_thread_id="th_main", parent_call_id="step_1",
+        ),
+        RunContext(
+            session_id="sess_main", user_text="child task", agent_tier="main",
+            runtime_context=RuntimeContext(
+                conversation_id="c", task_id="t", run_id="run_1",
+                thread_id="th_main", turn_id="tu_main", actor_type="agent",
+                actor_id="main", agent_tier="main", runtime_mode="execution",
+            ),
+        ),
+    )
+
+    assert isinstance(captured["event_bus"], StepEventBus)
+    assert captured["event_bus"]._trace_session_id == result.session_id
 
 
 def _stub_registry_and_loader():

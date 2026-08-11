@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any, Callable, List, Optional
 
 from floodmind.agent.native.artifact_watcher import ArtifactWatcher
+from floodmind.agent.native.event_bus import StepEventBus
 from floodmind.agent.native.executor import NativeAgentExecutor
 from floodmind.agent.native.message_builder import MessageBuilder
 from floodmind.agent.native.types import AgentLoopState, AgentResult, RunContext
@@ -83,6 +84,18 @@ class ChildThreadRuntime:
         child_session_id = (
             f"sub-{context.session_id}-{child_thread.parent_call_id}-{uuid.uuid4().hex[:8]}"
         )
+        base_bus = step_event_bus or self._event_bus
+        if isinstance(base_bus, StepEventBus) and not getattr(base_bus, "_trace_session_id", ""):
+            base_bus._trace_session_id = child_session_id
+            child_event_bus = base_bus
+        elif isinstance(base_bus, StepEventBus):
+            child_event_bus = base_bus
+        else:
+            child_event_bus = StepEventBus(
+                base_bus,
+                child_thread.parent_call_id,
+                trace_session_id=child_session_id,
+            )
         child_turn_id = new_id("turn")
         child_auth = None
         sandbox_ctx = None
@@ -170,7 +183,7 @@ class ChildThreadRuntime:
             # 4. 独立 ToolRuntime（§13.2：loaded set / GetTool closure 不共享）
             specialist_registry, specialist_tool_loader = self._tool_runtime_factory()
             child_executor = self._build_child_executor(
-                child_auth, specialist_registry, specialist_tool_loader,
+                child_auth, specialist_registry, specialist_tool_loader, child_event_bus,
             )
             sub_state.messages = child_executor._build_initial_messages(
                 context=sub_context,
@@ -246,11 +259,13 @@ class ChildThreadRuntime:
             if sandbox_ctx is not None:
                 self._sandbox_service.destroy(sandbox_ctx)
 
-    def _build_child_executor(self, child_auth, registry, tool_loader) -> NativeAgentExecutor:
+    def _build_child_executor(
+        self, child_auth, registry, tool_loader, event_bus,
+    ) -> NativeAgentExecutor:
         return NativeAgentExecutor(
             model_client=self._model_client,
             tool_executor=self._tool_executor,
-            event_bus=self._event_bus,
+            event_bus=event_bus,
             message_builder=self._message_builder,
             max_iterations=self._max_iterations,
             system_prompts=list(self._system_prompts),
