@@ -21,7 +21,7 @@ from floodmind.agent.native.types import InvalidToolCall, ModelEvent, TerminalRe
 from floodmind.agent.runtime.contracts.canonical_parts import CanonicalPart
 from floodmind.agent.runtime.contracts.messages import ai_message, Message
 from floodmind.agent.native.retry import is_retryable_error
-from floodmind.agent.native.transport import OpenAIChatTransport
+from floodmind.agent.native.transport import OpenAIChatTransport, TransportRetryAdvice
 
 logger = logging.getLogger(__name__)
 
@@ -113,6 +113,11 @@ class ModelClient:
             enable_thinking=enable_reasoning,
             provider=rm.provider,
         )
+
+    # ── Retry Advice 门面：Transport 只给 Advice，Orchestrator 决策（§7.7）──
+    def classify_error(self, exc: Exception) -> TransportRetryAdvice:
+        """把异常映射为 Transport Retry Advice（executor 不直接触碰 transport）。"""
+        return self._transport.classify_error(exc)
 
     # ── 非流式调用（兼容旧 QwenLLMService.invoke / .chat）───────
     def invoke(

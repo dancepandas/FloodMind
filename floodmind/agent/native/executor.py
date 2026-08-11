@@ -36,7 +36,7 @@ from floodmind.agent.runtime.services.journal_authority import JournalAuthority
 from floodmind.agent.native.event_bus import EventBus
 from floodmind.agent.native.message_builder import MessageBuilder
 from floodmind.agent.native.model_client import ModelClient
-from floodmind.agent.native.retry import RetryPolicy, is_retryable_error
+from floodmind.agent.native.retry import RetryPolicy, should_retry
 
 from floodmind.agent.runtime.services.tracing_service import TracingService
 
@@ -475,7 +475,11 @@ class NativeAgentExecutor:
                 break  # stream completed successfully
 
             except Exception as e:
-                if attempt >= retry_policy.max_retries or not is_retryable_error(e):
+                # §7.7 Orchestrator 决策：Transport 只给 Retry Advice（model_client 门面），
+                # 是否重试由 should_retry 结合终态判定。
+                advice = self.model_client.classify_error(e)
+                terminal_reason = state.terminal_reason
+                if attempt >= retry_policy.max_retries or not should_retry(advice, terminal_reason):
                     self.event_bus.emit_error(str(e)[:500])
                     self.event_bus.emit_llm_step_end(reason="error")
                     state.final_output = f"模型调用失败: {str(e)[:300]}"
