@@ -213,11 +213,134 @@ class Agent:
             return []
         return project_canonical_many(authority.read_after(sequence))
 
-    def resume(self, checkpoint_id: Optional[str] = None) -> str:
-        """从 checkpoint 经 Journal replay + reconciliation 恢复执行。"""
+    def resume(
+        self,
+        checkpoint_id: str,
+        user_message: str = "",
+    ) -> str:
+        """Journal Replay + Reconciliation resume（TARGET desktop contract）。
+
+        Mirrors ``cli.py:228-262``: ``ResumeService`` 走 fencing → 校验 →
+        replay → reconcile → ``resume.started``+``resume.completed``，
+        然后把已恢复的 JournalAuthority 直接绑到底层 executor
+        （**不** 走 ``NativeFloodAgent.stream(resume_checkpoint_id=...)`` —
+        那个路径在 memory-first runtime 下被显式拒绝），再用 ``run_from_state``
+        在绑好的 authority 上驱动续接。
+
+        Returns:
+            续接产出的最终回答文本。
+        """
+        from floodmind.agent.native.executor import project_run_state_to_loop_state
+        from floodmind.agent.native.types import AgentLoopState, RunContext
+        from floodmind.agent.runtime.services.checkpoint_service import CheckpointService
+        from floodmind.agent.runtime.services.resume_service import ResumeService
+        from floodmind.agent.runtime.services.artifact_service import ArtifactService
+        from floodmind.agent.runtime.contracts.runtime_context import RuntimeContext
+
         if not checkpoint_id:
             raise ValueError("resume requires checkpoint_id")
-        return self._agent.run_with_resume("", resume_checkpoint_id=checkpoint_id)
+
+        workspace = getattr(self._agent, "_workspace", None) or getattr(self, "_workspace", None)
+        base_dir = str(workspace.session_root) if workspace is not None else None
+        if not base_dir:
+            raise ValueError("Agent.resume requires a workspace with session_root")
+
+        session_id = self.session_id or ""
+        svc = CheckpointService(base_dir=base_dir)
+        manifest = svc.load_manifest(session_id, checkpoint_id)
+        identity = manifest.metadata or {}
+        required = (
+            "conversation_id", "task_id", "run_id", "thread_id", "turn_id", "runtime_dir",
+        )
+        missing = [key for key in required if not identity.get(key)]
+        if missing:
+            raise ValueError(
+                f"checkpoint {checkpoint_id} missing journal identity: {', '.join(missing)}"
+            )
+
+        outcome = ResumeService().resume(
+            runtime_dir=Path(identity["runtime_dir"]),
+            conversation_id=identity["conversation_id"],
+            task_id=identity["task_id"],
+            run_id=identity["run_id"],
+            thread_id=identity["thread_id"],
+            turn_id=identity["turn_id"],
+            checkpoint_id=checkpoint_id,
+            user_message=user_message,
+            session_id=session_id,
+            checkpoint_service=svc,
+        )
+        authority = outcome.authority
+        if authority is None:
+            raise RuntimeError("ResumeService returned no JournalAuthority")
+
+        runtime_dir = Path(identity["runtime_dir"])
+        workspace_id = str(workspace.workspace_dir) if workspace is not None else ""
+        artifact_service = ArtifactService(
+            runtime_dir / "artifacts",
+            authority=authority,
+            allowed_roots=[workspace_id] if workspace_id else [],
+        )
+        context = RuntimeContext(
+            conversation_id=identity["conversation_id"],
+            task_id=identity["task_id"],
+            run_id=identity["run_id"],
+            thread_id=identity["thread_id"],
+            turn_id=identity["turn_id"],
+            actor_type="host",
+            actor_id=session_id,
+            agent_tier="main",
+            runtime_mode="execution",
+            workspace_id=workspace_id,
+            permission_service=getattr(self._agent, "_permission_service", None),
+            path_service=getattr(self._agent, "_path_service", None),
+            background_service=getattr(self._agent, "_background_task_service", None),
+            artifact_service=artifact_service,
+            journal_authority=authority,
+        )
+
+        # Project RunState → AgentLoopState 并把已恢复 authority 绑到 executor。
+        run_state = outcome.run_state
+        loop_state = AgentLoopState(
+            session_id=session_id,
+            run_id=identity["run_id"],
+            user_message=user_message,
+            original_input=user_message or identity.get("user_message", ""),
+        )
+        loop_state = project_run_state_to_loop_state(loop_state, run_state)
+        if loop_state.status in {"completed", "failed"}:
+            loop_state.status = "awaiting_llm"
+            loop_state.final_output = ""
+        if user_message:
+            loop_state.user_message = user_message
+            loop_state.original_input = loop_state.original_input or user_message
+
+        executor = self._agent._orchestrator_executor
+        executor._journal_authority = authority
+        self._agent._journal_authority = authority
+        self._agent._last_loop_state = loop_state
+        self._journal_authority = authority
+
+        run_ctx = RunContext(
+            session_id=session_id,
+            user_text=user_message,
+            cwd=str(workspace.default_cwd) if workspace is not None else "",
+            workspace_dir=str(workspace.workspace_dir) if workspace is not None else "",
+            state_dir=str(workspace.state_dir) if workspace is not None else "",
+            artifact_dir=str(workspace.artifact_dir) if workspace is not None else "",
+            tmp_dir=str(workspace.tmp_dir) if workspace is not None else "",
+            scripts_dir=str(workspace.scripts_dir) if workspace is not None else "",
+            runtime_context=context,
+        )
+        self._agent._current_run_context = run_ctx
+
+        try:
+            result = executor.run_from_state(run_ctx, loop_state, run_state=run_state)
+        finally:
+            # fencing lease 覆盖整个 resumed run；终态后释放。
+            outcome.lease.release()
+        final_output = getattr(result, "final_output", "") or ""
+        return final_output
 
     def clear_memory(self) -> None:
         """清空底层 NativeFloodAgent 的会话记忆。"""

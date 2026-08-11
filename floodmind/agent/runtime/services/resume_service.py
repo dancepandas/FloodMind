@@ -20,13 +20,13 @@ import os
 import time
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Optional
+from typing import Any, Dict, Optional
 
-from pydantic import BaseModel, PrivateAttr
+from pydantic import BaseModel, ConfigDict, PrivateAttr
 
 from floodmind.agent.runtime.contracts.run_state import RunState
 from floodmind.agent.runtime.contracts.tool_transaction import ToolStatus
-from floodmind.agent.runtime.services.journal_authority import open_journal_authority
+from floodmind.agent.runtime.services.journal_authority import JournalAuthority, open_journal_authority
 from floodmind.agent.runtime.services.reconciliation_service import (
     ReconciliationService,
     ReconcileResult,
@@ -94,10 +94,19 @@ def open_lease(runtime_dir, run_id, owner: str, ttl_seconds: int = 300,
 
 
 class ResumeOutcome(BaseModel):
+    model_config = ConfigDict(arbitrary_types_allowed=True)
+
     run_state: RunState
     journal_cursor: int
     reconciled: ReconcileResult
     lease: Lease
+
+    # Optional seams for the SDK/desktop contract: expose the JournalAuthority the
+    # service opened so callers can rebind it onto an executor without going
+    # through a fresh stream().  Set by ResumeService().resume(); None when an
+    # outcome is constructed elsewhere (tests, previews).
+    authority: Optional[JournalAuthority] = None
+    identity: Optional[Dict[str, str]] = None
 
 
 # reconcile 集合之外的 pre-execution 僵尸（§6.4 尚未进入 running 的中间态）。
@@ -183,6 +192,15 @@ class ResumeService:
                 journal_cursor=authority.cursor(),
                 reconciled=reconciled,
                 lease=lease,
+                authority=authority,
+                identity={
+                    "conversation_id": conversation_id,
+                    "task_id": task_id,
+                    "run_id": run_id,
+                    "thread_id": thread_id,
+                    "turn_id": turn_id,
+                    "runtime_dir": str(Path(runtime_dir)),
+                },
             )
         except Exception:
             lease.release()
