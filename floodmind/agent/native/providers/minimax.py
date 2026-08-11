@@ -1,4 +1,4 @@
-"""MiniMax pipeline。
+"""MiniMax codec。
 
 方言要点（docs/minimax.txt）：
 - 思考开关：``thinking: {"type": "adaptive"/"disabled"}``（M3 可关；M2.x 强制思考，不可发 disabled）
@@ -12,11 +12,12 @@
 
 from typing import Any, Dict, List, Tuple
 
-from .base import ProviderPipeline, StreamState, incremental, split_think_tags
+from .base import ProviderCodec, StreamState, incremental, split_think_tags
 
 
-class MiniMaxPipeline(ProviderPipeline):
+class MiniMaxCodec(ProviderCodec):
     name = "minimax"
+    uses_max_completion_tokens = True
 
     @classmethod
     def match(cls, provider_id: str, model_id: str, base_url: str) -> int:
@@ -41,10 +42,6 @@ class MiniMaxPipeline(ProviderPipeline):
 
         model = str(params.get("model", "")).lower()
         is_m3 = "m3" in model
-
-        # max_tokens 弃用 → max_completion_tokens
-        if "max_tokens" in params:
-            params["max_completion_tokens"] = params.pop("max_tokens")
 
         # temperature 范围 [0,2]，超范围报错 → 钳制
         temp = params.get("temperature")

@@ -14,6 +14,7 @@ Tests for FloodMind SDK — embedded Agent API.
   10. Agent.run() 非流式
 """
 
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
@@ -25,6 +26,7 @@ from floodmind.tools.agent_tool import build_agent_tool, AgentTool
 from floodmind.skills.base import Skill, register_skill
 from floodmind.memory.dual_memory import DualMemory
 from floodmind.agent.runtime.contracts.workspace import Workspace
+from floodmind.agent.runtime.contracts.permissions import ToolPermissionPolicy
 
 
 # ---------------------------------------------------------------------------
@@ -91,7 +93,8 @@ class TestAgentCreation:
         agent = Agent(llm=llm)
         assert agent is not None
         assert agent.raw._bare is True
-        assert agent.raw.session_id == "sdk-agent"
+        assert agent.raw.session_id.startswith("sdk-")
+        assert len(agent.raw.session_id) == 36
 
     def test_create_with_tools(self, llm, sample_tools):
         """传入自定义工具。"""
@@ -124,7 +127,55 @@ class TestAgentCreation:
         """不传 memory 时自动创建。"""
         agent = Agent(llm=llm)
         assert agent.raw.memory is not None
-        assert agent.raw.memory.session_id == "sdk-agent"
+        assert agent.raw.memory.session_id == agent.session_id
+        assert agent.session_id.startswith("sdk-")
+
+    def test_default_session_id_is_generated_once_and_propagated(self, llm, tmp_path, monkeypatch):
+        """生成的 canonical ID 同时用于 Agent、memory 与 workspace 命名空间。"""
+        monkeypatch.chdir(tmp_path)
+        generated_hex = "0123456789abcdef0123456789abcdef"
+        with patch(
+            "floodmind.agent.api.uuid.uuid4",
+            return_value=SimpleNamespace(hex=generated_hex),
+        ) as uuid4:
+            agent = Agent(llm=llm)
+
+        expected = f"sdk-{generated_hex}"
+        assert uuid4.call_count == 1
+        assert agent.session_id == expected
+        assert agent.memory.session_id == expected
+        workspace = agent.raw._effective_workspace()
+        assert workspace.artifact_dir == tmp_path / ".floodmind" / "artifacts" / expected
+        assert workspace.tmp_dir == tmp_path / ".floodmind" / "tmp" / expected
+        assert workspace.scripts_dir == tmp_path / ".floodmind" / "scripts" / expected
+
+    def test_two_default_agents_use_isolated_session_namespaces(self, llm, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        generated = [
+            SimpleNamespace(hex="a" * 32),
+            SimpleNamespace(hex="b" * 32),
+        ]
+        with patch("floodmind.agent.api.uuid.uuid4", side_effect=generated) as uuid4:
+            first = Agent(llm=llm)
+            second = Agent(llm=llm)
+
+        assert uuid4.call_count == 2
+        assert first.session_id == f"sdk-{'a' * 32}"
+        assert second.session_id == f"sdk-{'b' * 32}"
+        assert first.session_id != second.session_id
+        assert first.memory.session_id == first.session_id
+        assert second.memory.session_id == second.session_id
+        assert first.raw._effective_workspace().artifact_dir != second.raw._effective_workspace().artifact_dir
+        assert first.raw._effective_workspace().tmp_dir != second.raw._effective_workspace().tmp_dir
+        assert first.raw._effective_workspace().scripts_dir != second.raw._effective_workspace().scripts_dir
+
+    def test_explicit_sdk_agent_session_id_remains_unchanged(self, llm):
+        with patch("floodmind.agent.api.uuid.uuid4") as uuid4:
+            agent = Agent(llm=llm, session_id="sdk-agent")
+
+        uuid4.assert_not_called()
+        assert agent.session_id == "sdk-agent"
+        assert agent.memory.session_id == "sdk-agent"
 
     def test_default_workspace_uses_current_cwd(self, llm, tmp_path, monkeypatch):
         """SDK 默认以启动目录作为 folder-first workspace。"""
@@ -396,6 +447,19 @@ class TestEdgeCases:
         assert agent.raw.session_id == "my-custom-session"
         assert agent.raw.memory.session_id == "my-custom-session"
 
+    def test_session_id_is_canonicalized_at_sdk_boundary(self, llm):
+        agent = Agent(llm=llm, session_id="  sub-worker-123  ")
+        assert agent.session_id == "sub-worker-123"
+        assert agent.memory.session_id == "sub-worker-123"
+
+    @pytest.mark.parametrize(
+        "session_id",
+        [".", "..", "name.", "../escape", "..\\escape", "/absolute", "C:\\escape", "bad\nid", "NUL.txt"],
+    )
+    def test_unsafe_explicit_session_id_is_rejected(self, llm, session_id):
+        with pytest.raises(ValueError, match="session_id"):
+            Agent(llm=llm, session_id=session_id)
+
     def test_stream_handles_empty_input(self, llm):
         """空输入不 crash。"""
         with patch.object(ModelClient, "stream_chat", _stream_text()):
@@ -557,7 +621,7 @@ class TestSdkEnhancements:
         def _deny_pending():
             svc = get_ask_service()
             for _ in range(200):
-                pending = svc.pending(session_id="sdk-agent")
+                pending = svc.pending(session_id=agent.session_id)
                 if pending:
                     svc.respond(PermissionAskResponse(
                         session_id=pending[0].session_id,
@@ -588,13 +652,52 @@ class TestSdkEnhancements:
         names = {t.name for t in agent.raw._orchestrator_registry.all()}
         assert any(n in names for n in ("Read", "Write", "Bash", "Glob", "Grep"))
 
-    def test_bare_false_registers_host_custom_tools(self, llm, sample_tools):
-        """P1-1：完整模式（bare=False）也注册宿主自定义 tools，双 registry 都可见。"""
+    def test_bare_false_registers_unclassified_host_tools_only_for_orchestrator(self, llm, sample_tools):
+        """Full mode preserves host tools on orchestrator but fails closed for specialist."""
         agent = Agent(llm=llm, bare=False, tools=sample_tools)
         orch = {t.name for t in agent.raw._orchestrator_registry.all()}
         spec = {t.name for t in agent.raw._specialist_registry.all()}
         assert "Echo" in orch and "Add" in orch
-        assert "Echo" in spec and "Add" in spec
+        assert "Echo" not in spec and "Add" not in spec
+
+    def test_bare_false_registers_only_safe_host_tools_for_specialist(self, llm):
+        readonly = build_agent_tool(
+            func=lambda: "read",
+            name="HostRead",
+            permission_policy=ToolPermissionPolicy(policy_type="readonly"),
+        )
+        state_write = build_agent_tool(
+            func=lambda: "write",
+            name="HostStateWrite",
+            is_readonly=False,
+            permission_policy=ToolPermissionPolicy(policy_type="state_write"),
+        )
+        agent = Agent(llm=llm, bare=False, tools=[readonly, state_write])
+
+        orch = {t.name for t in agent.raw._orchestrator_registry.all()}
+        spec = {t.name for t in agent.raw._specialist_registry.all()}
+        assert {"HostRead", "HostStateWrite"} <= orch
+        assert "HostRead" in spec
+        assert "HostStateWrite" not in spec
+
+    def test_full_specialist_excludes_state_write_and_destructive_tools(self, llm):
+        agent = Agent(llm=llm, bare=False)
+        specialist = agent.raw._specialist_registry.all()
+        names = {tool.name for tool in specialist}
+
+        assert "GetSkill" in names
+        assert {"Read", "Glob", "Grep"} <= names
+        assert "CoreMemoryAppend" not in names
+        assert "AddTaskExperience" not in names
+        assert "CreateScheduledTask" not in names
+        assert "CancelScheduledTask" not in names
+        assert "TaskKill" not in names
+        assert all(not tool.is_destructive for tool in specialist)
+        assert all(
+            getattr(getattr(tool, "permission_policy", None), "policy_type", None)
+            != "state_write"
+            for tool in specialist
+        )
 
     def test_bare_false_keeps_host_system_prompt(self, llm):
         """P1-2：完整模式保留宿主 system_prompt，且 skill 刷新重建后仍在。"""
@@ -618,7 +721,8 @@ class TestSdkEnhancements:
     def test_memory_session_id_clear_memory_proxies(self, llm):
         agent = Agent(llm=llm)
         assert agent.memory is agent.raw.memory
-        assert agent.session_id == "sdk-agent"
+        assert agent.session_id.startswith("sdk-")
+        assert agent.memory.session_id == agent.session_id
         agent.clear_memory()  # 委托底层，不抛异常
 
     def test_stream_forwards_kwargs_to_native(self, llm):
@@ -716,6 +820,57 @@ class TestSdkEnhancements:
         assert agent.raw._orchestrator_executor.max_iterations == 7
         assert agent.raw._specialist_executor.max_iterations == 7
 
+    @pytest.mark.parametrize("injected_window", [8192, 1_000_000])
+    def test_injected_model_window_overrides_global_default_in_both_directions(
+        self, llm, injected_window
+    ):
+        """The injected model preset wins whether its window is smaller or larger."""
+        with patch(
+            "floodmind.config.model_presets.get_preset",
+            return_value={"max_context_tokens": injected_window},
+        ):
+            agent = Agent(llm=llm)
+            assert agent.raw._resolve_context_window() == injected_window
+
+        assert agent.raw._orchestrator_executor.context_window == injected_window
+        assert agent.raw._specialist_executor.context_window == injected_window
+
+    def test_bare_executors_have_isolated_compressors(self, llm):
+        agent = Agent(llm=llm)
+        orchestrator = agent.raw._orchestrator_executor._context_compressor
+        specialist = agent.raw._specialist_executor._context_compressor
+
+        assert orchestrator is not specialist
+        orchestrator._last_summary = "orchestrator only"
+        orchestrator._summary_coverage = (1, 2, "digest")
+        assert specialist._last_summary is None
+        assert specialist._summary_coverage is None
+
+    def test_full_runtime_uses_resolved_window_iterations_and_isolated_compressors(self, llm):
+        resolved_window = 123_456
+        with patch(
+            "floodmind.config.model_presets.get_preset",
+            return_value={"max_context_tokens": resolved_window},
+        ):
+            agent = Agent(llm=llm, bare=False, max_iterations=7)
+
+        raw = agent.raw
+        orchestrator = raw._orchestrator_executor._context_compressor
+        specialist = raw._specialist_executor._context_compressor
+        assert raw._context_runtime.context_window == resolved_window
+        assert raw._orchestrator_executor.context_window == resolved_window
+        assert raw._specialist_executor.context_window == resolved_window
+        assert raw._orchestrator_executor.max_iterations == 7
+        assert raw._specialist_executor.max_iterations == 7
+        assert orchestrator is not specialist
+
+        orchestrator._last_summary = "must survive prompt rebuild"
+        raw._rebuild_system_prompts()
+        assert raw._orchestrator_executor._context_compressor is orchestrator
+        assert raw._specialist_executor._context_compressor is specialist
+        assert orchestrator._last_summary == "must survive prompt rebuild"
+        assert specialist._last_summary is None
+
 
 # ---------------------------------------------------------------------------
 # 10. SDK public exports / tool loading / provider routing
@@ -736,26 +891,32 @@ class TestSdkEnhancements:
 
     def test_top_level_exports_include_provider_and_tool_loading(self):
         from floodmind import (
-            ProviderPipeline,
-            MiniMaxPipeline,
+            ProviderCodec,
+            MiniMaxCodec,
             ToolLoadingConfig,
             ToolLoader,
-            route_pipeline,
+            SkillRegistry,
+            SkillRoot,
+            create_skill_registry,
+            route_codec,
         )
 
-        pipeline = route_pipeline("minimax", "MiniMax-M3", "https://api.minimaxi.com/v1")
-        assert isinstance(pipeline, ProviderPipeline)
-        assert isinstance(pipeline, MiniMaxPipeline)
+        codec = route_codec("minimax", "MiniMax-M3", "https://api.minimaxi.com/v1")
+        assert isinstance(codec, ProviderCodec)
+        assert isinstance(codec, MiniMaxCodec)
         assert ToolLoader(ToolLoadingConfig(mode="eager")).mode == "eager"
+        assert SkillRegistry is not None
+        assert SkillRoot is not None
+        assert callable(create_skill_registry)
 
-    def test_route_pipeline_exposes_route_context(self):
-        from floodmind import route_pipeline
+    def test_route_codec_exposes_route_context(self):
+        from floodmind import route_codec
 
-        pipeline = route_pipeline("minimax", "MiniMax-M3", "https://api.minimaxi.com/v1")
-        assert pipeline.name == "minimax"
-        assert pipeline.provider_id == "minimax"
-        assert pipeline.model_id == "MiniMax-M3"
-        assert pipeline.base_url == "https://api.minimaxi.com/v1"
+        codec = route_codec("minimax", "MiniMax-M3", "https://api.minimaxi.com/v1")
+        assert codec.name == "minimax"
+        assert codec.provider_id == "minimax"
+        assert codec.model_id == "MiniMax-M3"
+        assert codec.base_url == "https://api.minimaxi.com/v1"
 
     def test_agent_tool_loading_false_uses_eager_mode(self, llm, sample_tools):
         agent = Agent(llm=llm, tools=sample_tools, tool_loading=False)

@@ -84,7 +84,7 @@ def _default_registry() -> CapabilityRegistry:
         reasoning_replay_mode="think_tags"))
     reg.register_provider_defaults("kimi", ModelCapabilities(
         transport_family="openai", supports_tools=True, supports_reasoning=False))
-    # moonshot 是 kimi 的运行时 provider 别名（KimiPipeline.match 两者皆可）。
+    # moonshot 是 kimi 的运行时 provider 别名（KimiCodec.match 两者皆可）。
     reg.register_provider_defaults("moonshot", reg._provider_defaults["kimi"])
     reg.register_provider_defaults("minimax", ModelCapabilities(
         transport_family="openai", supports_tools=True, supports_parallel_tools=True))

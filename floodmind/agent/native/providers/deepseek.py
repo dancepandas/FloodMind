@@ -1,4 +1,4 @@
-"""DeepSeek 官方 pipeline。
+"""DeepSeek 官方 codec。
 
 方言要点（docs/deepseek.txt）：
 - 思考开关：``extra_body={"thinking": {"type": "enabled"/"disabled"}}``，默认 enabled
@@ -10,10 +10,10 @@
 
 from typing import Any, Dict
 
-from .base import ProviderPipeline
+from .base import ProviderCodec
 
 
-class DeepSeekPipeline(ProviderPipeline):
+class DeepSeekCodec(ProviderCodec):
     name = "deepseek"
 
     @classmethod

@@ -1,4 +1,4 @@
-"""Kimi（Moonshot）pipeline —— 按模型代际分支。
+"""Kimi（Moonshot）codec —— 按模型代际分支。
 
 方言要点（docs/kimi.txt）：
 - kimi-k3：始终思考，无开关（不应传 thinking）
@@ -14,11 +14,12 @@
 
 from typing import Any, Dict, List
 
-from .base import ProviderPipeline, usage_to_dict
+from .base import ProviderCodec, usage_to_dict
 
 
-class KimiPipeline(ProviderPipeline):
+class KimiCodec(ProviderCodec):
     name = "kimi"
+    uses_max_completion_tokens = True
 
     @classmethod
     def match(cls, provider_id: str, model_id: str, base_url: str) -> int:
@@ -54,10 +55,6 @@ class KimiPipeline(ProviderPipeline):
         params = super().prepare_request(params, enable_thinking=enable_thinking, stream=stream)
         if self.conservative:
             return params
-
-        # max_tokens 已弃用 → max_completion_tokens
-        if "max_tokens" in params:
-            params["max_completion_tokens"] = params.pop("max_tokens")
 
         gen = self._generation(str(params.get("model", "")))
 
