@@ -11,13 +11,14 @@ Native Agent Runtime - ModelClient
 import json
 import logging
 import os
-import time
 from typing import Any, Callable, Dict, Iterator, List, Optional
 
 import httpx
 import openai
 
+from floodmind.agent.native.response_pipeline import ResponsePipeline
 from floodmind.agent.native.types import InvalidToolCall, ModelEvent, TerminalReason, ToolCall
+from floodmind.agent.runtime.contracts.canonical_parts import CanonicalPart
 from floodmind.agent.runtime.contracts.messages import ai_message, Message
 from floodmind.agent.native.retry import is_retryable_error
 from floodmind.agent.native.transport import OpenAIChatTransport
@@ -208,37 +209,27 @@ class ModelClient:
             request_params, enable_thinking=self.enable_thinking, stream=True
         )
 
-        tool_call_accumulators: Dict[int, Dict[str, str]] = {}
-        completed_tool_call_accumulators: List[Dict[str, str]] = []
+        pipeline = ResponsePipeline()
         assistant_accumulator: Dict[str, Any] = {"role": "assistant", "content": ""}
         state = self.pipeline.new_stream_state()
-        latest_usage: Optional[Dict[str, int]] = None
-        terminal_reason = TerminalReason.from_raw(None)
 
-        def finalize_tool_call(idx: int, acc: Dict[str, str]) -> tuple[Optional[ToolCall], Optional[InvalidToolCall]]:
-            """Parse one complete call without converting malformed JSON to executable defaults."""
-            if not acc.get("id"):
-                acc["id"] = f"call_{idx}_{time.time_ns()}"
-            arguments_str = acc.get("arguments", "")
-            if not arguments_str:
-                return ToolCall(id=acc["id"], name=acc["name"], arguments={}), None
-            try:
-                parsed_args = json.loads(arguments_str)
-            except (json.JSONDecodeError, TypeError) as exc:
-                error = f"工具参数不是有效 JSON: {exc}"
-                logger.warning(
-                    "tool_call arguments JSON parse failed for %s. length=%d, preview=%s",
-                    acc["name"], len(arguments_str), arguments_str[:300],
+        def emit_finalized(
+            calls: List[ToolCall],
+            invalids: List[InvalidToolCall],
+        ) -> Iterator[ModelEvent]:
+            """把收口后的 ToolCall/InvalidToolCall 按现状事件序列发出。"""
+            for tool_call in calls:
+                yield ModelEvent(type="tool_call_done", content="", tool_call=tool_call)
+            for invalid in invalids:
+                yield ModelEvent(
+                    type="invalid_tool_call",
+                    content=invalid.error,
+                    invalid_tool_call=invalid,
                 )
-                return None, InvalidToolCall(
-                    id=acc["id"], name=acc["name"], raw_arguments=arguments_str, error=error,
-                )
-            if not isinstance(parsed_args, dict):
-                return None, InvalidToolCall(
-                    id=acc["id"], name=acc["name"], raw_arguments=arguments_str,
-                    error="工具参数 JSON 必须是对象。",
-                )
-            return ToolCall(id=acc["id"], name=acc["name"], arguments=parsed_args), None
+
+        def finalize_and_emit() -> Iterator[ModelEvent]:
+            calls, invalids = pipeline.finalize()
+            yield from emit_finalized(calls, invalids)
 
         try:
             stream = self._transport.send(request_params).chunks()
@@ -264,11 +255,22 @@ class ModelClient:
                     )
                     return
 
+                # Provider Raw Event → Canonical Parts → ResponsePipeline 状态化累积。
+                # tool deltas / usage / 终态（response_end）统一由 pipeline 收口。
+                finish: Optional[str] = None
+                for part in self.pipeline.decode_chunk(chunk):
+                    pipeline.accumulate(part)
+                    if part.event == "response_end":
+                        finish = part.text
+
+                # 补充非标位置 usage（Kimi 的 choices[0].usage 等）到 pipeline，
+                # 保证 usage 事件始终来自 pipeline.cumulative_usage()（单一事实源）。
                 usage = self.pipeline.extract_usage(chunk)
                 if usage:
-                    # Providers may emit several cumulative usage snapshots.  Keep
-                    # replacing the candidate so the terminal event is authoritative.
-                    latest_usage = usage
+                    pipeline.accumulate(CanonicalPart(
+                        event="usage", kind="text",
+                        text=json.dumps(usage, ensure_ascii=False),
+                    ))
 
                 if not chunk.choices:
                     continue
@@ -290,62 +292,19 @@ class ModelClient:
                     if answer_inc:
                         yield ModelEvent(type="token", content=answer_inc)
 
-                if delta.tool_calls:
-                    for tc_delta in delta.tool_calls:
-                        idx = tc_delta.index
-                        if idx not in tool_call_accumulators:
-                            tool_call_accumulators[idx] = {
-                                "id": "",
-                                "name": "",
-                                "arguments": "",
-                            }
-                        acc = tool_call_accumulators[idx]
-                        if tc_delta.id:
-                            acc["id"] = tc_delta.id
-                        if tc_delta.function and tc_delta.function.name:
-                            acc["name"] = tc_delta.function.name
-                        if tc_delta.function and tc_delta.function.arguments:
-                            acc["arguments"] += tc_delta.function.arguments
+                # 与现状一致：finish_reason="tool_calls" 的本 chunk 处理完后立即收口发事件。
+                if finish == "tool_calls":
+                    yield from finalize_and_emit()
 
-                finish_reason = choice.finish_reason
-                if finish_reason is not None:
-                    terminal_reason = TerminalReason.from_raw(finish_reason)
-                if finish_reason == "tool_calls":
-                    for idx, acc in sorted(tool_call_accumulators.items()):
-                        tool_call, invalid_call = finalize_tool_call(idx, acc)
-                        if tool_call is not None:
-                            yield ModelEvent(type="tool_call_done", content="", tool_call=tool_call)
-                        elif invalid_call is not None:
-                            yield ModelEvent(
-                                type="invalid_tool_call",
-                                content=invalid_call.error,
-                                invalid_tool_call=invalid_call,
-                            )
-                        completed_tool_call_accumulators.append(dict(acc))
-                    tool_call_accumulators.clear()
+            # 收口未触发 tool_calls 终态的残留 tool deltas（与现状一致）。
+            yield from finalize_and_emit()
 
-                if finish_reason in ("stop", "length", "content_filter"):
-                    pass
-
-            if tool_call_accumulators:
-                for idx, acc in sorted(tool_call_accumulators.items()):
-                    tool_call, invalid_call = finalize_tool_call(idx, acc)
-                    if tool_call is not None:
-                        yield ModelEvent(type="tool_call_done", content="", tool_call=tool_call)
-                    elif invalid_call is not None:
-                        yield ModelEvent(
-                            type="invalid_tool_call",
-                            content=invalid_call.error,
-                            invalid_tool_call=invalid_call,
-                        )
-                    completed_tool_call_accumulators.append(dict(acc))
-
-            if latest_usage:
-                yield ModelEvent(type="usage", content=json.dumps(latest_usage))
+            if pipeline.cumulative_usage():
+                yield ModelEvent(type="usage", content=json.dumps(pipeline.cumulative_usage()))
 
             assistant_message = self.pipeline.build_assistant_message(
                 assistant_accumulator,
-                completed_tool_call_accumulators,
+                pipeline.completed_accumulators(),
             )
             yield ModelEvent(
                 type="assistant_message_done",
@@ -354,7 +313,7 @@ class ModelClient:
                     "provider": self.pipeline.name,
                 },
             )
-            yield ModelEvent(type="done", content="", terminal_reason=terminal_reason)
+            yield ModelEvent(type="done", content="", terminal_reason=pipeline.terminal_reason())
 
         except openai.APIError as e:
             # 可重试错误抛给调用方（executor 重试循环），保留异常链

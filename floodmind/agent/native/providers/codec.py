@@ -57,7 +57,8 @@ class ProviderCodec:
                 func = getattr(tc, "function", None) or type("F", (), {})()
                 yield CanonicalPart(
                     event="tool_call_delta", kind="tool_call", index=int(getattr(tc, "index", 0)),
-                    name=getattr(func, "name", "") or "", arguments=getattr(func, "arguments", "") or "",
+                    id=getattr(tc, "id", "") or "", name=getattr(func, "name", "") or "",
+                    arguments=getattr(func, "arguments", "") or "",
                     raw=_asdict(raw_chunk))
         finish = getattr(choice, "finish_reason", None)
         if finish is not None:

@@ -14,6 +14,7 @@ class CanonicalPart(BaseModel):
     event: str                       # PART_EVENT_TYPES 之一
     kind: str = ""                   # PART_TYPES 之一
     index: int = 0
+    id: str = ""                     # tool_call 的 provider id（跨 chunk 首个非空帧）
     text: str = ""
     name: str = ""
     arguments: str = ""
