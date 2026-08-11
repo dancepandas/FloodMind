@@ -18,21 +18,108 @@ from floodmind.agent.native.types import (
     AgentResult,
     ModelEvent,
     RunContext,
+    TerminalReason,
     TokenUsage,
 )
 from floodmind.agent.runtime.contracts.tools import ToolCall, ToolResult
+from floodmind.agent.runtime.contracts.run_state import RunState
+from floodmind.agent.runtime.contracts.identity import new_id
+from floodmind.agent.runtime.contracts.tool_transaction import (
+    canonical_arguments,
+    arguments_sha256,
+)
+from floodmind.agent.runtime.services.idempotency import (
+    derive_idempotency_key,
+    side_effect_class_for_spec,
+)
+from floodmind.agent.runtime.services.journal_authority import JournalAuthority
 from floodmind.agent.native.event_bus import EventBus
 from floodmind.agent.native.message_builder import MessageBuilder
 from floodmind.agent.native.model_client import ModelClient
-from floodmind.agent.native.retry import RetryPolicy, is_retryable_error
+from floodmind.agent.native.retry import RetryPolicy, should_retry
 
-from floodmind.agent.runtime.services.execution_journal_service import ExecutionJournalService
 from floodmind.agent.runtime.services.tracing_service import TracingService
 
 # 上下文压缩（可选）
-from floodmind.agent.native.context_compressor import ContextCompressor
+from floodmind.agent.native.context_compressor import (
+    CompactionOverBudgetError,
+    ContextCompressor,
+)
+from floodmind.agent.native.capabilities import ModelCapabilities, default_registry
+from floodmind.agent.native.projection import compute_input_budget
 
 logger = logging.getLogger(__name__)
+
+
+_RUN_TO_LOOP_STATUS = {
+    "created": "created",
+    "projecting_context": "created",
+    "awaiting_model": "awaiting_llm",
+    "streaming_model": "awaiting_llm",
+    "awaiting_tool": "awaiting_tool",
+    "awaiting_approval": "awaiting_permission",
+    "executing_tool": "awaiting_tool",
+    "compacting": "context_compress",
+    "paused": "paused",
+    "cancelling": "failed",
+    "cancelled": "failed",
+    "completed": "completed",
+    "failed": "failed",
+}
+
+
+def project_run_state_to_loop_state(
+    loop_state: AgentLoopState,
+    run_state: RunState,
+) -> AgentLoopState:
+    """Project authoritative reducer fields onto the mutable loop driver state."""
+    projected = loop_state.model_copy(deep=True)
+    projected.status = _RUN_TO_LOOP_STATUS[run_state.status.value]
+    current_thread_id = run_state.current_thread_id
+    scoped_turns = [
+        turn for turn in run_state.turns
+        if not current_thread_id or turn.get("thread_id", "") in ("", current_thread_id)
+    ]
+    projected.iteration = sum(
+        1 for turn in scoped_turns if turn.get("role") == "assistant"
+    )
+    projected.journal_cursor = run_state.last_committed_sequence
+    system_prefix: List[Dict[str, Any]] = []
+    for message in loop_state.messages:
+        if message.get("role") != "system":
+            break
+        system_prefix.append(dict(message))
+    journal_messages: List[Dict[str, Any]] = []
+    for turn in scoped_turns:
+        role = turn.get("role")
+        if role == "user":
+            journal_messages.append({"role": "user", "content": turn.get("content", "")})
+        elif role == "assistant":
+            message: Dict[str, Any] = {
+                "role": "assistant",
+                "content": turn.get("content", ""),
+            }
+            if turn.get("tool_calls"):
+                message["tool_calls"] = list(turn["tool_calls"])
+            journal_messages.append(message)
+        elif role == "tool":
+            journal_messages.append({
+                "role": "tool",
+                "tool_call_id": turn.get("tool_call_id", ""),
+                "content": turn.get("content", ""),
+            })
+    if journal_messages or not current_thread_id:
+        projected.messages = system_prefix + journal_messages
+    projected.pending_tool_calls = []
+    projected.pending_ask_id = None
+    projected.pending_tool_transaction_id = ""
+    if run_state.pending_tool_transactions:
+        projected.pending_tool_transaction_id = (
+            run_state.pending_tool_transactions[-1].transaction_id
+        )
+    if run_state.pending_approvals:
+        projected.pending_ask_id = run_state.pending_approvals[-1].ask_id
+    return projected
 
 
 class NativeAgentExecutor:
@@ -64,12 +151,12 @@ class NativeAgentExecutor:
         tool_registry: Optional[Any] = None,
         tool_loader: Optional[Any] = None,
         checkpoint_service: Optional[Any] = None,
-        execution_journal_service: Optional[ExecutionJournalService] = None,
         tracing_service: Optional[TracingService] = None,
         context_compressor: Optional[ContextCompressor] = None,
         context_window: int = 128000,
         memory: Optional[Any] = None,
         background_task_service: Optional[Any] = None,
+        journal_authority: Optional[JournalAuthority] = None,
     ):
         self.model_client = model_client
         self.tool_executor = tool_executor
@@ -87,15 +174,20 @@ class NativeAgentExecutor:
         self._tool_registry = tool_registry
         self._tool_loader = tool_loader
         self._checkpoint_service = checkpoint_service
-        self._journal_service = execution_journal_service
         self._tracing_service = tracing_service
         self._context_compressor = context_compressor
         self.context_window = context_window
-        # 唯一历史源：每轮原子完成后写入 memory（add_assistant_round）；中断时不写。
         self._memory = memory
+        self._journal_authority = journal_authority
         # 后台任务服务：任务完成通知注入（None 时回退全局单例 getter）
         self._background_task_service = background_task_service
         self._compressor_session_id: Optional[str] = None
+        # §7.6 能力快照（一次解析，跨压缩/投影复用）；capability_snapshot_id 供 Manifest 引用
+        self._capability_snapshot_id: str = ""
+        self._capabilities: ModelCapabilities = self._resolve_capabilities()
+        # 压缩失败抑制：同一轮（消息未变）压缩 fail-closed 后不再重触发，避免
+        # awaiting_llm ↔ context_compress 忙循环（见 _on_awaiting_llm 的触发守卫）。
+        self._compaction_failed: bool = False
         self._state_handlers: Dict[AgentLoopStatus, Callable[[AgentLoopState, RunContext], AgentLoopState]] = {
             "created": self._on_created,
             "awaiting_llm": self._on_awaiting_llm,
@@ -152,12 +244,39 @@ class NativeAgentExecutor:
         self,
         context: RunContext,
         state: AgentLoopState,
+        run_state: Optional[RunState] = None,
     ) -> AgentResult:
         """从给定状态开始运行状态机。
 
         memory 是唯一历史源：每次 stream 从 memory 起步，无需 checkpoint resume。
         用户暂停 = abort（终态 failed，未完成轮丢弃不落 history）；无单独的 paused 软状态。
         """
+        # Checkpoint snapshots are projections. Replay the canonical journal before
+        # driving the loop so authoritative fields come from reducer state.
+        if run_state is not None:
+            state = project_run_state_to_loop_state(state, run_state)
+        elif self._journal_authority is not None:
+            replayed_state = self._journal_authority.replay()
+            if replayed_state.last_committed_sequence:
+                state = project_run_state_to_loop_state(state, replayed_state)
+
+        # 每次 run 干净的压缩失败抑制状态（executor 可跨 run/session 复用）
+        self._compaction_failed = False
+
+        # 后台任务在 start() 时捕获当前线程的 authority，延迟完成不会被后续 run 重路由。
+        background_service = getattr(self, "_background_task_service", None)
+        authority_bound = self._journal_authority is not None and background_service is not None
+        if authority_bound:
+            background_service.bind_thread_authority(self._journal_authority)
+
+        try:
+            return self._drive_run_from_state(context, state)
+        finally:
+            if authority_bound:
+                background_service.unbind_thread_authority()
+
+    def _drive_run_from_state(self, context: RunContext, state: AgentLoopState) -> AgentResult:
+        """Drive an already projected loop state while run-scoped bindings are active."""
         # 用户中断检查回调
         effective_abort = context.abort_check
 
@@ -206,6 +325,29 @@ class NativeAgentExecutor:
         if self._tracing_service is not None:
             self._tracing_service.flush(context.session_id)
 
+        if self._journal_authority is not None:
+            terminal_reason = (
+                state.terminal_reason.code
+                if state.terminal_reason is not None
+                else state.status
+            )
+            if state.status == "completed":
+                self._journal_authority.emit(
+                    "run.completed",
+                    {
+                        "final_output": state.final_output,
+                        "terminal_reason": terminal_reason,
+                    },
+                )
+            else:
+                self._journal_authority.emit(
+                    "run.failed",
+                    {
+                        "error": state.final_output,
+                        "terminal_reason": terminal_reason,
+                    },
+                )
+
         return self._build_result(state)
 
     # --- 状态处理器 ---
@@ -234,10 +376,30 @@ class NativeAgentExecutor:
             self._context_compressor.reset()
             self._compressor_session_id = state.session_id
 
+        before_messages = len(state.messages)
+        reason = "context_window_threshold"
+        if self._journal_authority is not None:
+            self._journal_authority.emit(
+                "context.compaction.started",
+                {"reason": reason, "before_messages": before_messages},
+            )
         try:
-            result = self._context_compressor.compress(state.messages, max_context_tokens=self.context_window)
+            caps = getattr(self, "_capabilities", None)
+            if caps is None:
+                caps = self._resolve_capabilities()
+                self._capabilities = caps
+            # §9.3 有效输入预算：从能力快照计算，压缩不得越过该预算
+            budget = compute_input_budget(caps)
+            result = self._context_compressor.compress_journal(
+                state.messages,
+                self._journal_authority,
+                capabilities=caps,
+                budget=budget,
+                max_context_tokens=budget.effective_input or self.context_window,
+            )
             if result.saved_tokens > 0:
                 state.messages = result.compressed_messages
+                self._compaction_failed = False
                 self.event_bus.emit({
                     "type": "context_compress",
                     "summary": result.summary,
@@ -253,7 +415,18 @@ class NativeAgentExecutor:
                 )
             else:
                 logger.info("[EXEC] context_compress triggered but no compression performed")
+            # Summary Event（§9.5 CompactSummary）已由 compress_journal 经 authority
+            # 落 journal——只 append context.compaction.completed，不改原始事件。
+        except CompactionOverBudgetError as e:
+            # F4 fail-closed：不静默截断当前用户请求，也不返回超预算投影。
+            # 保持原始 messages 继续运行，交由宿主/检索缩减（P6）处理。
+            # 同一轮消息未变，重试压缩必再失败 → 抑制再触发，避免忙循环。
+            self._compaction_failed = True
+            logger.error("[EXEC] context compression over input budget, keeping original messages: %s", e)
+            self.event_bus.emit_error(f"上下文压缩失败（超输入预算）: {str(e)[:200]}")
         except Exception as e:
+            # 与上同理：任何压缩失败都保持原始 messages，必须抑制再触发。
+            self._compaction_failed = True
             logger.error("[EXEC] context compression failed: %s", e)
             self.event_bus.emit_error(f"上下文压缩失败: {str(e)[:200]}")
 
@@ -274,9 +447,12 @@ class NativeAgentExecutor:
         # 后台任务完成通知注入（loop 活跃时；已终态的留给宿主唤醒路径）
         self._inject_background_notifications(state)
 
-        # 主动上下文压缩：达到阈值时先进入 context_compress 状态
+        # 主动上下文压缩：达到阈值时先进入 context_compress 状态。
+        # 压缩已 fail-closed（同一轮消息未变，重试必再失败）→ 跳过，直接走 LLM 调用，
+        # 避免 awaiting_llm ↔ context_compress 忙循环（不消耗 iteration，唯一出口是外部中断）。
         if (
-            self._context_compressor is not None
+            not self._compaction_failed
+            and self._context_compressor is not None
             and self._context_compressor.should_compress(state.messages, self.context_window)
         ):
             logger.info(
@@ -297,10 +473,25 @@ class NativeAgentExecutor:
         state.current_answer = ""
         state.round_assistant_message = None
         tool_calls: List[ToolCall] = []
+        invalid_tool_calls: List[Any] = []
         step_tokens = TokenUsage()
+        state.terminal_reason = None
         # 记录本轮开始前 reasoning 长度，重试时截断本轮残片，避免两段拼接
         reasoning_before = len(state.reasoning)
 
+        state.attempt_id = new_id("attempt")
+        if self._journal_authority is not None:
+            self._journal_authority.emit(
+                "model.attempt.started",
+                {
+                    "model": getattr(self.model_client, "model_name", ""),
+                    "iteration": state.iteration,
+                    "messages_count": len(state.messages),
+                },
+                attempt_id=state.attempt_id,
+            )
+        # §9.2 每次模型调用前落投影 Manifest（回答「模型看到了什么」）
+        self._emit_projection_committed(state)
         self.event_bus.emit_llm_step_start(
             model_name=getattr(self.model_client, 'model_name', ''),
             iteration=state.iteration,
@@ -310,6 +501,7 @@ class NativeAgentExecutor:
         retry_policy = RetryPolicy(max_retries=3, base_delay=2.0, max_delay=30.0)
         attempt = 0
         while True:
+            attempt_output_events: List[tuple[str, str]] = []
             try:
                 for event in self.model_client.stream_chat(
                     messages=state.messages,
@@ -317,11 +509,25 @@ class NativeAgentExecutor:
                     extra_body=self.extra_body or None,
                     abort_check=context.abort_check,
                 ):
-                    self._consume_llm_event(event, state, tool_calls, step_tokens)
+                    self._consume_llm_event(
+                        event, state, tool_calls, step_tokens, invalid_tool_calls,
+                        emit_output=False,
+                    )
+                    if event.type in {"reasoning", "token"}:
+                        attempt_output_events.append((event.type, event.content))
+                for event_type, content in attempt_output_events:
+                    if event_type == "reasoning":
+                        self.event_bus.emit_reasoning(content)
+                    else:
+                        self.event_bus.emit_token(content)
                 break  # stream completed successfully
 
             except Exception as e:
-                if attempt >= retry_policy.max_retries or not is_retryable_error(e):
+                # §7.7 Orchestrator 决策：Transport 只给 Retry Advice（model_client 门面），
+                # 是否重试由 should_retry 结合终态判定。
+                advice = self.model_client.classify_error(e)
+                terminal_reason = state.terminal_reason
+                if attempt >= retry_policy.max_retries or not should_retry(advice, terminal_reason):
                     self.event_bus.emit_error(str(e)[:500])
                     self.event_bus.emit_llm_step_end(reason="error")
                     state.final_output = f"模型调用失败: {str(e)[:300]}"
@@ -343,6 +549,8 @@ class NativeAgentExecutor:
                 state.current_answer = ""
                 state.reasoning = state.reasoning[:reasoning_before]
                 tool_calls = []
+                invalid_tool_calls = []
+                state.terminal_reason = None
                 step_tokens = TokenUsage()
                 time.sleep(delay)
 
@@ -358,8 +566,11 @@ class NativeAgentExecutor:
         # 本轮 reasoning 切片（跨轮 state.reasoning 累加，按本轮起点切片），写 memory 用
         state.round_reasoning = state.reasoning[reasoning_before:]
 
+        terminal = state.terminal_reason or TerminalReason.from_raw(
+            "tool_calls" if tool_calls or invalid_tool_calls else "stop"
+        )
         self.event_bus.emit_llm_step_end(
-            reason="tool_calls" if tool_calls else "stop",
+            reason=terminal.raw or terminal.code,
             tokens={
                 "prompt_tokens": step_tokens.prompt_tokens,
                 "completion_tokens": step_tokens.completion_tokens,
@@ -372,21 +583,71 @@ class NativeAgentExecutor:
         state.token_usage.completion_tokens += step_tokens.completion_tokens
         state.token_usage.total_tokens += step_tokens.total_tokens
 
-        if not tool_calls:
-            # 终态轮（只有 LLM 回答，没有工具调用）：立即落 memory（history 只含完整轮）
-            self._write_round_to_memory(state, tool_calls_records=[], is_final=True)
-            state.final_output = state.current_answer
-            # 记录最终一轮（只有 LLM 回答，没有工具调用）
-            if self._journal_service is not None:
-                self._journal_service.record_turn(
-                    session_id=context.session_id,
-                    turn_index=state.iteration,
-                    checkpoint_id=state.checkpoint_id,
-                    current_answer=state.current_answer,
-                    tool_calls=[],
-                    tool_result_entries=[],
-                    token_usage=state.token_usage.model_dump(),
+        if invalid_tool_calls:
+            # Keep the provider assistant snapshot (with the original malformed call) and
+            # return a structured tool error. Crucially, no ToolCall reaches execution.
+            assistant_message = getattr(state, "round_assistant_message", None)
+            if assistant_message:
+                state.messages.append(assistant_message)
+            for invalid in invalid_tool_calls:
+                feedback = (
+                    f"工具 `{invalid.name}` 的参数 JSON 无法解析，工具未执行。"
+                    f"请修正后重试。错误: {invalid.error}"
                 )
+                state.messages.append(
+                    self.message_builder.build_tool_result_message(invalid.id, feedback)
+                )
+                self.event_bus.emit_tool_result(
+                    tool_name=invalid.name,
+                    status="error",
+                    content=feedback,
+                    tool_input=invalid.raw_arguments,
+                    call_id=invalid.id,
+                )
+            state.iteration += 1
+            state.status = "awaiting_llm"
+            return state
+
+        if terminal.code == "max_tokens":
+            if state.max_token_continuation_count < state.max_token_continuations:
+                state.max_token_continuation_count += 1
+                partial = state.current_answer
+                if partial:
+                    state.final_output += partial
+                    state.messages.append(
+                        self.message_builder.build_assistant_tool_calls_message([], partial)
+                    )
+                state.messages.append(self.message_builder.build_user_message(
+                    "上一条回复因达到输出长度限制而中断。请直接从中断处继续，不要重复已有内容。"
+                ))
+                state.current_answer = ""
+                state.status = "awaiting_llm"
+                return state
+            state.final_output = (
+                state.final_output + state.current_answer
+                or "模型输出达到长度限制，未能完整完成。"
+            )
+            state.status = "failed"
+            return state
+
+        if terminal.code in {"filtered", "refused", "paused", "aborted", "error", "unknown"}:
+            labels = {
+                "filtered": "模型输出被内容过滤器截断。",
+                "refused": "模型拒绝了该请求。",
+                "paused": "模型暂停了当前回合，未正常完成。",
+                "aborted": "模型调用已中止。",
+                "error": "模型回合异常结束。",
+                "unknown": f"模型以未知原因结束: {terminal.raw or 'empty'}",
+            }
+            state.final_output = labels[terminal.code]
+            state.status = "failed"
+            return state
+
+        if not tool_calls:
+            self._emit_round_events(
+                state, tool_calls_records=[], is_final=True, attempt_id=state.attempt_id
+            )
+            state.final_output += state.current_answer
             # 终态后再检查一次排队指令：运行中若有追加的新指令，继续处理而非结束
             if self._inject_queued_user_messages(state) > 0:
                 logger.info("[EXEC] terminal round deferred: %d queued message(s) pending", state.iteration)
@@ -412,11 +673,14 @@ class NativeAgentExecutor:
     def _on_awaiting_tool(self, state: AgentLoopState, context: RunContext) -> AgentLoopState:
         """顺序执行 pending_tool_calls，检测 DOOM LOOP / 连续失败。"""
         tool_calls = state.pending_tool_calls
+        completed_ask_calls = list(getattr(state, "_pending_completed_ask_calls", []) or [])
+        state._pending_completed_ask_calls = []
 
-        # 本轮工具结果 journal 条目
-        tool_result_entries = []
         # 本轮工具记录（写 memory 用：tool_name/input/output/status）
-        round_tool_records: List[Dict[str, Any]] = []
+        round_tool_records: List[Dict[str, Any]] = list(
+            getattr(state, "_pending_round_tool_records", []) or []
+        )
+        state._pending_round_tool_records = []
 
         for idx, call in enumerate(tool_calls):
             # 中断（用户暂停）在工具阶段生效：执行到可中断点终止，本轮整轮丢弃不落 history
@@ -441,6 +705,30 @@ class NativeAgentExecutor:
                 state.status = "failed"
                 return state
 
+            transaction_id = new_id("transaction")
+            # §6.1/§6.5：先建立事务（tool.call.proposed，含幂等键）。tool.execution.started
+            # 不再由 executor 提前发出 —— 它由 ToolExecutionService 在真正副作用前发出，
+            # 保证校验/权限评估发生在事务标记 running 之前（§6.6 生命周期时序）。
+            identity = self._tool_transaction_identity(call)
+            canon = identity["canonical_arguments_str"]
+            side_effect_class = identity["side_effect_class"]
+            idempotency_key = identity["idempotency_key"]
+            if self._journal_authority is not None:
+                self._journal_authority.emit(
+                    "tool.call.proposed",
+                    {
+                        "transaction_id": transaction_id,
+                        "call_id": call.id,
+                        "tool_id": call.name,
+                        "tool_version": "1",
+                        "canonical_arguments": canon,
+                        "arguments_sha256": identity["arguments_sha256"],
+                        "side_effect_class": side_effect_class,
+                        "idempotency_key": idempotency_key,
+                        "preconditions": [],
+                    },
+                    call_id=call.id,
+                )
             self.event_bus.emit_tool_status(call.name, "running", tool_input=tool_input_str, call_id=call.id)
             logger.info("[EXEC] executing tool: name=%s, call_id=%s, input_len=%d", call.name, call.id, len(tool_input_str))
 
@@ -458,7 +746,17 @@ class NativeAgentExecutor:
                     status="error",
                 )
             else:
-                result = self.tool_executor.execute(call, context, registry=self._tool_registry)
+                result = self.tool_executor.execute(
+                    call,
+                    context,
+                    registry=self._tool_registry,
+                    journal_authority=self._journal_authority,
+                    transaction_id=transaction_id,
+                    idempotency_key=idempotency_key,
+                    side_effect_class=side_effect_class,
+                    canonical_arguments_str=canon,
+                    arguments_sha256=identity["arguments_sha256"],
+                )
             logger.info("[EXEC] tool done: name=%s, status=%s, result_len=%d", call.name, result.status, len(result.content) if result.content else 0)
 
             state.tool_results.append(result)
@@ -469,6 +767,7 @@ class NativeAgentExecutor:
 
             # 处理 awaiting_permission：保存当前未完成的工具调用，暂停执行
             if result.status == "awaiting_permission":
+                state.pending_tool_transaction_id = transaction_id
                 state.pending_tool_calls = tool_calls[idx:]  # 包含当前这个
                 state.pending_ask_id = result.metadata.get("ask_id")
                 state.status = "awaiting_permission"
@@ -481,6 +780,7 @@ class NativeAgentExecutor:
                 state.consecutive_failures[call.name] = 0
 
             if state.consecutive_failures.get(call.name, 0) >= self.MAX_CONSECUTIVE_TOOL_FAILURES:
+                self._emit_tool_execution_result(transaction_id, call, result, idempotency_key=idempotency_key)
                 failure_msg = (
                     f"工具 {call.name} 已连续失败 {self.MAX_CONSECUTIVE_TOOL_FAILURES} 次，"
                     f"强制终止执行循环。请检查参数是否正确。"
@@ -491,16 +791,8 @@ class NativeAgentExecutor:
                 state.status = "failed"
                 return state
 
-            # 使用 journal service 决定 inline 还是归档
-            if self._journal_service is not None:
-                inline_content, journal_entry = self._journal_service.process_tool_result(
-                    session_id=context.session_id,
-                    tool_call=call,
-                    tool_result=result,
-                )
-                tool_result_entries.append(journal_entry)
-            else:
-                inline_content = result.content
+            inline_content = result.content
+            self._emit_tool_execution_result(transaction_id, call, result, idempotency_key=idempotency_key)
 
             # 记录本轮工具调用/结果（写 memory 用）
             round_tool_records.append({
@@ -525,20 +817,12 @@ class NativeAgentExecutor:
                 self.message_builder.build_tool_result_message(call.id, inline_content)
             )
 
-        # 本轮工具全部执行完毕：整轮（assistant + tool_results）原子落 memory（history 只含完整轮）
-        self._write_round_to_memory(state, tool_calls_records=round_tool_records, is_final=False)
-
-        # 本轮工具全部执行完毕，记录 journal
-        if self._journal_service is not None:
-            self._journal_service.record_turn(
-                session_id=context.session_id,
-                turn_index=state.iteration,
-                checkpoint_id=state.checkpoint_id,
-                current_answer=state.current_answer,
-                tool_calls=tool_calls,
-                tool_result_entries=tool_result_entries,
-                token_usage=state.token_usage.model_dump(),
-            )
+        self._emit_round_events(
+            state,
+            tool_calls_records=round_tool_records,
+            is_final=False,
+            attempt_id=state.attempt_id,
+        )
 
         # 本轮工具全部执行完毕，进入下一轮 LLM
         state.pending_tool_calls = []
@@ -547,30 +831,36 @@ class NativeAgentExecutor:
         state.status = "awaiting_llm"
         return state
 
-    # --- memory 单一历史源：整轮原子写入 + 排队指令注入 ---
+    # --- canonical round events + queued-message projection ---
 
-    def _write_round_to_memory(
+    def _emit_round_events(
         self,
         state: AgentLoopState,
+        *,
         tool_calls_records: List[Dict[str, Any]],
         is_final: bool,
+        attempt_id: str,
     ) -> None:
-        """把一个完整 LLM 调用轮（assistant 产物 + 本轮工具结果）原子写入 memory。
-
-        仅在轮原子完成（LLM 出完 + 全部工具执行完 / 终态无工具）后调用。
-        中断路径不会走到这里，故 memory 永远只含完整轮。子代理 memory=None 时跳过。
-        """
-        if self._memory is None or not hasattr(self._memory, "add_assistant_round"):
+        if self._journal_authority is None:
             return
-        try:
-            self._memory.add_assistant_round(
-                content=state.current_answer or "",
-                reasoning=getattr(state, "round_reasoning", "") or "",
-                tool_calls=tool_calls_records,
-                is_final=is_final,
-            )
-        except Exception as e:
-            logger.warning("[EXEC] write round to memory failed: %s", e)
+        terminal_reason = (
+            state.terminal_reason.code
+            if state.terminal_reason is not None
+            else ("tool_calls" if tool_calls_records else "completed")
+        )
+        self._journal_authority.emit(
+            "model.attempt.completed",
+            {
+                "attempt_id": attempt_id,
+                "terminal_reason": terminal_reason,
+                "content": state.current_answer or "",
+                "reasoning": state.round_reasoning or "",
+                "tool_calls": tool_calls_records,
+                "is_final": bool(is_final),
+                "usage": state.token_usage.model_dump(),
+            },
+            attempt_id=attempt_id,
+        )
 
     def _inject_background_notifications(self, state: AgentLoopState) -> int:
         """把本会话已完成的后台任务作为 user 消息注入，使下一次 LLM 调用感知其完成。
@@ -581,11 +871,7 @@ class NativeAgentExecutor:
         """
         svc = self._background_task_service
         if svc is None:
-            try:
-                from floodmind.agent.runtime.services.background_task_service import get_background_task_service
-                svc = get_background_task_service()
-            except Exception:
-                return 0
+            return 0
         try:
             tasks = svc.drain_completions(state.session_id)
         except Exception as e:
@@ -735,7 +1021,22 @@ class NativeAgentExecutor:
                 if pending_call:
                     denial_msg = f"用户拒绝了工具 {pending_call.name} 的执行请求。"
                     self._emit_tool_error(pending_call, denial_msg, state)
+                    transaction_id = getattr(state, "pending_tool_transaction_id", "")
+                    if transaction_id:
+                        denied_result = ToolResult(
+                            tool_call_id=pending_call.id,
+                            name=pending_call.name,
+                            content=denial_msg,
+                            status="error",
+                        )
+                        self._emit_tool_execution_result(
+                            transaction_id,
+                            pending_call,
+                            denied_result,
+                            idempotency_key=self._tool_idempotency_key(pending_call),
+                        )
                 state.pending_tool_calls = []
+                state.pending_tool_transaction_id = ""
                 state.pending_ask_id = None
                 state.status = "awaiting_llm"
                 return state
@@ -748,7 +1049,18 @@ class NativeAgentExecutor:
             pending_call = state.pending_tool_calls[0] if state.pending_tool_calls else None
             if pending_call and hasattr(self.tool_executor, "execute"):
                 context.mode = getattr(state, "mode", "execution")
-                result = self.tool_executor.execute(pending_call, context, registry=self._tool_registry)
+                identity = self._tool_transaction_identity(pending_call)
+                result = self.tool_executor.execute(
+                    pending_call,
+                    context,
+                    registry=self._tool_registry,
+                    journal_authority=self._journal_authority,
+                    transaction_id=getattr(state, "pending_tool_transaction_id", "") or new_id("transaction"),
+                    idempotency_key=identity["idempotency_key"],
+                    side_effect_class=identity["side_effect_class"],
+                    canonical_arguments_str=identity["canonical_arguments_str"],
+                    arguments_sha256=identity["arguments_sha256"],
+                )
                 if result.status == "awaiting_permission":
                     state.pending_ask_id = result.metadata.get("ask_id")
                     return state
@@ -773,19 +1085,42 @@ class NativeAgentExecutor:
 
         first_call = pending_calls[0]
         context.mode = getattr(state, "mode", "execution")
+        transaction_id = getattr(state, "pending_tool_transaction_id", "") or new_id("transaction")
+        identity = self._tool_transaction_identity(first_call)
         result = self.tool_executor.execute(
             first_call,
             context,
             registry=self._tool_registry,
             authorized_ask_id=authorized_ask_id,
+            journal_authority=self._journal_authority,
+            transaction_id=transaction_id,
+            idempotency_key=identity["idempotency_key"],
+            side_effect_class=identity["side_effect_class"],
+            canonical_arguments_str=identity["canonical_arguments_str"],
+            arguments_sha256=identity["arguments_sha256"],
         )
         state.tool_results.append(result)
+        tool_input_str = json.dumps(first_call.arguments, ensure_ascii=False) if first_call.arguments else ""
+        inline_content = result.content
+        self._emit_tool_execution_result(
+            transaction_id,
+            first_call,
+            result,
+            idempotency_key=identity["idempotency_key"],
+        )
+        state.pending_tool_transaction_id = ""
+        state._pending_round_tool_records = [{
+            "tool_name": first_call.name,
+            "tool_input": tool_input_str,
+            "tool_output": inline_content or "",
+            "status": result.status,
+        }]
 
         self.event_bus.emit_tool_result(
             tool_name=first_call.name,
             status=result.status,
-            content=result.content,
-            tool_input=json.dumps(first_call.arguments, ensure_ascii=False) if first_call.arguments else "",
+            content=inline_content,
+            tool_input=tool_input_str,
             call_id=first_call.id,
         )
 
@@ -793,10 +1128,11 @@ class NativeAgentExecutor:
             state.artifacts.extend(result.artifacts)
 
         state.messages.append(
-            self.message_builder.build_tool_result_message(first_call.id, result.content)
+            self.message_builder.build_tool_result_message(first_call.id, inline_content)
         )
 
-        # 移除已执行的第一个 call
+        # 移除已执行的第一个 call，并保留它供统一的轮末 journal/memory 处理
+        state._pending_completed_ask_calls = [first_call]
         state.pending_tool_calls = pending_calls[1:]
         # 继续执行剩余工具
         state.status = "awaiting_tool"
@@ -810,17 +1146,24 @@ class NativeAgentExecutor:
         state: AgentLoopState,
         tool_calls_ref: List[ToolCall],
         step_tokens: TokenUsage,
+        invalid_tool_calls_ref: Optional[List[Any]] = None,
+        emit_output: bool = True,
     ) -> None:
         """消费单个 LLM 事件。"""
         if event.type == "reasoning":
             state.reasoning += event.content
-            self.event_bus.emit_reasoning(event.content)
+            if emit_output:
+                self.event_bus.emit_reasoning(event.content)
         elif event.type == "token":
             state.current_answer += event.content
-            self.event_bus.emit_token(event.content)
+            if emit_output:
+                self.event_bus.emit_token(event.content)
         elif event.type == "tool_call_done":
             if event.tool_call is not None:
                 tool_calls_ref.append(event.tool_call)
+        elif event.type == "invalid_tool_call":
+            if invalid_tool_calls_ref is not None and event.invalid_tool_call is not None:
+                invalid_tool_calls_ref.append(event.invalid_tool_call)
         elif event.type == "assistant_message_done":
             payload = event.raw or {}
             message = payload.get("message") if isinstance(payload, dict) else None
@@ -835,7 +1178,8 @@ class NativeAgentExecutor:
             self.event_bus.emit_llm_step_end(reason="timeout")
             raise TimeoutError(event.content)
         elif event.type == "done":
-            pass
+            if event.terminal_reason is not None:
+                state.terminal_reason = event.terminal_reason
         elif event.type == "usage":
             try:
                 payload = json.loads(event.content) if event.content else {}
@@ -859,6 +1203,71 @@ class NativeAgentExecutor:
             return all(s == input_sig for _, s in last_n)
         return False
 
+    def _tool_transaction_identity(self, call: ToolCall) -> dict:
+        """派生一次调用的确定性事务身份字段（§6.5/§6.6）。
+
+        与 ToolExecutionService 同源（同一 canonical 形态派生），供 tool.call.proposed
+        与 execute() 中段生命周期事件（validated/permission/started）共用。
+        """
+        spec = self._tool_registry.get(call.name) if self._tool_registry is not None else None
+        canon = canonical_arguments(call.arguments)
+        side_effect_class = side_effect_class_for_spec(spec)
+        idempotency_key = derive_idempotency_key(
+            tool_id=call.name,
+            canonical_arguments=canon,
+            side_effect_class=side_effect_class,
+        )
+        return {
+            "canonical_arguments_str": canon,
+            "arguments_sha256": arguments_sha256(call.name, "1", canon),
+            "side_effect_class": side_effect_class,
+            "idempotency_key": idempotency_key,
+        }
+
+    def _tool_idempotency_key(self, call: ToolCall) -> str:
+        """为单个 call 派生幂等键（与 tool.call.proposed 同源，§6.5）。"""
+        return self._tool_transaction_identity(call)["idempotency_key"]
+
+    def _emit_tool_execution_result(
+        self,
+        transaction_id: str,
+        call: ToolCall,
+        result: ToolResult,
+        *,
+        idempotency_key: str = "",
+    ) -> None:
+        if self._journal_authority is None:
+            return
+        # 结果不确定（超时等）：发 indeterminate，事务保留 pending 供 reconcile。
+        if (result.metadata or {}).get("indeterminate"):
+            self._journal_authority.emit(
+                "tool.execution.indeterminate",
+                {
+                    "transaction_id": transaction_id,
+                    "call_id": call.id,
+                    "tool_id": call.name,
+                    "reason": "timeout",
+                    "idempotency_key": idempotency_key,
+                },
+                call_id=call.id,
+            )
+            return
+        succeeded = result.status in {"completed", "succeeded", "success"}
+        self._journal_authority.emit(
+            "tool.execution.completed" if succeeded else "tool.execution.failed",
+            {
+                "transaction_id": transaction_id,
+                "call_id": call.id,
+                "tool_id": call.name,
+                "status": "succeeded" if succeeded else result.status,
+                "result_summary": result.content or "",
+                "full_ref": str((result.metadata or {}).get("full_ref", "")),
+                "artifacts": list(result.artifacts or []),
+                "idempotency_key": idempotency_key,
+            },
+            call_id=call.id,
+        )
+
     def _emit_tool_error(self, call: ToolCall, msg: str, state: AgentLoopState) -> None:
         """向事件总线和 messages 发送一个工具错误结果。"""
         tool_input_str = json.dumps(call.arguments, ensure_ascii=False) if call.arguments else ""
@@ -880,15 +1289,68 @@ class NativeAgentExecutor:
         if self._checkpoint_service is None:
             return
         try:
-            self._checkpoint_service.save(
+            journal_cursor = (
+                self._journal_authority.cursor()
+                if self._journal_authority is not None
+                else state.journal_cursor
+            )
+            identity_metadata = {}
+            if self._journal_authority is not None:
+                identity_metadata = {
+                    "conversation_id": self._journal_authority.conversation_id,
+                    "task_id": self._journal_authority.task_id,
+                    "run_id": self._journal_authority.run_id,
+                    "thread_id": self._journal_authority.thread_id,
+                    "turn_id": self._journal_authority.turn_id,
+                    "runtime_dir": str(self._journal_authority._writer._base_dir),
+                }
+            run_state = None
+            if self._journal_authority is not None:
+                run_state = self._journal_authority.replay()
+            record = self._checkpoint_service.save(
                 state,
                 metadata={
                     "model_name": getattr(self.model_client, 'model_name', ''),
                     "status": state.status,
+                    **identity_metadata,
                 },
+                journal_cursor=journal_cursor,
+                reducer_version="1",
+                run_state=run_state,
             )
+            if self._journal_authority is not None:
+                self._journal_authority.emit(
+                    "checkpoint.created",
+                    {
+                        "checkpoint_id": record.checkpoint_id,
+                        "cursor": self._journal_authority.cursor(),
+                        "iteration": state.iteration,
+                        "status": state.status,
+                    },
+                )
         except Exception as e:
             logger.error("NativeAgentExecutor: checkpoint save failed: %s", e)
+
+    def _resolve_run_id(self, context: RunContext) -> str:
+        """Resolve the canonical run id for a new run (identity §3.1).
+
+        Priority order:
+        1. context.runtime_context.run_id — the RuntimeContext carries the
+           authoritative run identity (see _run_specialist_task child states).
+        2. self._journal_authority.run_id — so the state agrees with the journal
+           it writes to when an authority is injected.
+        3. new_id("run") — canonical generator (run_-prefixed), never time-based.
+        """
+        runtime_context = getattr(context, "runtime_context", None)
+        if runtime_context is not None:
+            runtime_run_id = getattr(runtime_context, "run_id", "") or ""
+            if isinstance(runtime_run_id, str) and runtime_run_id:
+                return runtime_run_id
+        if self._journal_authority is not None:
+            authority_run_id = getattr(self._journal_authority, "run_id", "") or ""
+            if isinstance(authority_run_id, str) and authority_run_id:
+                return authority_run_id
+        return new_id("run")
 
     def _build_initial_state(
         self,
@@ -901,7 +1363,7 @@ class NativeAgentExecutor:
         messages = self._build_initial_messages(context, user_text, attachments, memory_messages)
         return AgentLoopState(
             session_id=context.session_id,
-            run_id=f"run-{int(time.time())}",
+            run_id=self._resolve_run_id(context),
             status="created",
             iteration=0,
             max_iterations=self.max_iterations,
@@ -959,3 +1421,85 @@ class NativeAgentExecutor:
             return get_ask_service()
         except Exception:
             return None
+
+    # --- 能力快照 / 投影 Manifest（§7.6 / §9.2 / §9.3） ---
+
+    @staticmethod
+    def _derive_model_family(model_name: str) -> str:
+        """从模型名推导 capability registry 的 family key（best-effort）。
+
+        剥离聚合网关前缀（"MiniMax/xxx"）后取首个 "-" 分段：o4-mini -> o（openai
+        o-family）、deepseek-chat -> deepseek、kimi-k2 -> kimi。
+        """
+        name = (model_name or "").strip().lower()
+        if not name:
+            return ""
+        base = name.split("/")[-1]
+        return base.split("-")[0]
+
+    def _resolve_capabilities(self) -> ModelCapabilities:
+        """§7.6 解析模型能力快照（一次解析，跨压缩/投影复用）。
+
+        经 default_registry 分层覆盖（provider -> family -> exact）；解析为空时
+        回退为仅含 self.context_window 的能力（保证 §9.3 预算可计算）。
+        """
+        provider = getattr(self.model_client, "provider", "") or ""
+        model = getattr(self.model_client, "model_name", "") or ""
+        if not isinstance(provider, str):
+            provider = ""
+        if not isinstance(model, str):
+            model = ""
+        family = self._derive_model_family(model)
+        caps, _ = default_registry().resolve_capabilities(provider, family, model)
+        if not caps.context_window:
+            caps = ModelCapabilities(context_window=self.context_window)
+        self._capability_snapshot_id = f"cap_{provider}:{family}:{model}"
+        return caps
+
+    def _emit_projection_committed(self, state: AgentLoopState) -> None:
+        """§9.2 每次模型调用前把当前消息投影 Manifest 落 journal（context.projection.committed）。
+
+        回答「模型看到了什么」：逐消息估算 token，source_type="episode"、
+        transform="identity"。确定性且廉价；失败不阻塞主循环。
+        """
+        if self._journal_authority is None:
+            return
+        try:
+            import hashlib
+
+            from floodmind.agent.native.context_compressor import ContextCompressor as _CC
+            from floodmind.agent.native.projection import build_manifest
+            from floodmind.agent.runtime.contracts.canonical_events import canonical_json
+            from floodmind.agent.runtime.contracts.projection import ProjectionSource
+
+            caps = getattr(self, "_capabilities", None)
+            if caps is None:
+                caps = self._resolve_capabilities()
+                self._capabilities = caps
+            budget = compute_input_budget(caps)
+            model = getattr(self.model_client, "model_name", "") or ""
+            codec = getattr(getattr(self.model_client, "pipeline", None), "name", "") or ""
+            sources = []
+            for i, msg in enumerate(state.messages):
+                tokens = _CC._estimate_tokens([msg])
+                sources.append(ProjectionSource(
+                    source_id=f"msg_{i}",
+                    source_type="episode",
+                    content_sha256=hashlib.sha256(canonical_json(msg).encode("utf-8")).hexdigest(),
+                    original_tokens=tokens,
+                    projected_tokens=tokens,
+                    transform="identity",
+                    priority=0,
+                    selected=True,
+                ))
+            manifest = build_manifest(
+                model=model,
+                codec_version=codec,
+                capability_snapshot_id=getattr(self, "_capability_snapshot_id", "") or "",
+                budget=budget,
+                sources=sources,
+                model_call_id=getattr(state, "attempt_id", "") or "",
+            )
+            self._journal_authority.emit("context.projection.committed", manifest.model_dump())
+        except Exception as e:
+            logger.warning("[EXEC] projection manifest emission failed: %s", e)

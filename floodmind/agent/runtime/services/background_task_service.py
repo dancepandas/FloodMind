@@ -17,6 +17,7 @@ stdout/stderr 直接重定向到文件（不用 PIPE + reader 线程，无管道
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import os
@@ -24,9 +25,13 @@ import subprocess
 import threading
 import time
 import uuid
+from collections import deque
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Deque, Dict, List, Optional, Tuple
+
+from floodmind.memory.session_manager import session_path, validate_session_id
+from floodmind.agent.runtime.contracts.sandbox import ToolInvocation
 
 logger = logging.getLogger(__name__)
 
@@ -37,6 +42,10 @@ _DEFAULT_MAX_LIFETIME_SECONDS = 30 * 60  # 30 分钟兜底 kill
 # 完成通知注入时的输出尾部最大长度
 _NOTIFICATION_TAIL_MAX = 4000
 
+# 内存索引仅用于近期任务查询/通知；meta/log 文件仍完整保留供审计。
+_DEFAULT_COMPLETED_RETENTION = 1000
+_DEFAULT_FINALIZED_RETENTION = 4000
+
 
 @dataclass
 class BackgroundTask:
@@ -46,7 +55,7 @@ class BackgroundTask:
     session_id: str
     command: str
     pid: Optional[int]
-    status: str  # running / completed / failed / killed
+    status: str  # starting / running / kill_requested / terminating / completed / failed / killed / kill_failed / orphaned / unknown
     exit_code: Optional[int]
     stdout_path: str
     stderr_path: str
@@ -56,6 +65,9 @@ class BackgroundTask:
     finished_at: Optional[float] = None
     tail: str = ""
     error: str = ""
+    process_identity: Optional[Dict[str, Any]] = None  # {pid, create_time}
+    journal_authority: Optional[Any] = None
+    sandbox_capabilities: List[str] = field(default_factory=list)
 
     @property
     def running(self) -> bool:
@@ -65,6 +77,7 @@ class BackgroundTask:
         d = asdict(self)
         d.pop("tail", None)
         d.pop("error", None)
+        d.pop("journal_authority", None)
         return d
 
 
@@ -76,21 +89,76 @@ class BackgroundTaskService:
         base_dir: Optional[str] = None,
         max_concurrent_per_session: int = _DEFAULT_MAX_CONCURRENT_PER_SESSION,
         max_lifetime_seconds: int = _DEFAULT_MAX_LIFETIME_SECONDS,
+        completed_retention: int = _DEFAULT_COMPLETED_RETENTION,
+        finalized_retention: int = _DEFAULT_FINALIZED_RETENTION,
+        event_sink: Optional[Callable[[str, Dict[str, Any]], None]] = None,
     ):
         self._base_dir = Path(base_dir) if base_dir else None
         self._max_concurrent_per_session = max(max_concurrent_per_session, 1)
         self._max_lifetime_seconds = max(max_lifetime_seconds, 60)
+        self._completed_retention = max(completed_retention, 1)
+        self._finalized_retention = max(finalized_retention, self._completed_retention)
+        self._event_sink = event_sink
+        self._thread_authority = threading.local()
 
         self._lock = threading.RLock()
+        self._session_sandbox: Dict[str, tuple] = {}
         self._active_tasks: Dict[str, BackgroundTask] = {}
+        # start() 在释放锁执行目录/文件/Popen IO 前预占的并发槽位。
+        self._pending_tasks: Dict[str, str] = {}  # task_id -> session_id
         self._completed: List[BackgroundTask] = []
-        self._subscribers: List[Callable[[BackgroundTask], None]] = []
+        # (session_id, callback)；session_id=None 是显式兼容的 legacy 全局订阅。
+        self._subscribers: List[Tuple[Optional[str], Callable[[BackgroundTask], None]]] = []
         self._processes: Dict[str, subprocess.Popen] = {}
-        # 已收尾的任务（进过完成队列/通知过订阅者）——_finalize 幂等去重
+        # 已收尾的任务使用有界 FIFO + set，兼顾幂等与长期服务内存上界。
         self._finalized: set = set()
+        self._finalized_order: Deque[str] = deque()
         self._platform = "win" if os.name == "nt" else "posix"
 
+    def _emit(self, event_type: str, payload: Dict[str, Any]) -> None:
+        """经 event_sink 发 Journal 事件（§12 Completion 先写 Journal）。"""
+        if self._event_sink is not None:
+            try:
+                self._event_sink(event_type, payload)
+            except Exception as e:
+                logger.warning("BackgroundTask event_sink error: %s", e)
+
+    def _emit_for(self, task: BackgroundTask, event_type: str, payload: Dict[str, Any]) -> None:
+        authority = task.journal_authority
+        if authority is not None:
+            try:
+                authority.emit(event_type, payload)
+            except Exception as e:
+                logger.warning("BackgroundTask journal emit error: %s", e)
+            return
+        self._emit(event_type, payload)
+
+    def bind_thread_authority(self, authority: Any) -> None:
+        stack = getattr(self._thread_authority, "stack", None)
+        if stack is None:
+            stack = []
+            self._thread_authority.stack = stack
+        stack.append(authority)
+
+    def unbind_thread_authority(self) -> None:
+        stack = getattr(self._thread_authority, "stack", None)
+        if stack:
+            stack.pop()
+
+    def _current_authority(self) -> Optional[Any]:
+        stack = getattr(self._thread_authority, "stack", None)
+        return stack[-1] if stack else None
+
     # ── 公开 API ─────────────────────────────────────────────────────
+
+    def set_session_sandbox(self, session_id: str, policy, backend) -> None:
+        """Set or clear mandatory launch enforcement for a session."""
+        session_id = validate_session_id(session_id)
+        with self._lock:
+            if policy is None or backend is None:
+                self._session_sandbox.pop(session_id, None)
+            else:
+                self._session_sandbox[session_id] = (policy, backend)
 
     def start(
         self,
@@ -108,78 +176,160 @@ class BackgroundTaskService:
         sandbox env/kwargs）。stdout/stderr 直接写文件。
         """
         lifetime = int(max_lifetime_seconds or self._max_lifetime_seconds)
+        session_id = validate_session_id(session_id)
 
+        task_id = uuid.uuid4().hex[:12]
         with self._lock:
-            running = [t for t in self._active_tasks.values() if t.session_id == session_id and t.running]
-            if len(running) >= self._max_concurrent_per_session:
+            running_count = sum(
+                1 for task in self._active_tasks.values()
+                if task.session_id == session_id and task.running
+            )
+            pending_count = sum(1 for pending_session in self._pending_tasks.values() if pending_session == session_id)
+            if running_count + pending_count >= self._max_concurrent_per_session:
                 raise RuntimeError(
                     f"会话 {session_id} 后台任务已达上限 {self._max_concurrent_per_session} 个，"
                     f"请先 TaskKill 或等待完成后再启动"
                 )
-            task_dir = self._background_dir(session_id) / (task_id := uuid.uuid4().hex[:12])
+            self._pending_tasks[task_id] = session_id
+
+        # 目录、文件和 Popen 都可能阻塞，槽位已预占后在全局锁外执行。
+        out_f = None
+        err_f = None
+        process = None
+        try:
+            task_dir = self._background_dir(session_id) / task_id
             task_dir.mkdir(parents=True, exist_ok=True)
 
-        out_path = task_dir / "out.log"
-        err_path = task_dir / "err.log"
-        meta_path = task_dir / "meta.json"
-        out_f = out_path.open("wb")
-        err_f = err_path.open("wb")
+            out_path = task_dir / "out.log"
+            err_path = task_dir / "err.log"
+            meta_path = task_dir / "meta.json"
+            out_f = out_path.open("wb")
+            err_f = err_path.open("wb")
 
-        kwargs: Dict[str, Any] = {
-            "stdin": subprocess.DEVNULL,
-            "stdout": out_f,
-            "stderr": err_f,
-            "env": env,
-            "cwd": cwd,
-        }
-        if popen_kwargs:
-            # 调用方已 wrap 的 sandbox 参数（creationflags/preexec_fn）优先保留
-            for k, v in popen_kwargs.items():
-                if k not in kwargs:
-                    kwargs[k] = v
-        if self._platform == "posix" and "preexec_fn" not in kwargs:
-            kwargs["preexec_fn"] = os.setsid  # 独立进程组，killpg 可靠
+            kwargs: Dict[str, Any] = {
+                "stdin": subprocess.DEVNULL,
+                "stdout": out_f,
+                "stderr": err_f,
+                "env": env,
+                "cwd": cwd,
+            }
+            if popen_kwargs:
+                # 调用方已 wrap 的 sandbox 参数（creationflags/preexec_fn）优先保留
+                for k, v in popen_kwargs.items():
+                    if k not in kwargs:
+                        kwargs[k] = v
+            if self._platform == "posix" and "preexec_fn" not in kwargs:
+                kwargs["preexec_fn"] = os.setsid  # 独立进程组，killpg 可靠
 
-        try:
+            with self._lock:
+                session_sandbox = self._session_sandbox.get(session_id)
+            sandbox_capabilities: List[str] = []
+            if session_sandbox is not None:
+                policy, backend = session_sandbox
+                try:
+                    prepared = backend.prepare_launch(
+                        ToolInvocation(
+                            command=shell_cmd,
+                            cwd=cwd,
+                            env=env or {},
+                        ),
+                        policy,
+                    )
+                    kwargs["env"] = prepared["env"]
+                    kwargs["cwd"] = prepared["cwd"]
+                    sandbox_capabilities = sorted(
+                        str(capability)
+                        for capability in backend.enforced_capabilities
+                    )
+                except Exception as exc:
+                    raise RuntimeError(f"session sandbox 强制失败: {exc}") from exc
+
             process = subprocess.Popen(shell_cmd, **kwargs)
-        except Exception as e:
-            out_f.close()
-            err_f.close()
+            from floodmind.agent.runtime.services.process_identity import process_create_time
+            task = BackgroundTask(
+                task_id=task_id,
+                session_id=session_id,
+                command=command,
+                pid=process.pid,
+                status="running",
+                exit_code=None,
+                stdout_path=str(out_path),
+                stderr_path=str(err_path),
+                meta_path=str(meta_path),
+                started_at=time.time(),
+                max_lifetime_seconds=lifetime,
+                process_identity={"pid": process.pid, "create_time": process_create_time(process.pid)},
+                journal_authority=self._current_authority(),
+                sandbox_capabilities=sandbox_capabilities,
+            )
+            self._emit_for(task, "background.start.requested", {
+                "task_id": task_id,
+                "session_id": session_id,
+                "command_sha256": hashlib.sha256(command.encode("utf-8")).hexdigest(),
+                "sandbox_id": "",
+            })
+            self._write_meta(task)
+
+            with self._lock:
+                self._pending_tasks.pop(task_id, None)
+                self._active_tasks[task_id] = task
+                self._processes[task_id] = process
+            # M1: started 在 watcher 启动前发出，避免近瞬时退出任务 completed 先于 started
+            # 落 Journal，导致 reducer terminal 事件空转、active_background_tasks 残留。
+            self._emit_for(task, "background.started", {
+                "task_id": task.task_id,
+                "session_id": task.session_id,
+                "pid": task.pid,
+            })
+        except Exception:
+            for stream in (out_f, err_f):
+                if stream is not None:
+                    try:
+                        stream.close()
+                    except Exception:
+                        pass
+            if process is not None:
+                self._kill_process(process)
+            with self._lock:
+                self._pending_tasks.pop(task_id, None)
             raise
-
-        task = BackgroundTask(
-            task_id=task_id,
-            session_id=session_id,
-            command=command,
-            pid=process.pid,
-            status="running",
-            exit_code=None,
-            stdout_path=str(out_path),
-            stderr_path=str(err_path),
-            meta_path=str(meta_path),
-            started_at=time.time(),
-            max_lifetime_seconds=lifetime,
-        )
-        self._write_meta(task)
-
-        with self._lock:
-            self._active_tasks[task_id] = task
-            self._processes[task_id] = process
         # 进程句柄由守护线程负责释放
-        threading.Thread(
+        watcher = threading.Thread(
             target=self._watch,
             args=(task, process, out_f, err_f, lifetime),
             name=f"bg-task-{task_id[:8]}",
             daemon=True,
-        ).start()
+        )
+        try:
+            watcher.start()
+        except Exception:
+            task.status = "killed"
+            self._kill_process(process)
+            for stream in (out_f, err_f):
+                try:
+                    stream.close()
+                except Exception:
+                    pass
+            task.finished_at = time.time()
+            # M2 同类：started 已发出，watcher 未能启动也须发终态事件，避免 reducer 残留
+            self._emit_for(task, "background.killed", {
+                "task_id": task.task_id,
+                "session_id": task.session_id,
+                "reason": "watcher_start_failed",
+                "exit_code": task.exit_code,
+            })
+            self._write_meta(task)
+            self._finalize(task)
+            raise
         logger.info("BackgroundTask started: task=%s session=%s pid=%s", task_id, session_id, process.pid)
         return task
 
     def get(self, session_id: str, task_id: str) -> Optional[BackgroundTask]:
         """按 task_id 查任务（活跃 + 已完成均可）。"""
+        session_id = validate_session_id(session_id)
         with self._lock:
             t = self._active_tasks.get(task_id)
-            if t is not None:
+            if t is not None and t.session_id == session_id:
                 return t
             for t in self._completed:
                 if t.task_id == task_id and t.session_id == session_id:
@@ -188,53 +338,203 @@ class BackgroundTaskService:
 
     def list(self, session_id: str) -> List[BackgroundTask]:
         """列出会话全部任务（已完成在前，活跃在后）。"""
+        session_id = validate_session_id(session_id)
         with self._lock:
             completed = [t for t in self._completed if t.session_id == session_id]
             running = [t for t in self._active_tasks.values() if t.session_id == session_id]
             return completed + running
 
-    def kill(self, session_id: str, task_id: str) -> bool:
-        """杀掉一个任务（进程树），并立即进入完成队列/通知订阅者（Agent 感知状态变化）。"""
+    def child_namespace(self, session_id: str) -> List[BackgroundTask]:
+        """子代理专用后台命名空间：仅该 session 的任务（别名，语义清晰化）。"""
+        return self.list(session_id)
+
+    def has_active(self, session_id: str) -> bool:
+        """Return whether the session has any non-terminal background task."""
+        session_id = validate_session_id(session_id)
+        with self._lock:
+            return any(
+                task.session_id == session_id
+                and task.status in (
+                    "starting", "running", "kill_requested", "terminating",
+                )
+                for task in self._active_tasks.values()
+            )
+
+    def kill(self, session_id: str, task_id: str, confirm_timeout: float = 10.0) -> bool:
+        """杀掉任务进程树并验证退出（§12 kill 验证链）。
+
+        状态推进：running -> kill_requested -> terminating -> killed（确认退出）
+        若确认超时 -> kill_failed。
+        """
+        session_id = validate_session_id(session_id)
         with self._lock:
             task = self._active_tasks.get(task_id)
             process = self._processes.get(task_id)
         if task is None or task.session_id != session_id:
             return False
-        if task.status == "running":
-            # 先标记 killed，抢在 _watch 线程把 process.wait() 的退出码写成 failed 之前
-            task.status = "killed"
-        self._kill_process(process)
-        task.finished_at = time.time()
-        task.tail = self._read_tail(task.stdout_path)
-        self._write_meta(task)
-        self._finalize(task)  # 用户主动关闭：立即推送，不等 _watch 线程
-        return True
 
-    def kill_session(self, session_id: str) -> int:
+        if task.status != "running":
+            return True  # 已自然终态（completed/failed），无可杀
+
+        task.status = "kill_requested"
+        self._emit_for(task, "background.kill.requested", {
+            "task_id": task_id,
+            "session_id": task.session_id,
+            "reason": "user_kill",
+        })
+
+        confirmed = False
+        try:
+            self._kill_process(process)
+            # 确认退出：轮询至多 confirm_timeout 秒
+            task.status = "terminating"
+            confirmed = self._wait_exit(process, confirm_timeout)
+            task.finished_at = time.time()
+            task.tail = self._read_tail(task.stdout_path)
+
+            if confirmed:
+                task.status = "killed"
+                task.exit_code = int(process.returncode) if process is not None else 0
+                self._emit_for(task, "background.killed", {
+                    "task_id": task_id,
+                    "session_id": task.session_id,
+                    "exit_code": task.exit_code,
+                })
+            else:
+                task.status = "kill_failed"
+                task.error = f"进程树终止后 {confirm_timeout}s 内未确认退出"
+                self._emit_for(task, "background.kill.failed", {
+                    "task_id": task_id,
+                    "session_id": task.session_id,
+                    "error": task.error,
+                })
+        finally:
+            # F1: 即使 _kill_process/_wait_exit 异常也必须以终态收尾（_finalize 幂等）
+            self._write_meta(task)
+            self._finalize(task)  # 用户主动关闭：立即推送，不等 _watch 线程
+        return confirmed
+
+    @staticmethod
+    def _wait_exit(process: Optional[subprocess.Popen], timeout: float) -> bool:
+        """确认进程已退出（轮询 poll）。"""
+        if process is None:
+            return True
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            if process.poll() is not None:
+                return True
+            time.sleep(0.05)
+        return process.poll() is not None
+
+    def kill_session(self, session_id: str, confirm_timeout: float = 5.0) -> int:
         """杀掉会话内全部存活任务并立即收尾（会话结束/Agent 析构时调用）。"""
+        session_id = validate_session_id(session_id)
         with self._lock:
-            targets = [t for t in self._active_tasks.values() if t.session_id == session_id and t.running]
-            for t in targets:
-                # 先标记 killed，抢在 _watch 线程覆盖前
-                t.status = "killed"
-                self._kill_process(self._processes.get(t.task_id))
-                t.finished_at = time.time()
-                self._write_meta(t)
-                self._finalize(t)
-        return len(targets)
+            targets = [t for t in self._active_tasks.values()
+                       if t.session_id == session_id and t.running]
+        killed = 0
+        for task in targets:
+            if self.kill(session_id, task.task_id, confirm_timeout=confirm_timeout):
+                killed += 1
+        return killed
+
+    def kill_task(self, task_id: str, confirm_timeout: float = 10.0) -> bool:
+        """按 task_id 杀掉任务（Reconcile 用；session 内部解析）。"""
+        with self._lock:
+            task = self._active_tasks.get(task_id)
+        if task is None:
+            return False
+        return self.kill(task.session_id, task_id, confirm_timeout=confirm_timeout)
+
+    def reconcile_background(self) -> Dict[str, int]:
+        """Host 重启后从 meta.json 对账（§12 / §25.7）。
+
+        扫描各会话 background/*/meta.json 中 status 为 running/starting 的任务：
+        - PID 存活且身份匹配  -> 保持 running（kept_running）
+        - PID 存活但身份不符  -> unknown（PID 复用/身份无法确认）
+        - PID 已死 / 无 PID   -> orphaned（父进程已失联）
+        completed/failed/killed 等终态不动。
+        """
+        result = {"kept_running": 0, "orphaned": 0, "unknown": 0}
+        if self._base_dir is None:
+            return result
+        from floodmind.agent.runtime.services.process_identity import (
+            pid_identity_matches,
+            process_exists,
+        )
+
+        for meta_file in sorted(self._base_dir.rglob("meta.json")):
+            try:
+                meta = json.loads(meta_file.read_text(encoding="utf-8"))
+            except Exception as e:
+                logger.warning("reconcile: meta unreadable %s: %s", meta_file, e)
+                continue
+            if meta.get("status") not in ("running", "starting"):
+                continue
+            pid = meta.get("pid")
+            identity = meta.get("process_identity") or {}
+            stored_ct = identity.get("create_time")
+            task_id = meta.get("task_id", "")
+            if process_exists(pid):
+                if pid_identity_matches(pid, stored_ct):
+                    # 进程仍存活：保持 running，但更新 meta 标记为已对账
+                    meta["status"] = "running"
+                    result["kept_running"] += 1
+                else:
+                    meta["status"] = "unknown"
+                    result["unknown"] += 1
+            else:
+                meta["status"] = "orphaned"
+                result["orphaned"] += 1
+            meta_file.write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
+            if meta["status"] in ("orphaned", "unknown"):
+                logger.info("Background reconcile: %s=%s pid=%s", task_id, meta["status"], pid)
+        return result
 
     def drain_completions(self, session_id: str) -> List[BackgroundTask]:
         """取出本会话已完成的全部任务（注入完成通知用，取后清空）。"""
+        session_id = validate_session_id(session_id)
         with self._lock:
             drained = [t for t in self._completed if t.session_id == session_id]
             self._completed = [t for t in self._completed if t.session_id != session_id]
             return drained
 
-    def subscribe(self, callback: Callable[[BackgroundTask], None]) -> None:
-        """订阅任务完成回调（宿主 EventBus 唤醒通道）。幂等去重。"""
+    def subscribe(
+        self,
+        callback: Callable[[BackgroundTask], None],
+        *,
+        session_id: Optional[str] = None,
+    ) -> Callable[[], None]:
+        """订阅任务完成回调。
+
+        ``session_id`` 指定时仅接收该会话；显式省略则保留 legacy 全局订阅行为。
+        返回的 unsubscribe 幂等。
+        """
+        if session_id is not None:
+            session_id = validate_session_id(session_id)
+        subscription = (session_id, callback)
         with self._lock:
-            if callback not in self._subscribers:
-                self._subscribers.append(callback)
+            if subscription not in self._subscribers:
+                self._subscribers.append(subscription)
+
+        def unsubscribe() -> None:
+            with self._lock:
+                if subscription in self._subscribers:
+                    self._subscribers.remove(subscription)
+
+        return unsubscribe
+
+    def clear_session_subscriptions(self, session_id: str) -> int:
+        """移除该 session 的全部订阅（子代理结束清理用，§25.7 Cleanup 无残留订阅）。
+
+        仅移除 session_id 精确匹配的订阅；legacy 全局订阅（session_id=None）不受影响。
+        返回移除数。
+        """
+        session_id = validate_session_id(session_id)
+        with self._lock:
+            before = len(self._subscribers)
+            self._subscribers = [s for s in self._subscribers if s[0] != session_id]
+            return before - len(self._subscribers)
 
     # ── 内部 ─────────────────────────────────────────────────────────
 
@@ -256,6 +556,13 @@ class BackgroundTaskService:
                     task.status = "killed"
                     task.exit_code = None
                     task.error = f"超过最大存活时间 {lifetime}s，已被强制终止"
+                    # M2: 兜底 kill 也是终态，须发 killed 事件，否则 reducer 残留 active_background_tasks
+                    self._emit_for(task, "background.killed", {
+                        "task_id": task.task_id,
+                        "session_id": task.session_id,
+                        "reason": "max_lifetime",
+                        "exit_code": task.exit_code,
+                    })
         except Exception as e:
             logger.warning("BackgroundTask %s wait 异常: %s", task.task_id, e)
             if task.status == "running":
@@ -271,7 +578,21 @@ class BackgroundTaskService:
             task.finished_at = task.finished_at or time.time()
             task.tail = self._read_tail(task.stdout_path)
             self._write_meta(task)
-            self._finalize(task)
+            # Completion 先写 Journal（§12）；kill 已由 kill() 发 killed/kill_failed。
+            if task.status in ("completed", "failed"):
+                self._emit_for(task, "background.completed", {
+                    "task_id": task.task_id,
+                    "session_id": task.session_id,
+                    "status": task.status,
+                    "exit_code": task.exit_code,
+                    "stdout_path": task.stdout_path,
+                    "stderr_path": task.stderr_path,
+                    "output_tail": task.tail,
+                })
+            # F1: kill() 正在验证链中（kill_requested/terminating），由 kill() 以终态收尾；
+            # 若此时 finalize，订阅者会收到非终态状态。kill() 两个终态分支都会 finalize。
+            if task.status not in ("kill_requested", "terminating"):
+                self._finalize(task)
 
     def _finalize(self, task: BackgroundTask) -> None:
         """幂等收尾：移出活跃 → 进完成队列 → 通知订阅者。kill()/kill_session()/wait 线程共用。"""
@@ -279,10 +600,19 @@ class BackgroundTaskService:
             if task.task_id in self._finalized:
                 return
             self._finalized.add(task.task_id)
+            self._finalized_order.append(task.task_id)
+            while len(self._finalized_order) > self._finalized_retention:
+                self._finalized.discard(self._finalized_order.popleft())
             self._active_tasks.pop(task.task_id, None)
             self._processes.pop(task.task_id, None)
             self._completed.append(task)
-            subscribers = list(self._subscribers)
+            if len(self._completed) > self._completed_retention:
+                del self._completed[: len(self._completed) - self._completed_retention]
+            subscribers = [
+                callback
+                for subscribed_session_id, callback in self._subscribers
+                if subscribed_session_id is None or subscribed_session_id == task.session_id
+            ]
         logger.info(
             "BackgroundTask finished: task=%s status=%s exit=%s",
             task.task_id, task.status, task.exit_code,
@@ -317,13 +647,19 @@ class BackgroundTaskService:
             logger.warning("BackgroundTask kill failed pid=%s: %s", process.pid, e)
 
     def _read_tail(self, path: str, limit: int = _NOTIFICATION_TAIL_MAX) -> str:
-        """读 stdout 尾部（供完成通知注入）。"""
+        """有界读取 stdout 尾部（供完成通知注入），不把大日志整体载入内存。"""
+        if limit <= 0:
+            return ""
         try:
             p = Path(path)
-            if not p.exists():
-                return ""
-            data = p.read_text(encoding="utf-8", errors="replace")
-            return data[-limit:] if len(data) > limit else data
+            with p.open("rb") as stream:
+                stream.seek(0, os.SEEK_END)
+                size = stream.tell()
+                # UTF-8 最多 4 bytes/字符；多读以确保解码后能返回 limit 字符。
+                stream.seek(max(0, size - limit * 4), os.SEEK_SET)
+                data = stream.read(limit * 4)
+            text = data.decode("utf-8", errors="replace")
+            return text[-limit:]
         except Exception:
             return ""
 
@@ -337,51 +673,39 @@ class BackgroundTaskService:
             logger.warning("BackgroundTask meta write failed: %s", e)
 
     def _background_dir(self, session_id: str) -> Path:
-        """定位 .floodmind/sessions/<sid>/background（folder-first）或兼容目录。"""
+        """定位会话后台目录，并强制限制在所选 session root 内。"""
+        session_id = validate_session_id(session_id)
+        session_root: Optional[Path] = None
         if self._base_dir is not None:
-            return self._base_dir / session_id / "background"
-        state_dir = ""
-        try:
-            from floodmind.tools.session_context import SESSION_CONTEXT
+            session_root = self._base_dir
+        else:
+            state_dir = ""
+            try:
+                from floodmind.tools.session_context import SESSION_CONTEXT
 
-            state_dir = SESSION_CONTEXT.get("state_dir", "") or ""
-        except Exception:
-            pass
-        if state_dir:
-            return Path(state_dir) / "sessions" / session_id / "background"
-        try:
-            from floodmind.agent.runtime.services.workspace_service import get_workspace
+                state_dir = SESSION_CONTEXT.get("state_dir", "") or ""
+            except Exception:
+                pass
+            if state_dir:
+                session_root = Path(state_dir) / "sessions"
+            else:
+                try:
+                    from floodmind.agent.runtime.services.workspace_service import get_workspace
 
-            ws = get_workspace()
-            if ws is not None:
-                return Path(ws.session_root) / session_id / "background"
-        except Exception:
-            pass
-        try:
-            from floodmind.tools.session_context import SESSION_CONTEXT
+                    ws = get_workspace()
+                    if ws is not None:
+                        session_root = Path(ws.session_root)
+                except Exception:
+                    pass
+            if session_root is None:
+                try:
+                    from floodmind.tools.session_context import SESSION_CONTEXT
 
-            out_dir = SESSION_CONTEXT.get("output_dir", "") or ""
-            if out_dir:
-                return Path(out_dir) / ".floodmind" / "background"
-        except Exception:
-            pass
-        raise ValueError("缺少 workspace/state_dir，无法定位后台任务目录")
-
-
-# 全局单例
-_service: Optional[BackgroundTaskService] = None
-_service_lock = threading.Lock()
-
-
-def get_background_task_service() -> BackgroundTaskService:
-    global _service
-    if _service is None:
-        with _service_lock:
-            if _service is None:
-                _service = BackgroundTaskService()
-    return _service
-
-
-def set_background_task_service(svc: Optional[BackgroundTaskService]) -> None:
-    global _service
-    _service = svc
+                    out_dir = SESSION_CONTEXT.get("output_dir", "") or ""
+                    if out_dir:
+                        session_root = Path(out_dir) / ".floodmind" / "sessions"
+                except Exception:
+                    pass
+        if session_root is None:
+            raise ValueError("缺少 workspace/state_dir，无法定位后台任务目录")
+        return session_path(session_root, session_id, "background")

@@ -13,6 +13,40 @@ from typing import Callable, Dict, Optional
 
 logger = logging.getLogger(__name__)
 
+# §7.7 默认禁自动重试的终态（wire raw 与规范化 code 双态）。
+# max_tokens/length 走 continuation，不自动重试。
+_BLOCKED_TERMINAL = {
+    "refusal", "content_filter", "length", "max_tokens", "pause", "paused",
+}
+
+
+def should_retry(advice, terminal_reason=None) -> bool:
+    """Orchestrator 决策（§7.7）：Transport 只给 Advice，是否重试由这里定。
+
+    - Transport 不建议重试（``advice.retry_suggested=False``）→ False
+    - 终态为 refusal / content_filter / length(max_tokens) / pause → False
+    - 已开始输出但无 replay safety（``response_started and not replay_safe``）→ False
+    - 其余 → True
+
+    ``terminal_reason`` 接受纯字符串（wire 值，如 ``"refusal"``）或
+    ``TerminalReason`` 对象（取 raw 与 code 双态）。
+    """
+    if not advice.retry_suggested:
+        return False
+    if terminal_reason:
+        if isinstance(terminal_reason, str):
+            candidates = (terminal_reason,)
+        else:
+            raw = getattr(terminal_reason, "raw", None)
+            code = getattr(terminal_reason, "code", None)
+            candidates = tuple(c for c in (raw, code) if c)
+        for cand in candidates:
+            if str(cand).lower() in _BLOCKED_TERMINAL:
+                return False
+    if advice.response_started and not advice.replay_safe:
+        return False
+    return True
+
 # 错误消息关键词 → 是否可重试
 _RETRYABLE_PATTERNS = [
     "rate limit", "rate exceeded", "429",

@@ -107,7 +107,7 @@ class TestSandboxService:
             tool_input={"query": "x"},
             permission_policy=ToolPermissionPolicy(policy_type="network"),
         )
-        decision = perm_svc.check(sub_req)
+        decision = perm_svc.check(sub_req, journal_authority=object())
         assert decision.behavior == PermissionBehavior.DENY
 
         # 父代理调用不应命中
@@ -117,7 +117,7 @@ class TestSandboxService:
             tool_input={"query": "x"},
             permission_policy=ToolPermissionPolicy(policy_type="network"),
         )
-        decision = perm_svc.check(parent_req)
+        decision = perm_svc.check(parent_req, journal_authority=object())
         assert decision.behavior == PermissionBehavior.ALLOW
 
 
@@ -177,15 +177,14 @@ class TestSandboxPathEnforcement:
         )
         token = set_workspace(ws)
 
-        # 全局 PathService 需使用 tmp 作为 project_root（is_write_allowed 检查）
-        from floodmind.agent.runtime.services.path_service import PathService, set_path_service, get_path_service
-        original_svc = get_path_service()
+        from floodmind.agent.runtime.contracts.runtime_context import RuntimeContext
+        from floodmind.agent.runtime.services.path_service import PathService
+        from floodmind.tools.session_context import set_runtime_context
+        path_svc = PathService(project_root=tmp_p)
         try:
-            path_svc = PathService(project_root=tmp_p)
-            set_path_service(path_svc)
-
-            # 设置 sub session 上下文
+            # 设置 sub session 上下文；RuntimeContext 必须在其后注入，避免 context 重置。
             set_session_context(sub_id, output_dir=str(workspace / "outputs"))
+            set_runtime_context(RuntimeContext(sub_id, sub_id, "run", "thread", "turn", path_service=path_svc))
 
             # 子代理写 sandbox workspace → 放行
             (workspace / "outputs").mkdir(parents=True, exist_ok=True)
@@ -203,7 +202,7 @@ class TestSandboxPathEnforcement:
             assert not result.allowed, "子代理写 tmp 根应被拒"
         finally:
             set_session_context("", output_dir="")
-            set_path_service(original_svc)
+            set_runtime_context(None)
             reset_workspace(token)
 
 

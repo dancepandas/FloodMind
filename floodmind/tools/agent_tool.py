@@ -20,12 +20,7 @@ from floodmind.agent.runtime.contracts.permissions import (
 )
 from floodmind.agent.runtime.contracts.paths import PathResolveResult
 from floodmind.agent.runtime.contracts.tools import ToolSpec
-from floodmind.agent.runtime.services.path_service import get_path_service
-from floodmind.agent.runtime.services.permission_service import (
-    PermissionService,
-    get_permission_service,
-    set_permission_service,
-)
+from floodmind.agent.runtime.services.permission_service import PermissionService
 from floodmind.agent.runtime.services._runtime_root import PROJECT_ROOT as _PROJECT_ROOT
 
 logger = logging.getLogger(__name__)
@@ -236,9 +231,17 @@ def make_read_path_permission_fn(path_field: str = "file_path") -> Callable[[dic
 # 路径解析
 # ---------------------------------------------------------------------------
 
+def _runtime_path_service():
+    from floodmind.tools.session_context import get_runtime_context
+
+    runtime_context = get_runtime_context()
+    return runtime_context.path_service if runtime_context is not None else None
+
+
 def _strip_session_prefix(path_str: str) -> str:
     """剥离 data/sessions/<id>/outputs/ 前缀"""
-    return get_path_service().strip_session_prefix(path_str)
+    path_service = _runtime_path_service()
+    return path_service.strip_session_prefix(path_str) if path_service is not None else path_str
 
 
 def resolve_tool_path(
@@ -255,7 +258,17 @@ def resolve_tool_path(
         session_id = get_current_session_id() or ""
     except Exception:
         session_id = ""
-    return get_path_service().resolve_simple(path_str, access=access, session_id=session_id)
+    path_service = _runtime_path_service()
+    if path_service is None:
+        return PathResolveResult(
+            raw_path=path_str,
+            normalized_path=path_str,
+            resolved_path="",
+            source="no_context_rejected",
+            allowed=False,
+            reason="RuntimeContext 未注入 PathService",
+        )
+    return path_service.resolve_simple(path_str, access=access, session_id=session_id)
 
 
 # ---------------------------------------------------------------------------
@@ -284,8 +297,6 @@ def get_agents_md_path(scope: str = "project") -> Path:
 # ---------------------------------------------------------------------------
 
 PermissionResult = PermissionDecision
-
-set_permission_manager = set_permission_service
 
 
 # ---------------------------------------------------------------------------

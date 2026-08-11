@@ -18,9 +18,12 @@ ToolExecutionService — 统一工具执行管线
 - ToolFeedback 统一由 service 生成
 """
 
+import concurrent.futures
 import contextvars
+import inspect
 import json
 import logging
+import queue
 import re
 import threading
 from typing import Any, Callable, Dict, List, Optional
@@ -35,6 +38,13 @@ from floodmind.agent.runtime.contracts.permissions import (
 )
 from floodmind.agent.runtime.contracts.paths import PathResolveRequest, PathResolveResult
 from floodmind.agent.runtime.contracts.tools import ToolCall, ToolExecutionContext, ToolResult, ToolSpec
+from floodmind.agent.runtime.contracts.tool_transaction import canonical_arguments
+from floodmind.agent.runtime.services.approval_fingerprint import compute_approval_fingerprint
+from floodmind.agent.runtime.services.idempotency import (
+    derive_idempotency_key,
+    find_committed_result,
+    side_effect_class_for_spec,
+)
 from floodmind.agent.runtime.services.tracing_service import TracingService
 
 logger = logging.getLogger(__name__)
@@ -50,7 +60,43 @@ PermissionDecisionHook = Callable[
 ]
 
 
+class _DaemonBoundedExecutor:
+    """Small shared worker pool whose stuck jobs cannot block interpreter shutdown."""
+
+    def __init__(self, max_workers: int = 8, max_pending: int = 32):
+        self._queue: queue.Queue = queue.Queue(maxsize=max_pending)
+        for index in range(max_workers):
+            worker = threading.Thread(
+                target=self._run,
+                name=f"floodmind-tool-{index}",
+                daemon=True,
+            )
+            worker.start()
+
+    def submit(self, fn: Callable[[], Any]) -> concurrent.futures.Future:
+        future: concurrent.futures.Future = concurrent.futures.Future()
+        self._queue.put_nowait((future, fn))
+        return future
+
+    def _run(self) -> None:
+        while True:
+            future, fn = self._queue.get()
+            try:
+                if future.set_running_or_notify_cancel():
+                    try:
+                        future.set_result(fn())
+                    except BaseException as exc:
+                        future.set_exception(exc)
+            finally:
+                self._queue.task_done()
+
+
+_TOOL_EXECUTOR = _DaemonBoundedExecutor()
+
+
 class ToolExecutionService:
+    TOOL_TIMEOUT_SECONDS = 300
+
     def __init__(
         self,
         permission_service=None,
@@ -79,7 +125,46 @@ class ToolExecutionService:
         context: Optional[Any] = None,
         registry: Optional[Any] = None,
         authorized_ask_id: Optional[str] = None,
+        *,
+        journal_authority: Any,
+        transaction_id: str = "",
+        idempotency_key: str = "",
+        side_effect_class: str = "read",
+        canonical_arguments_str: str = "",
+        arguments_sha256: str = "",
     ) -> ToolResult:
+        """Execute a tool with services supplied by the execution RuntimeContext."""
+        if journal_authority is None:
+            raise ValueError("journal_authority is required for tool execution")
+        return self._execute_bound(
+            call,
+            context,
+            registry,
+            authorized_ask_id,
+            journal_authority=journal_authority,
+            transaction_id=transaction_id,
+            idempotency_key=idempotency_key,
+            side_effect_class=side_effect_class,
+            canonical_arguments_str=canonical_arguments_str,
+            arguments_sha256=arguments_sha256,
+        )
+
+    def _execute_bound(
+        self,
+        call: ToolCall,
+        context: Optional[Any] = None,
+        registry: Optional[Any] = None,
+        authorized_ask_id: Optional[str] = None,
+        *,
+        journal_authority: Any,
+        transaction_id: str = "",
+        idempotency_key: str = "",
+        side_effect_class: str = "read",
+        canonical_arguments_str: str = "",
+        arguments_sha256: str = "",
+    ) -> ToolResult:
+        if journal_authority is None:
+            raise ValueError("journal_authority is required for tool execution")
         tool = self._resolve_tool(call, registry)
         if tool is None:
             return ToolResult(
@@ -92,6 +177,18 @@ class ToolExecutionService:
         # 统一参数键清洗（单点 chokepoint）：见 _sanitize_arguments docstring。
         # 在权限/校验/执行之前归一化，保证下游（权限、tracing、schema、**kwargs）都看到干净键。
         clean_arguments = self._sanitize_arguments(call.arguments)
+
+        # ToolSpec.parameters 是工具对外暴露的完整 JSON Schema。必须在权限钩子和工具
+        # handler 之前校验，避免无效输入触发授权流程或任何工具副作用。Pydantic
+        # args_schema 仍在后续负责类型转换与生成最终 handler 参数。
+        raw_schema_error = self._validate_raw_parameters(tool, clean_arguments)
+        if raw_schema_error is not None:
+            return self._make_input_validation_error(
+                call,
+                tool,
+                clean_arguments,
+                reason=raw_schema_error,
+            )
 
         session_id = getattr(context, "session_id", "") if context else ""
         output_dir = getattr(context, "output_dir", "") if context else ""
@@ -106,31 +203,33 @@ class ToolExecutionService:
         # 阶段D：agent 身份（主/子），阶段E：运行模式（规划/执行）
         agent_tier = getattr(context, "agent_tier", "main") if context else "main"
         mode = self._resolve_mode(context)
+        runtime_context = getattr(context, "runtime_context", None) if context else None
 
         if self._set_session_context_fn is not None and session_id:
-            try:
-                self._set_session_context_fn(
-                    session_id,
-                    output_dir,
-                    delegate_cwd=delegate_cwd or None,
-                    cwd=cwd or None,
-                    workspace_dir=workspace_dir or None,
-                    state_dir=state_dir or None,
-                    artifact_dir=artifact_dir or None,
-                    tmp_dir=tmp_dir or None,
-                    scripts_dir=scripts_dir or None,
-                )
-            except TypeError:
-                # 回调签名不支持 harness 字段或 delegate_cwd（旧签名），降级兼容
-                try:
-                    self._set_session_context_fn(session_id, output_dir, delegate_cwd=delegate_cwd or None)
-                except TypeError:
-                    self._set_session_context_fn(session_id, output_dir)
+            self._invoke_session_context_callback(
+                session_id,
+                output_dir,
+                delegate_cwd=delegate_cwd or None,
+                cwd=cwd or None,
+                workspace_dir=workspace_dir or None,
+                state_dir=state_dir or None,
+                artifact_dir=artifact_dir or None,
+                tmp_dir=tmp_dir or None,
+                scripts_dir=scripts_dir or None,
+                runtime_context=runtime_context,
+            )
 
         perm_input = dict(clean_arguments) if clean_arguments else {}
         perm_input["__call_id"] = call.id
 
-        perm_decision = self._check_permissions(tool, perm_input, session_id, agent_tier, mode)
+        perm_decision = self._check_permissions(
+            tool,
+            perm_input,
+            session_id,
+            agent_tier,
+            mode,
+            journal_authority=journal_authority,
+        )
         # Host-level 决策钩子：基础 SDK decision → hook → tracing 记录最终 decision → 执行，
         # 保证日志与实际行为一致。
         perm_decision = self._apply_permission_decision_hook(tool, perm_input, perm_decision)
@@ -166,7 +265,27 @@ class ToolExecutionService:
                     status="error",
                 )
 
+        # §6.6 事务中段事件（validated / permission.evaluated / approval.required /
+        # execution.started）由 ToolExecutionService 在此处发出；executor 只发
+        # tool.call.proposed 与终态事件。transaction_id 为空（旧调用方/测试未传）时
+        # 全部跳过发射，保持向后兼容。approval_fingerprint 为确定性纯函数（§6.3），
+        # 同一调用恒得同一指纹，绝不含时间/随机。
+        canon = canonical_arguments(call.arguments)
+        effective_canonical = canonical_arguments_str or canon
+        approval_fingerprint = self._compute_approval_fingerprint(
+            tool=tool,
+            call=call,
+            context=context,
+            agent_tier=agent_tier,
+            mode=mode,
+            canonical_arguments_str=effective_canonical,
+            side_effect_class=side_effect_class,
+        )
+
         if perm_decision.behavior == PermissionBehavior.DENY:
+            self._emit_permission_evaluated(
+                journal_authority, transaction_id, call, "deny", approval_fingerprint
+            )
             feedback = self._make_permission_feedback(perm_decision)
             return ToolResult(
                 tool_call_id=call.id,
@@ -186,6 +305,22 @@ class ToolExecutionService:
                     content=feedback.to_output_string(),
                     status="error",
                 )
+            self._emit_permission_evaluated(
+                journal_authority, transaction_id, call, "ask", approval_fingerprint
+            )
+            if transaction_id:
+                journal_authority.emit(
+                    "tool.approval.required",
+                    {
+                        "transaction_id": transaction_id,
+                        "call_id": call.id,
+                        "tool_name": tool.name,
+                        "reason": perm_decision.reason,
+                        "arguments": effective_canonical,
+                        "approval_fingerprint": approval_fingerprint,
+                    },
+                    call_id=call.id,
+                )
             ask_id = self._ask_service.start_ask(
                 PermissionAskRequest(
                     session_id=session_id,
@@ -193,7 +328,8 @@ class ToolExecutionService:
                     tool_name=tool.name,
                     reason=perm_decision.reason,
                     tool_input=perm_input,
-                )
+                ),
+                journal_authority=journal_authority,
             )
             if ask_id is None:
                 feedback = self._make_permission_feedback(
@@ -221,6 +357,9 @@ class ToolExecutionService:
             if command and self._permission_service is not None:
                 danger_decision = self._permission_service.check_dangerous_command(command)
                 if danger_decision.behavior == PermissionBehavior.DENY:
+                    self._emit_permission_evaluated(
+                        journal_authority, transaction_id, call, "deny", approval_fingerprint
+                    )
                     feedback = self._make_permission_feedback(danger_decision)
                     return ToolResult(
                         tool_call_id=call.id,
@@ -270,23 +409,103 @@ class ToolExecutionService:
                 status="error",
             )
 
-        try:
-            import concurrent.futures
-            ctx = contextvars.copy_context()
-            executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
-            future = executor.submit(lambda: ctx.run(tool.func, **validated_args))
-            try:
-                output = future.result(timeout=300)
-            except concurrent.futures.TimeoutError:
-                executor.shutdown(wait=False)
+        # 校验通过后按 §6.6 链序发出 validated → permission.evaluated(allow)。
+        # 权限决策此前已最终化（hook + exec-danger 检查），此处只是按 reducer 链序落记。
+        if transaction_id:
+            journal_authority.emit(
+                "tool.call.validated",
+                {"transaction_id": transaction_id, "call_id": call.id},
+                call_id=call.id,
+            )
+            self._emit_permission_evaluated(
+                journal_authority, transaction_id, call, "allow", approval_fingerprint
+            )
+
+        # §6.5 幂等：非 read 且有幂等键，先查已提交结果，命中直接复用（不重执行）。
+        # 与 executor 的 tool.call.proposed 使用同一 canonical 形态（call.arguments），
+        # 保证幂等键一致；dummy journal_authority（无 read_after）跳过查询。
+        # 幂等短路在本处之前 return，因此重放不会发出 execution.started（不重执行）。
+        side_effect_class = side_effect_class_for_spec(tool)
+        idempotency_key = derive_idempotency_key(
+            tool_id=call.name,
+            canonical_arguments=canon,
+            side_effect_class=side_effect_class,
+        )
+        if idempotency_key and hasattr(journal_authority, "read_after"):
+            committed = find_committed_result(journal_authority, idempotency_key)
+            if committed is not None:
                 return ToolResult(
                     tool_call_id=call.id,
                     name=call.name,
-                    content="工具执行超时（300秒）",
-                    status="error",
+                    content=committed["result_summary"],
+                    status="completed",
+                    artifacts=committed["artifacts"],
+                    metadata={"idempotent_replay": True, "full_ref": committed["full_ref"]},
                 )
-            finally:
-                executor.shutdown(wait=False)
+
+        # 真正副作用前发出 started：此后才把事务标记 running（reducer 链）。
+        if transaction_id:
+            journal_authority.emit(
+                "tool.execution.started",
+                {
+                    "transaction_id": transaction_id,
+                    "call_id": call.id,
+                    "tool_id": call.name,
+                    "arguments": effective_canonical,
+                },
+                call_id=call.id,
+            )
+
+        try:
+            ctx = contextvars.copy_context()
+            try:
+                future = _TOOL_EXECUTOR.submit(lambda: ctx.run(tool.func, **validated_args))
+            except queue.Full:
+                return ToolResult(
+                    tool_call_id=call.id,
+                    name=call.name,
+                    content="工具执行队列已满，请稍后重试。",
+                    status="error",
+                    metadata={"error_code": "TOOL_EXECUTION_SATURATED", "retryable": True},
+                )
+            try:
+                output = future.result(timeout=self.TOOL_TIMEOUT_SECONDS)
+            except concurrent.futures.TimeoutError:
+                # Python cannot stop a running thread. Cancellation only succeeds while queued;
+                # once running, side effects may still complete after this response.
+                cancelled = future.cancel()
+                if cancelled:
+                    return ToolResult(
+                        tool_call_id=call.id,
+                        name=call.name,
+                        content=f"工具在执行前等待超时（{self.TOOL_TIMEOUT_SECONDS}秒），已取消。",
+                        status="error",
+                        metadata={
+                            "error_code": "TOOL_EXECUTION_TIMEOUT",
+                            "timeout_seconds": self.TOOL_TIMEOUT_SECONDS,
+                            "execution_state": "cancelled_before_start",
+                            "indeterminate": False,
+                            "retryable": True,
+                        },
+                    )
+                return ToolResult(
+                    tool_call_id=call.id,
+                    name=call.name,
+                    content=(
+                        f"工具执行超过{self.TOOL_TIMEOUT_SECONDS}秒；运行线程无法安全停止，"
+                        "操作结果不确定，且可能仍在后台完成。请先核实外部状态，不要自动重试。"
+                    ),
+                    status="error",
+                    metadata={
+                        "error_code": "TOOL_EXECUTION_TIMEOUT_INDETERMINATE",
+                        "timeout_seconds": self.TOOL_TIMEOUT_SECONDS,
+                        "execution_state": "indeterminate_running",
+                        "indeterminate": True,
+                        "cancelled": False,
+                        "retryable": False,
+                        "do_not_retry_same_call": True,
+                    },
+                )
             output_str = str(output) if output is not None else ""
             return ToolResult(
                 tool_call_id=call.id,
@@ -319,6 +538,48 @@ class ToolExecutionService:
                 status="error",
             )
 
+    def _invoke_session_context_callback(
+        self,
+        session_id: str,
+        output_dir: str,
+        **session_fields: Any,
+    ) -> None:
+        """Invoke the callback once, adapting arguments before user code runs.
+
+        Signature inspection distinguishes legacy callbacks from modern callbacks. A
+        ``TypeError`` raised inside callback code therefore propagates normally instead
+        of being mistaken for a signature mismatch and triggering duplicate side effects.
+        """
+        callback = self._set_session_context_fn
+        if callback is None:
+            return
+
+        try:
+            signature = inspect.signature(callback)
+        except (TypeError, ValueError):
+            # Some extension callables have no introspectable signature. Use the modern
+            # contract once; never retry after execution based on exception type.
+            callback(session_id, output_dir, **session_fields)
+            return
+
+        parameters = signature.parameters.values()
+        accepts_kwargs = any(param.kind == inspect.Parameter.VAR_KEYWORD for param in parameters)
+        if accepts_kwargs:
+            supported_fields = session_fields
+        else:
+            supported_names = {
+                param.name
+                for param in parameters
+                if param.kind in (inspect.Parameter.POSITIONAL_OR_KEYWORD, inspect.Parameter.KEYWORD_ONLY)
+            }
+            supported_fields = {
+                name: value for name, value in session_fields.items() if name in supported_names
+            }
+
+        # bind() detects genuinely incompatible callbacks before any callback code runs.
+        signature.bind(session_id, output_dir, **supported_fields)
+        callback(session_id, output_dir, **supported_fields)
+
     def _resolve_tool(self, call: ToolCall, registry: Optional[Any]) -> Optional[ToolSpec]:
         if registry is None:
             return None
@@ -343,6 +604,62 @@ class ToolExecutionService:
             return mode
         return "execution"
 
+    def _compute_approval_fingerprint(
+        self,
+        *,
+        tool: ToolSpec,
+        call: ToolCall,
+        context: Any,
+        agent_tier: str,
+        mode: str,
+        canonical_arguments_str: str,
+        side_effect_class: str,
+    ) -> str:
+        """§6.3 确定性 approval fingerprint（纯函数，无 I/O/时间/随机）。
+
+        full target resolution is a follow-up —— resolved_targets=[]；workspace_generation
+        由 workspace_dir 确定性派生（绝不用时间/随机），同一调用恒得同一指纹。
+        """
+        cwd = getattr(context, "cwd", "") if context else ""
+        workspace_dir = getattr(context, "workspace_dir", "") if context else ""
+        return compute_approval_fingerprint(
+            tool_id=tool.name,
+            tool_version="1",
+            canonical_arguments=canonical_arguments_str or canonical_arguments(call.arguments),
+            resolved_targets=[],
+            cwd=cwd or "",
+            environment_identity="",
+            workspace_id=workspace_dir or "",
+            workspace_generation=f"{workspace_dir}#v1" if workspace_dir else "",
+            sandbox_permissions=[],
+            agent_tier=agent_tier or "main",
+            runtime_mode=mode or "execution",
+            side_effect_class=side_effect_class or "read",
+            policy_version="v1",
+        )
+
+    @staticmethod
+    def _emit_permission_evaluated(
+        journal_authority: Any,
+        transaction_id: str,
+        call: ToolCall,
+        decision: str,
+        approval_fingerprint: str,
+    ) -> None:
+        """发 tool.permission.evaluated（无事务 id 时为 no-op，兼容旧调用方）。"""
+        if not transaction_id:
+            return
+        journal_authority.emit(
+            "tool.permission.evaluated",
+            {
+                "transaction_id": transaction_id,
+                "call_id": call.id,
+                "decision": decision,
+                "approval_fingerprint": approval_fingerprint or "",
+            },
+            call_id=call.id,
+        )
+
     def _check_permissions(
         self,
         tool: ToolSpec,
@@ -350,7 +667,11 @@ class ToolExecutionService:
         session_id: str,
         agent_tier: str = "main",
         mode: str = "execution",
+        *,
+        journal_authority: Any,
     ) -> PermissionDecision:
+        if journal_authority is None:
+            raise ValueError("journal_authority is required for permission checks")
         # SDK permission_handler 钩子（宿主最高裁决）：True = 宿主显式放行 → 直接 ALLOW 并跳过
         # permission_service（宿主放行是最高权威）；False = 宿主拒绝 → DENY；None = 宿主无意见 →
         # 交给 SDK 正常判断。此前实现把 True 当"不拒绝"，permission_service 仍会 ASK/DENY，宿主无法真正放行。
@@ -388,7 +709,10 @@ class ToolExecutionService:
             check_fn = getattr(tool, "check_permissions_fn", None)
             if check_fn is not None:
                 request._check_permissions_fn = check_fn
-            return self._permission_service.check(request)
+            return self._permission_service.check(
+                request,
+                journal_authority=journal_authority,
+            )
 
         result = tool.check_permissions(perm_input)
         if hasattr(result, "behavior"):
@@ -501,6 +825,80 @@ class ToolExecutionService:
                 continue
             cleaned[clean_key] = value
         return cleaned
+
+    @staticmethod
+    def _validate_raw_parameters(tool: ToolSpec, arguments: dict) -> Optional[str]:
+        """Validate sanitized arguments against the complete ToolSpec JSON Schema.
+
+        ``args_schema`` only covers tools backed by Pydantic models. Raw/MCP/system
+        tools rely on ``parameters`` and may use JSON Schema features that Pydantic
+        does not enforce, including composition and references.
+        """
+        schema = getattr(tool, "parameters", None)
+        if not isinstance(schema, dict):
+            return None
+
+        try:
+            from jsonschema import exceptions, validators
+
+            validator_class = validators.validator_for(schema)
+            validator_class.check_schema(schema)
+            errors = sorted(
+                validator_class(schema).iter_errors(arguments),
+                key=lambda error: tuple(str(part) for part in error.absolute_path),
+            )
+        except exceptions.SchemaError as exc:
+            logger.warning(
+                "ToolExecutionService invalid parameters schema for %s: %s",
+                tool.name,
+                exc,
+            )
+            return f"工具参数 schema 无效：{exc.message}"
+        except Exception as exc:
+            logger.warning(
+                "ToolExecutionService JSON Schema validation error for %s: %s",
+                tool.name,
+                exc,
+            )
+            return f"JSON Schema 校验异常：{exc}"
+
+        if not errors:
+            return None
+
+        details = []
+        for error in errors:
+            location = ".".join(str(part) for part in error.absolute_path) or "<root>"
+            details.append(f"{location}: {error.message}")
+        reason = "; ".join(details)
+        logger.warning(
+            "ToolExecutionService parameters validation failed for %s: %s",
+            tool.name,
+            reason,
+        )
+        return reason
+
+    @staticmethod
+    def _make_input_validation_error(
+        call: ToolCall,
+        tool: ToolSpec,
+        arguments: dict,
+        reason: str,
+    ) -> ToolResult:
+        args_preview = json.dumps(arguments, ensure_ascii=False)[:500] if arguments else "EMPTY"
+        feedback = ToolFeedback(
+            error_type="输入校验失败",
+            error_code="INPUT_VALIDATION_FAILED",
+            what_went_wrong=f"工具 {tool.name} 输入校验失败：{reason}。收到参数：{args_preview}",
+            correct_usage="检查参数是否完整、参数名和值类型是否符合工具的 JSON Schema。",
+            retryable=True,
+            do_not_retry_same_call=False,
+        )
+        return ToolResult(
+            tool_call_id=call.id,
+            name=call.name,
+            content=feedback.to_output_string(),
+            status="error",
+        )
 
     def _validate_schema(self, tool: ToolSpec, arguments: dict) -> Optional[dict]:
         schema = getattr(tool, "args_schema", None)

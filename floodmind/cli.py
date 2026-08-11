@@ -2,10 +2,7 @@
 FloodMind CLI
 
 用法:
-  floodmind                           交互菜单 (Run/Chat/legacy 提示)
-  floodmind tui                       Legacy TUI 迁移提示
-  floodmind web                       Legacy Web 迁移提示
-  floodmind serve                     Legacy Web 服务迁移提示
+  floodmind                           交互菜单 (Run/Chat/Quit)
   floodmind chat                      纯文本终端对话
   floodmind run "任务描述"             单次任务执行
   floodmind init                      初始化配置
@@ -24,6 +21,8 @@ load_dotenv()
 
 import click
 
+from floodmind import __version__
+
 
 # ── 日志 ────────────────────────────────────────────────────
 
@@ -39,8 +38,17 @@ def _setup_logging(verbose: bool = False):
     logging.getLogger("urllib3").setLevel(logging.WARNING)
 
 
+def _initialize_cli_config() -> None:
+    """Initialize and migrate user config for config-dependent CLI work."""
+    from floodmind.config.settings import initialize_floodmind_home, migrate_settings
+
+    initialize_floodmind_home()
+    migrate_settings()
+
+
 def _validate_api_key() -> None:
     """校验 API Key 是否已配置，未配置则友好提示并退出。"""
+    _initialize_cli_config()
     from floodmind.config.settings import settings, get_config
 
     api_key = settings.model.api_key
@@ -57,7 +65,7 @@ def _validate_api_key() -> None:
     dashscope_fallback = "  或  DASHSCOPE_API_KEY" if provider == "dashscope" else ""
 
     click.echo(f"""
-  FloodMind v1.1.9
+  FloodMind v{__version__}
 
   [!] 未配置 API Key
 
@@ -92,23 +100,19 @@ _BANNER = r"""
 ╚═╝      ╚══════╝  ╚═════╝   ╚═════╝  ╚═════╝  ╚═╝     ╚═╝ ╚═╝ ╚═╝  ╚═══╝ ╚═════╝
 """
 
-_BANNER_SUB = "基于大语言模型的智能洪水预报系统  |  v1.1.9"
+_BANNER_SUB = f"基于大语言模型的智能洪水预报系统  |  v{__version__}"
 
 
 @click.group(invoke_without_command=True)
-@click.option("--tui", is_flag=True, help="显示 TUI legacy 迁移提示")
-@click.option("--web", "web_mode", is_flag=True, help="显示 Web legacy 迁移提示")
-@click.option("--port", default=13014, type=int, help="Legacy Web 端口参数（仅兼容提示）")
-@click.option("--host", default="0.0.0.0", help="Legacy Web 监听地址参数（仅兼容提示）")
 @click.option("--model", "-m", help="模型名称 (provider:model)", hidden=True)
 @click.option("--reasoning/--no-reasoning", default=None, help="启用推理模式", hidden=True)
 @click.option("--verbose", "-v", is_flag=True, help="显示详细日志", hidden=True)
-@click.version_option(version="1.1.9", prog_name="floodmind")
+@click.version_option(version=__version__, prog_name="floodmind")
 @click.pass_context
-def main(ctx, tui, web_mode, port, host, model, reasoning, verbose):
+def main(ctx, model, reasoning, verbose):
     """FloodMind — 智能洪水预报 Agent 系统
 
-    无参数时弹出交互菜单；--tui / --web 仅输出 legacy 迁移提示。
+    无参数时弹出交互菜单。
     """
     if ctx.invoked_subcommand is not None:
         return
@@ -116,41 +120,10 @@ def main(ctx, tui, web_mode, port, host, model, reasoning, verbose):
     _setup_logging(verbose=verbose)
     os.environ.setdefault("DASHSCOPE_API_KEY", os.getenv("FLOODMIND_API_KEY", ""))
 
-    if tui:
-        return _legacy_ui_notice("tui")
-
-    if web_mode:
-        return _legacy_ui_notice("web")
-
     # 无参数：显示交互菜单
     _validate_api_key()
     from floodmind.cli_interactive import run_menu
-    raise SystemExit(run_menu(model=model, port=port, host=host))
-
-
-# ── tui ─────────────────────────────────────────────────────
-
-@main.command()
-@click.option("--model", "-m", default="", help="模型名称")
-@click.option("--port", default=13014, type=int, help="Legacy Web 端口参数（仅兼容提示）")
-@click.option("--host", default="localhost", help="Legacy Web 监听地址参数（仅兼容提示）")
-def tui(model, port, host):
-    """Legacy TUI 入口（已迁移到 SDK-first 路线）"""
-    _setup_logging()
-    raise SystemExit(_legacy_ui_notice("tui"))
-
-
-# ── web ─────────────────────────────────────────────────────
-
-@main.command("web")
-@click.option("--host", default="0.0.0.0", help="Legacy Web 监听地址参数（仅兼容提示）")
-@click.option("--port", default=13014, type=int, help="Legacy Web 端口参数（仅兼容提示）")
-@click.option("--no-browser", is_flag=True, help="Legacy 兼容参数（仅兼容提示）")
-@click.option("--no-scheduler", is_flag=True, help="Legacy 兼容参数（仅兼容提示）")
-def web_cmd(host, port, no_browser, no_scheduler):
-    """Legacy Web 入口（已迁移到 SDK-first 路线）"""
-    _setup_logging()
-    raise SystemExit(_legacy_ui_notice("web"))
+    raise SystemExit(run_menu(model=model))
 
 
 # ── chat (纯文本) ───────────────────────────────────────────
@@ -158,18 +131,11 @@ def web_cmd(host, port, no_browser, no_scheduler):
 @main.command()
 @click.option("--model", "-m", help="模型名称 (provider:model)")
 @click.option("--reasoning/--no-reasoning", default=None, help="启用推理模式")
-@click.option("--tui", "use_tui", is_flag=True, help="改用 TUI 界面")
-@click.option("--web", "use_web", is_flag=True, help="改用 Web 界面")
 @click.option("--verbose", "-v", is_flag=True, help="显示详细日志")
-def chat(model, reasoning, use_tui, use_web, verbose):
+def chat(model, reasoning, verbose):
     """启动交互式对话（纯文本终端模式）"""
     _setup_logging(verbose=verbose)
     os.environ.setdefault("DASHSCOPE_API_KEY", os.getenv("FLOODMIND_API_KEY", ""))
-
-    if use_tui:
-        return _legacy_ui_notice("tui")
-    if use_web:
-        return _legacy_ui_notice("web")
 
     _validate_api_key()
     return _run_chat_legacy(model=model, reasoning=reasoning)
@@ -180,12 +146,18 @@ def chat(model, reasoning, use_tui, use_web, verbose):
 @main.command()
 @click.argument("task")
 @click.option("--model", "-m", help="模型名称")
-@click.option("--resume", "resume_session_id", help="从指定 session 的 checkpoint 恢复")
-@click.option("--checkpoint", "resume_checkpoint_id", help="指定 checkpoint ID（配合 --resume）")
+@click.option("--resume", "resume_session_id", help="续接指定 session 的 memory 对话历史")
+@click.option(
+    "--checkpoint",
+    "resume_checkpoint_id",
+    help="指定 checkpoint ID（需配合 --resume，按绑定 journal cursor 恢复）",
+)
 @click.option("--verbose", "-v", is_flag=True, help="显示详细日志")
 def run(task, model, resume_session_id, resume_checkpoint_id, verbose):
-    """执行单次任务，支持从 checkpoint 恢复"""
+    """执行单次任务；--resume 按 session 续接 memory 历史。"""
     _setup_logging(verbose=verbose)
+    if resume_checkpoint_id is not None and not resume_session_id:
+        raise click.UsageError("--checkpoint 必须配合 --resume SESSION_ID 使用")
     os.environ.setdefault("DASHSCOPE_API_KEY", os.getenv("FLOODMIND_API_KEY", ""))
     _validate_api_key()
 
@@ -210,6 +182,83 @@ def run(task, model, resume_session_id, resume_checkpoint_id, verbose):
     )
     workspace = _build_cli_workspace(sid)
     agent = create_flood_agent(llm_service=llm, memory=memory, session_id=sid, workspace=workspace)
+
+    if resume_checkpoint_id is not None:
+        from floodmind.agent.native.executor import project_run_state_to_loop_state
+        from floodmind.agent.native.types import AgentLoopState
+        from floodmind.agent.runtime.services.checkpoint_service import CheckpointService
+        from floodmind.agent.runtime.services.journal_authority import open_journal_authority
+        from floodmind.agent.runtime.services.resume_service import ResumeService
+
+        svc = CheckpointService(base_dir=str(workspace.session_root))
+        try:
+            state = svc.load(sid, resume_checkpoint_id, state_class=AgentLoopState)
+            manifest = svc.load_manifest(sid, resume_checkpoint_id)
+            identity = manifest.metadata
+            required = (
+                "conversation_id", "task_id", "run_id", "thread_id", "turn_id", "runtime_dir"
+            )
+            missing = [key for key in required if not identity.get(key)]
+            if missing:
+                raise ValueError(f"checkpoint 缺少 journal identity: {', '.join(missing)}")
+            # ResumeService：fencing lease + replay + reconcile + resume.started/completed 事件；
+            # user_message 作为新的 thread.message.sent 事件落进 canonical journal。
+            outcome = ResumeService().resume(
+                runtime_dir=Path(identity["runtime_dir"]),
+                conversation_id=identity["conversation_id"],
+                task_id=identity["task_id"],
+                run_id=identity["run_id"],
+                thread_id=identity["thread_id"],
+                turn_id=identity["turn_id"],
+                checkpoint_id=resume_checkpoint_id,
+                user_message=task,
+                session_id=sid,
+                checkpoint_service=svc,
+            )
+            run_state = outcome.run_state
+            authority = open_journal_authority(
+                Path(identity["runtime_dir"]),
+                conversation_id=identity["conversation_id"],
+                task_id=identity["task_id"],
+                run_id=identity["run_id"],
+                thread_id=identity["thread_id"],
+                turn_id=identity["turn_id"],
+            )
+            state = project_run_state_to_loop_state(state, run_state)
+            state.user_message = task
+            state.original_input = state.original_input or task
+            if state.status in {"completed", "failed"}:
+                state.status = "awaiting_llm"
+                state.final_output = ""
+            agent._journal_authority = authority
+            agent._orchestrator_executor._journal_authority = authority
+            agent._last_loop_state = state
+            context = agent._current_run_context
+            if context is None:
+                from floodmind.agent.native.types import RunContext
+
+                context = RunContext(
+                    session_id=sid,
+                    user_text=task,
+                    cwd=str(workspace.default_cwd),
+                    workspace_dir=str(workspace.workspace_dir),
+                    state_dir=str(workspace.state_dir),
+                    artifact_dir=str(workspace.artifact_dir),
+                    tmp_dir=str(workspace.tmp_dir),
+                    scripts_dir=str(workspace.scripts_dir),
+                )
+            try:
+                result = agent._orchestrator_executor.run_from_state(
+                    context, state, run_state=run_state
+                )
+            finally:
+                # fencing lease 覆盖整个 resumed run；到达终态后释放，
+                # 使同一 run 的后续 resume 不被 300s TTL 阻塞。
+                outcome.lease.release()
+            print(result.final_output)
+            return
+        except Exception as e:
+            raise click.ClickException(f"checkpoint 恢复失败: {e}") from e
 
     result = agent.run_with_resume(
         task,
@@ -245,6 +294,7 @@ def pause_session(session_id):
     _setup_logging()
     from floodmind.agent import create_flood_agent
     from floodmind.agent.runtime.services.checkpoint_service import CheckpointService
+    from floodmind.agent.runtime.services.journal_authority import open_journal_authority
     from floodmind.agent.native.types import AgentLoopState
 
     # 尝试通过 agent.pause 暂停当前运行
@@ -257,25 +307,27 @@ def pause_session(session_id):
     svc = CheckpointService()
     try:
         state = svc.load(session_id, state_class=AgentLoopState)
-        if state.status not in {"completed", "failed"}:
-            state.status = "paused"
-            svc.save(state)
-            click.echo(f"已暂停 session {session_id} 的最新 checkpoint")
-            return
+        manifest = svc.load_manifest(session_id, state.checkpoint_id)
+        identity = manifest.metadata
+        required = ("conversation_id", "task_id", "run_id", "thread_id", "turn_id", "runtime_dir")
+        missing = [key for key in required if not identity.get(key)]
+        if missing:
+            raise ValueError(f"checkpoint 缺少 journal identity: {', '.join(missing)}")
+        authority = open_journal_authority(
+            Path(identity["runtime_dir"]),
+            conversation_id=identity["conversation_id"],
+            task_id=identity["task_id"],
+            run_id=identity["run_id"],
+            thread_id=identity["thread_id"],
+            turn_id=identity["turn_id"],
+        )
+        svc.replay_from_checkpoint(authority, session_id, state.checkpoint_id)
+        click.echo(
+            f"session {session_id} 当前未运行；checkpoint 已按 canonical journal 校验，未写入非权威 pause 状态"
+        )
+        return
     except Exception as e:
         click.echo(f"暂停失败: {e}")
-
-
-# ── serve ───────────────────────────────────────────────────
-
-@main.command()
-@click.option("--host", default="0.0.0.0", help="Legacy Web 监听地址参数（仅兼容提示）")
-@click.option("--port", default=13014, type=int, help="Legacy Web 端口参数（仅兼容提示）")
-@click.option("--no-scheduler", is_flag=True, help="Legacy 兼容参数（仅兼容提示）")
-def serve(host, port, no_scheduler):
-    """Legacy Web 服务入口（已迁移到 SDK-first 路线）"""
-    _setup_logging()
-    return _legacy_ui_notice("serve")
 
 
 # ── init ────────────────────────────────────────────────────
@@ -304,19 +356,14 @@ version: 1.0
 @click.option("--dir", "-d", default=".", help="目标目录")
 def init(dir):
     """在当前目录初始化 FloodMind 配置"""
-    from floodmind.config.settings import _config_path, _load_json_config, _template_path, get_floodmind_home, save_config
+    _initialize_cli_config()
+    from floodmind.config.settings import _config_path, get_floodmind_home
 
     target = Path(dir).resolve()
 
     config_dir = get_floodmind_home()
     config_path = _config_path()
-    if not config_path.exists():
-        config_dir.mkdir(parents=True, exist_ok=True)
-        template_cfg = _load_json_config(_template_path()) or {}
-        save_config(template_cfg)
-        click.echo(f"[OK] 配置已创建: {config_path}")
-    else:
-        click.echo(f"  配置已存在: {config_path}")
+    click.echo(f"  配置已存在: {config_path}")
 
     skills_dir = target / "skills"
     skills_dir.mkdir(exist_ok=True)
@@ -380,6 +427,7 @@ def list(dir):
 @main.command("providers")
 def list_providers():
     """列出所有可用的 AI Provider (provider:model)"""
+    _initialize_cli_config()
     from floodmind.config.provider_registry import list_available_providers
     providers = list_available_providers()
     if not providers:
@@ -400,7 +448,7 @@ def list_providers():
 @main.group()
 def config():
     """配置管理"""
-    pass
+    _initialize_cli_config()
 
 
 @config.command()
@@ -450,16 +498,6 @@ def _build_cli_workspace(session_id: str):
     return build_folder_workspace(session_id, primary_dir=Path.cwd())
 
 
-def _legacy_ui_notice(entrypoint: str) -> int:
-    """提示 Web/TUI 入口已进入 legacy 迁移路径。"""
-    click.echo(
-        f"FloodMind {entrypoint} 已进入 legacy 迁移路径：当前版本以 Python SDK 和 `floodmind run` 为核心入口。"
-    )
-    click.echo("请使用 `floodmind run \"任务描述\"`，或在 Python 中通过 `from floodmind import Agent, Workspace` 使用 SDK。")
-    click.echo("如需临时使用旧 Web/TUI，请切换到 legacy 分支/兼容包，或直接启动旧版适配器。")
-    return 0
-
-
 def _run_chat_legacy(model=None, reasoning=None) -> int:
     """旧的纯文本 chat 模式（保留向后兼容）"""
     from floodmind.config.settings import settings
@@ -472,7 +510,7 @@ def _run_chat_legacy(model=None, reasoning=None) -> int:
     if reasoning is not None:
         settings.model.enable_reasoning = reasoning
 
-    click.echo(f"\n  FloodMind v1.1.9  —  {settings.model.model_name}")
+    click.echo(f"\n  FloodMind v{__version__}  —  {settings.model.model_name}")
     click.echo("  输入 'exit' 退出, 'clear' 清空记忆, 'memory' 查看记忆\n")
 
     llm = ModelClient.from_settings(

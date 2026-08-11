@@ -46,6 +46,7 @@ class SessionInfo:
     branch_name: Optional[str] = None
     worktree_path: Optional[str] = None
     metadata: Dict[str, Any] = field(default_factory=dict)
+    conversation_id: str = ""
 
     def touch(self):
         """更新最后活跃时间"""
@@ -311,14 +312,7 @@ class SessionManager:
             return
         
         agent = self._agents[session_id]
-        
-        if hasattr(agent, 'memory') and hasattr(agent.memory, 'save_chat_history'):
-            try:
-                agent.memory.save_chat_history()
-                logger.debug(f"会话 {session_id} 对话历史已保存")
-            except Exception as e:
-                logger.error(f"保存会话对话历史失败: {e}")
-        
+
         if self._on_session_evict:
             try:
                 self._on_session_evict(session_id, agent)
@@ -407,6 +401,20 @@ class SessionManager:
         with self._lock:
             return self._agents.get(session_id)
     
+    def _conversation_projection(self, session_id: str) -> List[Dict[str, Any]]:
+        session_id = validate_session_id(session_id)
+        meta_path = self.get_session_dir(session_id) / "session.json"
+        if not meta_path.exists():
+            return []
+        try:
+            conversation_id = str(json.loads(meta_path.read_text(encoding="utf-8")).get("conversation_id") or "")
+        except (OSError, ValueError, TypeError):
+            return []
+        if not conversation_id:
+            return []
+        from floodmind.agent.runtime.services.history_projection import project_conversation
+        return project_conversation(self.data_dir, conversation_id)
+
     def get_session_title(self, session_id: str) -> str:
         """获取会话标题（优先使用保存的标题，否则从第一条用户消息提取）"""
         session_id = validate_session_id(session_id)
@@ -414,33 +422,9 @@ class SessionManager:
         if info and info.title:
             return info.title
 
-        history_file = self.get_memory_dir(session_id) / "chat_history.json"
-        if history_file.exists():
-            try:
-                data = json.loads(history_file.read_text(encoding="utf-8"))
-                # 新格式：turns（扁平 role/content 或旧 per-turn）
-                if "turns" in data:
-                    for turn in data["turns"]:
-                        # 扁平 user 条目
-                        if turn.get("role") == "user":
-                            content = turn.get("content", "")
-                        else:
-                            content = turn.get("user_input", "")  # 旧 per-turn 格式
-                        if content:
-                            return self._extract_title_from_user_input(content)
-                # 旧格式：messages
-                messages = data.get("messages", [])
-                for msg in messages:
-                    if msg.get("type") == "human":
-                        content = msg.get("content", "")
-                        if content:
-                            return self._extract_title_from_user_input(content)
-            except Exception:
-                pass
-
-        if info:
-            return "新会话"
-
+        for turn in self._conversation_projection(session_id):
+            if turn.get("role") == "user" and turn.get("content"):
+                return self._extract_title_from_user_input(turn["content"])
         return "新会话"
 
     @staticmethod
@@ -519,27 +503,8 @@ class SessionManager:
         return {"items": page_items, "more": more, "cursor": cursor}
 
     def _load_frontend_messages(self, session_id: str) -> List[Dict[str, str]]:
-        """从 chat_history.json 加载并转换为前端消息列表。"""
-        session_id = validate_session_id(session_id)
-
-        history_file = self.get_memory_dir(session_id) / "chat_history.json"
-        if not history_file.exists():
-            old_dir = Path.cwd() / "data" / "chat_history"
-            old_files = sorted(old_dir.glob(f"chat_{session_id}_*.json")) if old_dir.exists() else []
-            if old_files:
-                history_file = old_files[-1]
-            else:
-                return []
-
-        try:
-            data = json.loads(history_file.read_text(encoding="utf-8"))
-            if isinstance(data, dict) and "turns" in data:
-                return self._turns_to_frontend(data["turns"])
-            messages = data.get("full_messages", data.get("messages", [])) if isinstance(data, dict) else data
-            return self._legacy_messages_to_frontend(messages or [])
-        except Exception as e:
-            logger.error(f"获取会话消息失败: {e}")
-            return []
+        """Load the canonical conversation projection for frontend rendering."""
+        return self._turns_to_frontend(self._conversation_projection(session_id))
 
     @staticmethod
     def _encode_message_cursor(index: int) -> str:
@@ -554,19 +519,9 @@ class SessionManager:
 
     @staticmethod
     def _turns_to_frontend(turns: List[Dict[str, Any]]) -> List[Dict[str, str]]:
-        """将对话历史转为前端消息列表。
-
-        支持两种 _turns 格式：
-        - 扁平条目（role/content）：当前架构，一次 LLM 调用一条 assistant 条目。
-          同一用户轮的多条 assistant 条目合并为一条 FloodMind 消息（保留原 per-turn UX）。
-        - 旧 per-turn 字典（user_input/final_answer）：迁移前的格式，按原逻辑渲染。
-        前端 fromServerMessage 据此构建 thought/action/answer blocks 并自动折叠。
-        """
+        """Convert canonical projected turns into frontend messages."""
         if not turns:
             return []
-        # 旧格式（无 role 键）：per-turn 字典
-        if "role" not in turns[0]:
-            return SessionManager._legacy_turns_to_frontend(turns)
 
         # 扁平条目：按用户轮聚合 assistant 条目
         result: List[Dict[str, Any]] = []
@@ -604,47 +559,6 @@ class SessionManager:
         _flush()
         return result
 
-    @staticmethod
-    def _legacy_turns_to_frontend(turns: List[Dict[str, Any]]) -> List[Dict[str, str]]:
-        """旧 per-turn 格式（user_input/final_answer）转前端消息列表。"""
-        result: List[Dict[str, Any]] = []
-        for turn in turns:
-            if turn.get("user_input"):
-                result.append({"role": "human", "content": turn["user_input"]})
-            ai_parts: Dict[str, Any] = {"role": "FloodMind", "content": ""}
-            if turn.get("reasoning"):
-                ai_parts["reasoning"] = turn["reasoning"]
-            tool_calls = turn.get("tool_calls", [])
-            if tool_calls:
-                ai_parts["tool_calls"] = [
-                    {
-                        "tool_name": tc.get("tool_name", tc.get("name", "unknown")),
-                        "tool_output": tc.get("tool_output", tc.get("result", "")),
-                    }
-                    for tc in tool_calls
-                ]
-            if turn.get("final_answer"):
-                ai_parts["content"] = turn["final_answer"]
-            if ai_parts.get("reasoning") or ai_parts.get("tool_calls") or ai_parts.get("content"):
-                result.append(ai_parts)
-        return result
-
-    @staticmethod
-    def _legacy_messages_to_frontend(messages: list) -> List[Dict[str, str]]:
-        """将旧格式消息转为前端格式"""
-        result = []
-        for m in messages:
-            msg_data = {
-                "role": "human" if m.get("type") == "human" else "FloodMind",
-                "content": m.get("content", "")
-            }
-            if m.get("reasoning"):
-                msg_data["reasoning"] = m.get("reasoning", "")
-            if m.get("tool_calls"):
-                msg_data["tool_calls"] = m.get("tool_calls", [])
-            result.append(msg_data)
-        return result
-    
     def delete_session(self, session_id: str):
         """删除会话（包括所有数据和工作树）"""
         session_id = validate_session_id(session_id)

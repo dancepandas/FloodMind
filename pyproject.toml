@@ -55,24 +55,6 @@ gpu = [
     "accelerate>=0.20",
     "chronos-forecasting>=2.0",
 ]
-web = [
-    "flask>=3.0",
-    "flask-cors>=4.0",
-    "werkzeug>=3.0",
-    "waitress>=2.1",
-    "aiofiles>=23.0",
-    "gunicorn>=21.0",
-    "schedule>=1.2",
-    "websockets>=12.0",
-    "httpx-sse>=0.4",
-]
-tui = [
-    "rich>=13.0",
-    "textual>=0.52",
-]
-legacy = [
-    "floodmind[web,tui]",
-]
 doc = [
     "pypdf>=3.0",
     "pdfplumber>=0.10",
@@ -80,8 +62,13 @@ doc = [
     "python-pptx>=1.0",
     "reportlab>=4.0",
     "fpdf2>=2.7",
-    "docx2pdf>=0.1",
+    "docx2pdf>=0.1; platform_system == 'Windows' or platform_system == 'Darwin'",
     "lxml>=4.9",
+]
+deployment = [
+    "floodmind[gpu,doc]",
+    "scikit-learn>=1.2",
+    "opencv-python>=4.8",
 ]
 all = [
     "floodmind[gpu,doc]",
@@ -97,10 +84,6 @@ build-backend = "setuptools.build_meta"
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["floodmind*"]
-exclude = ["floodmind.server*", "floodmind.tui*"]
-
-[tool.setuptools]
-py-modules = ["sitecustomize"]
 
 [tool.setuptools.package-data]
 floodmind = [

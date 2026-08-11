@@ -8,6 +8,7 @@ ToolSpec / ToolCall / ToolResult 统一由 agent.runtime.contracts.tools 定义�
 
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+import json
 from typing import Any, Callable, Dict, List, Literal, Optional, Tuple, TypedDict
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -27,6 +28,54 @@ AgentLoopStatus = Literal[
     "failed",
     "completed",
 ]
+
+
+TerminalReasonCode = Literal[
+    "completed",
+    "tool_calls",
+    "max_tokens",
+    "filtered",
+    "refused",
+    "paused",
+    "aborted",
+    "error",
+    "unknown",
+]
+
+
+@dataclass(frozen=True)
+class TerminalReason:
+    """Provider-neutral terminal contract while retaining the wire value."""
+
+    code: TerminalReasonCode
+    raw: str = ""
+
+    @property
+    def is_normal_completion(self) -> bool:
+        return self.code == "completed"
+
+    @classmethod
+    def from_raw(cls, reason: Any) -> "TerminalReason":
+        raw = "" if reason is None else str(reason)
+        normalized = raw.strip().lower()
+        mapping: Dict[str, TerminalReasonCode] = {
+            "stop": "completed",
+            "end_turn": "completed",
+            "tool_calls": "tool_calls",
+            "tool_use": "tool_calls",
+            "length": "max_tokens",
+            "max_tokens": "max_tokens",
+            "content_filter": "filtered",
+            "filtered": "filtered",
+            "refusal": "refused",
+            "refused": "refused",
+            "pause_turn": "paused",
+            "paused": "paused",
+            "abort": "aborted",
+            "aborted": "aborted",
+            "error": "error",
+        }
+        return cls(code=mapping.get(normalized, "unknown"), raw=raw)
 
 
 @dataclass
@@ -62,9 +111,21 @@ class RunContext:
     delegate_cwd: str = ""
     # agent 身份（阶段D）：主代理="main"，子代理="sub"。决定权限分层。
     agent_tier: str = "main"
+    # 由 RuntimeContext 注入每次运行所需的服务。
+    runtime_context: Optional[Any] = None
     # 运行模式（阶段E）：planning=只读硬门，execution=执行。
     # 由 executor 从 AgentLoopState.mode 注入；子代理恒 execution。
     mode: str = "execution"
+
+
+@dataclass(frozen=True)
+class InvalidToolCall:
+    """A provider tool request that is safe to journal/return, but never execute."""
+
+    id: str
+    name: str
+    raw_arguments: str
+    error: str
 
 
 @dataclass
@@ -74,6 +135,7 @@ class ModelEvent:
         "token",
         "tool_call_delta",
         "tool_call_done",
+        "invalid_tool_call",
         "assistant_message_done",
         "done",
         "usage",
@@ -82,6 +144,8 @@ class ModelEvent:
     ]
     content: str = ""
     tool_call: Optional[ToolCall] = None
+    invalid_tool_call: Optional[InvalidToolCall] = None
+    terminal_reason: Optional[TerminalReason] = None
     raw: Optional[dict] = None
 
 
@@ -139,8 +203,10 @@ class AgentLoopState(BaseModel):
     session_id: str = ""
     run_id: str = ""
     checkpoint_id: str = ""
+    journal_cursor: int = 0
     status: AgentLoopStatus = "created"
     iteration: int = 0
+    attempt_id: str = ""
     max_iterations: int = 10000
 
     # 对话与执行上下文
@@ -159,6 +225,9 @@ class AgentLoopState(BaseModel):
     consumed_user_message_count: int = 0
     pending_tool_calls: List[ToolCall] = Field(default_factory=list)
     pending_ask_id: Optional[str] = None
+    terminal_reason: Optional[TerminalReason] = None
+    max_token_continuations: int = 1
+    max_token_continuation_count: int = 0
 
     # 防御机制状态
     doom_loop_tracker: List[Tuple[str, str]] = Field(default_factory=list)
@@ -210,6 +279,97 @@ class ExecutionPlan(BaseModel):
                 return s
         return None
 
+    @staticmethod
+    def normalize_needs(value: Any) -> List[str]:
+        """Normalize dependency input to an ordered list of non-empty strings."""
+        if isinstance(value, str):
+            try:
+                decoded = json.loads(value)
+            except (json.JSONDecodeError, TypeError):
+                decoded = [value] if value else []
+            value = decoded
+        if value is None:
+            return []
+        if not isinstance(value, list):
+            value = [value]
+        result: List[str] = []
+        for dependency in value:
+            dependency_id = str(dependency).strip()
+            if dependency_id and dependency_id not in result:
+                result.append(dependency_id)
+        return result
+
+    @classmethod
+    def normalize_steps(cls, raw_steps: Any) -> List[Dict[str, Any]]:
+        """Normalize a complete plan and validate its dependency graph."""
+        if not isinstance(raw_steps, list):
+            raw_steps = [raw_steps]
+
+        normalized: List[Dict[str, Any]] = []
+        explicit_ids = [
+            str(step.get("step_id") or "").strip()
+            for step in raw_steps
+            if isinstance(step, dict) and step.get("step_id")
+        ]
+        if len(explicit_ids) != len(set(explicit_ids)):
+            duplicate = next(step_id for step_id in explicit_ids if explicit_ids.count(step_id) > 1)
+            raise ValueError(f"步骤 ID 重复: {duplicate}")
+        reserved_ids = set(explicit_ids)
+        used_ids: set[str] = set()
+        for index, raw in enumerate(raw_steps):
+            step = dict(raw) if isinstance(raw, dict) else {"title": str(raw)[:60]}
+            requested_id = str(step.get("step_id") or "").strip()
+            if requested_id:
+                step_id = requested_id
+            else:
+                suffix = index + 1
+                step_id = f"step-{suffix}"
+                while step_id in used_ids or step_id in reserved_ids:
+                    suffix += 1
+                    step_id = f"step-{suffix}"
+            used_ids.add(step_id)
+            step["step_id"] = step_id
+            step["status"] = "pending"
+            step["needs"] = cls.normalize_needs(step.get("needs"))
+            normalized.append(step)
+
+        plan = cls(steps=normalized)
+        plan.validate_dependencies()
+        return normalized
+
+    def validate_dependencies(self) -> None:
+        """Reject missing, self-referential, or cyclic dependencies."""
+        ids = [str(step.get("step_id") or "").strip() for step in self.steps]
+        if any(not step_id for step_id in ids):
+            raise ValueError("计划步骤缺少 step_id")
+        if len(ids) != len(set(ids)):
+            raise ValueError("计划步骤 ID 必须唯一")
+        known_ids = set(ids)
+        for step in self.steps:
+            step_id = str(step["step_id"])
+            needs = self.normalize_needs(step.get("needs"))
+            step["needs"] = needs
+            if step_id in needs:
+                raise ValueError(f"步骤 {step_id} 不能依赖自身")
+            missing = [dependency for dependency in needs if dependency not in known_ids]
+            if missing:
+                raise ValueError(f"步骤 {step_id} 依赖不存在的步骤: {', '.join(missing)}")
+        if self.has_cycle():
+            raise ValueError("执行计划存在依赖环")
+
+    def replace_needs(self, step_id: str, needs: Any) -> None:
+        """Validate and apply a dependency change atomically."""
+        target = self.find_step(step_id)
+        if target is None:
+            raise ValueError(f"步骤 {step_id} 不存在")
+        previous = target.get("needs", [])
+        target["needs"] = self.normalize_needs(needs)
+        try:
+            self.validate_dependencies()
+        except ValueError:
+            target["needs"] = previous
+            raise
+
     def next_pending_step(self) -> Optional[Dict[str, Any]]:
         for s in self.steps:
             if s.get("status") == "pending":
@@ -219,74 +379,53 @@ class ExecutionPlan(BaseModel):
     def all_steps_completed(self) -> bool:
         return all(s.get("status") == "completed" for s in self.steps) if self.steps else False
 
-    def topological_sort(self) -> List[str]:
-        """Kahn 算法拓扑排序，返回 step_id 列表。有环时返回空列表。"""
-        in_degree: Dict[str, int] = {}
-        adj: Dict[str, List[str]] = {}
-        all_ids = set()
+    def _topological_order(self) -> tuple[List[str], Dict[str, List[str]]]:
+        """Build the dependency graph once and return its stable Kahn ordering."""
+        step_ids = [
+            str(step.get("step_id"))
+            for step in self.steps
+            if step.get("step_id")
+        ]
+        known_ids = set(step_ids)
+        in_degree = {step_id: 0 for step_id in step_ids}
+        dependents: Dict[str, List[str]] = {step_id: [] for step_id in step_ids}
 
-        for s in self.steps:
-            sid = s.get("step_id", "")
-            if not sid:
+        for step in self.steps:
+            step_id = str(step.get("step_id") or "")
+            if step_id not in known_ids:
                 continue
-            all_ids.add(sid)
-            in_degree.setdefault(sid, 0)
-            adj.setdefault(sid, [])
-
-        for s in self.steps:
-            sid = s.get("step_id", "")
-            needs = s.get("needs", []) or []
-            for dep in needs:
-                if dep not in all_ids:
+            for dependency in self.normalize_needs(step.get("needs")):
+                if dependency not in known_ids:
                     import logging
                     logging.getLogger(__name__).warning(
-                        "步骤 %s 依赖了不存在的步骤 %s，已跳过", sid, dep
+                        "步骤 %s 依赖了不存在的步骤 %s，已跳过", step_id, dependency
                     )
                     continue
-                in_degree[sid] = in_degree.get(sid, 0) + 1
-                adj.setdefault(dep, []).append(sid)
+                in_degree[step_id] += 1
+                dependents[dependency].append(step_id)
 
-        queue = [sid for sid in all_ids if in_degree.get(sid, 0) == 0]
-        result = []
+        queue = [step_id for step_id in step_ids if in_degree[step_id] == 0]
+        order: List[str] = []
+        cursor = 0
+        while cursor < len(queue):
+            node = queue[cursor]
+            cursor += 1
+            order.append(node)
+            for dependent in dependents[node]:
+                in_degree[dependent] -= 1
+                if in_degree[dependent] == 0:
+                    queue.append(dependent)
+        return order, dependents
 
-        while queue:
-            node = queue.pop(0)
-            result.append(node)
-            for neighbor in adj.get(node, []):
-                in_degree[neighbor] -= 1
-                if in_degree[neighbor] == 0:
-                    queue.append(neighbor)
-
-        return result if len(result) == len(all_ids) else []
+    def topological_sort(self) -> List[str]:
+        """Kahn 算法拓扑排序，返回 step_id 列表。有环时返回空列表。"""
+        order, graph = self._topological_order()
+        return order if len(order) == len(graph) else []
 
     def has_cycle(self) -> bool:
-        """DFS 三色标记检测循环"""
-        WHITE, GRAY, BLACK = 0, 1, 2
-        all_ids = {s.get("step_id", "") for s in self.steps if s.get("step_id")}
-        adj: Dict[str, List[str]] = {sid: [] for sid in all_ids}
-        for s in self.steps:
-            sid = s.get("step_id", "")
-            needs = s.get("needs", []) or []
-            for dep in needs:
-                if dep in adj:
-                    adj[dep].append(sid)
-
-        color: Dict[str, int] = {sid: WHITE for sid in all_ids}
-
-        def _dfs(node: str) -> bool:
-            color[node] = GRAY
-            for neighbor in adj.get(node, []):
-                if color[neighbor] == GRAY:
-                    return True
-                if color[neighbor] == WHITE and _dfs(neighbor):
-                    return True
-            color[node] = BLACK
-            return False
-
-        for sid in all_ids:
-            if color[sid] == WHITE and _dfs(sid):
-                return True
-        return False
+        """Return whether the shared dependency graph contains a cycle."""
+        order, graph = self._topological_order()
+        return len(order) != len(graph)
 
     def get_batches(self) -> List[List[str]]:
         """按拓扑层级分批：每批内的步骤可并行执行"""

@@ -34,7 +34,12 @@ from floodmind.agent.runtime.contracts.permissions import (
     ToolPermissionPolicy,
 )
 from floodmind.agent.runtime.contracts.paths import PathResolveResult
-from floodmind.agent.runtime.services.exec_write_scanner import check_exec_write_targets
+from floodmind.agent.runtime.services.exec_write_scanner import (
+    approve_unresolved_exec_writes,
+    check_exec_write_targets,
+    dangerous_command_reason,
+    scan_exec_writes,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -45,35 +50,6 @@ class PermissionService:
         self._allow_rules: List[PermissionRule] = []
         self._ask_service = ask_service
         self._path_service = path_service
-        self._dangerous_command_patterns = [
-            re.compile(r'\brm\s+-rf\b', re.IGNORECASE),
-            re.compile(r'\bdel\s+/[sS]\b', re.IGNORECASE),
-            re.compile(r'\bdel\s+/[fF]\b', re.IGNORECASE),
-            re.compile(r'\bdel\s+/[qQ]\b', re.IGNORECASE),
-            re.compile(r'\bformat\s+[A-Za-z]:', re.IGNORECASE),
-            re.compile(r'\brmdir\s+/[sS]\b', re.IGNORECASE),
-            re.compile(r'\bshred\b', re.IGNORECASE),
-            re.compile(r'\bdd\s+if=', re.IGNORECASE),
-            re.compile(r'\bmkfs\b', re.IGNORECASE),
-            re.compile(r'>\s*/dev/sd', re.IGNORECASE),
-            re.compile(r'\bgit\s+push\s+--force\b', re.IGNORECASE),
-            re.compile(r'\bgit\s+reset\s+--hard\b', re.IGNORECASE),
-            re.compile(r'\bdocker\s+system\s+prune', re.IGNORECASE),
-            re.compile(r'\bdocker\s+rm\s+-f\b', re.IGNORECASE),
-            re.compile(r'\bRemove-Item\s+.*-Recurse\b', re.IGNORECASE),
-            re.compile(r'\bRemove-Item\s+.*-Force\b', re.IGNORECASE),
-            re.compile(r'\btaskkill\s+/[fF]', re.IGNORECASE),
-            re.compile(r'\bnet\s+user\b', re.IGNORECASE),
-            re.compile(r'\bnet\s+localgroup\b', re.IGNORECASE),
-            re.compile(r'\bdiskpart\b', re.IGNORECASE),
-            re.compile(r'\breg\s+delete\b', re.IGNORECASE),
-            re.compile(r'\bregedit\b', re.IGNORECASE),
-            re.compile(r'\bicacls\b', re.IGNORECASE),
-            re.compile(r'\bcacls\b', re.IGNORECASE),
-            re.compile(r'\bwbadmin\b', re.IGNORECASE),
-            re.compile(r'\bpowershell\s+-enc', re.IGNORECASE),
-            re.compile(r'\bpwsh\s+-enc\b', re.IGNORECASE),
-        ]
         self._mutating_command_patterns = [
             re.compile(r'(^|[^>])>{1,2}(?!\s*&)', re.IGNORECASE),
             re.compile(r'\b(rm|del|rmdir|rd)\b', re.IGNORECASE),
@@ -115,7 +91,14 @@ class PermissionService:
         "UpdateProjectInstructions",  # 写 AGENTS.md
     })
 
-    def check(self, request: PermissionRequest) -> PermissionDecision:
+    def check(
+        self,
+        request: PermissionRequest,
+        *,
+        journal_authority: Any,
+    ) -> PermissionDecision:
+        if journal_authority is None:
+            raise ValueError("journal_authority is required for permission checks")
         tool_policy_result = self._check_tool_policy(request)
 
         if tool_policy_result.behavior == PermissionBehavior.DENY:
@@ -135,7 +118,11 @@ class PermissionService:
                 return decision
 
         if tool_policy_result.behavior == PermissionBehavior.ASK:
-            return self._handle_ask(request, tool_policy_result.reason)
+            return self._handle_ask(
+                request,
+                tool_policy_result.reason,
+                journal_authority=journal_authority,
+            )
 
         for rule in self._deny_rules:
             if rule.matches(request.tool_name, request.tool_input, request.session_id):
@@ -211,6 +198,11 @@ class PermissionService:
         policy = request.permission_policy
         policy_type = policy.policy_type if policy else ""
 
+        # Explicitly marked state transitions are the sole planning-mode write
+        # capability. Tier checks run before this gate, so this marker cannot grant
+        # subagents state_write access or bypass any other safety layer.
+        if policy_type == "state_write" and getattr(policy, "allow_in_planning", False):
+            return None
         # 直接拒绝的 policy_type
         if policy_type in self._PLANNING_DENIED_POLICY_TYPES:
             return PermissionDecision(
@@ -277,12 +269,12 @@ class PermissionService:
         self._allow_rules.append(rule)
 
     def check_dangerous_command(self, command: str) -> PermissionDecision:
-        for pattern in self._dangerous_command_patterns:
-            if pattern.search(command):
-                return PermissionDecision(
-                    behavior=PermissionBehavior.DENY,
-                    reason=f"检测到危险命令模式: {pattern.pattern}",
-                )
+        reason = dangerous_command_reason(command)
+        if reason:
+            return PermissionDecision(
+                behavior=PermissionBehavior.DENY,
+                reason=reason,
+            )
         return PermissionDecision(behavior=PermissionBehavior.ALLOW)
 
     def check_shell_command_risk(self, command: str) -> PermissionDecision:
@@ -363,7 +355,15 @@ class PermissionService:
 
         return policy_result
 
-    def _handle_ask(self, request: PermissionRequest, reason: str) -> PermissionDecision:
+    def _handle_ask(
+        self,
+        request: PermissionRequest,
+        reason: str,
+        *,
+        journal_authority: Any,
+    ) -> PermissionDecision:
+        if journal_authority is None:
+            raise ValueError("journal_authority is required for ASK creation")
         if self._ask_service is None:
             logger.warning("PermissionService: AskService 未设置，ASK 自动拒绝")
             return PermissionDecision(behavior=PermissionBehavior.DENY, reason=f"需要用户确认: {reason}（AskService 不可用）")
@@ -372,15 +372,24 @@ class PermissionService:
         call_id = request.call_id
         clean_input = {k: v for k, v in request.tool_input.items() if k != "__call_id"} if isinstance(request.tool_input, dict) else request.tool_input
 
-        approved = self._ask_service.request(PermissionAskRequest(
-            session_id=request.session_id,
-            call_id=call_id,
-            tool_name=request.tool_name,
-            reason=reason,
-            tool_input=clean_input,
-        ))
+        approved = self._ask_service.request(
+            PermissionAskRequest(
+                session_id=request.session_id,
+                call_id=call_id,
+                tool_name=request.tool_name,
+                reason=reason,
+                tool_input=clean_input,
+            ),
+            journal_authority=journal_authority,
+        )
 
         if approved:
+            policy = request.permission_policy
+            if policy is not None and policy.policy_type == "exec" and policy.command_field:
+                normalized = self._normalize_tool_input(request.tool_input)
+                command = str(normalized.get(policy.command_field, "")).strip()
+                if command and scan_exec_writes(command).unresolved:
+                    approve_unresolved_exec_writes(command)
             return PermissionDecision(behavior=PermissionBehavior.ALLOW, reason="用户确认允许")
         return PermissionDecision(behavior=PermissionBehavior.DENY, reason="用户拒绝")
 
@@ -388,10 +397,6 @@ class PermissionService:
         raw_path = str(normalized.get(path_field, "")).strip()
         if not raw_path:
             return PermissionDecision(behavior=PermissionBehavior.ALLOW)
-
-        if self._path_service is None:
-            from floodmind.agent.runtime.services.path_service import get_path_service
-            self._path_service = get_path_service()
 
         result = self._path_service.resolve_simple(raw_path, access="write", session_id=session_id)
         if result.source == "no_context_rejected":
@@ -414,10 +419,6 @@ class PermissionService:
             if danger.behavior != PermissionBehavior.ALLOW:
                 return danger
 
-        if self._path_service is None:
-            from floodmind.agent.runtime.services.path_service import get_path_service
-            self._path_service = get_path_service()
-
         for pf in path_fields:
             raw_path = str(normalized.get(pf, "")).strip()
             if raw_path:
@@ -425,10 +426,17 @@ class PermissionService:
                 if not result.allowed:
                     return PermissionDecision(behavior=PermissionBehavior.DENY, reason=result.reason)
 
-        # 命令体写目标检查：> / Set-Content / Copy-Item 等写操作目标必须落在允许写目录内
-        # （堵住"只读授权被 Bash 绕过"漏洞）。保守静态扫描，详见 exec_write_scanner。
-        # 放在 mutating ASK 之前：越权写入是硬拒，不是"让用户确认"。
+        # 无法静态解析的写目标不能按普通文件副作用放行。权限管线有 AskService 时
+        # 返回 ASK 走唯一交互出口；无交互出口时 _handle_ask 会按既有契约降级 DENY。
         if command:
+            write_scan = scan_exec_writes(command)
+            if write_scan.unresolved:
+                return PermissionDecision(
+                    behavior=PermissionBehavior.ASK,
+                    reason="Bash 命令包含无法静态解析的写目标，需要用户确认: "
+                    + "; ".join(write_scan.unresolved),
+                )
+
             deny_reason = check_exec_write_targets(
                 command,
                 resolver=lambda t: self._path_service.resolve_simple(t, access="write", session_id=session_id),
@@ -466,10 +474,6 @@ class PermissionService:
                 reason="skill_name 或 script_name 包含路径穿越字符 '..'",
             )
 
-        if self._path_service is None:
-            from floodmind.agent.runtime.services.path_service import get_path_service
-            self._path_service = get_path_service()
-
         skill_scripts_dir = self._path_service._project_root / "skills" / skill_name / "scripts"
         script_path = skill_scripts_dir / script_name
 
@@ -492,10 +496,6 @@ class PermissionService:
         raw_path = str(normalized.get(path_field, "")).strip()
         if not raw_path:
             return PermissionDecision(behavior=PermissionBehavior.ALLOW)
-
-        if self._path_service is None:
-            from floodmind.agent.runtime.services.path_service import get_path_service
-            self._path_service = get_path_service()
 
         result = self._path_service.resolve_simple(raw_path, access="read", session_id=session_id)
         if not result.allowed:
@@ -544,24 +544,4 @@ class PermissionService:
             behavior=PermissionBehavior.DENY,
             reason="禁止写入系统目录",
         ))
-        svc.add_deny_rule(PermissionRule(
-            name="deny_destructive_command",
-            tool_name="exec_bash",
-            pattern=r"(rm\s+-rf|rm -rf|del\s+/[sS]|del /s|format\s+[A-Za-z]:|rmdir\s+/[sS]|rmdir /s)",
-            behavior=PermissionBehavior.DENY,
-            reason="检测到破坏性命令",
-        ))
         return svc
-
-
-_global_permission_service: Optional[PermissionService] = None
-
-
-def get_permission_service() -> Optional[PermissionService]:
-    return _global_permission_service
-
-
-def set_permission_service(svc: PermissionService) -> None:
-    global _global_permission_service
-    _global_permission_service = svc
-    logger.info("PermissionService 已接入执行路径")

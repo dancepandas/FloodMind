@@ -8,6 +8,7 @@ from floodmind.agent.runtime.contracts.permissions import (
     PermissionRequest,
     ToolPermissionPolicy,
 )
+from floodmind.agent.runtime.services.exec_write_scanner import check_exec_write_targets
 from floodmind.agent.runtime.services.permission_service import PermissionService
 
 
@@ -60,6 +61,43 @@ class TestPermissionService:
         decision = svc.check_tool_policy(policy, {}, "write_state_tool")
         assert decision.behavior == PermissionBehavior.ALLOW
 
+    def test_planning_denies_unmarked_state_write(self):
+        svc = self._make_svc()
+        decision = svc.check(PermissionRequest(
+            tool_name="PlanningState",
+            tool_input={},
+            permission_policy=ToolPermissionPolicy(policy_type="state_write"),
+            mode="planning",
+        ), journal_authority=object())
+        assert decision.behavior == PermissionBehavior.DENY
+        assert "规划模式" in decision.reason
+
+    def test_planning_allows_explicitly_marked_state_write(self):
+        svc = self._make_svc()
+        decision = svc.check(PermissionRequest(
+            tool_name="PlanningState",
+            tool_input={},
+            permission_policy=ToolPermissionPolicy(
+                policy_type="state_write", allow_in_planning=True,
+            ),
+            mode="planning",
+        ), journal_authority=object())
+        assert decision.behavior == PermissionBehavior.ALLOW
+
+    def test_planning_marker_does_not_bypass_subagent_tier(self):
+        svc = self._make_svc()
+        decision = svc.check(PermissionRequest(
+            tool_name="PlanningState",
+            tool_input={},
+            permission_policy=ToolPermissionPolicy(
+                policy_type="state_write", allow_in_planning=True,
+            ),
+            agent_tier="sub",
+            mode="planning",
+        ), journal_authority=object())
+        assert decision.behavior == PermissionBehavior.DENY
+        assert "子代理" in decision.reason
+
     def test_network_allows(self):
         svc = self._make_svc()
         policy = ToolPermissionPolicy(policy_type="network")
@@ -80,16 +118,75 @@ class TestPermissionService:
         """P2：未声明 policy 的只读工具按 is_readonly 放行（不再一刀切 DENY）。"""
         svc = self._make_svc()
         req = PermissionRequest(tool_name="MyReadTool", tool_input={}, permission_policy=None, is_readonly=True)
-        decision = svc.check(req)
+        decision = svc.check(req, journal_authority=object())
         assert decision.behavior == PermissionBehavior.ALLOW
 
     def test_no_policy_non_readonly_tool_asks(self):
         """P2：未声明 policy 的非只读工具走 ASK（无 ask_service 时降级 DENY）。"""
         svc = self._make_svc()
         req = PermissionRequest(tool_name="MyWriteTool", tool_input={}, permission_policy=None, is_readonly=False)
-        decision = svc.check(req)
+        decision = svc.check(req, journal_authority=object())
         assert decision.behavior in (PermissionBehavior.ASK, PermissionBehavior.DENY)
         assert decision.behavior != PermissionBehavior.ALLOW
+
+    def test_exec_unresolved_write_target_asks_when_interactive_route_exists(self):
+        class _AskService:
+            def request(self, request, *, journal_authority):
+                return True
+
+        svc = PermissionService(ask_service=_AskService())
+        req = PermissionRequest(
+            tool_name="Bash",
+            tool_input={"command": "Set-Content -Path $target x"},
+            permission_policy=ToolPermissionPolicy(policy_type="exec", command_field="command"),
+        )
+        decision = svc.check(req, journal_authority=object())
+        assert decision.behavior == PermissionBehavior.ALLOW
+        assert "用户确认" in decision.reason
+
+    def test_exec_approved_unresolved_target_reaches_handler_once(self):
+        class _AskService:
+            def request(self, request, *, journal_authority):
+                return True
+
+        command = "Set-Content -Path $target x"
+        svc = PermissionService(ask_service=_AskService())
+        decision = svc.check(PermissionRequest(
+            tool_name="Bash",
+            tool_input={"command": command},
+            permission_policy=ToolPermissionPolicy(
+                policy_type="exec", command_field="command"
+            ),
+        ), journal_authority=object())
+        assert decision.behavior == PermissionBehavior.ALLOW
+        assert check_exec_write_targets(
+            command,
+            resolver=lambda target: pytest.fail("unresolved target must not resolve"),
+            allow_approved_unresolved=True,
+        ) is None
+        assert check_exec_write_targets(
+            command,
+            resolver=lambda target: pytest.fail("unresolved target must not resolve"),
+            allow_approved_unresolved=True,
+        ) is not None
+
+    @pytest.mark.parametrize(
+        "command",
+        ["chmod -R 777 /tmp/x", "pip uninstall floodmind", "cmd /c del x.txt"],
+    )
+    def test_dangerous_rule_parity_uses_strict_union(self, command):
+        assert self._make_svc().check_dangerous_command(command).behavior == PermissionBehavior.DENY
+
+    def test_exec_unresolved_write_target_denied_without_ask_route(self):
+        svc = self._make_svc()
+        req = PermissionRequest(
+            tool_name="Bash",
+            tool_input={"command": "Set-Content -Path $target x"},
+            permission_policy=ToolPermissionPolicy(policy_type="exec", command_field="command"),
+        )
+        decision = svc.check(req, journal_authority=object())
+        assert decision.behavior == PermissionBehavior.DENY
+        assert "AskService 不可用" in decision.reason
 
     def test_make_feedback_deny(self):
         svc = self._make_svc()

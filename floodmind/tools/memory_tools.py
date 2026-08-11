@@ -21,7 +21,7 @@ from typing import Any, Dict, List, Optional
 from pydantic import BaseModel, Field
 
 from floodmind.agent.runtime.contracts.permissions import ToolPermissionPolicy
-from floodmind.agent.runtime.services.execution_journal_service import ExecutionJournalService
+from floodmind.agent.runtime.services.history_projection import project_current
 from floodmind.memory.task_experience import get_task_experience_store
 from floodmind.tools.agent_tool import (
     ToolRegistry,
@@ -244,6 +244,21 @@ class JournalGetFullResultInput(BaseModel):
     ref_id: str = Field(description="[必填] journal 归档引用 ID")
 
 
+def _canonical_tool_results() -> List[Dict[str, Any]]:
+    runtime_context = SESSION_CONTEXT.get("runtime_context")
+    authority = getattr(runtime_context, "journal_authority", None)
+    if authority is None:
+        return []
+    # Materialize the canonical projection first so journal identity/cursor failures are
+    # surfaced consistently with conversation history reads.
+    project_current(authority)
+    return [
+        dict(event.payload)
+        for event in authority.read_after(0)
+        if event.event_type in {"tool.execution.completed", "tool.execution.failed"}
+    ]
+
+
 def _impl_journal_search(query: str = "", top_k: int = 3) -> str:
     query = str(query).strip().strip('"').strip("'")
     if not query:
@@ -251,42 +266,34 @@ def _impl_journal_search(query: str = "", top_k: int = 3) -> str:
 
     session_id = _get_session_id()
     try:
-        svc = ExecutionJournalService()
-        entries = svc.get_recent_summaries(session_id, n=100)
-        logger.info("[JournalSearch] session_id=%s, turns=%d, query=%s", session_id, len(entries), query)
+        entries = _canonical_tool_results()
+        logger.info("[JournalSearch] session_id=%s, results=%d, query=%s", session_id, len(entries), query)
         if not entries:
             return _finalize_tool_output("journal_search", "当前会话没有 journal 记录", query=query, top_k=top_k)
 
         query_words = [w.lower() for w in query.split() if len(w) > 1]
         candidates = []
         for entry in entries:
-            score = 0
-            text_parts = []
-            text_parts.append(entry.llm.answer_fragment.lower())
-            for tr in entry.tool_results:
-                text_parts.append(tr.tool_name.lower())
-                text_parts.append(tr.summary.lower())
-            text = " ".join(text_parts)
-            for word in query_words:
-                if word in text:
-                    score += 1
+            text = " ".join(
+                str(entry.get(key, "")).lower()
+                for key in ("tool_id", "result_summary", "full_ref")
+            )
+            score = sum(1 for word in query_words if word in text)
             if score > 0:
                 candidates.append((score, entry))
 
-        candidates.sort(key=lambda x: x[0], reverse=True)
+        candidates.sort(key=lambda item: item[0], reverse=True)
         selected = candidates[:top_k]
-
         if not selected:
             return _finalize_tool_output("journal_search", f"未找到与 '{query}' 相关的 journal 记录", query=query, top_k=top_k)
 
         parts = [f"# Journal 搜索结果（query: {query}）"]
         for score, entry in selected:
-            parts.append(f"\n## Turn {entry.turn_index} (score={score})")
-            parts.append(f"LLM: {entry.llm.answer_fragment}")
-            for tr in entry.tool_results:
-                parts.append(f"- Tool {tr.tool_name}: {tr.summary}")
-                if tr.full_ref:
-                    parts.append(f"  完整结果: {tr.full_ref}")
+            parts.append(f"\n## Tool {entry.get('tool_id', '')} (score={score})")
+            parts.append(f"- Status: {entry.get('status', '')}")
+            parts.append(f"- Result: {entry.get('result_summary', '')}")
+            if entry.get("full_ref"):
+                parts.append(f"- 完整结果: {entry['full_ref']}")
         return _finalize_tool_output("journal_search", "\n".join(parts), query=query, top_k=top_k)
     except Exception as e:
         logger.error("搜索 journal 失败: %s", e)

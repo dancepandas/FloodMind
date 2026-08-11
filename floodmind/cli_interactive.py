@@ -1,6 +1,6 @@
 """FloodMind CLI — 交互菜单
 
-在用户无子命令、无 --tui/--web 参数时弹出简单菜单，让用户选择 TUI / Web / Chat / Quit。
+在用户无子命令时弹出简单菜单，让用户选择 Run / Chat / Quit。
 """
 
 import sys
@@ -10,13 +10,11 @@ from typing import Optional
 _MENU_LINES = [
     "",
     "  \033[36m╔═══════════════════════════════════════════════════╗\033[0m",
-    "  \033[36m║\033[0m     \033[1;36mFloodMind\033[0m  v1.1.9  SDK-first Agent 系统    \033[36m║\033[0m",
+    "  \033[36m║\033[0m     \033[1;36mFloodMind\033[0m  v1.2.0  SDK-first Agent 系统    \033[36m║\033[0m",
     "  \033[36m╠═══════════════════════════════════════════════════╣\033[0m",
     "  \033[36m║\033[0m                                                 \033[36m║\033[0m",
     "  \033[36m║\033[0m   \033[1;33m[R]\033[0m  Run   单次 SDK/folder-first 任务入口      \033[36m║\033[0m",
     "  \033[36m║\033[0m   \033[1;33m[C]\033[0m  Chat  纯文本命令行对话                    \033[36m║\033[0m",
-    "  \033[36m║\033[0m   \033[1;33m[T]\033[0m  TUI   legacy 入口提示                    \033[36m║\033[0m",
-    "  \033[36m║\033[0m   \033[1;33m[W]\033[0m  Web   legacy 入口提示                    \033[36m║\033[0m",
     "  \033[36m║\033[0m   \033[1;33m[Q]\033[0m  Quit  退出                               \033[36m║\033[0m",
     "  \033[36m║\033[0m                                                 \033[36m║\033[0m",
     "  \033[36m╚═══════════════════════════════════════════════════╝\033[0m",
@@ -47,34 +45,30 @@ def _enable_ansi_colors() -> None:
 
 
 def show_menu() -> str:
-    """打印菜单并返回用户选择 (r/t/w/c/q)，默认 'r'。"""
+    """打印菜单并返回用户选择 (r/c/q)，默认 'r'。"""
     _enable_ansi_colors()
     for line in _MENU_LINES:
         print(line, flush=True)
 
     while True:
         try:
-            raw = input("  \033[1;36m请选择 [R/C/T/W/Q 默认=R]: \033[0m").strip().lower()
+            raw = input("  \033[1;36m请选择 [R/C/Q 默认=R]: \033[0m").strip().lower()
         except (EOFError, KeyboardInterrupt):
             return "q"
 
         if raw in ("", "r"):
             return "r"
-        if raw == "t":
-            return "t"
-        if raw == "w":
-            return "w"
         if raw == "c":
             return "c"
         if raw == "q":
             return "q"
-        print("  请输入 R、C、T、W 或 Q", flush=True)
+        print("  请输入 R、C 或 Q", flush=True)
 
 
-def run_menu(model: Optional[str] = None, port: int = 13014, host: str = "0.0.0.0") -> int:
+def run_menu(model: Optional[str] = None) -> int:
     """执行交互菜单并根据选择调用对应的子命令实现。返回退出码。"""
     # 避免延迟导入带来的循环：这里导入 cli 内函数
-    from floodmind.cli import _legacy_ui_notice, _run_chat_legacy
+    from floodmind.cli import _run_chat_legacy
 
     choice = show_menu()
 
@@ -84,10 +78,6 @@ def run_menu(model: Optional[str] = None, port: int = 13014, host: str = "0.0.0.
     if choice == "r":
         print("\n  请使用: floodmind run \"任务描述\"")
         return 0
-    if choice == "t":
-        return _legacy_ui_notice("tui")
-    if choice == "w":
-        return _legacy_ui_notice("web")
     if choice == "c":
         _run_chat_legacy(model=model)
         return 0

@@ -6,8 +6,8 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from floodmind.agent.runtime.contracts.tools import ToolCall, ToolResult
-from floodmind.agent.runtime.services.execution_journal_service import ExecutionJournalService
+from floodmind.agent.runtime.contracts.runtime_context import RuntimeContext
+from floodmind.agent.runtime.services.journal_authority import open_journal_authority
 from floodmind.tools.base_tools import set_memory_instance
 from floodmind.tools.memory_tools import (
     conversation_search,
@@ -68,33 +68,44 @@ class TestMemoryTools:
         result = conversation_search.func(query="问题")
         assert "记忆系统未初始化" in result
 
-    def test_journal_search_and_get_full_result(self, monkeypatch):
-        monkeypatch.chdir(self.tmp)
-        svc = ExecutionJournalService(inline_threshold=10)
-
-        # 创建一些 journal 记录（内容超过 100 字符以触发归档，因为 threshold 有最小值 100）
-        long_content = "word " * 50  # 250+ chars
-        tool_call = ToolCall(id="tc1", name="Read", arguments={})
-        tool_result = ToolResult(tool_call_id="tc1", name="Read", content=long_content, status="completed")
-        inline, entry = svc.process_tool_result("test-session", tool_call, tool_result)
-
-        svc.record_turn(
-            session_id="test-session",
-            turn_index=0,
-            checkpoint_id=None,
-            current_answer="读取配置文件",
-            tool_calls=[tool_call],
-            tool_result_entries=[entry],
+    def test_journal_search_and_get_full_result(self):
+        runtime_dir = Path(self.tmp) / ".floodmind"
+        auth = open_journal_authority(
+            runtime_dir,
+            conversation_id="conversation-1",
+            task_id="task-1",
+            run_id="run-1",
+            thread_id="thread-1",
+            turn_id="turn-1",
         )
+        long_content = "word " * 50
+        auth.emit(
+            "tool.execution.completed",
+            {
+                "transaction_id": "ttx_1",
+                "call_id": "tc1",
+                "tool_id": "Read",
+                "status": "succeeded",
+                "result_summary": long_content,
+                "full_ref": "ref-1",
+                "artifacts": [],
+            },
+        )
+        runtime_context = RuntimeContext(
+            conversation_id="conversation-1",
+            task_id="task-1",
+            run_id="run-1",
+            thread_id="thread-1",
+            turn_id="turn-1",
+            journal_authority=auth,
+        )
+        set_session_context("test-session", output_dir=self.tmp, runtime_context=runtime_context)
 
-        # 用 journal_search 查找
-        result = journal_search.func(query="配置文件")
-        assert "Turn 0" in result
-        assert "Read" in result
-        assert entry.full_ref in result
+        result = journal_search.func(query="word")
+        assert "Tool Read" in result
+        assert "ref-1" in result
 
-        # 用 journal_get_full_result 读取完整结果
-        result = journal_get_full_result.func(ref_id=entry.full_ref)
+        result = journal_get_full_result.func(ref_id="ref-1")
         assert "完整工具结果" in result
         assert long_content in result
 

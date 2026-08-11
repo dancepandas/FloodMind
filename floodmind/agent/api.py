@@ -35,16 +35,29 @@ FloodMind Agent — 轻量级 SDK 入口
 """
 
 import logging
-from typing import Any, Callable, Dict, Iterator, List, Optional
+import uuid
+from pathlib import Path
+from typing import Any, Callable, Dict, Iterator, List, Optional, Sequence, Union
 
 from floodmind.agent.native.native_flood_agent import NativeFloodAgent
 from floodmind.agent.native.model_client import ModelClient
+from floodmind.memory.session_manager import validate_session_id
 
 logger = logging.getLogger(__name__)
 
 
 class Agent:
     """FloodMind 轻量级 Agent — 嵌入式 SDK 入口。
+
+    TARGET desktop contract:
+    - ``conversation_id`` / ``task_id`` / ``run_id`` / ``thread_id`` expose the
+      canonical identity of the latest run.
+    - ``stream()`` yields best-effort preview events; preview parts carry
+      ``attempt_id`` / ``part_id`` when available.
+    - ``events_after(sequence)`` returns Journal-derived committed public events
+      with canonical ``sequence`` values for replay and preview reconciliation.
+    - ``resume(checkpoint_id)`` resumes through Journal replay and reconciliation.
+    - ``run()`` and ``chat()`` return the committed final answer.
 
     将 FloodMind Agent 嵌入到任何 Python 系统中：
     - 传入 LLM 客户端和自定义工具
@@ -80,6 +93,9 @@ class Agent:
             adapter 回退。运行期可用 ``bind_workspace`` 切换。
         tool_loading: 工具加载策略。``None`` 使用 settings 默认；``False`` 为 eager 旧行为；
             ``True`` 为 progressive 默认；也可传 ``floodmind.ToolLoadingConfig``。
+        skill_roots: 宿主额外提供的只读 Skill 发现根；每个 Agent 使用独立 Registry。
+        skill_writable_root: Skill CRUD 与自动生成的唯一写入根，同时只加入 Skill 读取授权，
+            不会自动加入 Workspace 的普通写入根。
         bare: 是否为 bare 嵌入模式（默认 True）。``True`` 仅注册自定义工具；``False`` 走
             NativeFloodAgent 完整 runtime（内置工具、MCP、Skill、权限 ASK 事件、workspace 绑定）。
             完整 runtime 下 ``tools=None`` 保留原生默认工具集。
@@ -108,8 +124,11 @@ class Agent:
         workspace: Optional[Any] = None,
         tool_loading: Optional[Any] = None,
         bare: bool = True,
+        skill_roots: Optional[Sequence[Union[str, Path]]] = None,
+        skill_writable_root: Optional[Union[str, Path]] = None,
+        mcp_pool: Optional[Any] = None,
     ):
-        sid = session_id or "sdk-agent"
+        sid = validate_session_id(session_id or f"sdk-{uuid.uuid4().hex}")
         if memory is None:
             from floodmind.memory.dual_memory import DualMemory
             from floodmind.config.model_resolver import resolve_model
@@ -120,6 +139,7 @@ class Agent:
             workspace = Workspace.from_cwd(session_id=sid).ensure()
 
         self._on_event = on_event
+        self._journal_authority: Optional[Any] = None
         self._last_usage: Dict[str, int] = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
         self._artifacts: List[Dict[str, Any]] = []
 
@@ -137,6 +157,9 @@ class Agent:
             max_iterations=max_iterations,
             workspace=workspace,
             tool_loading=tool_loading,
+            skill_roots=skill_roots,
+            skill_writable_root=skill_writable_root,
+            mcp_pool=mcp_pool,
         )
 
     def bind_workspace(self, ws: Any) -> None:
@@ -157,6 +180,167 @@ class Agent:
     def session_id(self) -> str:
         """底层 NativeFloodAgent 的 session_id。"""
         return self._agent.session_id
+
+    @property
+    def conversation_id(self) -> str:
+        """最近一次 run 的 canonical conversation identity。"""
+        authority = self._journal_authority
+        return getattr(self._agent, "conversation_id", "") or getattr(
+            authority, "conversation_id", ""
+        )
+
+    @property
+    def task_id(self) -> str:
+        """最近一次 run 的 canonical task identity。"""
+        return getattr(self._journal_authority, "task_id", "")
+
+    @property
+    def run_id(self) -> str:
+        """最近一次 run 的 canonical run identity。"""
+        return getattr(self._journal_authority, "run_id", "")
+
+    @property
+    def thread_id(self) -> str:
+        """最近一次 run 的 canonical thread identity。"""
+        return getattr(self._journal_authority, "thread_id", "")
+
+    def events_after(self, sequence: int = 0) -> List[Dict[str, Any]]:
+        """返回该 run 从 sequence 之后的公共 committed 事件。"""
+        from floodmind.agent.sdk_events import project_canonical_many
+
+        authority = self._journal_authority
+        if authority is None:
+            return []
+        return project_canonical_many(authority.read_after(sequence))
+
+    def resume(
+        self,
+        checkpoint_id: str,
+        user_message: str = "",
+    ) -> str:
+        """Journal Replay + Reconciliation resume（TARGET desktop contract）。
+
+        Mirrors ``cli.py:228-262``: ``ResumeService`` 走 fencing → 校验 →
+        replay → reconcile → ``resume.started``+``resume.completed``，
+        然后把已恢复的 JournalAuthority 直接绑到底层 executor
+        （**不** 走 ``NativeFloodAgent.stream(resume_checkpoint_id=...)`` —
+        那个路径在 memory-first runtime 下被显式拒绝），再用 ``run_from_state``
+        在绑好的 authority 上驱动续接。
+
+        Returns:
+            续接产出的最终回答文本。
+        """
+        from floodmind.agent.native.executor import project_run_state_to_loop_state
+        from floodmind.agent.native.types import AgentLoopState, RunContext
+        from floodmind.agent.runtime.services.checkpoint_service import CheckpointService
+        from floodmind.agent.runtime.services.resume_service import ResumeService
+        from floodmind.agent.runtime.services.artifact_service import ArtifactService
+        from floodmind.agent.runtime.contracts.runtime_context import RuntimeContext
+
+        if not checkpoint_id:
+            raise ValueError("resume requires checkpoint_id")
+
+        workspace = getattr(self._agent, "_workspace", None) or getattr(self, "_workspace", None)
+        base_dir = str(workspace.session_root) if workspace is not None else None
+        if not base_dir:
+            raise ValueError("Agent.resume requires a workspace with session_root")
+
+        session_id = self.session_id or ""
+        svc = CheckpointService(base_dir=base_dir)
+        manifest = svc.load_manifest(session_id, checkpoint_id)
+        identity = manifest.metadata or {}
+        required = (
+            "conversation_id", "task_id", "run_id", "thread_id", "turn_id", "runtime_dir",
+        )
+        missing = [key for key in required if not identity.get(key)]
+        if missing:
+            raise ValueError(
+                f"checkpoint {checkpoint_id} missing journal identity: {', '.join(missing)}"
+            )
+
+        outcome = ResumeService().resume(
+            runtime_dir=Path(identity["runtime_dir"]),
+            conversation_id=identity["conversation_id"],
+            task_id=identity["task_id"],
+            run_id=identity["run_id"],
+            thread_id=identity["thread_id"],
+            turn_id=identity["turn_id"],
+            checkpoint_id=checkpoint_id,
+            user_message=user_message,
+            session_id=session_id,
+            checkpoint_service=svc,
+        )
+        authority = outcome.authority
+        if authority is None:
+            raise RuntimeError("ResumeService returned no JournalAuthority")
+
+        runtime_dir = Path(identity["runtime_dir"])
+        workspace_id = str(workspace.workspace_dir) if workspace is not None else ""
+        artifact_service = ArtifactService(
+            runtime_dir / "artifacts",
+            authority=authority,
+            allowed_roots=[workspace_id] if workspace_id else [],
+        )
+        context = RuntimeContext(
+            conversation_id=identity["conversation_id"],
+            task_id=identity["task_id"],
+            run_id=identity["run_id"],
+            thread_id=identity["thread_id"],
+            turn_id=identity["turn_id"],
+            actor_type="host",
+            actor_id=session_id,
+            agent_tier="main",
+            runtime_mode="execution",
+            workspace_id=workspace_id,
+            permission_service=getattr(self._agent, "_permission_service", None),
+            path_service=getattr(self._agent, "_path_service", None),
+            background_service=getattr(self._agent, "_background_task_service", None),
+            artifact_service=artifact_service,
+            journal_authority=authority,
+        )
+
+        # Project RunState → AgentLoopState 并把已恢复 authority 绑到 executor。
+        run_state = outcome.run_state
+        loop_state = AgentLoopState(
+            session_id=session_id,
+            run_id=identity["run_id"],
+            user_message=user_message,
+            original_input=user_message or identity.get("user_message", ""),
+        )
+        loop_state = project_run_state_to_loop_state(loop_state, run_state)
+        if loop_state.status in {"completed", "failed"}:
+            loop_state.status = "awaiting_llm"
+            loop_state.final_output = ""
+        if user_message:
+            loop_state.user_message = user_message
+            loop_state.original_input = loop_state.original_input or user_message
+
+        executor = self._agent._orchestrator_executor
+        executor._journal_authority = authority
+        self._agent._journal_authority = authority
+        self._agent._last_loop_state = loop_state
+        self._journal_authority = authority
+
+        run_ctx = RunContext(
+            session_id=session_id,
+            user_text=user_message,
+            cwd=str(workspace.default_cwd) if workspace is not None else "",
+            workspace_dir=str(workspace.workspace_dir) if workspace is not None else "",
+            state_dir=str(workspace.state_dir) if workspace is not None else "",
+            artifact_dir=str(workspace.artifact_dir) if workspace is not None else "",
+            tmp_dir=str(workspace.tmp_dir) if workspace is not None else "",
+            scripts_dir=str(workspace.scripts_dir) if workspace is not None else "",
+            runtime_context=context,
+        )
+        self._agent._current_run_context = run_ctx
+
+        try:
+            result = executor.run_from_state(run_ctx, loop_state, run_state=run_state)
+        finally:
+            # fencing lease 覆盖整个 resumed run；终态后释放。
+            outcome.lease.release()
+        final_output = getattr(result, "final_output", "") or ""
+        return final_output
 
     def clear_memory(self) -> None:
         """清空底层 NativeFloodAgent 的会话记忆。"""
@@ -197,6 +381,9 @@ class Agent:
         self._last_usage = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
         self._artifacts = []
         for event in self._agent.stream(message, **stream_kwargs):
+            authority = getattr(self._agent, "_journal_authority", None)
+            if authority is not None:
+                self._journal_authority = authority
             self._collect_event(event)
             if self._on_event is not None:
                 try:
@@ -275,6 +462,11 @@ class Agent:
     def artifacts(self) -> List[Dict[str, Any]]:
         """最近一次 run()/stream() 收集到的产物事件（file_generated/image_generated）。"""
         return list(self._artifacts)
+
+    @property
+    def skill_registry(self) -> Any:
+        """This Agent's isolated SkillRegistry."""
+        return self._agent.skill_registry
 
     @property
     def raw(self) -> NativeFloodAgent:

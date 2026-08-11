@@ -6,7 +6,9 @@ from pathlib import Path
 import pytest
 
 from floodmind.agent.runtime.contracts.workspace import Workspace
+from floodmind.agent.runtime.contracts.runtime_context import RuntimeContext
 from floodmind.agent.runtime.services.path_service import PathService
+from floodmind.tools.session_context import get_runtime_context, set_runtime_context
 from floodmind.agent.runtime.services.workspace_service import build_folder_workspace, set_workspace, reset_workspace
 
 
@@ -23,6 +25,29 @@ def tmp_workspace():
         token = set_workspace(ws)
         yield root, ws
         reset_workspace(token)
+
+
+class TestRuntimeContextPathService:
+    def test_runtime_context_path_service_is_context_local(self, tmp_path):
+        import contextvars
+
+        outer = PathService(project_root=tmp_path / "outer")
+        inner = PathService(project_root=tmp_path / "inner")
+        set_runtime_context(RuntimeContext("c", "t", "r", "th", "turn", path_service=outer))
+        ctx = contextvars.copy_context()
+        ctx.run(
+            set_runtime_context,
+            RuntimeContext("c", "t", "r", "th", "turn", path_service=inner),
+        )
+        assert get_runtime_context().path_service is outer
+        assert ctx.run(get_runtime_context).path_service is inner
+
+    def test_extra_read_roots_are_read_only(self, tmp_path):
+        root = tmp_path / "skills"
+        target = root / "demo" / "SKILL.md"
+        service = PathService(project_root=tmp_path / "project", extra_read_roots=[root])
+        assert service.is_read_allowed(target)
+        assert not service.is_write_allowed(target)
 
 
 class TestPathServiceDynamicRoots:
@@ -109,29 +134,52 @@ class TestSubAgentWriteRange:
 
 
 class TestSkillRegistryReadWhitelist:
-    """SDK 收敛项 ②：folder-first 下 agent 可直接读已装 skill 注册表源文件。"""
+    """Folder-first mode keeps SDK package skills readable without global leaks."""
 
-    def test_folder_first_can_read_skill_registry(self, tmp_path):
+    def test_folder_first_can_read_builtin_package_skill(self, tmp_path):
+        import floodmind.skills as skills_mod
+
         ws = build_folder_workspace("s1", primary_dir=tmp_path / "project")
         ws.ensure()
         svc = PathService(project_root=tmp_path, workspace=ws)
 
-        from floodmind.skills.registry import get_skill_registry
-        prefixes = svc._skill_read_prefixes()
-        assert prefixes  # 非空
-        skill_root = get_skill_registry().roots[0]
+        skill_root = Path(skills_mod.__file__).resolve().parent
         ref = skill_root / "some-skill" / "references" / "guide.md"
+        assert skill_root in svc._skill_read_prefixes()
         assert svc.is_read_allowed(ref)
         # 只放开读、不影响写
         assert not svc.is_write_allowed(ref)
 
+    def test_global_registry_host_root_is_not_globally_readable(self, tmp_path, monkeypatch):
+        import floodmind.skills.registry as registry_mod
+
+        host_root = tmp_path / "host-skills"
+        host_root.mkdir()
+        ref = host_root / "private-skill" / "SKILL.md"
+        ref.parent.mkdir()
+        ref.write_text("private", encoding="utf-8")
+        fake_registry = type("FakeRegistry", (), {"roots": (host_root,)})()
+        monkeypatch.setattr(registry_mod, "get_skill_registry", lambda: fake_registry)
+
+        ws = build_folder_workspace("s1", primary_dir=tmp_path / "project")
+        ws.ensure()
+        svc = PathService(project_root=tmp_path, workspace=ws)
+
+        assert host_root not in svc._skill_read_prefixes()
+        assert not svc.is_read_allowed(ref)
+
     def test_site_packages_skills_prefix_derived(self):
         import floodmind.skills as skills_mod
-        from pathlib import Path as _P
-        svc = PathService(project_root=_P.cwd())
-        expected = _P(skills_mod.__file__).resolve().parent.parent.parent / "skills"
-        prefixes = [p.resolve() for p in svc._skill_read_prefixes()]
-        assert expected in prefixes
+
+        svc = PathService(project_root=Path.cwd())
+        package_root = Path(skills_mod.__file__).resolve().parent
+        install_root = package_root.parent.parent
+        prefixes = svc._skill_read_prefixes()
+        if install_root.name in {"site-packages", "dist-packages"}:
+            assert install_root / "skills" in prefixes
+        else:
+            # Source checkouts must not globally expose the repository's skills/.
+            assert install_root / "skills" not in prefixes
 
 
 class TestReadDenyGuidance:
@@ -183,6 +231,31 @@ class TestFolderFirstPathResolution:
         finally:
             set_session_context("", output_dir="")
 
+    def test_folder_first_keeps_legacy_looking_relative_path(self, tmp_path):
+        from floodmind.agent.runtime.services.path_service import PathResolveRequest
+
+        ws = build_folder_workspace("s1", primary_dir=tmp_path / "project")
+        ws.ensure()
+        svc = PathService(project_root=tmp_path, workspace=ws)
+        raw = "data/sessions/s1/outputs/report.md"
+        result = svc.resolve(PathResolveRequest(raw_path=raw, access="write", session_id="s1"))
+        assert result.normalized_path == raw
+        assert Path(result.resolved_path) == ws.default_cwd / raw
+
+    def test_web_session_rewrites_current_session_prefix_only(self, tmp_workspace):
+        from floodmind.agent.runtime.services.path_service import PathResolveRequest
+
+        root, ws = tmp_workspace
+        svc = PathService(project_root=root, workspace=ws)
+        current = svc.resolve(PathResolveRequest(
+            raw_path="data/sessions/s1/outputs/report.md", access="write", session_id="s1"
+        ))
+        other = svc.resolve(PathResolveRequest(
+            raw_path="data/sessions/other/outputs/report.md", access="write", session_id="s1"
+        ))
+        assert current.normalized_path == "report.md"
+        assert other.normalized_path == "data/sessions/other/outputs/report.md"
+
     def test_folder_first_disables_project_root_static_write_allowlist(self, tmp_path):
         ws = build_folder_workspace("s1", primary_dir=tmp_path / "project")
         ws.ensure()
@@ -212,6 +285,19 @@ class TestFolderFirstPathResolution:
         svc = PathService(project_root=tmp_path, workspace=ws)
         assert svc.is_read_allowed(outside)
         assert not svc.is_write_allowed(outside)
+
+    def test_added_readable_root_allows_read_but_not_write(self, tmp_path):
+        outside_root = tmp_path / "agent-skills"
+        ws = build_folder_workspace("s1", primary_dir=tmp_path / "project")
+        ws.ensure()
+        ws.add_readable_root(outside_root)
+        outside_root.mkdir()
+        skill_file = outside_root / "custom" / "SKILL.md"
+        skill_file.parent.mkdir()
+        skill_file.write_text("custom", encoding="utf-8")
+        svc = PathService(project_root=tmp_path, workspace=ws)
+        assert svc.is_read_allowed(skill_file)
+        assert not svc.is_write_allowed(skill_file)
 
     def test_writable_root_allows_write_and_read(self, tmp_path):
         outside_root = tmp_path / "outside"

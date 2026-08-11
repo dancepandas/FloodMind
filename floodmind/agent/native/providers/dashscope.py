@@ -1,4 +1,4 @@
-"""DashScope（阿里云百炼）pipeline。
+"""DashScope（阿里云百炼）codec。
 
 方言要点（docs/qwen.txt）：
 - 思考开关：``extra_body={"enable_thinking": True}``（Qwen/GLM/Kimi 等自研与托管模型）
@@ -11,11 +11,12 @@
 
 from typing import Any, Dict
 
-from .base import ProviderPipeline
+from .base import ProviderCodec
 
 
-class DashScopePipeline(ProviderPipeline):
+class DashScopeCodec(ProviderCodec):
     name = "dashscope"
+    uses_max_completion_tokens = True
 
     @classmethod
     def match(cls, provider_id: str, model_id: str, base_url: str) -> int:
@@ -36,10 +37,6 @@ class DashScopePipeline(ProviderPipeline):
         params = super().prepare_request(params, enable_thinking=enable_thinking, stream=stream)
         if self.conservative:
             return params
-
-        # max_tokens 不含思维链且将废弃 → max_completion_tokens
-        if "max_tokens" in params:
-            params["max_completion_tokens"] = params.pop("max_tokens")
 
         # 思考模式不支持强制指定函数调用
         if enable_thinking and isinstance(params.get("tool_choice"), dict):

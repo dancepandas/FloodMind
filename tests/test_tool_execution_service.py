@@ -1,5 +1,6 @@
 """Tests for ToolExecutionService dangerous command enforcement."""
 
+import threading
 from unittest.mock import MagicMock
 
 import pytest
@@ -14,6 +15,12 @@ from floodmind.agent.runtime.contracts.permissions import (
 from floodmind.agent.runtime.contracts.tools import ToolCall
 from floodmind.agent.runtime.services.permission_service import PermissionService
 from floodmind.agent.runtime.services.tool_execution_service import ToolExecutionService
+from floodmind.agent.runtime.services.idempotency import (
+    derive_idempotency_key,
+    side_effect_class_for_spec,
+)
+from floodmind.agent.runtime.contracts.tool_transaction import canonical_arguments
+from floodmind.agent.runtime.services.journal_authority import open_journal_authority
 from floodmind.tools.session_context import SESSION_CONTEXT
 
 
@@ -38,7 +45,7 @@ class TestToolExecutionServiceDangerousCommand:
         ctx = RunContext(session_id="s1", user_text="test", output_dir="/tmp/out", upload_dir="/tmp/up")
         call = ToolCall(id="c1", name="TestExec", arguments={"command": "rm -rf /tmp/important"})
 
-        result = svc.execute(call, context=ctx, registry=reg)
+        result = svc.execute(call, context=ctx, registry=reg, journal_authority=object())
 
         assert result.status == "error"
         assert "危险" in result.content or "PERMISSION_DENIED" in result.content
@@ -53,7 +60,7 @@ class TestToolExecutionServiceDangerousCommand:
         ctx = RunContext(session_id="s1", user_text="test", output_dir="/tmp/out", upload_dir="/tmp/up")
         call = ToolCall(id="c1", name="TestExec", arguments={"command": "python script.py"})
 
-        result = svc.execute(call, context=ctx, registry=reg)
+        result = svc.execute(call, context=ctx, registry=reg, journal_authority=object())
 
         assert result.status == "completed"
         assert "ran python script.py" in result.content
@@ -91,11 +98,97 @@ class TestToolExecutionContextInjection:
         )
         call = ToolCall(id="c1", name="CtxTool", arguments={})
 
-        result = svc.execute(call, context=ctx, registry=reg)
+        result = svc.execute(call, context=ctx, registry=reg, journal_authority=object())
 
         assert result.status == "completed"
         assert f"cwd={tmp_path / 'project'}" in result.content
         assert f"workspace={tmp_path / 'project'}" in result.content
+
+    def test_modern_callback_internal_type_error_runs_side_effect_once(self, tmp_path):
+        calls = []
+
+        def _callback(session_id, output_dir, **kwargs):
+            calls.append((session_id, output_dir, kwargs))
+            raise TypeError("callback body failed")
+
+        svc = ToolExecutionService(set_session_context_fn=_callback)
+        reg = MagicMock()
+        reg.get.return_value = _make_write_tool()
+        ctx = RunContext(
+            session_id="s1",
+            user_text="test",
+            output_dir=str(tmp_path / "out"),
+            upload_dir=str(tmp_path / "up"),
+            cwd=str(tmp_path),
+        )
+
+        with pytest.raises(TypeError, match="callback body failed"):
+            svc.execute(
+                ToolCall(id="c1", name="TestWrite", arguments={"file_path": "a.txt"}),
+                context=ctx,
+                registry=reg,
+                journal_authority=object(),
+            )
+
+        assert len(calls) == 1
+
+    def test_legacy_callback_receives_only_supported_fields(self):
+        calls = []
+
+        def _legacy(session_id, output_dir, delegate_cwd=None):
+            calls.append((session_id, output_dir, delegate_cwd))
+
+        svc = ToolExecutionService(set_session_context_fn=_legacy)
+        reg = MagicMock()
+        reg.get.return_value = _make_write_tool()
+
+        result = svc.execute(
+            ToolCall(id="c1", name="TestWrite", arguments={"file_path": "a.txt"}),
+            context=_ctx(),
+            registry=reg,
+                journal_authority=object(),
+        )
+
+        assert result.status == "completed"
+        assert calls == [("s1", "/tmp/out", None)]
+
+
+class TestToolExecutionTimeout:
+    def test_running_timeout_is_indeterminate_and_not_retryable(self):
+        started = threading.Event()
+        release = threading.Event()
+        tool = _make_write_tool()
+
+        def _side_effect(file_path, content=""):
+            started.set()
+            release.wait(timeout=2)
+            return "eventually completed"
+
+        tool.func = _side_effect
+        reg = MagicMock()
+        reg.get.return_value = tool
+        svc = ToolExecutionService()
+        svc.TOOL_TIMEOUT_SECONDS = 0.05
+
+        try:
+            result = svc.execute(
+                ToolCall(id="c1", name="TestWrite", arguments={"file_path": "a.txt"}),
+                context=_ctx(),
+                registry=reg,
+                journal_authority=object(),
+            )
+        finally:
+            release.set()
+
+        assert started.is_set()
+        assert result.status == "error"
+        assert result.metadata["error_code"] == "TOOL_EXECUTION_TIMEOUT_INDETERMINATE"
+        assert result.metadata["execution_state"] == "indeterminate_running"
+        assert result.metadata["indeterminate"] is True
+        assert result.metadata["cancelled"] is False
+        assert result.metadata["retryable"] is False
+        assert result.metadata["do_not_retry_same_call"] is True
+        assert "不要自动重试" in result.content
 
 
 def _make_write_tool(base_decision=None):
@@ -134,7 +227,7 @@ class TestPermissionDecisionHook:
         reg.get.return_value = _make_write_tool()
         call = ToolCall(id="c1", name="TestWrite", arguments={"file_path": "a.txt"})
 
-        result = svc.execute(call, context=_ctx(), registry=reg)
+        result = svc.execute(call, context=_ctx(), registry=reg, journal_authority=object())
 
         assert result.status == "completed"
         assert seen["tool_name"] == "TestWrite"
@@ -154,7 +247,7 @@ class TestPermissionDecisionHook:
         reg.get.return_value = _make_write_tool()
         call = ToolCall(id="c1", name="TestWrite", arguments={"file_path": "a.txt"})
 
-        result = svc.execute(call, context=_ctx(), registry=reg)
+        result = svc.execute(call, context=_ctx(), registry=reg, journal_authority=object())
 
         assert result.status == "awaiting_permission"
         assert result.metadata["ask_id"] == "ask-123"
@@ -169,7 +262,7 @@ class TestPermissionDecisionHook:
         reg.get.return_value = _make_write_tool()
         call = ToolCall(id="c1", name="TestWrite", arguments={"file_path": "a.txt"})
 
-        result = svc.execute(call, context=_ctx(), registry=reg)
+        result = svc.execute(call, context=_ctx(), registry=reg, journal_authority=object())
 
         assert result.status == "error"
         assert "宿主拒绝" in result.content
@@ -185,7 +278,7 @@ class TestPermissionDecisionHook:
         reg.get.return_value = _make_write_tool(base_decision=sdk_deny)
         call = ToolCall(id="c1", name="TestWrite", arguments={"file_path": "a.txt"})
 
-        result = svc.execute(call, context=_ctx(), registry=reg)
+        result = svc.execute(call, context=_ctx(), registry=reg, journal_authority=object())
 
         assert result.status == "error"
         assert "危险命令" in result.content
@@ -203,7 +296,7 @@ class TestPermissionDecisionHook:
         reg.get.return_value = _make_write_tool(base_decision=sdk_ask)
         call = ToolCall(id="c1", name="TestWrite", arguments={"file_path": "a.txt"})
 
-        result = svc.execute(call, context=_ctx(), registry=reg)
+        result = svc.execute(call, context=_ctx(), registry=reg, journal_authority=object())
 
         # ASK 未被降级：仍走授权流程
         assert result.status == "awaiting_permission"
@@ -217,7 +310,7 @@ class TestPermissionDecisionHook:
         reg.get.return_value = _make_write_tool()
         call = ToolCall(id="c1", name="TestWrite", arguments={"file_path": "a.txt"})
 
-        result = svc.execute(call, context=_ctx(), registry=reg)
+        result = svc.execute(call, context=_ctx(), registry=reg, journal_authority=object())
 
         assert result.status == "completed"
         assert "wrote a.txt" in result.content
@@ -229,7 +322,7 @@ class TestPermissionDecisionHook:
         reg.get.return_value = _make_write_tool()
         call = ToolCall(id="c1", name="TestWrite", arguments={"file_path": "a.txt"})
 
-        result = svc.execute(call, context=_ctx(), registry=reg)
+        result = svc.execute(call, context=_ctx(), registry=reg, journal_authority=object())
 
         assert result.status == "completed"
 
@@ -246,7 +339,7 @@ class TestPermissionDecisionHook:
         reg.get.return_value = _make_write_tool()
         call = ToolCall(id="c1", name="TestWrite", arguments={"file_path": "a.txt"})
 
-        result = svc.execute(call, context=_ctx(), registry=reg, authorized_ask_id="ask-123")
+        result = svc.execute(call, context=_ctx(), registry=reg, authorized_ask_id="ask-123", journal_authority=object())
 
         assert result.status == "completed"
         assert "wrote a.txt" in result.content
@@ -318,7 +411,7 @@ class TestExecPolicyWriteTarget:
         outside = tmp_path / "external" / "x.txt"
         call = ToolCall(id="c1", name="TestExec", arguments={"command": f'Set-Content -Path {outside} hi'})
 
-        result = svc.execute(call, context=_ctx(), registry=reg)
+        result = svc.execute(call, context=_ctx(), registry=reg, journal_authority=object())
 
         assert result.status == "error"
         assert "写目标" in result.content
@@ -375,7 +468,7 @@ class TestMalformedArgumentKeys:
             arguments={'tool_name"': "analyze_example_document"},
         )
 
-        result = svc.execute(call, context=_ctx(), registry=reg)
+        result = svc.execute(call, context=_ctx(), registry=reg, journal_authority=object())
 
         assert result.status == "completed"
         assert "detail: analyze_example_document" in result.content
@@ -391,7 +484,7 @@ class TestMalformedArgumentKeys:
             arguments={"\n\"tool_name": "demo"},
         )
 
-        result = svc.execute(call, context=_ctx(), registry=reg)
+        result = svc.execute(call, context=_ctx(), registry=reg, journal_authority=object())
 
         assert result.status == "completed"
         assert "detail: demo" in result.content
@@ -409,7 +502,7 @@ class TestMalformedArgumentKeys:
             arguments={'skill_name"': "chronos"},
         )
 
-        result = svc.execute(call, context=_ctx(), registry=reg)
+        result = svc.execute(call, context=_ctx(), registry=reg, journal_authority=object())
 
         # skill_name" → skill_name（正好是合法键）→ 正常执行
         assert result.status == "completed"
@@ -421,22 +514,152 @@ class TestMalformedArgumentKeys:
         reg.get.return_value = self._make_pyd_schema_tool()
         call = ToolCall(id="c4", name="GetSkill", arguments={"other": "x"})
 
-        result = svc.execute(call, context=_ctx(), registry=reg)
+        result = svc.execute(call, context=_ctx(), registry=reg, journal_authority=object())
 
         assert result.status == "error"
         assert "INPUT_VALIDATION_FAILED" in result.content
         assert "unexpected keyword argument" not in result.content
 
-    def test_unexpected_kwarg_feedback_hints_quote(self):
-        # 防御纵深：即便清洗后仍有未知键（如 tool_nam），TOOL_EXECUTION_ERROR
-        # 也要明示"参数名可能有多余引号/空白"，让模型能自纠。
+    def test_unknown_argument_gives_schema_feedback(self):
         svc = ToolExecutionService()
         reg = MagicMock()
         reg.get.return_value = self._make_no_schema_tool()
         call = ToolCall(id="c5", name="GetTool", arguments={"tool_nam": "x"})
 
-        result = svc.execute(call, context=_ctx(), registry=reg)
+        result = svc.execute(call, context=_ctx(), registry=reg, journal_authority=object())
 
         assert result.status == "error"
-        assert "TOOL_EXECUTION_ERROR" in result.content
-        assert "引号" in result.content
+        assert "INPUT_VALIDATION_FAILED" in result.content
+        assert "unexpected keyword argument" not in result.content
+
+
+class TestRawParametersJsonSchemaValidation:
+    def _execute(self, schema, arguments):
+        permission_handler = MagicMock(return_value=True)
+        handler = MagicMock(return_value="ok")
+        tool = MagicMock()
+        tool.name = "SchemaTool"
+        tool.parameters = schema
+        tool.args_schema = None
+        tool.permission_policy = None
+        tool.validate_input.return_value = MagicMock(valid=True)
+        tool.func = handler
+        registry = MagicMock()
+        registry.get.return_value = tool
+
+        result = ToolExecutionService(permission_handler=permission_handler).execute(
+            ToolCall(id="schema-call", name="SchemaTool", arguments=arguments),
+            context=_ctx(),
+            registry=registry,
+            journal_authority=object(),
+        )
+        return result, permission_handler, handler
+
+    @pytest.mark.parametrize(
+        ("schema", "arguments"),
+        [
+            ({"type": "object", "properties": {"name": {"type": "string"}}, "required": ["name"]}, {}),
+            ({"type": "object", "properties": {"name": {"type": "string"}}, "additionalProperties": False}, {"name": "ok", "extra": 1}),
+            ({"type": "object", "properties": {"count": {"type": "integer"}}}, {"count": "1"}),
+            ({"type": "object", "properties": {"config": {"type": "object", "properties": {"enabled": {"type": "boolean"}}, "required": ["enabled"]}}}, {"config": {"enabled": "yes"}}),
+            ({"type": "object", "properties": {"mode": {"enum": ["fast", "safe"]}}}, {"mode": "other"}),
+            ({"type": "object", "properties": {"value": {"oneOf": [{"type": "string"}, {"type": "integer"}]}}}, {"value": False}),
+            ({"$defs": {"item": {"type": "string", "enum": ["a", "b"]}}, "type": "object", "properties": {"item": {"$ref": "#/$defs/item"}}}, {"item": "c"}),
+        ],
+    )
+    def test_invalid_raw_schema_input_fails_before_permission_and_handler(self, schema, arguments):
+        result, permission_handler, handler = self._execute(schema, arguments)
+
+        assert result.status == "error"
+        assert "INPUT_VALIDATION_FAILED" in result.content
+        permission_handler.assert_not_called()
+        handler.assert_not_called()
+
+    def test_valid_composed_and_referenced_input_reaches_handler(self):
+        schema = {
+            "$defs": {"mode": {"enum": ["fast", "safe"]}},
+            "type": "object",
+            "properties": {
+                "mode": {"$ref": "#/$defs/mode"},
+                "payload": {"anyOf": [{"type": "string"}, {"type": "integer"}]},
+            },
+            "required": ["mode", "payload"],
+            "additionalProperties": False,
+        }
+
+        result, permission_handler, handler = self._execute(
+            schema, {"mode": "safe", "payload": 3}
+        )
+
+        assert result.status == "completed"
+        permission_handler.assert_called_once()
+        handler.assert_called_once_with(mode="safe", payload=3)
+
+
+class TestToolExecutionIdempotency:
+    """§6.5：非 read 工具带幂等键，命中已提交结果即复用，不重执行。"""
+
+    def _make_non_read_tool(self):
+        tool = MagicMock()
+        tool.name = "Write"
+        tool.permission_policy = None
+        tool.check_permissions.return_value = True
+        tool.validate_input.return_value = MagicMock(valid=True)
+        tool.args_schema = None
+        tool.is_readonly = False
+        tool.is_destructive = False
+        return tool
+
+    def test_committed_result_is_replayed_and_tool_not_reexecuted(self, tmp_path):
+        calls = []
+        tool = self._make_non_read_tool()
+        tool.func = lambda path: calls.append(path) or f"wrote {path}"
+        reg = MagicMock()
+        reg.get.return_value = tool
+        svc = ToolExecutionService()
+        call = ToolCall(id="c1", name="Write", arguments={"file_path": "a.txt"})
+        canon = canonical_arguments(call.arguments)
+        ik = derive_idempotency_key(
+            tool_id=call.name,
+            canonical_arguments=canon,
+            side_effect_class=side_effect_class_for_spec(tool),
+        )
+        assert ik != ""
+
+        auth = open_journal_authority(tmp_path, conversation_id="c", task_id="t",
+                                      run_id="r", thread_id="th", turn_id="tu")
+        # Simulate a previously committed result for the same idempotency key.
+        auth.emit("tool.execution.completed", {
+            "transaction_id": "ttx_old", "call_id": "c_old", "tool_id": "Write",
+            "status": "succeeded", "result_summary": "wrote a.txt", "full_ref": "ref://a",
+            "artifacts": ["art_1"], "idempotency_key": ik,
+        })
+
+        result = svc.execute(call, context=_ctx(), registry=reg, journal_authority=auth)
+
+        assert result.status == "completed"
+        assert result.metadata.get("idempotent_replay") is True
+        assert result.content == "wrote a.txt"
+        assert result.artifacts == ["art_1"]
+        assert calls == []  # never executed — replayed from journal
+
+    def test_read_tool_has_empty_key_and_still_executes(self, tmp_path):
+        calls = []
+        tool = MagicMock()
+        tool.name = "Read"
+        tool.permission_policy = None
+        tool.check_permissions.return_value = True
+        tool.validate_input.return_value = MagicMock(valid=True)
+        tool.args_schema = None
+        tool.is_readonly = True
+        tool.func = lambda path: calls.append(path) or "content"
+        reg = MagicMock()
+        reg.get.return_value = tool
+        svc = ToolExecutionService()
+        call = ToolCall(id="c1", name="Read", arguments={"path": "a.txt"})
+
+        result = svc.execute(call, context=_ctx(), registry=reg, journal_authority=object())
+
+        assert result.status == "completed"
+        assert result.metadata.get("idempotent_replay") is not True
+        assert calls == ["a.txt"]

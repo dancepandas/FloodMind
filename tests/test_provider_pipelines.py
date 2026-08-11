@@ -1,20 +1,21 @@
-"""Tests for provider pipelines — 路由、请求翻译、流式解析（fake chunk，不打真实 API）。"""
+"""Tests for provider codecs — 路由、请求翻译、流式解析（fake chunk，不打真实 API）。"""
 
+import json
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
 
 from floodmind.agent.native.providers import (
-    route_pipeline,
-    DashScopePipeline,
-    DeepSeekPipeline,
-    KimiPipeline,
-    MiniMaxPipeline,
-    OpenAICompatiblePipeline,
+    route_codec,
+    DashScopeCodec,
+    DeepSeekCodec,
+    KimiCodec,
+    MiniMaxCodec,
+    OpenAICompatibleCodec,
 )
 from floodmind.agent.native.providers.base import (
-    ProviderPipeline,
+    ProviderCodec,
     incremental,
     split_think_tags,
 )
@@ -83,9 +84,37 @@ class TestRouting:
         ("", "some-model", "", "openai-compatible", False),
     ])
     def test_route(self, pid, mid, url, expected, conservative):
-        p = route_pipeline(pid, mid, url)
+        p = route_codec(pid, mid, url)
         assert p.name == expected
         assert p.conservative is conservative
+
+    @pytest.mark.parametrize("base_url", [
+        "https://api.anthropic.com",
+        "https://API.ANTHROPIC.COM/v1/",
+        "https://api.anthropic.com./v1",
+    ])
+    def test_official_anthropic_endpoint_rejected(self, base_url):
+        from floodmind.agent.native.model_client import ModelClient
+
+        with pytest.raises(ValueError, match="OpenAI-compatible gateway"):
+            ModelClient(
+                api_key="k",
+                base_url=base_url,
+                model_name="claude-sonnet-4-5",
+                provider="anthropic",
+            )
+
+    @pytest.mark.parametrize("provider", ["anthropic", "custom", "openai"])
+    def test_claude_model_allowed_via_custom_openai_gateway(self, provider):
+        from floodmind.agent.native.model_client import ModelClient
+
+        client = ModelClient(
+            api_key="k",
+            base_url="https://claude-gateway.example.com/v1",
+            model_name="claude-sonnet-4-5",
+            provider=provider,
+        )
+        assert client.pipeline.name == "openai-compatible"
 
 
 # ---------------------------------------------------------------------------
@@ -104,58 +133,58 @@ def _base_params(model="m"):
 
 class TestPrepareRequest:
     def test_fallback_stream_options_only(self):
-        p = OpenAICompatiblePipeline()
+        p = OpenAICompatibleCodec()
         out = p.prepare_request(_base_params(), enable_thinking=True, stream=True)
         assert out["stream_options"] == {"include_usage": True}
         assert "extra_body" not in out  # enable_thinking 硬编码已移除
 
     def test_dashscope_enable_thinking(self):
-        p = DashScopePipeline()
+        p = DashScopeCodec()
         out = p.prepare_request(_base_params("qwen3.6-plus"), enable_thinking=True, stream=True)
         assert out["extra_body"]["enable_thinking"] is True
         assert "max_completion_tokens" in out and "max_tokens" not in out
 
     def test_dashscope_thinking_off_no_param(self):
-        p = DashScopePipeline()
+        p = DashScopeCodec()
         out = p.prepare_request(_base_params("qwen3.6-plus"), enable_thinking=False, stream=True)
         assert "extra_body" not in out
 
     def test_dashscope_minimax_hosted_uses_thinking_type(self):
         """百炼托管的 MiniMax/xxx 模型用 thinking.type 而非 enable_thinking。"""
-        p = DashScopePipeline()
+        p = DashScopeCodec()
         out = p.prepare_request(_base_params("MiniMax/MiniMax-M3"), enable_thinking=True, stream=True)
         assert out["extra_body"]["thinking"] == {"type": "adaptive"}
         assert "enable_thinking" not in out["extra_body"]
 
     def test_dashscope_thinking_downgrades_forced_tool_choice(self):
-        p = DashScopePipeline()
+        p = DashScopeCodec()
         params = _base_params("qwen3.6-plus")
         params["tool_choice"] = {"type": "function", "function": {"name": "f"}}
         out = p.prepare_request(params, enable_thinking=True, stream=True)
         assert out["tool_choice"] == "auto"
 
     def test_deepseek_thinking_dialect(self):
-        p = DeepSeekPipeline()
+        p = DeepSeekCodec()
         out = p.prepare_request(_base_params("deepseek-v4-pro"), enable_thinking=True, stream=True)
         assert out["extra_body"]["thinking"] == {"type": "enabled"}
         # 思考模式剥离采样参数
         assert "temperature" not in out
 
     def test_deepseek_thinking_off_keeps_temperature(self):
-        p = DeepSeekPipeline()
+        p = DeepSeekCodec()
         out = p.prepare_request(_base_params("deepseek-v4-pro"), enable_thinking=False, stream=True)
         assert out["extra_body"]["thinking"] == {"type": "disabled"}
         assert out["temperature"] == 0.3
 
     def test_kimi_k26_full_adaptation(self):
-        p = KimiPipeline()
+        p = KimiCodec()
         out = p.prepare_request(_base_params("kimi-k2.6"), enable_thinking=True, stream=True)
         assert out["extra_body"]["thinking"] == {"type": "enabled", "keep": "all"}
         assert "temperature" not in out  # k2.6 禁传
         assert "max_completion_tokens" in out
 
     def test_kimi_k3_no_thinking_param(self):
-        p = KimiPipeline()
+        p = KimiCodec()
         out = p.prepare_request(_base_params("kimi-k3"), enable_thinking=True, stream=True)
         assert "extra_body" not in out  # k3 始终思考，无 thinking 开关
         assert out["reasoning_effort"] == "max"  # K3 顶层推理强度，默认 max
@@ -163,23 +192,23 @@ class TestPrepareRequest:
 
     def test_kimi_k25_temperature_stripped(self):
         """实测 k2.5 同样仅允许 temperature=1，显式传入 400。"""
-        p = KimiPipeline()
+        p = KimiCodec()
         out = p.prepare_request(_base_params("kimi-k2.5"), enable_thinking=False, stream=True)
         assert "temperature" not in out
 
     def test_kimi_k27_never_disabled(self):
-        p = KimiPipeline()
+        p = KimiCodec()
         out = p.prepare_request(_base_params("kimi-k2.7-code"), enable_thinking=False, stream=True)
         assert "extra_body" not in out  # 强制思考，关闭只省略
         assert "temperature" not in out
 
     def test_kimi_k27_thinking_on_no_param(self):
-        p = KimiPipeline()
+        p = KimiCodec()
         out = p.prepare_request(_base_params("kimi-k2.7-code"), enable_thinking=True, stream=True)
         assert "extra_body" not in out  # 实测 k2.7-code 无需 thinking 参数
 
     def test_kimi_thinking_downgrades_required_tool_choice(self):
-        p = KimiPipeline()
+        p = KimiCodec()
         params = _base_params("kimi-k2.6")
         params["tools"] = [{"type": "function", "function": {"name": "f"}}]
         params["tool_choice"] = "required"
@@ -193,7 +222,7 @@ class TestPrepareRequest:
         assert out["tool_choice"] == "auto"
 
     def test_kimi_reasoning_content_passback_snapshot(self):
-        p = KimiPipeline()
+        p = KimiCodec()
         state = p.new_stream_state()
         acc = {"role": "assistant", "content": ""}
         d1 = _ns(role="assistant", reasoning_content="先分析", content=None)
@@ -210,30 +239,41 @@ class TestPrepareRequest:
         assert msg["tool_calls"][0]["function"]["arguments"] == '{"q":"x"}'
 
     def test_kimi_pipeline_records_routing_context(self):
-        p = route_pipeline("moonshot", "kimi-k3", "https://api.moonshot.cn/v1")
+        p = route_codec("moonshot", "kimi-k3", "https://api.moonshot.cn/v1")
         assert p.provider_id == "moonshot"
         assert p.model_id == "kimi-k3"
         assert p.base_url == "https://api.moonshot.cn/v1"
 
+    @pytest.mark.parametrize(
+        "pipeline",
+        [DashScopeCodec(), KimiCodec(), MiniMaxCodec()],
+    )
+    def test_completion_token_capability_rewrites_shared_field(self, pipeline):
+        out = pipeline.prepare_request(
+            _base_params("provider-model"), enable_thinking=False, stream=False
+        )
+        assert out["max_completion_tokens"] == 4096
+        assert "max_tokens" not in out
+
     def test_minimax_thinking_split(self):
-        p = MiniMaxPipeline()
+        p = MiniMaxCodec()
         out = p.prepare_request(_base_params("MiniMax-M3"), enable_thinking=True, stream=True)
         assert out["extra_body"]["thinking"] == {"type": "adaptive"}
         assert out["extra_body"]["reasoning_split"] is True
         assert "max_completion_tokens" in out
 
     def test_minimax_m3_disable(self):
-        p = MiniMaxPipeline()
+        p = MiniMaxCodec()
         out = p.prepare_request(_base_params("MiniMax-M3"), enable_thinking=False, stream=True)
         assert out["extra_body"]["thinking"] == {"type": "disabled"}
 
     def test_minimax_m2_never_disabled(self):
-        p = MiniMaxPipeline()
+        p = MiniMaxCodec()
         out = p.prepare_request(_base_params("MiniMax-M2.7"), enable_thinking=False, stream=True)
         assert "extra_body" not in out  # M2.x 不可发 disabled
 
     def test_minimax_temperature_clamped(self):
-        p = MiniMaxPipeline()
+        p = MiniMaxCodec()
         params = _base_params("MiniMax-M3")
         params["temperature"] = 5.0
         out = p.prepare_request(params, enable_thinking=False, stream=True)
@@ -241,7 +281,7 @@ class TestPrepareRequest:
 
     def test_conservative_mode_standard_request(self):
         """聚合网关命中模型前缀 → 请求适配退化为标准行为。"""
-        p = route_pipeline("openai", "MiniMax/MiniMax-M3", "https://gw.example.com/v1")
+        p = route_codec("openai", "MiniMax/MiniMax-M3", "https://gw.example.com/v1")
         assert p.conservative is True
         out = p.prepare_request(_base_params("MiniMax/MiniMax-M3"), enable_thinking=True, stream=True)
         assert "extra_body" not in out
@@ -249,7 +289,7 @@ class TestPrepareRequest:
 
     def test_explicit_extra_body_wins(self):
         """调用方显式 extra_body 优先级最高（setdefault 不覆盖）。"""
-        p = MiniMaxPipeline()
+        p = MiniMaxCodec()
         params = _base_params("MiniMax-M3")
         params["extra_body"] = {"thinking": {"type": "disabled"}, "custom": 1}
         out = p.prepare_request(params, enable_thinking=True, stream=True)
@@ -263,21 +303,45 @@ class TestPrepareRequest:
 # ---------------------------------------------------------------------------
 
 class TestStreamParsing:
+    def test_reasoning_delta_does_not_drop_colocated_content_tool_or_finish(self):
+        from floodmind.agent.native.model_client import ModelClient
+
+        client = ModelClient(api_key="k", base_url="https://example.com/v1", model_name="m")
+        mock_client = MagicMock()
+        mock_client.chat.completions.create.return_value = iter([
+            _ns(choices=[_ns(
+                delta=_ns(
+                    reasoning_content="think",
+                    content="answer",
+                    tool_calls=[_ns(
+                        index=0, id="c1", function=_ns(name="search", arguments='{"q":"x"}')
+                    )],
+                ),
+                finish_reason="tool_calls",
+            )])
+        ])
+        client._transport._client = mock_client
+        events = list(client.stream_chat(messages=[{"role": "user", "content": "x"}]))
+        assert next(e.content for e in events if e.type == "reasoning") == "think"
+        assert next(e.content for e in events if e.type == "token") == "answer"
+        assert next(e for e in events if e.type == "tool_call_done").tool_call.arguments == {"q": "x"}
+        assert next(e for e in events if e.type == "done").terminal_reason.code == "tool_calls"
+
     def test_standard_reasoning_content(self):
-        p = OpenAICompatiblePipeline()
+        p = OpenAICompatibleCodec()
         state = p.new_stream_state()
         assert p.extract_reasoning(_ns(reasoning_content="想"), state) == "想"
         assert p.extract_reasoning(_ns(reasoning_content=None, reasoning="想2"), state) == "想2"
 
     def test_cumulative_reasoning_dedup(self):
         """累积式全量帧只发差分。"""
-        p = OpenAICompatiblePipeline()
+        p = OpenAICompatibleCodec()
         state = p.new_stream_state()
         assert p.extract_reasoning(_ns(reasoning_content="思考"), state) == "思考"
         assert p.extract_reasoning(_ns(reasoning_content="思考过程"), state) == "过程"
 
     def test_minimax_reasoning_details_cumulative(self):
-        p = MiniMaxPipeline()
+        p = MiniMaxCodec()
         state = p.new_stream_state()
         acc = {"role": "assistant", "content": ""}
         d1 = _ns(reasoning_content=None, reasoning_details=[{"type": "reasoning.text", "text": "步骤一"}])
@@ -291,7 +355,7 @@ class TestStreamParsing:
         assert msg["reasoning_details"] == [{"type": "reasoning.text", "text": "步骤一，步骤二"}]
 
     def test_minimax_preserves_raw_think_content_for_passback(self):
-        p = MiniMaxPipeline()
+        p = MiniMaxCodec()
         state = p.new_stream_state()
         acc = {"role": "assistant", "content": ""}
         chunks = ["<think>想", "一下</think>答"]
@@ -309,7 +373,7 @@ class TestStreamParsing:
 
     def test_minimax_think_tag_streaming(self):
         """content 内 <think> 标签跨 chunk 剥离：思考进 reasoning，回答干净。"""
-        p = MiniMaxPipeline()
+        p = MiniMaxCodec()
         state = p.new_stream_state()
         chunks = ["<thi", "nk>分析一下", "水位</think>", "答案是", " 32.5m<thi"]
         reasoning_out, answer_out = "", ""
@@ -321,14 +385,14 @@ class TestStreamParsing:
         assert answer_out == "答案是 32.5m"
 
     def test_minimax_plain_content_passthrough(self):
-        p = MiniMaxPipeline()
+        p = MiniMaxCodec()
         state = p.new_stream_state()
         a, r = p.filter_content("普通回答", state)
         assert (a, r) == ("普通回答", "")
 
     def test_kimi_usage_in_choices(self):
         """Kimi 流式 usage 在末帧 choices[0].usage（非标位置）。"""
-        p = KimiPipeline()
+        p = KimiCodec()
         chunk = _ns(
             usage=None,
             choices=[_ns(usage={"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15})],
@@ -338,13 +402,57 @@ class TestStreamParsing:
         }
 
     def test_standard_usage_top_level(self):
-        p = OpenAICompatiblePipeline()
+        p = OpenAICompatibleCodec()
         chunk = _ns(usage={"prompt_tokens": 1, "completion_tokens": 2, "total_tokens": 3}, choices=[])
         assert p.extract_usage(chunk)["total_tokens"] == 3
 
     def test_usage_missing_returns_none(self):
-        p = MiniMaxPipeline()
+        p = MiniMaxCodec()
         assert p.extract_usage(_ns(usage=None, choices=[])) is None
+
+    def test_stream_emits_final_cumulative_usage(self):
+        from floodmind.agent.native.model_client import ModelClient
+
+        client = ModelClient(api_key="k", base_url="https://example.com/v1", model_name="m")
+        mock_client = MagicMock()
+        mock_client.chat.completions.create.return_value = iter([
+            _ns(
+                usage={"prompt_tokens": 10, "completion_tokens": 1, "total_tokens": 11},
+                choices=[_ns(delta=_ns(content="a", tool_calls=None), finish_reason=None)],
+            ),
+            _ns(
+                usage={"prompt_tokens": 10, "completion_tokens": 7, "total_tokens": 17},
+                choices=[_ns(delta=_ns(content=None, tool_calls=None), finish_reason="stop")],
+            ),
+        ])
+        client._transport._client = mock_client
+
+        events = list(client.stream_chat(messages=[{"role": "user", "content": "x"}]))
+        usage_events = [json.loads(e.content) for e in events if e.type == "usage"]
+        assert usage_events == [
+            {"prompt_tokens": 10, "completion_tokens": 7, "total_tokens": 17}
+        ]
+
+    def test_abort_preserves_aborted_terminal_reason(self):
+        from floodmind.agent.native.model_client import ModelClient
+
+        client = ModelClient(api_key="k", base_url="https://example.com/v1", model_name="m")
+        stream = MagicMock()
+        stream.__iter__.return_value = iter([
+            _ns(usage=None, choices=[_ns(delta=_ns(content="late", tool_calls=None), finish_reason=None)])
+        ])
+        mock_client = MagicMock()
+        mock_client.chat.completions.create.return_value = stream
+        client._transport._client = mock_client
+
+        events = list(client.stream_chat(
+            messages=[{"role": "user", "content": "x"}],
+            abort_check=lambda: True,
+        ))
+        done = next(e for e in events if e.type == "done")
+        assert done.terminal_reason.code == "aborted"
+        assert done.terminal_reason.raw == "aborted"
+        stream.close.assert_called_once_with()
 
 
 # ---------------------------------------------------------------------------
@@ -353,7 +461,7 @@ class TestStreamParsing:
 
 class TestPrepareMessages:
     def test_kimi_rejects_public_image_url(self):
-        p = KimiPipeline()
+        p = KimiCodec()
         messages = [{
             "role": "user",
             "content": [
@@ -365,7 +473,7 @@ class TestPrepareMessages:
             p.prepare_messages(messages)
 
     def test_kimi_allows_base64_image(self):
-        p = KimiPipeline()
+        p = KimiCodec()
         messages = [{
             "role": "user",
             "content": [{"type": "image_url", "image_url": {"url": "data:image/png;base64,xxx"}}],
@@ -373,7 +481,7 @@ class TestPrepareMessages:
         assert p.prepare_messages(messages) is messages
 
     def test_minimax_passthrough(self):
-        p = MiniMaxPipeline()
+        p = MiniMaxCodec()
         messages = [{
             "role": "user",
             "content": [{"type": "video_url", "video_url": {"url": "mm_file://fid", "fps": 1}}],
@@ -417,7 +525,7 @@ class TestToolCallIdAlignment:
         ]
         mock_client = MagicMock()
         mock_client.chat.completions.create.return_value = iter(stream)
-        client._client = mock_client
+        client._transport._client = mock_client
 
         events = list(client.stream_chat(messages=[{"role": "user", "content": "hi"}]))
         tool_call_event = next(e for e in events if e.type == "tool_call_done")
@@ -456,11 +564,58 @@ class TestToolCallIdAlignment:
         ]
         mock_client = MagicMock()
         mock_client.chat.completions.create.return_value = iter(stream)
-        client._client = mock_client
+        client._transport._client = mock_client
 
         events = list(client.stream_chat(messages=[{"role": "user", "content": "hi"}]))
         tool_call_event = next(e for e in events if e.type == "tool_call_done")
         done_event = next(e for e in events if e.type == "assistant_message_done")
         assert tool_call_event.tool_call.id == "real_id_42"
         assert done_event.raw["message"]["tool_calls"][0]["id"] == "real_id_42"
+
+    def test_malformed_nonempty_tool_json_never_emits_executable_call(self):
+        """Malformed args must not become {} and trigger a tool's default arguments."""
+        from floodmind.agent.native.model_client import ModelClient
+
+        client = ModelClient(api_key="k", base_url="https://example.com/v1", model_name="m")
+        stream = [
+            _ns(choices=[_ns(
+                delta=_ns(content=None, tool_calls=[_ns(
+                    index=0, id="bad1", function=_ns(name="side_effect", arguments='{"path":')
+                )]),
+                finish_reason=None,
+            )]),
+            _ns(choices=[_ns(delta=_ns(content=None, tool_calls=None), finish_reason="tool_calls")]),
+        ]
+        mock_client = MagicMock()
+        mock_client.chat.completions.create.return_value = iter(stream)
+        client._transport._client = mock_client
+
+        events = list(client.stream_chat(messages=[{"role": "user", "content": "go"}]))
+        assert not [e for e in events if e.type == "tool_call_done"]
+        invalid = next(e for e in events if e.type == "invalid_tool_call")
+        assert invalid.invalid_tool_call.name == "side_effect"
+        assert invalid.invalid_tool_call.raw_arguments == '{"path":'
+        done = next(e for e in events if e.type == "done")
+        assert done.terminal_reason.code == "tool_calls"
+        assert done.terminal_reason.raw == "tool_calls"
+
+    @pytest.mark.parametrize("raw,code", [
+        ("stop", "completed"),
+        ("length", "max_tokens"),
+        ("content_filter", "filtered"),
+        ("refusal", "refused"),
+        ("pause_turn", "paused"),
+    ])
+    def test_stream_preserves_raw_terminal_reason(self, raw, code):
+        from floodmind.agent.native.model_client import ModelClient
+
+        client = ModelClient(api_key="k", base_url="https://example.com/v1", model_name="m")
+        mock_client = MagicMock()
+        mock_client.chat.completions.create.return_value = iter([
+            _ns(choices=[_ns(delta=_ns(content=None, tool_calls=None), finish_reason=raw)])
+        ])
+        client._transport._client = mock_client
+        done = next(e for e in client.stream_chat(messages=[{"role": "user", "content": "x"}]) if e.type == "done")
+        assert done.terminal_reason.code == code
+        assert done.terminal_reason.raw == raw
 

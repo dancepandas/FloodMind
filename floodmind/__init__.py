@@ -13,8 +13,8 @@ FloodMind — 基于大语言模型的智能 Agent 框架
         Agent,                # SDK 嵌入式 Agent
         ModelClient,          # LLM 客户端
         resolve_model,        # 模型配置解析（单一入口，SDK 稳定契约）
-        route_pipeline,       # 厂商 Pipeline 路由（llm.pipeline 内省/自检）
-        ProviderPipeline,     # 厂商 Pipeline 扩展基类
+        route_codec,          # 厂商 Codec 路由（llm.pipeline 内省/自检）
+        ProviderCodec,        # 厂商 Codec 扩展基类
         ToolLoadingConfig,    # 渐进式工具加载配置
         ToolLoader,           # 渐进式工具加载状态（高级）
         Workspace,            # Harness 工作区契约
@@ -32,7 +32,7 @@ FloodMind — 基于大语言模型的智能 Agent 框架
     )
 """
 
-__version__ = "1.1.9"
+__version__ = "2.0.0"
 
 # ── SDK 公共 API ──
 
@@ -43,15 +43,15 @@ def __getattr__(name):
         "ModelClient": "floodmind.agent.native.model_client",
         "resolve_model": "floodmind.config.model_resolver",
         "ResolvedModel": "floodmind.config.model_resolver",
-        "route_pipeline": "floodmind.agent.native.providers",
-        "ProviderPipeline": "floodmind.agent.native.providers",
+        "route_codec": "floodmind.agent.native.providers",
+        "ProviderCodec": "floodmind.agent.native.providers",
         "StreamState": "floodmind.agent.native.providers",
         "TokenUsage": "floodmind.agent.native.providers",
-        "OpenAICompatiblePipeline": "floodmind.agent.native.providers",
-        "DashScopePipeline": "floodmind.agent.native.providers",
-        "DeepSeekPipeline": "floodmind.agent.native.providers",
-        "KimiPipeline": "floodmind.agent.native.providers",
-        "MiniMaxPipeline": "floodmind.agent.native.providers",
+        "OpenAICompatibleCodec": "floodmind.agent.native.providers",
+        "DashScopeCodec": "floodmind.agent.native.providers",
+        "DeepSeekCodec": "floodmind.agent.native.providers",
+        "KimiCodec": "floodmind.agent.native.providers",
+        "MiniMaxCodec": "floodmind.agent.native.providers",
         "ToolLoadingConfig": "floodmind.agent.native.tool_loading",
         "ToolCatalogEntry": "floodmind.agent.native.tool_loading",
         "ToolLoader": "floodmind.agent.native.tool_loading",
@@ -62,6 +62,9 @@ def __getattr__(name):
         "DualMemory": "floodmind.memory.dual_memory",
         "AgentTool": "floodmind.tools.agent_tool",
         "Skill": "floodmind.skills.base",
+        "SkillRegistry": "floodmind.skills.registry",
+        "SkillRoot": "floodmind.skills.registry",
+        "create_skill_registry": "floodmind.skills.registry",
         "register_skill": "floodmind.skills",
         "FloodmindPlugin": "floodmind.plugin.base",
         "NativeFloodAgent": "floodmind.agent.native.native_flood_agent",
@@ -83,15 +86,15 @@ __all__ = [
     "ModelClient",
     "resolve_model",
     "ResolvedModel",
-    "route_pipeline",
-    "ProviderPipeline",
+    "route_codec",
+    "ProviderCodec",
     "StreamState",
     "TokenUsage",
-    "OpenAICompatiblePipeline",
-    "DashScopePipeline",
-    "DeepSeekPipeline",
-    "KimiPipeline",
-    "MiniMaxPipeline",
+    "OpenAICompatibleCodec",
+    "DashScopeCodec",
+    "DeepSeekCodec",
+    "KimiCodec",
+    "MiniMaxCodec",
     "ToolLoadingConfig",
     "ToolCatalogEntry",
     "ToolLoader",
@@ -102,6 +105,9 @@ __all__ = [
     "DualMemory",
     "AgentTool",
     "Skill",
+    "SkillRegistry",
+    "SkillRoot",
+    "create_skill_registry",
     "register_skill",
     "FloodmindPlugin",
     "NativeFloodAgent",

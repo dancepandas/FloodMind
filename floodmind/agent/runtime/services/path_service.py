@@ -14,7 +14,7 @@ import logging
 import os
 import re
 from pathlib import Path
-from typing import Optional
+from typing import Iterable, Optional
 
 from floodmind.agent.runtime.contracts.paths import PathResolveRequest, PathResolveResult
 from floodmind.agent.runtime.contracts.workspace import Workspace
@@ -53,22 +53,47 @@ except Exception:
     pass
 
 
+def _sdk_skill_read_prefixes() -> tuple[Path, ...]:
+    """Return immutable, package-derived SDK skill roots."""
+    try:
+        from floodmind import skills as skills_mod
+
+        package_root = Path(skills_mod.__file__).resolve().parent
+    except Exception:
+        return ()
+
+    prefixes = [package_root]
+    install_root = package_root.parent.parent
+    if install_root.name in {"site-packages", "dist-packages"}:
+        prefixes.append(install_root / "skills")
+    return tuple(prefixes)
+
+
+_SDK_SKILL_READ_PREFIXES = _sdk_skill_read_prefixes()
+
+
 class PathService:
     def __init__(
         self,
         project_root: Optional[Path] = None,
         workspace: Optional["Workspace"] = None,
+        extra_read_roots: Iterable[Path] = (),
     ):
         self._project_root = (project_root or _PROJECT_ROOT).resolve()
-        # 静态白名单：从模块常量复制为实例属性，便于运行时追加 workspace 动态根。
-        # workspace 默认 None，运行时 fallback get_workspace()，保证测试可显式注入。
+        # workspace 可运行时重绑；skill 等实例级只读授权保持为不可变快照，
+        # 不写回宿主拥有的 Workspace，也绝不进入写根。
         self._workspace = workspace
+        self._extra_read_roots = tuple(Path(root).resolve() for root in extra_read_roots)
         self._static_write_allowed_prefixes = list(_WRITE_ALLOWED_PREFIXES)
         self._static_read_allowed_prefixes = list(_READ_ALLOWED_PREFIXES)
         self._static_read_allowed_outside_prefixes = list(_READ_ALLOWED_OUTSIDE_PREFIXES)
         self._static_write_allowed_toplevel_files = set(_WRITE_ALLOWED_TOPLEVEL_FILES)
 
     # ── workspace 动态根 ──────────────────────────────────────────
+    def bind_workspace(self, workspace: Optional["Workspace"]) -> None:
+        """Rebind this instance without modifying either Workspace object."""
+        self._workspace = workspace
+
     def _effective_workspace(self) -> Optional["Workspace"]:
         if self._workspace is not None:
             return self._workspace
@@ -98,47 +123,20 @@ class PathService:
         return [r for r in roots if r is not None]
 
     def _dynamic_read_roots(self) -> list:
+        """Current readable roots, including every effective writable root."""
         ws = self._effective_workspace()
         if ws is None:
             return []
-        if getattr(ws, "is_folder_first", False):
-            roots = [ws.workspace_dir, ws.state_dir, *ws.readable_roots, *ws.writable_roots]
-        else:
-            roots = [ws.user_dir, ws.sandbox_base, *ws.readable_roots]
-            if getattr(ws, "primary_dir", None) is not None:
-                roots.append(ws.primary_dir)
-            if getattr(ws, "state_dir", None) is not None:
-                roots.append(ws.state_dir)
-        return [r for r in roots if r is not None]
+        roots = [*self._dynamic_write_roots(), *ws.readable_roots]
+        return [r for r in dict.fromkeys(roots) if r is not None]
 
-    def _skill_read_prefixes(self) -> list:
-        """SDK 已装 skill 注册表读白名单（folder-first 下也可读）。
-
-        agent 需直接读已装 skill 的源文件（SKILL.md / references/ / scripts/）以正确
-        执行技能；folder-first 模式只认 workspace + readable/writable_roots，导致读已装
-        skill 源文件反复被拒（死循环重试）。这里加入 SkillRegistry 的发现根 +
-        site-packages/skills（独立安装的 skill 包），只放开读、不影响写。
-        """
-        prefixes = []
-        try:
-            from floodmind.skills.registry import get_skill_registry
-            for root in get_skill_registry().roots:
-                if root not in prefixes:
-                    prefixes.append(root)
-        except Exception:
-            pass
-        try:
-            from floodmind import skills as _skills_mod
-            site_skills = Path(_skills_mod.__file__).resolve().parent.parent.parent / "skills"
-            if site_skills not in prefixes:
-                prefixes.append(site_skills)
-        except Exception:
-            pass
-        return prefixes
+    def _skill_read_prefixes(self) -> tuple[Path, ...]:
+        """Built-in roots plus this PathService instance's read-only grants."""
+        return (*_SDK_SKILL_READ_PREFIXES, *self._extra_read_roots)
 
     def resolve(self, request: PathResolveRequest) -> PathResolveResult:
         raw = str(request.raw_path).strip().strip('"').strip("'")
-        normalized = self._strip_session_prefix(raw)
+        normalized = self._strip_session_prefix(raw, request.session_id)
         p = Path(normalized)
         ws = self._effective_workspace()
         is_folder_first = bool(ws is not None and getattr(ws, "is_folder_first", False))
@@ -255,21 +253,40 @@ class PathService:
                 return True
         return False
 
-    def strip_session_prefix(self, path_str: str) -> str:
-        return self._strip_session_prefix(path_str)
+    def strip_session_prefix(self, path_str: str, session_id: str = "") -> str:
+        return self._strip_session_prefix(path_str, session_id)
 
-    def _strip_session_prefix(self, path_str: str) -> str:
+    def _strip_session_prefix(self, path_str: str, session_id: str = "") -> str:
+        """Rewrite legacy web-session paths only for the current session.
+
+        Folder-first workspaces may legitimately contain a ``data/sessions`` tree, so
+        rewriting there changes the caller's path semantics.  Legacy aliases are also
+        session-scoped: a path naming a different session is never remapped into the
+        current session's output directory.
+        """
+        ws = self._effective_workspace()
+        if ws is not None and getattr(ws, "is_folder_first", False):
+            return path_str
+
+        current_session_id = session_id
+        if not current_session_id:
+            try:
+                from floodmind.tools.session_context import SESSION_CONTEXT
+
+                current_session_id = str(SESSION_CONTEXT.get("session_id", "") or "")
+            except Exception:
+                current_session_id = ""
+        if not current_session_id:
+            return path_str
+
         s = path_str.replace("\\", "/")
-        m = re.match(r"^data/sessions/[^/]+/outputs/(.+)$", s)
-        if m:
-            return m.group(1)
-        m = re.match(r"^data/sessions/[^/]+/(.+)$", s)
-        if m:
-            return m.group(1)
-        m = re.match(r"^data/sessions/(.+)$", s)
-        if m:
-            return m.group(1)
-        return path_str
+        prefix = f"data/sessions/{current_session_id}/"
+        if not s.lower().startswith(prefix.lower()):
+            return path_str
+        suffix = s[len(prefix) :]
+        if suffix.lower().startswith("outputs/"):
+            suffix = suffix[len("outputs/") :]
+        return suffix or path_str
 
     def _check_path_allowed(self, resolved: Path, access: str, session_id: str = "") -> tuple:
         for pattern in _FORBIDDEN_PATH_PATTERNS:
@@ -396,18 +413,3 @@ class PathService:
             return True
         except ValueError:
             return False
-
-
-_global_path_service: Optional[PathService] = None
-
-
-def get_path_service() -> PathService:
-    global _global_path_service
-    if _global_path_service is None:
-        _global_path_service = PathService()
-    return _global_path_service
-
-
-def set_path_service(svc: PathService) -> None:
-    global _global_path_service
-    _global_path_service = svc

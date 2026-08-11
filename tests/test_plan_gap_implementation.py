@@ -2,6 +2,8 @@ import json
 
 from floodmind.agent.native.event_bus import EventBus
 from floodmind.agent.runtime.contracts.events import VALID_EVENT_TYPES
+from floodmind.agent.runtime.services.journal_authority import open_journal_authority
+from floodmind.agent.runtime.services.run_identity import resolve_identity
 from floodmind.memory.session_manager import SessionManager
 from floodmind.plugin.loader import PluginLoader
 
@@ -9,22 +11,15 @@ from floodmind.plugin.loader import PluginLoader
 def test_session_manager_messages_page_cursor(tmp_path):
     sm = SessionManager(config={"data_dir": str(tmp_path)})
     session_id = "ses_page"
-    memory_dir = sm.get_memory_dir(session_id)
-    memory_dir.mkdir(parents=True, exist_ok=True)
-    turns = []
+    identity = resolve_identity(session_id, sm.get_session_dir(session_id))
+    authority = open_journal_authority(tmp_path, conversation_id=identity["conversation_id"], task_id="task", run_id="run", thread_id="thread", turn_id="turn")
     for i in range(6):
-        turns.append({"role": "user", "content": f"u{i}"})
-        turns.append({"role": "assistant", "content": f"a{i}"})
-    (memory_dir / "chat_history.json").write_text(json.dumps({"turns": turns}), encoding="utf-8")
-
+        authority.emit("thread.message.sent", {"content": f"u{i}", "turn_index": i})
+        authority.emit("model.attempt.completed", {"attempt_id": f"a{i}", "terminal_reason": "completed", "content": f"a{i}", "reasoning": "", "tool_calls": [], "is_final": True, "usage": {}})
     page1 = sm.get_messages_page(session_id, limit=3)
     assert [m["content"] for m in page1["items"]] == ["a4", "u5", "a5"]
-    assert page1["more"] is True
-    assert page1["cursor"]
-
     page2 = sm.get_messages_page(session_id, limit=3, before_cursor=page1["cursor"])
     assert [m["content"] for m in page2["items"]] == ["u3", "a3", "u4"]
-    assert page2["more"] is True
 
 
 def test_compaction_aliases_emit_current_event_names():

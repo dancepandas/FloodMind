@@ -29,7 +29,7 @@ class TestPlanModeGate:
             permission_policy=ToolPermissionPolicy(policy_type="exec"),
             mode="planning",
         )
-        decision = perm_svc.check(request)
+        decision = perm_svc.check(request, journal_authority=object())
         assert decision.behavior == PermissionBehavior.DENY
         assert "规划模式" in decision.reason
 
@@ -40,7 +40,7 @@ class TestPlanModeGate:
             permission_policy=ToolPermissionPolicy(policy_type="readonly"),
             mode="planning",
         )
-        decision = perm_svc.check(request)
+        decision = perm_svc.check(request, journal_authority=object())
         assert decision.behavior == PermissionBehavior.ALLOW
 
     def test_exec_denied_in_planning_mode(self, perm_svc):
@@ -50,7 +50,7 @@ class TestPlanModeGate:
             permission_policy=ToolPermissionPolicy(policy_type="exec"),
             mode="planning",
         )
-        decision = perm_svc.check(request)
+        decision = perm_svc.check(request, journal_authority=object())
         assert decision.behavior == PermissionBehavior.DENY
         assert "规划模式" in decision.reason
 
@@ -61,7 +61,7 @@ class TestPlanModeGate:
             permission_policy=ToolPermissionPolicy(policy_type="internal"),
             mode="planning",
         )
-        decision = perm_svc.check(request)
+        decision = perm_svc.check(request, journal_authority=object())
         assert decision.behavior == PermissionBehavior.DENY
         assert "规划模式" in decision.reason
 
@@ -72,18 +72,34 @@ class TestPlanModeGate:
             permission_policy=ToolPermissionPolicy(policy_type="internal"),
             mode="planning",
         )
-        decision = perm_svc.check(request)
+        decision = perm_svc.check(request, journal_authority=object())
         assert decision.behavior == PermissionBehavior.DENY
 
-    def test_create_plan_allowed_in_planning_mode(self, perm_svc):
+    @pytest.mark.parametrize("tool_name", ["create_plan", "update_plan"])
+    def test_planning_control_state_write_allowed_in_planning_mode(self, perm_svc, tool_name):
         request = PermissionRequest(
-            tool_name="create_plan",
-            tool_input={"user_goal": "test", "deliverables": "x", "steps": []},
-            permission_policy=ToolPermissionPolicy(policy_type="readonly"),
+            tool_name=tool_name,
+            tool_input={"action": "add_step"} if tool_name == "update_plan" else {"steps": []},
+            permission_policy=ToolPermissionPolicy(
+                policy_type="state_write",
+                reason="更新代理执行计划状态",
+                allow_in_planning=True,
+            ),
             mode="planning",
         )
-        decision = perm_svc.check(request)
+        decision = perm_svc.check(request, journal_authority=object())
         assert decision.behavior == PermissionBehavior.ALLOW
+
+    def test_unmarked_state_write_still_denied_in_planning_mode(self, perm_svc):
+        request = PermissionRequest(
+            tool_name="other_state_writer",
+            tool_input={},
+            permission_policy=ToolPermissionPolicy(policy_type="state_write"),
+            mode="planning",
+        )
+        decision = perm_svc.check(request, journal_authority=object())
+        assert decision.behavior == PermissionBehavior.DENY
+        assert "规划模式" in decision.reason
 
     def test_exit_plan_mode_not_blocked_by_mode_gate(self, perm_svc):
         """exit_plan_mode 是 ask 类型，不会被规划模式硬门拒绝（但最终行为取决于 AskService）。"""
@@ -93,7 +109,7 @@ class TestPlanModeGate:
             permission_policy=ToolPermissionPolicy(policy_type="ask", reason="审批"),
             mode="planning",
         )
-        decision = perm_svc.check(request)
+        decision = perm_svc.check(request, journal_authority=object())
         # mode gate 放行 ASK → 最终行为是 ASK 或 DENY（取决于 AskService 是否注入）
         # 但不应包含"规划模式"拒绝原因
         assert "规划模式" not in decision.reason
@@ -106,7 +122,7 @@ class TestPlanModeGate:
             permission_policy=ToolPermissionPolicy(policy_type="readonly"),
             mode="execution",
         )
-        decision = perm_svc.check(request)
+        decision = perm_svc.check(request, journal_authority=object())
         assert decision.behavior == PermissionBehavior.ALLOW
 
     def test_planning_mode_does_not_restrict_sub_agent(self, perm_svc):
@@ -118,5 +134,5 @@ class TestPlanModeGate:
             agent_tier="sub",
             mode="execution",
         )
-        decision = perm_svc.check(request)
+        decision = perm_svc.check(request, journal_authority=object())
         assert decision.behavior == PermissionBehavior.ALLOW

@@ -1,13 +1,17 @@
-"""ProviderPipeline 抽象基类 —— 厂商专属调用管线的统一接口。
+"""ProviderCodec 抽象基类 —— 厂商专属编解码/调用管线的统一接口。
 
-每家厂商一个 pipeline，负责三层「线上方言」翻译（不碰编排/记忆）：
+每厂商一个 codec（由原 ProviderPipeline 收敛重命名而来），负责三层「线上方言」翻译
+（不碰编排/记忆）：
 
 1. ``prepare_request``   —— 请求参数适配（思考开关方言 / max_tokens 命名 / 禁传参数剥离）
 2. ``prepare_messages``  —— 消息适配（思维链回传策略 + 多模态 block 归一化/校验）
 3. 流式解析钩子          —— ``extract_reasoning`` / ``filter_content`` / ``extract_usage``
 
+加上 ``codec.ProviderCodec`` 提供的纯编解码面（§7.3）：``encode_request`` /
+``decode_chunk``（Provider Raw Event → Canonical Parts）/ ``decode_message``。
+
 解析侧每次流式调用持有独立 ``StreamState``（``new_stream_state()``）。
-ModelClient 构造时经 ``route_pipeline()`` 绑定一条 pipeline，之后不再感知厂商差异。
+ModelClient 构造时经 ``route_codec()`` 绑定一条 codec，之后不再感知厂商差异。
 
 基类默认实现 = 标准 OpenAI 行为（兜底）：
 
@@ -18,6 +22,8 @@ ModelClient 构造时经 ``route_pipeline()`` 绑定一条 pipeline，之后不�
 
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple
+
+from .codec import ProviderCodec as _CodecBase
 
 # ---------------------------------------------------------------------------
 # 共享工具
@@ -95,7 +101,7 @@ def usage_to_dict(usage: Any) -> Optional[Dict[str, int]]:
 
 @dataclass
 class StreamState:
-    """单次流式调用的解析状态（pipeline 私有，ModelClient 不解读字段）。"""
+    """单次流式调用的解析状态（codec 私有，ModelClient 不解读字段）。"""
 
     reasoning_buffer: str = ""       # 累积式 reasoning 去重
     content_raw: str = ""            # <think> 解析用的 content 累积（兼容累积式方言）
@@ -105,11 +111,15 @@ class StreamState:
 
 
 # ---------------------------------------------------------------------------
-# Pipeline 基类（默认 = OpenAI 标准行为）
+# Codec 基类（默认 = OpenAI 标准行为）
 # ---------------------------------------------------------------------------
 
-class ProviderPipeline:
-    """厂商调用管线基类。默认实现即 OpenAI 兼容兜底行为。
+class ProviderCodec(_CodecBase):
+    """厂商 Codec 基类。默认实现即 OpenAI 兼容兜底行为。
+
+    继承自 ``codec.ProviderCodec``（纯编解码面：``encode_request`` / ``decode_chunk`` /
+    ``decode_message``），并叠加厂商调用管线方言（``prepare_request`` / ``prepare_messages`` /
+    流式解析钩子）。``name`` 以类属性为准（子类声明），允许实例化时显式覆盖。
 
     ``conservative``：仅模型名前缀命中路由时置 True（如聚合网关托管的
     ``MiniMax/xxx``）——解析适配全部启用，请求适配退化为标准行为，
@@ -118,9 +128,14 @@ class ProviderPipeline:
 
     name: str = "base"
     conservative: bool = False
+    uses_max_completion_tokens: bool = False
     provider_id: str = ""
     model_id: str = ""
     base_url: str = ""
+
+    def __init__(self, name: Optional[str] = None):
+        """保留类级 ``name``（如 ``DashScopeCodec.name="dashscope"``），并允许显式覆盖。"""
+        self.name = name or self.name
 
     # ── 路由 ────────────────────────────────────────────────────────
 
@@ -145,6 +160,8 @@ class ProviderPipeline:
         """
         if stream:
             params.setdefault("stream_options", {"include_usage": True})
+        if not self.conservative and self.uses_max_completion_tokens and "max_tokens" in params:
+            params["max_completion_tokens"] = params.pop("max_tokens")
         return params
 
     def prepare_messages(self, messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
