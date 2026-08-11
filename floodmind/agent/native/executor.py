@@ -185,6 +185,9 @@ class NativeAgentExecutor:
         # §7.6 能力快照（一次解析，跨压缩/投影复用）；capability_snapshot_id 供 Manifest 引用
         self._capability_snapshot_id: str = ""
         self._capabilities: ModelCapabilities = self._resolve_capabilities()
+        # 压缩失败抑制：同一轮（消息未变）压缩 fail-closed 后不再重触发，避免
+        # awaiting_llm ↔ context_compress 忙循环（见 _on_awaiting_llm 的触发守卫）。
+        self._compaction_failed: bool = False
         self._state_handlers: Dict[AgentLoopStatus, Callable[[AgentLoopState, RunContext], AgentLoopState]] = {
             "created": self._on_created,
             "awaiting_llm": self._on_awaiting_llm,
@@ -256,6 +259,9 @@ class NativeAgentExecutor:
             replayed_state = self._journal_authority.replay()
             if replayed_state.last_committed_sequence:
                 state = project_run_state_to_loop_state(state, replayed_state)
+
+        # 每次 run 干净的压缩失败抑制状态（executor 可跨 run/session 复用）
+        self._compaction_failed = False
 
         # 用户中断检查回调
         effective_abort = context.abort_check
@@ -379,6 +385,7 @@ class NativeAgentExecutor:
             )
             if result.saved_tokens > 0:
                 state.messages = result.compressed_messages
+                self._compaction_failed = False
                 self.event_bus.emit({
                     "type": "context_compress",
                     "summary": result.summary,
@@ -399,9 +406,13 @@ class NativeAgentExecutor:
         except CompactionOverBudgetError as e:
             # F4 fail-closed：不静默截断当前用户请求，也不返回超预算投影。
             # 保持原始 messages 继续运行，交由宿主/检索缩减（P6）处理。
+            # 同一轮消息未变，重试压缩必再失败 → 抑制再触发，避免忙循环。
+            self._compaction_failed = True
             logger.error("[EXEC] context compression over input budget, keeping original messages: %s", e)
             self.event_bus.emit_error(f"上下文压缩失败（超输入预算）: {str(e)[:200]}")
         except Exception as e:
+            # 与上同理：任何压缩失败都保持原始 messages，必须抑制再触发。
+            self._compaction_failed = True
             logger.error("[EXEC] context compression failed: %s", e)
             self.event_bus.emit_error(f"上下文压缩失败: {str(e)[:200]}")
 
@@ -422,9 +433,12 @@ class NativeAgentExecutor:
         # 后台任务完成通知注入（loop 活跃时；已终态的留给宿主唤醒路径）
         self._inject_background_notifications(state)
 
-        # 主动上下文压缩：达到阈值时先进入 context_compress 状态
+        # 主动上下文压缩：达到阈值时先进入 context_compress 状态。
+        # 压缩已 fail-closed（同一轮消息未变，重试必再失败）→ 跳过，直接走 LLM 调用，
+        # 避免 awaiting_llm ↔ context_compress 忙循环（不消耗 iteration，唯一出口是外部中断）。
         if (
-            self._context_compressor is not None
+            not self._compaction_failed
+            and self._context_compressor is not None
             and self._context_compressor.should_compress(state.messages, self.context_window)
         ):
             logger.info(

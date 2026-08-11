@@ -706,6 +706,47 @@ class TestExecutorPlaceholderStates:
         assert kwargs["max_context_tokens"] == expected_limit
         assert kwargs["budget"] == budget
 
+    def test_failed_compression_does_not_busy_loop(self):
+        """F4 守卫：压缩 fail-closed 后不得在 awaiting_llm ↔ context_compress 间忙循环。
+
+        真实 ContextCompressor + 不可再压缩消息（head+tail > effective_input）→
+        compress_journal 抛 CompactionOverBudgetError；run_from_state 必须跳过后续
+        压缩触发，直接走到 LLM 调用（stream_chat 被调）并正常 completed。
+        未修复的忙循环永不调用 LLM；abort_check 计数在失败时确定性终止。
+        """
+        from floodmind.agent.native.context_compressor import ContextCompressor
+        from floodmind.agent.native.types import AgentLoopState
+
+        compressor = ContextCompressor(head_keep=1, tail_keep=1, trigger_threshold=0.5)
+        executor = self._make_executor(context_compressor=compressor, context_window=100)
+        state = AgentLoopState(
+            session_id="test-session",
+            run_id="run-1",
+            status="awaiting_llm",
+            messages=[
+                {"role": "system", "content": "sys"},
+                {"role": "user", "content": "x" * 200},
+                {"role": "assistant", "content": "y" * 200},
+                {"role": "user", "content": "a" * 200},
+                {"role": "assistant", "content": "b" * 200},
+                {"role": "user", "content": "z" * 200},
+            ],
+        )
+        entries = {"n": 0}
+
+        def abort_check() -> bool:
+            entries["n"] += 1
+            return entries["n"] >= 50
+
+        ctx = self._make_context()
+        ctx.abort_check = abort_check
+        result = executor.run_from_state(ctx, state)
+
+        # 到达 LLM 调用（而非忙循环被 abort 打断）
+        assert executor.model_client.stream_chat.call_count == 1
+        assert result.final_output != "任务已被用户中断。"
+        assert not result.is_timeout
+
     def test_model_call_emits_projection_manifest(self):
         """F3：每次模型调用前 emit context.projection.committed（回答「模型看到了什么」）。"""
         mc = MagicMock(spec=ModelClient)
