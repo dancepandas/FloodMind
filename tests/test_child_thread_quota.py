@@ -20,7 +20,7 @@ from floodmind.agent.runtime.services.permission_service import PermissionServic
 from floodmind.agent.runtime.services.sandbox_service import SandboxService
 
 
-def _runtime(tmp_path, mc, quota):
+def _runtime(tmp_path, mc, quota=None):
     parent_auth = open_journal_authority(
         tmp_path / "runtime", conversation_id="c", task_id="t",
         run_id="run_1", thread_id="th_main", turn_id="tu_main",
@@ -42,8 +42,8 @@ def _runtime(tmp_path, mc, quota):
         artifact_store_root=tmp_path / "artifacts",
         runtime_dir=tmp_path / "runtime",
         tool_runtime_factory=lambda: (_stub_reg(), _stub_loader()),
+        quota_factory=(lambda child: quota) if quota is not None else None,
     )
-    rt._quota = quota
     # 运行期在 run() 内自行包裹 _TokenBudgetModelClient；此处不预包，避免双重计数。
     return rt
 
@@ -57,9 +57,10 @@ def _stub_loader():
     return MagicMock()
 
 
-def _parent_context(session_id="sess_main"):
+def _parent_context(session_id="sess_main", abort_check=None):
     return RunContext(
         session_id=session_id, user_text="child task", agent_tier="main",
+        abort_check=abort_check,
         runtime_context=RuntimeContext(
             conversation_id="c", task_id="t", run_id="run_1",
             thread_id="th_main", turn_id="tu_main", actor_type="agent",
@@ -116,28 +117,68 @@ def test_quota_wall_clock_terminates_child_as_failed():
     assert result.reason == "quota:wall_clock"
 
 
-def test_parallel_children_do_not_cross_cancel_reasons(tmp_path):
-    """两个子代理并行跑在同一个 cached runtime 上：各自的配额/取消 reason 不串。"""
-    import floodmind.agent.runtime.services.child_thread_runtime as ctr
+def test_sequential_children_do_not_share_quota_state(tmp_path):
     mc = MagicMock(spec=ModelClient)
-    turn = {"n": 0}
-    def stream(*a, **k):
-        with threading.Lock():
-            turn["n"] += 1
-            n = turn["n"]
-        return [ModelEvent(type="token", content=f"t{n}"),
-                ModelEvent(type="usage", raw={"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 100}),
-                ModelEvent(type="done")]
+    mc.stream_chat.return_value = [ModelEvent(type="token", content="x"), ModelEvent(type="done")]
+    rt = _runtime(tmp_path, mc)
+
+    child_a = ChildThread(
+        thread_id="th_child_a", parent_thread_id="th_main", parent_call_id="sa",
+        max_turns=1, max_tokens=10**6, wall_clock_budget_seconds=30.0,
+    )
+    result_a = rt.run(child_a, _parent_context(session_id="sess_a"))
+    assert result_a.event_type == SubagentEventType.failed
+    assert result_a.reason.startswith("quota:max_turns")
+
+    child_b = ChildThread(
+        thread_id="th_child_b", parent_thread_id="th_main", parent_call_id="sb",
+        max_turns=10, max_tokens=10**6, wall_clock_budget_seconds=30.0,
+    )
+    result_b = rt.run(child_b, _parent_context(session_id="sess_b"))
+    assert result_b.event_type == SubagentEventType.result
+    assert result_b.reason == ""
+
+
+def test_parallel_children_do_not_cross_cancel_reasons(tmp_path):
+    """并行子代理必须保留各自不同的父取消/配额终止原因。"""
+    mc = MagicMock(spec=ModelClient)
+    barrier = threading.Barrier(2)
+    lock = threading.Lock()
+    parent_cancel = threading.Event()
+    calls = {"n": 0}
+
+    def stream(*args, **kwargs):
+        with lock:
+            calls["n"] += 1
+        barrier.wait(timeout=10)
+        parent_cancel.set()
+        return [
+            ModelEvent(type="token", content="x"),
+            ModelEvent(type="usage", raw={"prompt_tokens": 0, "completion_tokens": 0,
+                                           "total_tokens": 1}),
+            ModelEvent(type="done"),
+        ]
+
     mc.stream_chat.side_effect = stream
-    rt = _runtime(tmp_path, mc, ChildThreadQuota(max_turns=1, max_tokens=10**6, wall_clock_budget_seconds=30.0))
-    # 两个子代理共用 rt（cached runtime 的真实形态）
-    def go(i):
-        child = ChildThread(thread_id=f"th_child_{i}", parent_thread_id="th_main",
-                            parent_call_id=f"s{i}", max_turns=1, max_tokens=10**6,
-                            wall_clock_budget_seconds=30.0)
-        res = rt.run(child, _parent_context(session_id=f"sess_{i}"))
-        return res.reason
+    rt = _runtime(tmp_path, mc)
+    child_a = ChildThread(
+        thread_id="th_child_a", parent_thread_id="th_main", parent_call_id="sa",
+        max_turns=10, max_tokens=10**6, wall_clock_budget_seconds=30.0,
+    )
+    child_b = ChildThread(
+        thread_id="th_child_b", parent_thread_id="th_main", parent_call_id="sb",
+        max_turns=1, max_tokens=10**6, wall_clock_budget_seconds=30.0,
+    )
+
     with ThreadPoolExecutor(max_workers=2) as ex:
-        reasons = list(ex.map(go, [0, 1]))
-    # 每个子代理因自己的 max_turns=1 配额终止，reason 必须都含 max_turns，且互不为对方污染
-    assert all("quota:max_turns" in r for r in reasons)
+        future_a = ex.submit(
+            rt.run, child_a,
+            _parent_context(session_id="sess_a", abort_check=parent_cancel.is_set),
+        )
+        future_b = ex.submit(rt.run, child_b, _parent_context(session_id="sess_b"))
+        result_a = future_a.result(timeout=20)
+        result_b = future_b.result(timeout=20)
+
+    assert calls["n"] == 2
+    assert result_a.reason == "parent_cancelled"
+    assert "quota:max_turns" in result_b.reason

@@ -93,6 +93,7 @@ class ChildThreadRuntime:
         artifact_store_root: Path,
         runtime_dir: Path,
         tool_runtime_factory: Callable[[], tuple],  # () -> (registry, tool_loader)
+        quota_factory: Optional[Callable[[ChildThread], ChildThreadQuota]] = None,
     ):
         self._model_client = model_client
         self._tool_executor = tool_executor
@@ -110,7 +111,7 @@ class ChildThreadRuntime:
         self._artifact_store_root = Path(artifact_store_root)
         self._runtime_dir = Path(runtime_dir)
         self._tool_runtime_factory = tool_runtime_factory
-        self._quota = None               # Task 2 注入
+        self._quota_factory = quota_factory
 
     def run(
         self,
@@ -178,6 +179,14 @@ class ChildThreadRuntime:
                 authority=child_auth,
                 allowed_roots=[str(sandbox_ctx.workspace_dir)],
             )
+            if self._quota_factory is not None:
+                quota = self._quota_factory(child_thread)
+            else:
+                quota = ChildThreadQuota(
+                    max_turns=child_thread.max_turns,
+                    max_tokens=child_thread.max_tokens,
+                    wall_clock_budget_seconds=child_thread.wall_clock_budget_seconds,
+                )
             # 3. 子 RuntimeContext / RunContext / LoopState（Task 5 替换 permission/path）
             sub_runtime_context = RuntimeContext(
                 conversation_id=parent_ctx.conversation_id,
@@ -211,7 +220,9 @@ class ChildThreadRuntime:
                 tmp_dir=str(tdirs["tmp_dir"]),
                 scripts_dir=str(tdirs["scripts_dir"]),
                 enable_reasoning=context.enable_reasoning,
-                abort_check=self._child_abort_check(context.abort_check, run_state),
+                abort_check=self._child_abort_check(
+                    context.abort_check, run_state, quota,
+                ),
                 delegate_cwd=sub_cwd,
                 agent_tier="sub",
                 runtime_context=sub_runtime_context,
@@ -225,13 +236,7 @@ class ChildThreadRuntime:
             )
             # 4. 独立 ToolRuntime（§13.2：loaded set / GetTool closure 不共享）
             specialist_registry, specialist_tool_loader = self._tool_runtime_factory()
-            if self._quota is None:
-                self._quota = ChildThreadQuota(
-                    max_turns=child_thread.max_turns,
-                    max_tokens=child_thread.max_tokens,
-                    wall_clock_budget_seconds=child_thread.wall_clock_budget_seconds,
-                )
-            child_model_client = _TokenBudgetModelClient(self._model_client, self._quota)
+            child_model_client = _TokenBudgetModelClient(self._model_client, quota)
             child_executor = self._build_child_executor(
                 child_auth, child_model_client, specialist_registry,
                 specialist_tool_loader, child_event_bus,
@@ -334,17 +339,16 @@ class ChildThreadRuntime:
             journal_authority=child_auth,
         )
 
-    def _child_abort_check(self, parent_abort, run_state):
+    def _child_abort_check(self, parent_abort, run_state, quota):
         """组合取消：父取消 或 配额耗尽。Task 2/3 填充配额逻辑。"""
         def check():
             if parent_abort is not None and parent_abort():
                 run_state["cancel_reason"] = "parent_cancelled"
                 return True
-            if self._quota is not None:
-                reason = self._quota.expired_reason()
-                if reason:
-                    run_state["cancel_reason"] = reason
-                    return True
+            reason = quota.expired_reason()
+            if reason:
+                run_state["cancel_reason"] = reason
+                return True
             return False
         return check
 
