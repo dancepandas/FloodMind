@@ -124,6 +124,29 @@ def test_index_write_failure_isolated(tmp_path, monkeypatch):
     assert [e.event_id for e in auth.read_after(0)] == [event.event_id]
 
 
+def test_interior_index_hole_falls_back_to_authoritative(tmp_path, monkeypatch):
+    auth = open_journal_authority(
+        tmp_path / "runtime", conversation_id="c", task_id="t",
+        run_id="run_1", thread_id="th", turn_id="tu", index=True,
+    )
+    original_index_event = auth._index.index_event
+    calls = 0
+
+    def fail_second(envelope):
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            raise RuntimeError("middle index write failed")
+        original_index_event(envelope)
+
+    monkeypatch.setattr(auth._index, "index_event", fail_second)
+    auth.emit("run.started", {})
+    auth.emit("model.attempt.completed", {})
+    auth.emit("run.completed", {})
+    assert [e.sequence for e in auth._index.read_after(0)] == [1, 3]
+    assert [e.sequence for e in auth.read_after(0)] == [1, 2, 3]
+
+
 def test_rebuild_ignores_non_numeric_segment(tmp_path):
     auth = _seed_journal(tmp_path, [("run.started", {})])
     jdir = auth._writer._journal_dir

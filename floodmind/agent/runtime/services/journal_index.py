@@ -48,6 +48,14 @@ class SqliteJournalIndex:
             )
             self._conn.commit()
 
+    def count(self) -> int:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT COUNT(*) FROM journal_events WHERE run_id=?",
+                (self._run_id,),
+            ).fetchone()
+        return int(row[0])
+
     def max_sequence(self) -> int:
         with self._lock:
             row = self._conn.execute(

@@ -135,7 +135,7 @@ class JournalAuthority:
     def read_after(self, after_sequence: int = 0) -> List[EventEnvelope]:
         if self._index is not None:
             try:
-                if self._index.max_sequence() >= self._writer.current_sequence():
+                if self._index.count() == self._writer.current_sequence():
                     return self._index.read_after(after_sequence)
             except Exception:
                 pass
