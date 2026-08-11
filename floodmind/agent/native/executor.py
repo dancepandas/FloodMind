@@ -41,7 +41,12 @@ from floodmind.agent.native.retry import RetryPolicy, should_retry
 from floodmind.agent.runtime.services.tracing_service import TracingService
 
 # 上下文压缩（可选）
-from floodmind.agent.native.context_compressor import ContextCompressor
+from floodmind.agent.native.context_compressor import (
+    CompactionOverBudgetError,
+    ContextCompressor,
+)
+from floodmind.agent.native.capabilities import ModelCapabilities, default_registry
+from floodmind.agent.native.projection import compute_input_budget
 
 logger = logging.getLogger(__name__)
 
@@ -177,6 +182,9 @@ class NativeAgentExecutor:
         # 后台任务服务：任务完成通知注入（None 时回退全局单例 getter）
         self._background_task_service = background_task_service
         self._compressor_session_id: Optional[str] = None
+        # §7.6 能力快照（一次解析，跨压缩/投影复用）；capability_snapshot_id 供 Manifest 引用
+        self._capability_snapshot_id: str = ""
+        self._capabilities: ModelCapabilities = self._resolve_capabilities()
         self._state_handlers: Dict[AgentLoopStatus, Callable[[AgentLoopState, RunContext], AgentLoopState]] = {
             "created": self._on_created,
             "awaiting_llm": self._on_awaiting_llm,
@@ -356,12 +364,18 @@ class NativeAgentExecutor:
                 {"reason": reason, "before_messages": before_messages},
             )
         try:
-            capabilities = self._capabilities if hasattr(self, "_capabilities") else None
+            caps = getattr(self, "_capabilities", None)
+            if caps is None:
+                caps = self._resolve_capabilities()
+                self._capabilities = caps
+            # §9.3 有效输入预算：从能力快照计算，压缩不得越过该预算
+            budget = compute_input_budget(caps)
             result = self._context_compressor.compress_journal(
                 state.messages,
                 self._journal_authority,
-                capabilities=capabilities,
-                max_context_tokens=self.context_window,
+                capabilities=caps,
+                budget=budget,
+                max_context_tokens=budget.effective_input or self.context_window,
             )
             if result.saved_tokens > 0:
                 state.messages = result.compressed_messages
@@ -382,6 +396,11 @@ class NativeAgentExecutor:
                 logger.info("[EXEC] context_compress triggered but no compression performed")
             # Summary Event（§9.5 CompactSummary）已由 compress_journal 经 authority
             # 落 journal——只 append context.compaction.completed，不改原始事件。
+        except CompactionOverBudgetError as e:
+            # F4 fail-closed：不静默截断当前用户请求，也不返回超预算投影。
+            # 保持原始 messages 继续运行，交由宿主/检索缩减（P6）处理。
+            logger.error("[EXEC] context compression over input budget, keeping original messages: %s", e)
+            self.event_bus.emit_error(f"上下文压缩失败（超输入预算）: {str(e)[:200]}")
         except Exception as e:
             logger.error("[EXEC] context compression failed: %s", e)
             self.event_bus.emit_error(f"上下文压缩失败: {str(e)[:200]}")
@@ -443,6 +462,8 @@ class NativeAgentExecutor:
                 },
                 attempt_id=state.attempt_id,
             )
+        # §9.2 每次模型调用前落投影 Manifest（回答「模型看到了什么」）
+        self._emit_projection_committed(state)
         self.event_bus.emit_llm_step_start(
             model_name=getattr(self.model_client, 'model_name', ''),
             iteration=state.iteration,
@@ -1372,3 +1393,85 @@ class NativeAgentExecutor:
             return get_ask_service()
         except Exception:
             return None
+
+    # --- 能力快照 / 投影 Manifest（§7.6 / §9.2 / §9.3） ---
+
+    @staticmethod
+    def _derive_model_family(model_name: str) -> str:
+        """从模型名推导 capability registry 的 family key（best-effort）。
+
+        剥离聚合网关前缀（"MiniMax/xxx"）后取首个 "-" 分段：o4-mini -> o（openai
+        o-family）、deepseek-chat -> deepseek、kimi-k2 -> kimi。
+        """
+        name = (model_name or "").strip().lower()
+        if not name:
+            return ""
+        base = name.split("/")[-1]
+        return base.split("-")[0]
+
+    def _resolve_capabilities(self) -> ModelCapabilities:
+        """§7.6 解析模型能力快照（一次解析，跨压缩/投影复用）。
+
+        经 default_registry 分层覆盖（provider -> family -> exact）；解析为空时
+        回退为仅含 self.context_window 的能力（保证 §9.3 预算可计算）。
+        """
+        provider = getattr(self.model_client, "provider", "") or ""
+        model = getattr(self.model_client, "model_name", "") or ""
+        if not isinstance(provider, str):
+            provider = ""
+        if not isinstance(model, str):
+            model = ""
+        family = self._derive_model_family(model)
+        caps, _ = default_registry().resolve_capabilities(provider, family, model)
+        if not caps.context_window:
+            caps = ModelCapabilities(context_window=self.context_window)
+        self._capability_snapshot_id = f"cap_{provider}:{family}:{model}"
+        return caps
+
+    def _emit_projection_committed(self, state: AgentLoopState) -> None:
+        """§9.2 每次模型调用前把当前消息投影 Manifest 落 journal（context.projection.committed）。
+
+        回答「模型看到了什么」：逐消息估算 token，source_type="episode"、
+        transform="identity"。确定性且廉价；失败不阻塞主循环。
+        """
+        if self._journal_authority is None:
+            return
+        try:
+            import hashlib
+
+            from floodmind.agent.native.context_compressor import ContextCompressor as _CC
+            from floodmind.agent.native.projection import build_manifest
+            from floodmind.agent.runtime.contracts.canonical_events import canonical_json
+            from floodmind.agent.runtime.contracts.projection import ProjectionSource
+
+            caps = getattr(self, "_capabilities", None)
+            if caps is None:
+                caps = self._resolve_capabilities()
+                self._capabilities = caps
+            budget = compute_input_budget(caps)
+            model = getattr(self.model_client, "model_name", "") or ""
+            codec = getattr(getattr(self.model_client, "pipeline", None), "name", "") or ""
+            sources = []
+            for i, msg in enumerate(state.messages):
+                tokens = _CC._estimate_tokens([msg])
+                sources.append(ProjectionSource(
+                    source_id=f"msg_{i}",
+                    source_type="episode",
+                    content_sha256=hashlib.sha256(canonical_json(msg).encode("utf-8")).hexdigest(),
+                    original_tokens=tokens,
+                    projected_tokens=tokens,
+                    transform="identity",
+                    priority=0,
+                    selected=True,
+                ))
+            manifest = build_manifest(
+                model=model,
+                codec_version=codec,
+                capability_snapshot_id=getattr(self, "_capability_snapshot_id", "") or "",
+                budget=budget,
+                sources=sources,
+                model_call_id=getattr(state, "attempt_id", "") or "",
+            )
+            self._journal_authority.emit("context.projection.committed", manifest.model_dump())
+        except Exception as e:
+            logger.warning("[EXEC] projection manifest emission failed: %s", e)

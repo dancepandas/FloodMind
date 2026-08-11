@@ -2,7 +2,12 @@
 
 import hashlib
 
-from floodmind.agent.native.context_compressor import ContextCompressor
+import pytest
+
+from floodmind.agent.native.context_compressor import (
+    CompactionOverBudgetError,
+    ContextCompressor,
+)
 from floodmind.agent.runtime.contracts.canonical_events import canonical_json
 from floodmind.agent.runtime.services.journal_authority import open_journal_authority
 
@@ -10,25 +15,28 @@ from floodmind.agent.runtime.services.journal_authority import open_journal_auth
 def test_compact_emits_summary_event_and_keeps_user_message(tmp_path):
     auth = open_journal_authority(tmp_path, conversation_id="c", task_id="t",
                                   run_id="run_1", thread_id="th", turn_id="tu")
-    auth.emit("thread.message.sent", {"content": "long user message that must never be truncated", "turn_index": 0})
+    auth.emit("thread.message.sent", {"content": "user one", "turn_index": 0})
+    auth.emit("model.attempt.completed", {"attempt_id": "a1", "terminal_reason": "completed",
+        "content": "assistant one", "reasoning": "", "tool_calls": [], "is_final": True, "usage": {}})
+    auth.emit("thread.message.sent", {"content": "long user message that must never be truncated", "turn_index": 1})
     messages = [
         {"role": "system", "content": "SYSTEM"},
+        {"role": "user", "content": "user one"},
+        {"role": "assistant", "content": "assistant one"},
         {"role": "user", "content": "long user message that must never be truncated"},
-        {"role": "assistant", "content": "a" * 2000},
-        {"role": "assistant", "content": "b" * 2000},
     ]
-    cc = ContextCompressor()
+    cc = ContextCompressor(head_keep=1, tail_keep=1)
     result = cc.compress_journal(messages, auth, capabilities=None,
                                  budget=None, max_context_tokens=1200)
     # 当前用户请求不静默截断
     assert any("long user message that must never be truncated" in m.get("content", "")
                for m in result.compressed_messages if m.get("role") == "user")
-    # Summary Event 落 journal
+    # Summary Event 落 journal（journal-backed source）
     types = [e.event_type for e in auth.read_after(0)]
     assert "context.compaction.completed" in types
     # 原始 journal 不变（只新增 summary 事件，不修改原事件）
     first = auth.read_after(0)[0]
-    assert first.event_type == "thread.message.sent" and first.payload["content"] == "long user message that must never be truncated"
+    assert first.event_type == "thread.message.sent" and first.payload["content"] == "user one"
 
 
 def test_compact_summary_is_journal_backed(tmp_path):
@@ -98,3 +106,90 @@ def test_compact_summary_is_journal_backed(tmp_path):
     assert all("current user request" not in c for c in covered_contents)
     assert "SYSTEM" not in result.summary
     assert "current user request" not in result.summary
+
+
+def test_repeated_compaction_retains_prior_compact_block(tmp_path):
+    """F1：二次压缩必须保留第一次压缩产生的 [compact] 摘要块（绝不静默丢失）。"""
+    auth = open_journal_authority(tmp_path, conversation_id="c", task_id="t",
+                                  run_id="run_1", thread_id="th", turn_id="tu")
+    for i, (u, a) in enumerate([
+        ("user one", "assistant one"),
+        ("user two", "assistant two"),
+    ]):
+        auth.emit("thread.message.sent", {"content": u, "turn_index": i})
+        auth.emit("model.attempt.completed", {"attempt_id": f"a{i}", "terminal_reason": "completed",
+            "content": a, "reasoning": "", "tool_calls": [], "is_final": True, "usage": {}})
+    auth.emit("thread.message.sent", {"content": "user three", "turn_index": 2})
+    auth.emit("model.attempt.completed", {"attempt_id": "a2", "terminal_reason": "completed",
+        "content": "assistant three", "reasoning": "", "tool_calls": [], "is_final": True, "usage": {}})
+    auth.emit("thread.message.sent", {"content": "user current", "turn_index": 3})
+
+    messages = [
+        {"role": "system", "content": "SYSTEM"},
+        {"role": "user", "content": "user one"},
+        {"role": "assistant", "content": "assistant one"},
+        {"role": "user", "content": "user two"},
+        {"role": "assistant", "content": "assistant two"},
+        {"role": "user", "content": "user three"},
+        {"role": "assistant", "content": "assistant three"},
+        {"role": "user", "content": "user current"},
+    ]
+    cc = ContextCompressor(head_keep=1, tail_keep=2)
+    first = cc.compress_journal(messages, auth, max_context_tokens=1200)
+    first_compacts = [m for m in first.compressed_messages if m.get("compaction")]
+    assert len(first_compacts) == 1
+    prior_summary = first_compacts[0]["content"]
+
+    # 第二次压缩：第一次输出 + 两个新轮次
+    auth.emit("model.attempt.completed", {"attempt_id": "a3", "terminal_reason": "completed",
+        "content": "assistant four", "reasoning": "", "tool_calls": [], "is_final": True, "usage": {}})
+    auth.emit("thread.message.sent", {"content": "user five", "turn_index": 4})
+    second_input = first.compressed_messages + [
+        {"role": "assistant", "content": "assistant four"},
+        {"role": "user", "content": "user five"},
+    ]
+    second = cc.compress_journal(second_input, auth, max_context_tokens=1200)
+    second_compacts = [m for m in second.compressed_messages if m.get("compaction")]
+    # 第一次的 [compact] 摘要块必须仍在第二次输出中
+    assert any(prior_summary in m["content"] for m in second_compacts), (
+        "二次压缩丢失了首次压缩的 [compact] 摘要块"
+    )
+
+
+def test_no_wire_fallback_when_no_covered_events(tmp_path):
+    """F5：覆盖区无 journal-backed 事件时不 emit compaction.completed（不退回 wire 哈希）。"""
+    auth = open_journal_authority(tmp_path, conversation_id="c", task_id="t",
+                                  run_id="run_1", thread_id="th", turn_id="tu")
+    auth.emit("thread.message.sent", {"content": "user current", "turn_index": 0})
+    messages = [
+        {"role": "system", "content": "SYSTEM"},
+        {"role": "system", "content": "[compact] prior history", "compaction": True},
+        {"role": "user", "content": "user current"},
+    ]
+    cc = ContextCompressor(head_keep=1, tail_keep=1)
+    result = cc.compress_journal(messages, auth, max_context_tokens=1200)
+    types = [e.event_type for e in auth.read_after(0)]
+    assert "context.compaction.completed" not in types
+    # 既有 compaction 块仍保留（F1 不变量），且用户消息不被截断
+    assert any(m.get("compaction") and "prior history" in str(m.get("content", ""))
+               for m in result.compressed_messages)
+
+
+def test_compress_over_budget_fails_closed(tmp_path):
+    """F4：仍超限且无工具输出可裁剪时 fail-closed 抛 CompactionOverBudgetError。
+
+    绝不静默返回超预算投影，也绝不静默截断当前用户请求。
+    """
+    auth = open_journal_authority(tmp_path, conversation_id="c", task_id="t",
+                                  run_id="run_1", thread_id="th", turn_id="tu")
+    current = "current user request " + "x" * 50000
+    messages = [
+        {"role": "system", "content": "SYSTEM"},
+        {"role": "user", "content": current},
+    ]
+    cc = ContextCompressor(head_keep=1, tail_keep=1)
+    with pytest.raises(CompactionOverBudgetError):
+        cc.compress_journal(messages, auth, max_context_tokens=100)
+    # fail-closed：不产生 compaction.completed（未发生有效压缩）
+    types = [e.event_type for e in auth.read_after(0)]
+    assert "context.compaction.completed" not in types

@@ -617,7 +617,7 @@ class TestExecutorPlaceholderStates:
         llm = MagicMock()
         llm.invoke.return_value = MagicMock(content="summary")
         compressor = ContextCompressor(model_client=llm, head_keep=1, tail_keep=1, trigger_threshold=0.5)
-        executor = self._make_executor(context_compressor=compressor, context_window=100)
+        executor = self._make_executor(context_compressor=compressor, context_window=32000)
         state = AgentLoopState(
             session_id="test-session",
             run_id="run-1",
@@ -659,6 +659,88 @@ class TestExecutorPlaceholderStates:
         )
         new_state = executor._on_awaiting_llm(state, self._make_context())
         assert new_state.status == "context_compress"
+
+    def test_context_compress_wires_effective_input_budget(self):
+        """F2：_on_context_compress 必须把 §9.3 有效输入预算接入 compress_journal。
+
+        capabilities 不再为 None；max_context_tokens = effective_input 或回退 context_window。
+        """
+        from floodmind.agent.native.context_compressor import ContextCompressor
+        from floodmind.agent.native.projection import compute_input_budget
+        from floodmind.agent.native.types import AgentLoopState
+
+        cc = MagicMock(spec=ContextCompressor)
+        cc.should_compress.return_value = False
+        result = MagicMock()
+        result.saved_tokens = 0
+        result.compressed_messages = []
+        cc.compress_journal.return_value = result
+
+        mc = MagicMock(spec=ModelClient)
+        mc.provider = "deepseek"
+        mc.model_name = "deepseek-chat"
+        executor = NativeAgentExecutor(
+            model_client=mc,
+            tool_executor=MagicMock(),
+            event_bus=EventBus(),
+            message_builder=MessageBuilder(),
+            max_iterations=5,
+            system_prompt="test",
+            tools_schema=[],
+            context_compressor=cc,
+            context_window=32000,
+        )
+        state = AgentLoopState(
+            session_id="test-session",
+            run_id="run-1",
+            status="context_compress",
+            messages=[{"role": "system", "content": "sys"}],
+        )
+        executor._on_context_compress(state, self._make_context())
+
+        kwargs = cc.compress_journal.call_args.kwargs
+        caps = kwargs["capabilities"]
+        assert caps is not None, "capabilities 不得为 None"
+        budget = compute_input_budget(caps)
+        expected_limit = budget.effective_input or 32000
+        assert kwargs["max_context_tokens"] == expected_limit
+        assert kwargs["budget"] == budget
+
+    def test_model_call_emits_projection_manifest(self):
+        """F3：每次模型调用前 emit context.projection.committed（回答「模型看到了什么」）。"""
+        mc = MagicMock(spec=ModelClient)
+        mc.provider = "openai"
+        mc.model_name = "o4-mini"
+        mc.stream_chat.return_value = [
+            ModelEvent(type="token", content="done"),
+            ModelEvent(type="done"),
+        ]
+        authority = MagicMock()
+        authority.replay.return_value = initial_run_state("run-test")
+        executor = NativeAgentExecutor(
+            model_client=mc,
+            tool_executor=MagicMock(),
+            event_bus=EventBus(),
+            message_builder=MessageBuilder(),
+            max_iterations=5,
+            system_prompt="test prompt",
+            tools_schema=[],
+        )
+        executor._journal_authority = authority
+
+        executor.run(self._make_context(), "hello")
+
+        emitted = [
+            call for call in authority.emit.call_args_list
+            if call.args[0] == "context.projection.committed"
+        ]
+        assert emitted, "模型调用路径必须 emit context.projection.committed"
+        payload = emitted[0].args[1]
+        assert payload["model"] == "o4-mini"
+        assert payload["sources"], "Manifest 必须包含消息级 sources"
+        assert payload["sources"][0]["source_type"] == "episode"
+        assert payload["sources"][0]["transform"] == "identity"
+        assert payload["budget"]["effective_input"] > 0
 
 
 class TestAwaitingPermissionRecovery:

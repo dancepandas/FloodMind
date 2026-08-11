@@ -26,6 +26,14 @@ from floodmind.agent.runtime.contracts.projection import ProjectionManifest
 
 logger = logging.getLogger(__name__)
 
+
+class CompactionOverBudgetError(RuntimeError):
+    """Fail-closed：压缩后投影仍超输入预算，且无更多工具输出可裁剪。
+
+    不得静默截断当前用户请求（§9.6 step 10）；检索缩减属 P6，当前先以抛错终止。
+    """
+
+
 # §9.6 摘要来源切到 Canonical Events：产生对话轮次的 journal 事件类型。
 # 用于把被压缩中间区映射到 journal 事件（source_event_ids / covered_sequence_* /
 # source_sha256 可被 replay 复现）。
@@ -296,6 +304,41 @@ class ContextCompressor:
             return False
         return True
 
+    @classmethod
+    def _is_compaction_block(cls, msg: Dict[str, Any]) -> bool:
+        """是否为既有压缩块（system + compaction 标记或 [compact] 前缀，对应 Atomic Group compaction_block）。"""
+        if not isinstance(msg, dict):
+            return False
+        if msg.get("role") != "system":
+            return False
+        if msg.get("compaction"):
+            return True
+        return str(msg.get("content", "")).startswith("[compact]")
+
+    @classmethod
+    def _retain_compaction_blocks(
+        cls,
+        messages: List[Dict[str, Any]],
+        compressed: List[Dict[str, Any]],
+        *,
+        head_len: int,
+        has_new_summary: bool,
+    ) -> List[Dict[str, Any]]:
+        """F1：把输入中所有既存 compaction 块保留到输出（按内容去重）。
+
+        插到新摘要块之后（即头部 + 新摘要 + 旧摘要块 + 尾部），保证二次压缩不会
+        静默丢失首轮压缩历史。已存在于头部/尾部的块按内容去重，不重复插入。
+        """
+        insert_at = head_len + (1 if has_new_summary else 0)
+        existing_contents = {c.get("content") for c in compressed}
+        for m in messages:
+            if cls._is_compaction_block(m) and m.get("content") not in existing_contents:
+                copy = dict(m)
+                compressed.insert(insert_at, copy)
+                existing_contents.add(copy.get("content"))
+                insert_at += 1
+        return compressed
+
     def _journal_covered_events(
         self,
         messages: List[Dict[str, Any]],
@@ -376,18 +419,19 @@ class ContextCompressor:
             covered_sequence_start = covered[0].sequence
             covered_sequence_end = covered[-1].sequence
             source_text = canonical_json([e.payload for e in covered])
+            source_sha256 = hashlib.sha256(source_text.encode("utf-8")).hexdigest()
         else:
-            # authority 缺失或映射为空：退回被覆盖 wire 消息的 canonical 投影
+            # F5：无 journal-backed 覆盖时字段留空，绝不退化为 wire-message 哈希。
             source_event_ids = []
             covered_sequence_start = 0
             covered_sequence_end = 0
-            source_text = canonical_json([m for seg in compressible for m in seg])
+            source_sha256 = ""
 
         summary_event = CompactSummary(
             covered_sequence_start=covered_sequence_start,
             covered_sequence_end=covered_sequence_end,
             source_event_ids=source_event_ids,
-            source_sha256=hashlib.sha256(source_text.encode("utf-8")).hexdigest(),
+            source_sha256=source_sha256,
             summary=summary,
             completed_facts=[],
             open_commitments=[],
@@ -398,22 +442,41 @@ class ContextCompressor:
             unresolved_transactions=pending_transaction_ids,
             recipe_version="1",
         )
-        if authority is not None:
-            authority.emit("context.compaction.completed", summary_event.model_dump())
 
-        # 6) 重建压缩后消息：头部（固定保留） + 摘要块 + 尾部（最近完整 Group）
+        # 6) 重建压缩后消息：头部（固定保留） + 摘要块 + 尾部（最近完整 Group）。
+        #    F1：输入中既有 compaction 块代表此前压缩历史，必须始终保留在输出中，
+        #    否则二次压缩会静默丢失首轮压缩的摘要。
         compressed = [dict(m) for m in messages[:start]]
         if summary:
             compressed.append(
                 {"role": "system", "content": "[compact] " + summary, "compaction": True}
             )
         compressed.extend(dict(m) for m in trimmed[end:])
+        compressed = self._retain_compaction_blocks(
+            messages, compressed, head_len=start, has_new_summary=bool(summary)
+        )
 
-        # 7) 再次计数；仍超限 → 扩大 Offload，不截断当前用户请求
+        # 7) 再次计数：有界扩大 Offload（至多 3 轮裁剪工具/函数输出），仍超限 → fail-closed
+        #    （绝不静默截断当前用户请求，也绝不返回超预算投影）。
+        for _ in range(3):
+            if self._estimate_tokens(compressed) <= limit:
+                break
+            next_compressed = self._trim_tool_outputs(compressed)
+            if next_compressed == compressed:
+                break  # 已无更多工具输出可裁剪
+            compressed = next_compressed
         if self._estimate_tokens(compressed) > limit:
-            compressed = self._trim_tool_outputs(compressed)
+            raise CompactionOverBudgetError(
+                f"compacted projection still over input budget: "
+                f"~{self._estimate_tokens(compressed)} tokens > limit {limit}; "
+                "refusing to silently truncate the current user request"
+            )
 
-        # 8) Projection Manifest（source_type="episode"，transform="compact"）
+        # 8) Summary Event 在最终校验后落 journal（F6）；无 journal-backed 覆盖不落（F5）
+        if authority is not None and covered:
+            authority.emit("context.compaction.completed", summary_event.model_dump())
+
+        # 9) Projection Manifest（source_type="episode"，transform="compact"）
         manifest = build_manifest(
             model="", codec_version="", capability_snapshot_id="",
             budget=budget,

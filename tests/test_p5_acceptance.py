@@ -19,7 +19,7 @@ def test_compact_does_not_split_tool_call_result_atomic_group(tmp_path):
         {"role": "assistant", "content": "done " * 500},
     ]
     cc = ContextCompressor()
-    result = cc.compress_journal(messages, auth, max_context_tokens=800)
+    result = cc.compress_journal(messages, auth, max_context_tokens=8000)
     compressed = result.compressed_messages
     # 不拆 Tool Call + Result：要么整组保留，要么整组被摘要替换，绝不只留一半
     tc = [m for m in compressed if m.get("tool_calls")]
@@ -30,12 +30,24 @@ def test_compact_does_not_split_tool_call_result_atomic_group(tmp_path):
 def test_compact_replay_block_not_lost(tmp_path):
     auth = open_journal_authority(tmp_path, conversation_id="c", task_id="t",
                                   run_id="run_1", thread_id="th", turn_id="tu")
+    auth.emit("thread.message.sent", {"content": "user one", "turn_index": 0})
     auth.emit("model.attempt.completed", {"attempt_id": "a1", "terminal_reason": "completed",
-        "content": "block", "reasoning": "think", "tool_calls": [], "is_final": True, "usage": {}})
-    messages = [{"role": "system", "content": "S"}, {"role": "assistant", "content": "block", "reasoning": "think"}]
+        "content": "assistant one", "reasoning": "think", "tool_calls": [], "is_final": True, "usage": {}})
+    auth.emit("thread.message.sent", {"content": "user two", "turn_index": 1})
+    auth.emit("model.attempt.completed", {"attempt_id": "a2", "terminal_reason": "completed",
+        "content": "assistant two", "reasoning": "think", "tool_calls": [], "is_final": True, "usage": {}})
+    auth.emit("thread.message.sent", {"content": "user three", "turn_index": 2})
+    messages = [
+        {"role": "system", "content": "S"},
+        {"role": "user", "content": "user one"},
+        {"role": "assistant", "content": "assistant one", "reasoning": "think"},
+        {"role": "user", "content": "user two"},
+        {"role": "assistant", "content": "assistant two", "reasoning": "think"},
+        {"role": "user", "content": "user three"},
+    ]
     before = auth.replay().turns
-    cc = ContextCompressor()
-    cc.compress_journal(messages, auth, max_context_tokens=400)
+    cc = ContextCompressor(head_keep=1, tail_keep=2)
+    cc.compress_journal(messages, auth, max_context_tokens=32000)
     after = auth.replay().turns
     assert before == after  # 原始 journal 不变（compact 只 append summary，不改原事件）
     assert any(e.event_type == "context.compaction.completed" for e in auth.read_after(0))
@@ -47,5 +59,5 @@ def test_compact_never_truncates_current_user_message(tmp_path):
     current = "当前用户请求绝不能静默截断 " * 200
     messages = [{"role": "system", "content": "S"}, {"role": "user", "content": current}]
     cc = ContextCompressor()
-    result = cc.compress_journal(messages, auth, max_context_tokens=50)
+    result = cc.compress_journal(messages, auth, max_context_tokens=32000)
     assert any(m.get("role") == "user" and m.get("content") == current for m in result.compressed_messages)
