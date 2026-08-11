@@ -17,6 +17,7 @@ stdout/stderr 直接重定向到文件（不用 PIPE + reader 线程，无管道
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import os
@@ -53,7 +54,7 @@ class BackgroundTask:
     session_id: str
     command: str
     pid: Optional[int]
-    status: str  # running / completed / failed / killed
+    status: str  # starting / running / kill_requested / terminating / completed / failed / killed / kill_failed / orphaned / unknown
     exit_code: Optional[int]
     stdout_path: str
     stderr_path: str
@@ -85,12 +86,14 @@ class BackgroundTaskService:
         max_lifetime_seconds: int = _DEFAULT_MAX_LIFETIME_SECONDS,
         completed_retention: int = _DEFAULT_COMPLETED_RETENTION,
         finalized_retention: int = _DEFAULT_FINALIZED_RETENTION,
+        event_sink: Optional[Callable[[str, Dict[str, Any]], None]] = None,
     ):
         self._base_dir = Path(base_dir) if base_dir else None
         self._max_concurrent_per_session = max(max_concurrent_per_session, 1)
         self._max_lifetime_seconds = max(max_lifetime_seconds, 60)
         self._completed_retention = max(completed_retention, 1)
         self._finalized_retention = max(finalized_retention, self._completed_retention)
+        self._event_sink = event_sink
 
         self._lock = threading.RLock()
         self._active_tasks: Dict[str, BackgroundTask] = {}
@@ -104,6 +107,17 @@ class BackgroundTaskService:
         self._finalized: set = set()
         self._finalized_order: Deque[str] = deque()
         self._platform = "win" if os.name == "nt" else "posix"
+
+    def _emit(self, event_type: str, payload: Dict[str, Any]) -> None:
+        """经 event_sink 发 Journal 事件（§12 Completion 先写 Journal）。"""
+        if self._event_sink is not None:
+            try:
+                self._event_sink(event_type, payload)
+            except Exception as e:
+                logger.warning("BackgroundTask event_sink error: %s", e)
+
+    def set_event_sink(self, event_sink: Optional[Callable[[str, Dict[str, Any]], None]]) -> None:
+        self._event_sink = event_sink
 
     # ── 公开 API ─────────────────────────────────────────────────────
 
@@ -182,6 +196,12 @@ class BackgroundTaskService:
                 started_at=time.time(),
                 max_lifetime_seconds=lifetime,
             )
+            self._emit("background.start.requested", {
+                "task_id": task_id,
+                "session_id": session_id,
+                "command_sha256": hashlib.sha256(command.encode("utf-8")).hexdigest(),
+                "sandbox_id": "",
+            })
             self._write_meta(task)
 
             with self._lock:
@@ -221,6 +241,11 @@ class BackgroundTaskService:
             self._write_meta(task)
             self._finalize(task)
             raise
+        self._emit("background.started", {
+            "task_id": task.task_id,
+            "session_id": task.session_id,
+            "pid": task.pid,
+        })
         logger.info("BackgroundTask started: task=%s session=%s pid=%s", task_id, session_id, process.pid)
         return task
 
@@ -244,42 +269,87 @@ class BackgroundTaskService:
             running = [t for t in self._active_tasks.values() if t.session_id == session_id]
             return completed + running
 
-    def kill(self, session_id: str, task_id: str) -> bool:
-        """杀掉一个任务（进程树），并立即进入完成队列/通知订阅者（Agent 感知状态变化）。"""
+    def kill(self, session_id: str, task_id: str, confirm_timeout: float = 10.0) -> bool:
+        """杀掉任务进程树并验证退出（§12 kill 验证链）。
+
+        状态推进：running -> kill_requested -> terminating -> killed（确认退出）
+        若确认超时 -> kill_failed。
+        """
         session_id = validate_session_id(session_id)
         with self._lock:
             task = self._active_tasks.get(task_id)
             process = self._processes.get(task_id)
         if task is None or task.session_id != session_id:
             return False
-        if task.status == "running":
-            # 先标记 killed，抢在 _watch 线程把 process.wait() 的退出码写成 failed 之前
-            task.status = "killed"
+
+        if task.status != "running":
+            return True  # 已自然终态（completed/failed），无可杀
+
+        task.status = "kill_requested"
+        self._emit("background.kill.requested", {
+            "task_id": task_id,
+            "session_id": task.session_id,
+            "reason": "user_kill",
+        })
+
         self._kill_process(process)
+        # 确认退出：轮询至多 confirm_timeout 秒
+        task.status = "terminating"
+        confirmed = self._wait_exit(process, confirm_timeout)
         task.finished_at = time.time()
         task.tail = self._read_tail(task.stdout_path)
+
+        if confirmed:
+            task.status = "killed"
+            task.exit_code = int(process.returncode) if process is not None else 0
+            self._emit("background.killed", {
+                "task_id": task_id,
+                "session_id": task.session_id,
+                "exit_code": task.exit_code,
+            })
+        else:
+            task.status = "kill_failed"
+            task.error = f"进程树终止后 {confirm_timeout}s 内未确认退出"
+            self._emit("background.kill.failed", {
+                "task_id": task_id,
+                "session_id": task.session_id,
+                "error": task.error,
+            })
         self._write_meta(task)
         self._finalize(task)  # 用户主动关闭：立即推送，不等 _watch 线程
-        return True
+        return confirmed
 
-    def kill_session(self, session_id: str) -> int:
+    @staticmethod
+    def _wait_exit(process: Optional[subprocess.Popen], timeout: float) -> bool:
+        """确认进程已退出（轮询 poll）。"""
+        if process is None:
+            return True
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            if process.poll() is not None:
+                return True
+            time.sleep(0.05)
+        return process.poll() is not None
+
+    def kill_session(self, session_id: str, confirm_timeout: float = 5.0) -> int:
         """杀掉会话内全部存活任务并立即收尾（会话结束/Agent 析构时调用）。"""
         session_id = validate_session_id(session_id)
         with self._lock:
-            targets = [t for t in self._active_tasks.values() if t.session_id == session_id and t.running]
-            work = []
-            for task in targets:
-                # 锁内只抢占状态和快照句柄；进程等待、文件 IO、订阅回调全部在锁外。
-                task.status = "killed"
-                work.append((task, self._processes.get(task.task_id)))
+            targets = [t for t in self._active_tasks.values()
+                       if t.session_id == session_id and t.running]
+        killed = 0
+        for task in targets:
+            if self.kill(session_id, task.task_id, confirm_timeout=confirm_timeout):
+                killed += 1
+        return killed
 
-        for task, process in work:
-            self._kill_process(process)
-            task.finished_at = time.time()
-            task.tail = self._read_tail(task.stdout_path)
-            self._write_meta(task)
-            self._finalize(task)
-        return len(targets)
+    def kill_task(self, task_id: str, confirm_timeout: float = 10.0) -> bool:
+        """按 task_id 杀掉任务（Reconcile 用；session 内部解析）。"""
+        with self._lock:
+            task = self._active_tasks.get(task_id)
+        if task is None:
+            return False
+        return self.kill(task.session_id, task_id, confirm_timeout=confirm_timeout)
 
     def drain_completions(self, session_id: str) -> List[BackgroundTask]:
         """取出本会话已完成的全部任务（注入完成通知用，取后清空）。"""
@@ -350,6 +420,17 @@ class BackgroundTaskService:
             task.tail = self._read_tail(task.stdout_path)
             self._write_meta(task)
             self._finalize(task)
+            # Completion 先写 Journal（§12）；kill 已由 kill() 发 killed/kill_failed
+            if task.status in ("completed", "failed"):
+                self._emit("background.completed", {
+                    "task_id": task.task_id,
+                    "session_id": task.session_id,
+                    "status": task.status,
+                    "exit_code": task.exit_code,
+                    "stdout_path": task.stdout_path,
+                    "stderr_path": task.stderr_path,
+                    "output_tail": task.tail,
+                })
 
     def _finalize(self, task: BackgroundTask) -> None:
         """幂等收尾：移出活跃 → 进完成队列 → 通知订阅者。kill()/kill_session()/wait 线程共用。"""

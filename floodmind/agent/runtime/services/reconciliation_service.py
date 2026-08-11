@@ -7,11 +7,12 @@
 - 悬空 `pending_approvals`（无 resolved）→ 发 `tool.approval.resolved`（approved=False）deny 落定。
 - `child_threads` 中 status == running → 发 `thread.cancelled`。
 - background/artifact 临时清理本任务留接口（`background_killed`/`artifacts_cleaned` 保持 0），P6 实装；
-  若 `background_task_service` 已注入则对 `active_background_tasks` 调 `kill_session`（不依赖 ContextVar）。
+  若 `background_task_service` 已注入则对 `active_background_tasks` 调 `kill_task`（§12 kill 验证链，不依赖 ContextVar）。
 
 本服务不直接改 reducer 状态，只通过 JournalAuthority 发事件；确定性由 reducer 折叠保证。
 """
 
+import logging
 from typing import Any, Optional
 
 from pydantic import BaseModel
@@ -19,6 +20,8 @@ from pydantic import BaseModel
 from floodmind.agent.runtime.contracts.run_state import RunState
 from floodmind.agent.runtime.contracts.tool_transaction import ToolStatus
 from floodmind.agent.runtime.services.journal_authority import JournalAuthority
+
+logger = logging.getLogger(__name__)
 
 
 class ReconcileResult(BaseModel):
@@ -86,13 +89,13 @@ class ReconciliationService:
                                {"thread_id": ct.thread_id, "parent_call_id": ct.parent_call_id,
                                 "summary": "reconciled"})
                 result.child_threads_closed += 1
-        # 4) 后台任务清理（P6 实装）：注入 service 时对 active_background_tasks 调 kill_session
+        # 4) 后台任务清理（P6）：active_background_tasks 为 task_id 列表，
+        #    经 kill_task 走完整 kill 验证链（§12）。
         if self._background_task_service is not None:
-            for ident in list(run_state.active_background_tasks):
+            for task_id in list(run_state.active_background_tasks):
                 try:
-                    result.background_killed += int(
-                        self._background_task_service.kill_session(ident) or 0
-                    )
-                except Exception:
-                    continue
+                    if self._background_task_service.kill_task(task_id):
+                        result.background_killed += 1
+                except Exception as e:
+                    logger.warning("BackgroundTask reconcile kill failed task=%s: %s", task_id, e)
         return result

@@ -453,6 +453,32 @@ def _reduce_artifact_committed(
     return ns
 
 
+def _reduce_background_started(
+    state: RunState, payload: Dict[str, Any],
+) -> RunState:
+    """background.started：run 级 active_background_tasks 记账（task_id，去重）。"""
+    task_id = payload.get("task_id", "")
+    if not task_id:
+        return state
+    if task_id in state.active_background_tasks:
+        return state
+    ns = state.model_copy(deep=True)
+    ns.active_background_tasks = state.active_background_tasks + [task_id]
+    return ns
+
+
+def _reduce_background_terminal(
+    state: RunState, payload: Dict[str, Any],
+) -> RunState:
+    """background.killed / kill.failed / completed：从 active_background_tasks 移除。"""
+    task_id = payload.get("task_id", "")
+    if not task_id or task_id not in state.active_background_tasks:
+        return state
+    ns = state.model_copy(deep=True)
+    ns.active_background_tasks = [t for t in state.active_background_tasks if t != task_id]
+    return ns
+
+
 def reduce(state: RunState, event: EventEnvelope) -> RunState:
     """确定性折叠。未知事件 fail closed：保持不变但推进 cursor。"""
     if event.event_id in state.processed_event_ids:
@@ -505,4 +531,8 @@ def reduce(state: RunState, event: EventEnvelope) -> RunState:
         if et == "artifact.declared":
             return _reduce_artifact_declared(ns, event.payload)
         return _reduce_artifact_committed(ns, event.payload)
+    if et == "background.started":
+        return _reduce_background_started(ns, event.payload)
+    if et in ("background.killed", "background.kill.failed", "background.completed"):
+        return _reduce_background_terminal(ns, event.payload)
     return ns  # 其他事件（usage/checkpoint/thread.*）不改状态，仅推进 cursor
