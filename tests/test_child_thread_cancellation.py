@@ -84,23 +84,45 @@ def test_cancelled_event_only_after_verified_cleanup(tmp_path):
 
     abort_flag["on"] = True
     release.set()
-    deadline = time.monotonic() + 10
-    saw_alive_without_event = False
+    deadline = time.monotonic() + 15
+    violation = False
     while bg.has_active(started["session_id"]) and time.monotonic() < deadline:
         event_types = [event.event_type for event in parent_auth.read_after(0)]
-        if "child_thread.cancelled" not in event_types:
-            saw_alive_without_event = True
+        if "child_thread.cancelled" in event_types:
+            violation = True
             break
-        time.sleep(0.01)
+        time.sleep(0.02)
 
     runner.join(timeout=20)
     assert not runner.is_alive()
-    assert saw_alive_without_event is True
+    assert violation is False
     assert outcome["result"].event_type == SubagentEventType.cancelled
     assert "child_thread.cancelled" in [
         event.event_type for event in parent_auth.read_after(0)
     ]
     assert not bg.has_active(started["session_id"])
+
+
+def test_cancelled_result_downgrades_when_cleanup_is_incomplete(tmp_path):
+    cancel = threading.Event()
+    cancel.set()
+    mc = MagicMock(spec=ModelClient)
+    mc.stream_chat.return_value = [ModelEvent(type="done")]
+    runtime, _, parent_auth = _runtime(tmp_path, mc)
+    runtime._sandbox_service.destroy = MagicMock(side_effect=RuntimeError("destroy failed"))
+
+    result = runtime.run(_child(), _ctx("sess_main", abort_check=cancel.is_set))
+
+    assert result.event_type == SubagentEventType.failed
+    assert result.completed is False
+    assert result.reason == "cleanup_incomplete"
+    terminal_events = [
+        event for event in parent_auth.read_after(0)
+        if event.event_type in ("child_thread.cancelled", "child_thread.failed")
+    ]
+    assert terminal_events
+    assert {event.event_type for event in terminal_events} == {"child_thread.failed"}
+    assert {event.payload["reason"] for event in terminal_events} == {"cleanup_incomplete"}
 
 
 def test_child_bg_tasks_killed_and_verified_on_cancel(tmp_path):

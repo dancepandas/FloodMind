@@ -293,7 +293,10 @@ class ChildThreadRuntime:
                 abort=bool(context.abort_check and context.abort_check()),
                 run_state=run_state,
             )
-            self._cleanup_child(child_session_id, sandbox_ctx)
+            verified = self._cleanup_child(child_session_id, sandbox_ctx)
+            terminal_event, payload, subagent_result = self._finalize_classification(
+                terminal_event, payload, subagent_result, verified=verified,
+            )
             if child_auth is not None:
                 child_auth.emit(terminal_event, payload)
             parent_auth.emit(
@@ -307,21 +310,26 @@ class ChildThreadRuntime:
                 if (context.abort_check and context.abort_check())
                 else "child_thread.failed"
             )
-            parent_auth.emit(terminal, {
+            payload = {
                 "thread_id": child_thread.thread_id,
                 "parent_call_id": child_thread.parent_call_id,
                 "session_id": child_session_id,
                 "summary": str(exc),
                 "artifact_ids": [],
                 "reason": str(exc),
-            }, thread_id=child_thread.thread_id)
+            }
+            self._cleanup_child(child_session_id, sandbox_ctx)
+            parent_auth.emit(
+                terminal, payload, thread_id=child_thread.thread_id,
+            )
             raise
         finally:
             # 7. 清理：先确认子会话后台任务终态，再销毁沙盒。
             self._cleanup_child(child_session_id, sandbox_ctx)
 
-    def _cleanup_child(self, child_session_id: str, sandbox_ctx: Any) -> None:
-        """Wait for child background tasks, force-kill them, then destroy sandbox."""
+    def _cleanup_child(self, child_session_id: str, sandbox_ctx: Any) -> bool:
+        """Clean up child resources and report whether terminal state was verified."""
+        background_verified = False
         try:
             deadline = time.monotonic() + 10.0
             while (
@@ -330,13 +338,20 @@ class ChildThreadRuntime:
             ):
                 time.sleep(0.05)
             self._background_task_service.kill_session(child_session_id)
+            background_verified = not self._background_task_service.has_active(
+                child_session_id,
+            )
         except Exception as exc:
             logger.warning("child cleanup background failed: %s", exc)
+
+        sandbox_verified = sandbox_ctx is None
         if sandbox_ctx is not None:
             try:
                 self._sandbox_service.destroy(sandbox_ctx)
+                sandbox_verified = True
             except Exception as exc:
                 logger.warning("child sandbox destroy failed: %s", exc)
+        return background_verified and sandbox_verified
 
     def _build_child_executor(
         self, child_auth, child_model_client, registry, tool_loader, event_bus,
@@ -423,6 +438,23 @@ class ChildThreadRuntime:
             completed=completed,
             reason=reason,
         )
+
+    @staticmethod
+    def _finalize_classification(terminal_event, payload, result, *, verified):
+        requires_verified_cleanup = (
+            terminal_event == "child_thread.cancelled"
+            or result.reason.startswith("quota:")
+        )
+        if verified or not requires_verified_cleanup:
+            return terminal_event, payload, result
+        failed_payload = dict(payload)
+        failed_payload["reason"] = "cleanup_incomplete"
+        failed_result = result.model_copy(update={
+            "event_type": SubagentEventType.failed,
+            "completed": False,
+            "reason": "cleanup_incomplete",
+        })
+        return "child_thread.failed", failed_payload, failed_result
 
     @staticmethod
     def _summarize_tools(result: AgentResult) -> list:
