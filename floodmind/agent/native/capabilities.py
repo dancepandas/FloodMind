@@ -54,13 +54,18 @@ class CapabilityRegistry:
         self._exact[model_id] = caps
 
     def resolve_capabilities(self, provider: str, family: str, model: str) -> Tuple[ModelCapabilities, CapabilitySource]:
-        if model in self._exact:
-            return self._exact[model], CapabilitySource.exact
+        # 分层覆盖 = 继承合并，而非整体替换：从 provider 默认出发，
+        # 未显式设置的字段沿 family → exact 逐层继承（§7.6）。
+        base = self._provider_defaults.get(provider) or ModelCapabilities()
+        entry, source = None, CapabilitySource.provider_default
         if (provider, family) in self._family:
-            return self._family[(provider, family)], CapabilitySource.family
-        if provider in self._provider_defaults:
-            return self._provider_defaults[provider], CapabilitySource.provider_default
-        return ModelCapabilities(), CapabilitySource.provider_default
+            entry, source = self._family[(provider, family)], CapabilitySource.family
+        if model in self._exact:
+            entry, source = self._exact[model], CapabilitySource.exact
+        if entry is None:
+            return base.model_copy(deep=True), source
+        merged = ModelCapabilities(**{**base.model_dump(), **entry.model_dump(exclude_unset=True)})
+        return merged, source
 
     def snapshot(self, provider: str, family: str, model: str, *, source_version: str = "", observed_at: str = "") -> CapabilitySnapshot:
         caps, source = self.resolve_capabilities(provider, family, model)
@@ -79,6 +84,8 @@ def _default_registry() -> CapabilityRegistry:
         reasoning_replay_mode="think_tags"))
     reg.register_provider_defaults("kimi", ModelCapabilities(
         transport_family="openai", supports_tools=True, supports_reasoning=False))
+    # moonshot 是 kimi 的运行时 provider 别名（KimiPipeline.match 两者皆可）。
+    reg.register_provider_defaults("moonshot", reg._provider_defaults["kimi"])
     reg.register_provider_defaults("minimax", ModelCapabilities(
         transport_family="openai", supports_tools=True, supports_parallel_tools=True))
     reg.register_provider_defaults("dashscope", ModelCapabilities(
