@@ -179,6 +179,15 @@ class ChildThreadRuntime:
                 authority=child_auth,
                 allowed_roots=[str(sandbox_ctx.workspace_dir)],
             )
+            from floodmind.agent.runtime.services.child_permission_context import (
+                build_child_permission_context,
+            )
+            child_perm, child_path = build_child_permission_context(
+                parent_path_service=self._path_service,
+                parent_permission_service=self._permission_service,
+                child_workspace=sandbox_ctx.workspace_dir,
+                child_session_id=child_session_id,
+            )
             if self._quota_factory is not None:
                 quota = self._quota_factory(child_thread)
             else:
@@ -200,8 +209,8 @@ class ChildThreadRuntime:
                 runtime_mode="execution",
                 workspace_id=str(sandbox_ctx.workspace_dir),
                 sandbox_id=child_session_id,
-                permission_service=self._permission_service,
-                path_service=self._path_service,
+                permission_service=child_perm,
+                path_service=child_path,
                 background_service=self._background_task_service,
                 artifact_service=sub_artifact_service,
                 journal_authority=child_auth,
