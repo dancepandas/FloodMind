@@ -46,13 +46,13 @@ def test_publish_rejects_symlink_escape(tmp_path):
     store = tmp_path / "artifacts"
     svc = ArtifactService(store, allowed_roots=[str(tmp_path / "in")])
     src = _write(tmp_path, "in/evil", b"")
-    link = src
+    src.unlink()  # 占位文件先删除，否则 symlink_to 抛 FileExistsError
     try:
-        link.symlink_to(victim)
+        src.symlink_to(victim)
     except (OSError, NotImplementedError):
         pytest.skip("symlink 不可用")
     with pytest.raises(Exception):
-        svc.publish(ArtifactDeclaration(logical_name="evil", source_path=str(link)))
+        svc.publish(ArtifactDeclaration(logical_name="evil", source_path=str(src)))
 
 
 def test_publish_content_containment_enforced(tmp_path):
