@@ -308,6 +308,10 @@ class BackgroundTaskService:
             running = [t for t in self._active_tasks.values() if t.session_id == session_id]
             return completed + running
 
+    def child_namespace(self, session_id: str) -> List[BackgroundTask]:
+        """子代理专用后台命名空间：仅该 session 的任务（别名，语义清晰化）。"""
+        return self.list(session_id)
+
     def has_active(self, session_id: str) -> bool:
         """Return whether the session has any non-terminal background task."""
         session_id = validate_session_id(session_id)
