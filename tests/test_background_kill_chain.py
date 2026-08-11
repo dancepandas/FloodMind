@@ -91,19 +91,22 @@ def test_nested_bind_restores_parent_authority(tmp_path):
     parent = _RecordingAuthority()
     child = _RecordingAuthority()
     svc.bind_thread_authority(parent)
-    svc.bind_thread_authority(child)
-    svc.unbind_thread_authority()
+    try:
+        svc.bind_thread_authority(child)
+        svc.unbind_thread_authority()
 
-    task = svc.start("sess_1", "true", _sleep_cmd(0.1), cwd=str(tmp_path))
-    assert task.journal_authority is parent
-    deadline = time.time() + 10
-    while task.status in ("running", "starting") and time.time() < deadline:
-        time.sleep(0.05)
-    assert task.status == "completed"
-    assert "background.started" in parent.events
-    assert "background.completed" in parent.events
-    assert child.events == []
-    svc.unbind_thread_authority()
+        task = svc.start("sess_1", "true", _sleep_cmd(0.1), cwd=str(tmp_path))
+        assert task.journal_authority is parent
+        assert "background.started" in parent.events
+
+        deadline = time.time() + 10
+        while "background.completed" not in parent.events and time.time() < deadline:
+            time.sleep(0.05)
+
+        assert parent.events.index("background.started") < parent.events.index("background.completed")
+        assert child.events == []
+    finally:
+        svc.unbind_thread_authority()
 
 
 def test_completion_emits_completed_event(tmp_path):
