@@ -20,6 +20,7 @@ import openai
 from floodmind.agent.native.types import InvalidToolCall, ModelEvent, TerminalReason, ToolCall
 from floodmind.agent.runtime.contracts.messages import ai_message, Message
 from floodmind.agent.native.retry import is_retryable_error
+from floodmind.agent.native.transport import OpenAIChatTransport
 
 logger = logging.getLogger(__name__)
 
@@ -48,7 +49,7 @@ class ModelClient:
         validate_openai_compatible_transport(provider, base_url)
         from floodmind.agent.native.providers import route_codec
         self.pipeline = route_codec(provider, model_name, base_url)
-        self._client = openai.OpenAI(
+        self._transport = OpenAIChatTransport(
             api_key=api_key,
             base_url=base_url,
             timeout=timeout,
@@ -155,7 +156,7 @@ class ModelClient:
         )
 
         try:
-            response = self._client.chat.completions.create(**request_params)
+            response = self._transport.send(request_params).chunks()
         except openai.APIError as e:
             logger.error("ModelClient invoke error: %s", e)
             raise
@@ -240,7 +241,7 @@ class ModelClient:
             return ToolCall(id=acc["id"], name=acc["name"], arguments=parsed_args), None
 
         try:
-            stream = self._client.chat.completions.create(**request_params)
+            stream = self._transport.send(request_params).chunks()
         except openai.APIError as e:
             # 可重试错误（如连接阶段的网络抖动）直接抛给调用方（executor 重试循环），
             # 保留异常链（APIConnectionError 的 str() 恒为 "Connection error."，

@@ -320,7 +320,7 @@ class TestStreamParsing:
                 finish_reason="tool_calls",
             )])
         ])
-        client._client = mock_client
+        client._transport._client = mock_client
         events = list(client.stream_chat(messages=[{"role": "user", "content": "x"}]))
         assert next(e.content for e in events if e.type == "reasoning") == "think"
         assert next(e.content for e in events if e.type == "token") == "answer"
@@ -425,7 +425,7 @@ class TestStreamParsing:
                 choices=[_ns(delta=_ns(content=None, tool_calls=None), finish_reason="stop")],
             ),
         ])
-        client._client = mock_client
+        client._transport._client = mock_client
 
         events = list(client.stream_chat(messages=[{"role": "user", "content": "x"}]))
         usage_events = [json.loads(e.content) for e in events if e.type == "usage"]
@@ -443,7 +443,7 @@ class TestStreamParsing:
         ])
         mock_client = MagicMock()
         mock_client.chat.completions.create.return_value = stream
-        client._client = mock_client
+        client._transport._client = mock_client
 
         events = list(client.stream_chat(
             messages=[{"role": "user", "content": "x"}],
@@ -525,7 +525,7 @@ class TestToolCallIdAlignment:
         ]
         mock_client = MagicMock()
         mock_client.chat.completions.create.return_value = iter(stream)
-        client._client = mock_client
+        client._transport._client = mock_client
 
         events = list(client.stream_chat(messages=[{"role": "user", "content": "hi"}]))
         tool_call_event = next(e for e in events if e.type == "tool_call_done")
@@ -564,7 +564,7 @@ class TestToolCallIdAlignment:
         ]
         mock_client = MagicMock()
         mock_client.chat.completions.create.return_value = iter(stream)
-        client._client = mock_client
+        client._transport._client = mock_client
 
         events = list(client.stream_chat(messages=[{"role": "user", "content": "hi"}]))
         tool_call_event = next(e for e in events if e.type == "tool_call_done")
@@ -588,7 +588,7 @@ class TestToolCallIdAlignment:
         ]
         mock_client = MagicMock()
         mock_client.chat.completions.create.return_value = iter(stream)
-        client._client = mock_client
+        client._transport._client = mock_client
 
         events = list(client.stream_chat(messages=[{"role": "user", "content": "go"}]))
         assert not [e for e in events if e.type == "tool_call_done"]
@@ -614,7 +614,7 @@ class TestToolCallIdAlignment:
         mock_client.chat.completions.create.return_value = iter([
             _ns(choices=[_ns(delta=_ns(content=None, tool_calls=None), finish_reason=raw)])
         ])
-        client._client = mock_client
+        client._transport._client = mock_client
         done = next(e for e in client.stream_chat(messages=[{"role": "user", "content": "x"}]) if e.type == "done")
         assert done.terminal_reason.code == code
         assert done.terminal_reason.raw == raw
