@@ -37,11 +37,17 @@ def open_journal_authority(
     thread_id: str,
     turn_id: str,
     attempt_id: str = "",
+    index: bool = False,
 ) -> "JournalAuthority":
     journal_dir = _run_journal_dir(runtime_dir, conversation_id, task_id, run_id)
     writer = JournalWriter(runtime_dir, run_id, journal_dir=journal_dir)
+    journal_index = None
+    if index:
+        from floodmind.agent.runtime.services.journal_index import SqliteJournalIndex
+        journal_index = SqliteJournalIndex(journal_dir, run_id)
     return JournalAuthority(
         writer=writer,
+        index=journal_index,
         conversation_id=conversation_id,
         task_id=task_id,
         run_id=run_id,
@@ -56,6 +62,7 @@ class JournalAuthority:
         self,
         *,
         writer: JournalWriter,
+        index: Optional[Any] = None,
         conversation_id: str,
         task_id: str,
         run_id: str,
@@ -64,6 +71,7 @@ class JournalAuthority:
         attempt_id: str = "",
     ):
         self._writer = writer
+        self._index = index
         self.conversation_id = conversation_id
         self.task_id = task_id
         self.run_id = run_id
@@ -99,15 +107,30 @@ class JournalAuthority:
 
     def emit(self, event_type: str, payload: Dict[str, Any], **scope) -> EventEnvelope:
         envelope = self.new_envelope(event_type, payload, **scope)
-        return self._writer.append(envelope)
+        envelope = self._writer.append(envelope)
+        if self._index:
+            try:
+                self._index.index_event(envelope)
+            except Exception:
+                pass
+        return envelope
 
     def append_group(self, events: List[EventEnvelope]) -> List[EventEnvelope]:
-        return self._writer.append_many(events)
+        envelopes = self._writer.append_many(events)
+        if self._index:
+            for envelope in envelopes:
+                try:
+                    self._index.index_event(envelope)
+                except Exception:
+                    pass
+        return envelopes
 
     def cursor(self) -> int:
         return self._writer.current_sequence()
 
     def read_after(self, after_sequence: int = 0) -> List[EventEnvelope]:
+        if self._index is not None:
+            return self._index.read_after(after_sequence)
         return self._writer.read_from(after_sequence)
 
     def replay(self, after_sequence: int = 0, state: Optional[RunState] = None) -> RunState:
