@@ -64,6 +64,7 @@ class BackgroundTask:
     finished_at: Optional[float] = None
     tail: str = ""
     error: str = ""
+    process_identity: Optional[Dict[str, Any]] = None  # {pid, create_time}
 
     @property
     def running(self) -> bool:
@@ -183,6 +184,7 @@ class BackgroundTaskService:
                 kwargs["preexec_fn"] = os.setsid  # 独立进程组，killpg 可靠
 
             process = subprocess.Popen(shell_cmd, **kwargs)
+            from floodmind.agent.runtime.services.process_identity import process_create_time
             task = BackgroundTask(
                 task_id=task_id,
                 session_id=session_id,
@@ -195,6 +197,7 @@ class BackgroundTaskService:
                 meta_path=str(meta_path),
                 started_at=time.time(),
                 max_lifetime_seconds=lifetime,
+                process_identity={"pid": process.pid, "create_time": process_create_time(process.pid)},
             )
             self._emit("background.start.requested", {
                 "task_id": task_id,
@@ -363,6 +366,51 @@ class BackgroundTaskService:
         if task is None:
             return False
         return self.kill(task.session_id, task_id, confirm_timeout=confirm_timeout)
+
+    def reconcile_background(self) -> Dict[str, int]:
+        """Host 重启后从 meta.json 对账（§12 / §25.7）。
+
+        扫描各会话 background/*/meta.json 中 status 为 running/starting 的任务：
+        - PID 存活且身份匹配  -> 保持 running（kept_running）
+        - PID 存活但身份不符  -> unknown（PID 复用/身份无法确认）
+        - PID 已死 / 无 PID   -> orphaned（父进程已失联）
+        completed/failed/killed 等终态不动。
+        """
+        result = {"kept_running": 0, "orphaned": 0, "unknown": 0}
+        if self._base_dir is None:
+            return result
+        from floodmind.agent.runtime.services.process_identity import (
+            pid_identity_matches,
+            process_exists,
+        )
+
+        for meta_file in sorted(self._base_dir.rglob("meta.json")):
+            try:
+                meta = json.loads(meta_file.read_text(encoding="utf-8"))
+            except Exception as e:
+                logger.warning("reconcile: meta unreadable %s: %s", meta_file, e)
+                continue
+            if meta.get("status") not in ("running", "starting"):
+                continue
+            pid = meta.get("pid")
+            identity = meta.get("process_identity") or {}
+            stored_ct = identity.get("create_time")
+            task_id = meta.get("task_id", "")
+            if process_exists(pid):
+                if pid_identity_matches(pid, stored_ct):
+                    # 进程仍存活：保持 running，但更新 meta 标记为已对账
+                    meta["status"] = "running"
+                    result["kept_running"] += 1
+                else:
+                    meta["status"] = "unknown"
+                    result["unknown"] += 1
+            else:
+                meta["status"] = "orphaned"
+                result["orphaned"] += 1
+            meta_file.write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
+            if meta["status"] in ("orphaned", "unknown"):
+                logger.info("Background reconcile: %s=%s pid=%s", task_id, meta["status"], pid)
+        return result
 
     def drain_completions(self, session_id: str) -> List[BackgroundTask]:
         """取出本会话已完成的全部任务（注入完成通知用，取后清空）。"""

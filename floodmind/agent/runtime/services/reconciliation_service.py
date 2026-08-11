@@ -89,6 +89,12 @@ class ReconciliationService:
                                {"thread_id": ct.thread_id, "parent_call_id": ct.parent_call_id,
                                 "summary": "reconciled"})
                 result.child_threads_closed += 1
+        # 4a) Host 重启后 PID/Meta 对账（§12 / §25.7）
+        try:
+            if self._background_task_service is not None:
+                self._background_task_service.reconcile_background()
+        except Exception as e:
+            logger.warning("Background reconcile failed: %s", e)
         # 4) 后台任务清理（P6）：active_background_tasks 为 task_id 列表，
         #    经 kill_task 走完整 kill 验证链（§12）。
         if self._background_task_service is not None:
