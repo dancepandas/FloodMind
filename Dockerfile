@@ -1,5 +1,14 @@
 # RTX 2080 (Turing架构, CUDA 12.4)
 # 使用 PyTorch 2.6.0+ 修复 CVE-2025-32434 安全漏洞
+#
+# ── 架构基线（forward-only）─────────────────────────────────
+# FloodMind 已切到 SDK-first：web/TUI 前端被弃用，desktop 端由独立项目消费
+# 本 SDK API。本镜像不再启动 Flask/waitress web 服务，改为承载 SDK + 其
+# 依赖的可复现运行环境。运行示例：
+#   docker run --rm -it floodmind-sdk \
+#       floodmind run "加载某流域降雨 CSV 并预报未来 24h 流量"
+# 若团队需要 web 部署，请在新项目里基于本 SDK 包二次开发。
+# ──────────────────────────────────────────────────────────
 FROM pytorch/pytorch:2.6.0-cuda12.4-cudnn9-runtime
 
 WORKDIR /app
@@ -31,12 +40,11 @@ RUN pip config set global.index-url https://pypi.tuna.tsinghua.edu.cn/simple \
 ENV PIP_DEFAULT_TIMEOUT=300
 ENV PIP_RETRIES=10
 
-COPY requirements.txt .
-RUN pip install --no-cache-dir --progress-bar off -r requirements.txt
+COPY . .
+# 安装 SDK + 其 GPU/文档依赖（无 web/tui extras）
+RUN pip install --no-cache-dir --progress-bar off ".[deployment]"
 
 RUN npm install -g docx
-
-COPY . .
 
 RUN mkdir -p /app/data/sessions \
     && mkdir -p /app/data/vector_store \
@@ -53,9 +61,6 @@ ENV PYTHONIOENCODING=utf-8
 ENV MPLBACKEND=Agg
 ENV MPLCONFIGDIR=/app/data/matplotlib
 
-EXPOSE 13014
-
-HEALTHCHECK --interval=30s --timeout=10s --start-period=10s --retries=3 \
-    CMD curl -f http://localhost:13014/api/health || exit 1
-
-CMD ["python", "-m", "waitress", "--host=0.0.0.0", "--port=13014", "--threads=16", "web_server:app"]
+# SDK-only：默认入口展示帮助。调用方应在自己的服务里 `from floodmind import Agent`。
+# 示例：`docker run --rm floodmind-sdk floodmind run "你的任务"`
+CMD ["floodmind", "--help"]

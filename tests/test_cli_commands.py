@@ -15,40 +15,22 @@ from floodmind import __version__
 from floodmind.cli import main
 
 
-_LEGACY_MODULES = ("floodmind.tui", "floodmind.server", "flask", "textual")
-
-
-def _forget_legacy_modules():
-    for name in _LEGACY_MODULES:
-        sys.modules.pop(name, None)
-
-
-def _assert_legacy_not_imported():
-    for name in _LEGACY_MODULES:
-        assert name not in sys.modules
-
-
-@pytest.fixture(autouse=True)
-def clean_legacy_modules():
-    _forget_legacy_modules()
-    yield
-
-
 @pytest.fixture
 def runner():
     return CliRunner()
 
 
 class TestMainGroup:
-    def test_help_shows_core_and_legacy_commands(self, runner):
+    def test_help_shows_core_commands(self, runner):
         result = runner.invoke(main, ["--help"])
         assert result.exit_code == 0
         assert "run" in result.output
         assert "config" in result.output
         assert "providers" in result.output
-        assert "tui" in result.output
-        assert "web" in result.output
-        assert "serve" in result.output
+        # Web/TUI 命令已弃用移除：help 文本不应再列出这些入口
+        assert "tui" not in result.output
+        assert "web" not in result.output
+        assert "serve" not in result.output
 
     def test_version(self, runner):
         result = runner.invoke(main, ["--version"])
@@ -105,55 +87,6 @@ print(json.dumps({"first": first.exit_code, "second": second.exit_code}))
         assert len(list(home.glob("settings.json.bak.*"))) == 1
 
 
-class TestTuiCommand:
-    @patch("floodmind.cli._validate_api_key")
-    def test_tui_reports_legacy_notice(self, mock_validate, runner):
-        result = runner.invoke(main, ["tui"])
-        assert result.exit_code == 0
-        assert "legacy" in result.output
-        assert "floodmind run" in result.output
-        mock_validate.assert_not_called()
-        _assert_legacy_not_imported()
-
-    @patch("floodmind.cli._validate_api_key")
-    def test_tui_with_port_reports_legacy_notice(self, mock_validate, runner):
-        result = runner.invoke(main, ["tui", "--port", "8080"])
-        assert result.exit_code == 0
-        assert "legacy" in result.output
-        mock_validate.assert_not_called()
-        _assert_legacy_not_imported()
-
-
-class TestWebCommand:
-    @patch("floodmind.cli._validate_api_key", return_value=None)
-    def test_web_reports_legacy_notice(self, mock_validate, runner):
-        result = runner.invoke(main, ["web"])
-        assert result.exit_code == 0
-        assert "legacy" in result.output
-        assert "floodmind run" in result.output
-        mock_validate.assert_not_called()
-        _assert_legacy_not_imported()
-
-    @patch("floodmind.cli._validate_api_key", return_value=None)
-    def test_web_no_browser_reports_legacy_notice(self, mock_validate, runner):
-        result = runner.invoke(main, ["web", "--no-browser"])
-        assert result.exit_code == 0
-        assert "legacy" in result.output
-        mock_validate.assert_not_called()
-        _assert_legacy_not_imported()
-
-
-class TestServeCommand:
-    @patch("floodmind.cli._validate_api_key")
-    def test_serve_reports_legacy_notice(self, mock_validate, runner):
-        result = runner.invoke(main, ["serve"])
-        assert result.exit_code == 0
-        assert "legacy" in result.output
-        assert "floodmind run" in result.output
-        mock_validate.assert_not_called()
-        _assert_legacy_not_imported()
-
-
 class TestChatCommand:
     @patch("floodmind.cli._validate_api_key")
     @patch("floodmind.cli._run_chat_legacy", return_value=0)
@@ -161,24 +94,6 @@ class TestChatCommand:
         result = runner.invoke(main, ["chat"])
         assert result.exit_code == 0
         mock_chat.assert_called_once()
-
-    @patch("floodmind.cli._validate_api_key")
-    def test_chat_with_tui_flag_reports_legacy_notice(self, mock_validate, runner):
-        result = runner.invoke(main, ["chat", "--tui"])
-        assert result.exit_code == 0
-        assert "legacy" in result.output
-        assert "floodmind run" in result.output
-        mock_validate.assert_not_called()
-        _assert_legacy_not_imported()
-
-    @patch("floodmind.cli._validate_api_key")
-    def test_chat_with_web_flag_reports_legacy_notice(self, mock_validate, runner):
-        result = runner.invoke(main, ["chat", "--web"])
-        assert result.exit_code == 0
-        assert "legacy" in result.output
-        assert "floodmind run" in result.output
-        mock_validate.assert_not_called()
-        _assert_legacy_not_imported()
 
 
 class TestRunCommand:
@@ -236,45 +151,9 @@ class TestNoArgsMenu:
         assert "floodmind run" in result.output
 
     @patch("floodmind.cli._validate_api_key")
-    @patch("floodmind.cli_interactive.show_menu", return_value="t")
-    def test_tui_choice_reports_legacy_notice(self, mock_menu, mock_validate, runner):
-        result = runner.invoke(main, [])
-        assert result.exit_code == 0
-        assert "legacy" in result.output
-        _assert_legacy_not_imported()
-
-    @patch("floodmind.cli._validate_api_key")
-    @patch("floodmind.cli_interactive.show_menu", return_value="w")
-    def test_web_choice_reports_legacy_notice(self, mock_menu, mock_validate, runner):
-        result = runner.invoke(main, [])
-        assert result.exit_code == 0
-        assert "legacy" in result.output
-        _assert_legacy_not_imported()
-
-    @patch("floodmind.cli._validate_api_key")
     @patch("floodmind.cli._run_chat_legacy", return_value=0)
     @patch("floodmind.cli_interactive.show_menu", return_value="c")
     def test_chat_choice_runs_chat(self, mock_menu, mock_chat, mock_validate, runner):
         result = runner.invoke(main, [])
         assert result.exit_code == 0
         mock_chat.assert_called_once()
-
-
-class TestFlagShortcuts:
-    @patch("floodmind.cli._validate_api_key")
-    def test_tui_flag_shortcut_reports_legacy_notice(self, mock_validate, runner):
-        result = runner.invoke(main, ["--tui"])
-        assert result.exit_code == 0
-        assert "legacy" in result.output
-        assert "floodmind run" in result.output
-        mock_validate.assert_not_called()
-        _assert_legacy_not_imported()
-
-    @patch("floodmind.cli._validate_api_key")
-    def test_web_flag_shortcut_reports_legacy_notice(self, mock_validate, runner):
-        result = runner.invoke(main, ["--web"])
-        assert result.exit_code == 0
-        assert "legacy" in result.output
-        assert "floodmind run" in result.output
-        mock_validate.assert_not_called()
-        _assert_legacy_not_imported()
