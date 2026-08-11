@@ -1,5 +1,6 @@
 """SandboxBackend 强制边界测试（§11.4）。"""
 import os
+import platform
 import sys
 import time
 from pathlib import Path
@@ -12,6 +13,12 @@ from floodmind.agent.runtime.contracts.sandbox import (
 from floodmind.agent.runtime.services.sandbox_backend import LocalRestrictedSandbox
 
 
+_PROCESS_CAPABILITIES = {
+    "process_tree", "resource_time", "resource_output", "env_restriction",
+    "secret_inject", "cwd_containment", "temp_containment", "cancellation",
+}
+
+
 def _py(args: list) -> list:
     """用当前解释器执行一段 Python 代码，避免依赖系统 PATH 里的 python。"""
     return [sys.executable, "-c", args]
@@ -19,6 +26,58 @@ def _py(args: list) -> list:
 
 def _policy(root: Path, **kw) -> SandboxPolicy:
     return SandboxPolicy(file_root=str(root), **kw)
+
+
+def test_enforced_capabilities_reflected():
+    sb = LocalRestrictedSandbox()
+    assert _PROCESS_CAPABILITIES <= sb.enforced_capabilities
+    assert ("filesystem_root" in sb.enforced_capabilities) == sb._landlock_active()
+
+
+def test_tmp_dir_created(tmp_path):
+    sb = LocalRestrictedSandbox()
+    res = sb.execute(
+        ToolInvocation(command=_py("pass"), cwd=str(tmp_path)),
+        _policy(tmp_path),
+    )
+    assert res.exit_code == 0
+    assert (tmp_path / "tmp").is_dir()
+
+
+def test_stdout_and_stderr_share_output_budget(tmp_path):
+    sb = LocalRestrictedSandbox()
+    res = sb.execute(
+        ToolInvocation(
+            command=_py("import sys; print('o' * 900); print('e' * 900, file=sys.stderr)"),
+            cwd=str(tmp_path),
+        ),
+        _policy(tmp_path, resources={"max_output_bytes": 1000}),
+    )
+    assert res.output_truncated is True
+    assert len(res.stdout.encode()) + len(res.stderr.encode()) <= 1000
+
+
+@pytest.mark.skipif(
+    platform.system() != "Linux" or not LocalRestrictedSandbox()._landlock_active(),
+    reason="Landlock unavailable",
+)
+def test_landlock_blocks_fs_escape(tmp_path):
+    root = tmp_path / "root"
+    root.mkdir()
+    outside = tmp_path / "outside.txt"
+    inside = root / "inside.txt"
+    code = (
+        "from pathlib import Path; "
+        f"Path({str(inside)!r}).write_text('inside'); "
+        f"Path({str(outside)!r}).write_text('outside')"
+    )
+    res = LocalRestrictedSandbox().execute(
+        ToolInvocation(command=_py(code), cwd=str(root)),
+        _policy(root),
+    )
+    assert res.exit_code != 0
+    assert inside.read_text() == "inside"
+    assert not outside.exists()
 
 
 def test_executes_command_under_file_root(tmp_path):

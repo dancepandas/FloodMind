@@ -35,6 +35,9 @@ def test_acceptance_cleanup_no_residual_subscriptions(tmp_path):
     deadline = time.time() + 10
     while t.status == "running" and time.time() < deadline:
         time.sleep(0.05)
+    settle_deadline = time.time() + 0.2
+    while t.task_id not in got and time.time() < settle_deadline:
+        time.sleep(0.01)
     assert t.task_id not in got  # 已退订，无残留
 
 
@@ -54,8 +57,11 @@ def test_acceptance_kill_verification_chain(tmp_path):
     assert t.exit_code is not None
 
 
-def test_acceptance_restart_pid_reconcile(tmp_path):
+def test_acceptance_restart_pid_reconcile(tmp_path, monkeypatch):
     """§25.7 Host 重启后可 Reconcile PID/Meta。"""
+    from floodmind.agent.runtime.services import process_identity
+    monkeypatch.setattr(process_identity, "process_exists", lambda pid: False)
+    monkeypatch.setattr(process_identity, "pid_identity_matches", lambda pid, create_time: False)
     # 模拟重启后重建服务：遗留 running meta，PID 已死 -> orphaned
     svc = BackgroundTaskService(base_dir=str(tmp_path))
     task_dir = tmp_path / "sess_a" / "background" / "bg_old"

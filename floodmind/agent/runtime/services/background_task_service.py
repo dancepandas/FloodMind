@@ -487,11 +487,7 @@ class BackgroundTaskService:
             task.finished_at = task.finished_at or time.time()
             task.tail = self._read_tail(task.stdout_path)
             self._write_meta(task)
-            # F1: kill() 正在验证链中（kill_requested/terminating），由 kill() 以终态收尾；
-            # 若此时 finalize，订阅者会收到非终态状态。kill() 两个终态分支都会 finalize。
-            if task.status not in ("kill_requested", "terminating"):
-                self._finalize(task)
-            # Completion 先写 Journal（§12）；kill 已由 kill() 发 killed/kill_failed
+            # Completion 先写 Journal（§12）；kill 已由 kill() 发 killed/kill_failed。
             if task.status in ("completed", "failed"):
                 self._emit("background.completed", {
                     "task_id": task.task_id,
@@ -502,6 +498,10 @@ class BackgroundTaskService:
                     "stderr_path": task.stderr_path,
                     "output_tail": task.tail,
                 })
+            # F1: kill() 正在验证链中（kill_requested/terminating），由 kill() 以终态收尾；
+            # 若此时 finalize，订阅者会收到非终态状态。kill() 两个终态分支都会 finalize。
+            if task.status not in ("kill_requested", "terminating"):
+                self._finalize(task)
 
     def _finalize(self, task: BackgroundTask) -> None:
         """幂等收尾：移出活跃 → 进完成队列 → 通知订阅者。kill()/kill_session()/wait 线程共用。"""

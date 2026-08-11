@@ -1,25 +1,22 @@
-"""SandboxBackend 实现（target §11.4）。
-
-LocalRestrictedSandbox 提供 OS 强制边界：
-- 文件根：cwd 必须落在 file_root 内，越界抛 SandboxViolation；
-- 进程树：每个 execute 独立的 ProcessSandbox（Windows Job Object / POSIX killpg）；
-- 资源：超时（max_seconds / timeout_seconds）终止；stdout/stderr 有界读取；
-- 环境：剥离 HOME/凭证，TEMP/TMP 指向 file_root/tmp，env_allowlist 过滤，secret_inject 注入；
-- 取消：cancellation() 为 True 时终止并返回 cancelled=True。
-"""
+"""SandboxBackend implementations (target §11.4)."""
 
 from __future__ import annotations
 
+import ctypes
+import errno
 import logging
+import os
+import platform
 import subprocess
 import threading
 import time
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Dict, Optional
 
 from floodmind.agent.runtime.contracts.sandbox import (
     CancellationToken,
     ExecutionResult,
+    SandboxBackend,
     SandboxPolicy,
     SandboxViolation,
     ToolInvocation,
@@ -28,53 +25,153 @@ from floodmind.agent.runtime.services.process_sandbox import ProcessSandbox
 
 logger = logging.getLogger(__name__)
 
-# 被剥离的凭证类父环境变量
 _CRED_KEYS = ("HOME", "USERPROFILE", "HOMEDRIVE", "HOMEPATH")
-# 即使 allowlist 非空也必须保留的运行必需变量
 _REQUIRED_ENV = ("PATH", "SYSTEMROOT", "SystemRoot", "COMSPEC", "TEMP", "TMP", "TMPDIR")
 
+_LL_EXECUTE = 1 << 0
+_LL_WRITE_FILE = 1 << 1
+_LL_READ_FILE = 1 << 2
+_LL_READ_DIR = 1 << 3
+_LL_REMOVE_DIR = 1 << 4
+_LL_REMOVE_FILE = 1 << 5
+_LL_MAKE_CHAR = 1 << 6
+_LL_MAKE_DIR = 1 << 7
+_LL_MAKE_REG = 1 << 8
+_LL_MAKE_SYM = 1 << 9
+_LL_ALL = (
+    _LL_EXECUTE | _LL_WRITE_FILE | _LL_READ_FILE | _LL_READ_DIR | _LL_REMOVE_DIR
+    | _LL_REMOVE_FILE | _LL_MAKE_CHAR | _LL_MAKE_DIR | _LL_MAKE_REG | _LL_MAKE_SYM
+)
+_LL_READ_EXEC = _LL_EXECUTE | _LL_READ_FILE | _LL_READ_DIR
+_LL_RULE_PATH_BENEATH = 1
+_LL_CREATE_RULESET_VERSION = 1
+_PR_SET_NO_NEW_PRIVS = 38
 
-class SandboxBackend:
-    """SandboxBackend Protocol（§11.4）。"""
 
-    def execute(
-        self,
-        invocation: ToolInvocation,
-        policy: SandboxPolicy,
-        cancellation: Optional[CancellationToken] = None,
-    ) -> ExecutionResult:  # pragma: no cover - 契约
-        ...
+class _RulesetAttr(ctypes.Structure):
+    _fields_ = [("handled_access_fs", ctypes.c_uint64)]
+
+
+class _PathBeneathAttr(ctypes.Structure):
+    _fields_ = [("allowed_access", ctypes.c_uint64), ("parent_fd", ctypes.c_int)]
+
+
+def _landlock_functions():
+    """Return Landlock callables, using libc wrappers or the Linux syscall ABI."""
+    if platform.system() != "Linux":
+        return None
+    libc = ctypes.CDLL(None, use_errno=True)
+    names = ("landlock_create_ruleset", "landlock_add_rule", "landlock_restrict_self")
+    if all(hasattr(libc, name) for name in names):
+        return tuple(getattr(libc, name) for name in names) + (libc,)
+    machine = platform.machine().lower()
+    if machine not in {"x86_64", "amd64", "aarch64", "arm64", "riscv64"}:
+        return None
+
+    def call(number):
+        return lambda *args: libc.syscall(number, *args)
+
+    return call(444), call(445), call(446), libc
+
+
+def _landlock_available() -> bool:
+    funcs = _landlock_functions()
+    if funcs is None:
+        return False
+    create_ruleset, _, _, _ = funcs
+    ctypes.set_errno(0)
+    result = create_ruleset(None, 0, _LL_CREATE_RULESET_VERSION)
+    return int(result) >= 1
+
+
+def _add_landlock_path(add_rule, ruleset_fd: int, path: Path, access: int) -> None:
+    o_path = getattr(os, "O_PATH", os.O_RDONLY)
+    parent_fd = os.open(str(path), o_path | getattr(os, "O_CLOEXEC", 0))
+    try:
+        attr = _PathBeneathAttr(allowed_access=access, parent_fd=parent_fd)
+        if add_rule(ruleset_fd, _LL_RULE_PATH_BENEATH, ctypes.byref(attr), 0) < 0:
+            err = ctypes.get_errno()
+            raise OSError(err, os.strerror(err))
+    finally:
+        os.close(parent_fd)
+
+
+def _apply_landlock(root: Path) -> None:
+    """Restrict the child after fork and before exec; failures degrade with warning."""
+    funcs = _landlock_functions()
+    if funcs is None:
+        return
+    create_ruleset, add_rule, restrict_self, libc = funcs
+    ruleset_fd = -1
+    try:
+        if not _landlock_available():
+            return
+        attr = _RulesetAttr(handled_access_fs=_LL_ALL)
+        ruleset_fd = create_ruleset(ctypes.byref(attr), ctypes.sizeof(attr), 0)
+        if ruleset_fd < 0:
+            err = ctypes.get_errno()
+            raise OSError(err, os.strerror(err))
+        _add_landlock_path(add_rule, ruleset_fd, root, _LL_ALL)
+        # The restriction is installed pre-exec. Permit the host runtime to be read and
+        # executed, but never written; mutable access remains exclusive to file_root.
+        for runtime_root in (Path("/bin"), Path("/lib"), Path("/lib64"), Path("/usr")):
+            if runtime_root.exists():
+                _add_landlock_path(add_rule, ruleset_fd, runtime_root, _LL_READ_EXEC)
+        if libc.prctl(_PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) < 0:
+            err = ctypes.get_errno()
+            raise OSError(err, os.strerror(err))
+        if restrict_self(ruleset_fd, 0) < 0:
+            err = ctypes.get_errno()
+            raise OSError(err, os.strerror(err))
+    except OSError as exc:
+        if exc.errno not in (errno.ENOSYS, errno.EOPNOTSUPP):
+            logger.warning("Landlock filesystem restriction unavailable: %s", exc)
+    except Exception as exc:
+        logger.warning("Landlock filesystem restriction unavailable: %s", exc)
+    finally:
+        if ruleset_fd >= 0:
+            os.close(ruleset_fd)
+
+
+class _ByteBudget:
+    def __init__(self, cap: int):
+        self.cap = max(cap, 1)
+        self.used = 0
+        self.lock = threading.Lock()
+
+    def consume(self, chunk: bytes) -> tuple[bytes, bool]:
+        with self.lock:
+            room = max(self.cap - self.used, 0)
+            kept = chunk[:room]
+            self.used += len(kept)
+            return kept, len(kept) < len(chunk)
 
 
 class _BoundedReader(threading.Thread):
-    """从管道有界读取：超过 cap 继续排空（防止子进程阻塞）但不再存储。"""
+    """Drain a pipe while both streams share one cumulative byte budget."""
 
-    def __init__(self, stream, cap: int):
+    def __init__(self, stream, budget: _ByteBudget):
         super().__init__(daemon=True)
         self._stream = stream
-        self._cap = max(cap, 1)
+        self._budget = budget
         self._buf = bytearray()
         self._truncated = False
-        self._stop = threading.Event()
+        self._stop_event = threading.Event()
 
     def run(self) -> None:
         try:
-            while not self._stop.is_set():
+            while not self._stop_event.is_set():
                 chunk = self._stream.read(65536)
                 if not chunk:
                     break
-                if len(self._buf) < self._cap:
-                    room = self._cap - len(self._buf)
-                    self._buf.extend(chunk[:room])
-                    if len(chunk) > room:
-                        self._truncated = True
-                else:
-                    self._truncated = True
+                kept, truncated = self._budget.consume(chunk)
+                self._buf.extend(kept)
+                self._truncated = self._truncated or truncated
         except Exception:
             pass
 
     def stop(self) -> None:
-        self._stop.set()
+        self._stop_event.set()
 
     def text(self) -> str:
         return bytes(self._buf).decode("utf-8", errors="replace")
@@ -85,10 +182,29 @@ class _BoundedReader(threading.Thread):
 
 
 class LocalRestrictedSandbox:
-    """本地受限沙盒（§11.4 默认实现）。"""
+    """Local process sandbox.
+
+    Linux Landlock enforces mutable filesystem containment. Process-tree, wall-time,
+    output, environment, temp, and cancellation boundaries are cross-platform.
+    Network, CPU, memory, and fully cross-platform filesystem isolation require a
+    container backend (for example Docker or Windows Sandbox) behind SandboxBackend.
+    """
 
     def __init__(self) -> None:
-        self._platform = "win" if __import__("os").name == "nt" else "posix"
+        self._platform = "win" if os.name == "nt" else "posix"
+
+    def _landlock_active(self) -> bool:
+        return _landlock_available()
+
+    @property
+    def enforced_capabilities(self) -> set[str]:
+        caps = {
+            "process_tree", "resource_time", "resource_output", "env_restriction",
+            "secret_inject", "cwd_containment", "temp_containment", "cancellation",
+        }
+        if self._landlock_active():
+            caps.add("filesystem_root")
+        return caps
 
     def execute(
         self,
@@ -98,44 +214,45 @@ class LocalRestrictedSandbox:
     ) -> ExecutionResult:
         root = Path(policy.file_root).resolve()
         cwd = self._validate_cwd(root, invocation.cwd)
+        (root / "tmp").mkdir(parents=True, exist_ok=True)
         env = self._build_env(invocation.env, policy, root)
-
         process_sandbox = ProcessSandbox(
             max_processes=policy.resources.max_processes,
             workspace_dir=root / "tmp",
         )
         pkwargs = process_sandbox.wrap_popen_kwargs({})
+        if self._platform == "posix" and "preexec_fn" in pkwargs:
+            def restricted_child() -> None:
+                os.setsid()
+                _apply_landlock(root)
+            pkwargs["preexec_fn"] = restricted_child
+
+        proc = None
+        out = err = None
         try:
-            proc = subprocess.Popen(
-                invocation.command,
-                cwd=str(cwd),
-                env=env,
-                stdin=subprocess.PIPE if invocation.stdin_bytes is not None else subprocess.DEVNULL,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                **pkwargs,
-            )
-        except FileNotFoundError as e:
-            return ExecutionResult(sandbox_violation=f"command not found: {e}")
-        process_sandbox.register_process(proc)
-
-        cap = max(policy.resources.max_output_bytes, 1)
-        out = _BoundedReader(proc.stdout, cap)
-        err = _BoundedReader(proc.stderr, cap)
-        out.start()
-        err.start()
-
-        if invocation.stdin_bytes is not None:
             try:
-                proc.stdin.write(invocation.stdin_bytes)
-                proc.stdin.close()
-            except Exception:
-                pass
+                proc = subprocess.Popen(
+                    invocation.command, cwd=str(cwd), env=env,
+                    stdin=subprocess.PIPE if invocation.stdin_bytes is not None else subprocess.DEVNULL,
+                    stdout=subprocess.PIPE, stderr=subprocess.PIPE, **pkwargs,
+                )
+            except FileNotFoundError as exc:
+                return ExecutionResult(sandbox_violation=f"command not found: {exc}")
+            process_sandbox.register_process(proc)
+            budget = _ByteBudget(policy.resources.max_output_bytes)
+            out = _BoundedReader(proc.stdout, budget)
+            err = _BoundedReader(proc.stderr, budget)
+            out.start()
+            err.start()
+            if invocation.stdin_bytes is not None:
+                try:
+                    proc.stdin.write(invocation.stdin_bytes)
+                    proc.stdin.close()
+                except Exception:
+                    pass
 
-        deadline = time.monotonic() + (invocation.timeout_seconds or policy.resources.max_seconds)
-        timed_out = False
-        cancelled = False
-        try:
+            deadline = time.monotonic() + (invocation.timeout_seconds or policy.resources.max_seconds)
+            timed_out = cancelled = False
             while proc.poll() is None:
                 if cancellation and cancellation():
                     cancelled = True
@@ -151,28 +268,26 @@ class LocalRestrictedSandbox:
             except Exception:
                 process_sandbox.terminate_all()
                 proc.wait(timeout=5)
-        finally:
-            out.stop()
-            err.stop()
             out.join(5)
             err.join(5)
-            for stream in (proc.stdout, proc.stderr):
-                try:
-                    stream.close()
-                except Exception:
-                    pass
-
-        return ExecutionResult(
-            exit_code=proc.returncode,
-            stdout=out.text(),
-            stderr=err.text(),
-            output_truncated=out.truncated or err.truncated,
-            timed_out=timed_out,
-            cancelled=cancelled,
-            pid=proc.pid,
-        )
-
-    # ── helpers ───────────────────────────────────────────────────
+            return ExecutionResult(
+                exit_code=proc.returncode, stdout=out.text(), stderr=err.text(),
+                output_truncated=out.truncated or err.truncated,
+                timed_out=timed_out, cancelled=cancelled, pid=proc.pid,
+            )
+        finally:
+            if out is not None and err is not None:
+                out.stop()
+                err.stop()
+                out.join(5)
+                err.join(5)
+            if proc is not None:
+                for stream in (proc.stdout, proc.stderr):
+                    try:
+                        stream.close()
+                    except Exception:
+                        pass
+            process_sandbox.close()
 
     def _validate_cwd(self, root: Path, cwd_str: str) -> Path:
         cwd = Path(cwd_str).resolve()
@@ -183,16 +298,15 @@ class LocalRestrictedSandbox:
     def _build_env(self, base_env: Dict[str, str], policy: SandboxPolicy, root: Path) -> Dict[str, str]:
         env = dict(base_env)
         tmp_dir = str(root / "tmp")
-        env["TEMP"] = tmp_dir
-        env["TMP"] = tmp_dir
-        env["TMPDIR"] = tmp_dir
+        env.update({"TEMP": tmp_dir, "TMP": tmp_dir, "TMPDIR": tmp_dir})
         for key in _CRED_KEYS:
             env.pop(key, None)
         if policy.env_allowlist:
             keep = set(policy.env_allowlist)
-            for key in _REQUIRED_ENV:
-                if key in base_env:
-                    keep.add(key)
-            env = {k: v for k, v in env.items() if k in keep}
+            keep.update(key for key in _REQUIRED_ENV if key in base_env)
+            env = {key: value for key, value in env.items() if key in keep}
         env.update(policy.secret_inject)
         return env
+
+
+assert isinstance(LocalRestrictedSandbox(), SandboxBackend)

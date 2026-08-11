@@ -54,6 +54,16 @@ class ProcessSandbox:
         if self._platform == "win" and self._job_handle is not None:
             self._assign_to_job(process)
 
+    def close(self) -> None:
+        """关闭 OS 沙盒句柄，但不主动终止已退出或仍运行的进程。"""
+        if self._platform == "win" and self._job_handle is not None:
+            try:
+                import ctypes
+                ctypes.windll.kernel32.CloseHandle(self._job_handle)
+            except Exception as e:
+                logger.warning("ProcessSandbox: CloseHandle failed: %s", e)
+            self._job_handle = None
+
     def terminate_all(self) -> None:
         """结束沙盒内所有进程。"""
         if self._platform == "win" and self._job_handle is not None:
@@ -77,14 +87,7 @@ class ProcessSandbox:
                 except Exception as e:
                     logger.warning("ProcessSandbox: kill process failed: %s", e)
 
-        # 清理句柄
-        if self._platform == "win" and self._job_handle is not None:
-            try:
-                import ctypes
-                ctypes.windll.kernel32.CloseHandle(self._job_handle)
-            except Exception as e:
-                logger.warning("ProcessSandbox: CloseHandle failed: %s", e)
-            self._job_handle = None
+        self.close()
 
     def restrict_env(self, env: Dict[str, str], workspace_dir: Path) -> Dict[str, str]:
         """返回限制后的环境变量。"""

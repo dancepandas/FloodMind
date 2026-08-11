@@ -94,6 +94,30 @@ def test_supersede_links_previous(tmp_path):
     assert m2.supersedes == m1.artifact_id
 
 
+def test_supersede_does_not_mutate_declaration(tmp_path):
+    v1 = _write(tmp_path, "in/v1-copy.txt", b"v1")
+    v2 = _write(tmp_path, "in/v2-copy.txt", b"v2")
+    svc = ArtifactService(tmp_path / "artifacts")
+    old = svc.publish(ArtifactDeclaration(logical_name="v.txt", source_path=str(v1)))
+    declaration = ArtifactDeclaration(logical_name="v.txt", source_path=str(v2))
+
+    new = svc.supersede(old.artifact_id, declaration)
+
+    assert declaration.supersedes is None
+    assert new.supersedes == old.artifact_id
+
+
+def test_artifact_declared_alone_is_not_durable_artifact(tmp_path):
+    from floodmind.agent.runtime.reducer import initial_run_state, reduce
+    from floodmind.agent.runtime.services.journal_authority import open_journal_authority
+
+    auth = open_journal_authority(tmp_path / "journal-declared", conversation_id="c", task_id="t",
+                                   run_id="run_1", thread_id="th", turn_id="tu")
+    event = auth.new_envelope("artifact.declared", {"artifact_id": "art_" + "a" * 28})
+    state = reduce(initial_run_state("run_1", thread_id="th"), event)
+    assert state.artifacts == []
+
+
 def test_publish_emits_journal_events(tmp_path):
     from floodmind.agent.runtime.contracts.canonical_events import EventEnvelope
     from floodmind.agent.runtime.contracts.run_state import RunStatus

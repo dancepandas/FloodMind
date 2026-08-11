@@ -17,6 +17,7 @@ import hashlib
 import json
 import logging
 import os
+import re
 import shutil
 import uuid
 from pathlib import Path
@@ -35,6 +36,7 @@ _MIME_BY_EXT = {
 }
 
 _IMG_EXT = {".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp"}
+_ARTIFACT_ID_RE = re.compile(r"^art_[0-9a-f]{28}$")
 
 
 def _mime_for(path: Path) -> str:
@@ -154,16 +156,19 @@ class ArtifactService:
     # ── 读取 / 验证 / 删除 ───────────────────────────────────────
 
     def resolve(self, artifact_id: str) -> ArtifactManifest:
+        self._validate_artifact_id(artifact_id)
         return self._read_manifest(artifact_id)
 
     def read_path(self, artifact_id: str) -> Path:
         """返回对象路径；下载方必须先 verify 再外发（§25.8 防路径穿越）。"""
+        self._validate_artifact_id(artifact_id)
         m = self._read_manifest(artifact_id)
-        return Path(m.storage_uri)
+        return self._validated_object_path(m.storage_uri)
 
     def verify(self, artifact_id: str) -> bool:
+        self._validate_artifact_id(artifact_id)
         m = self._read_manifest(artifact_id)
-        obj = Path(m.storage_uri)
+        obj = self._validated_object_path(m.storage_uri)
         ok = obj.is_file() and _hash_file(obj) == m.content_sha256
         if self._authority is not None:
             self._authority.emit("artifact.verified", {
@@ -175,8 +180,9 @@ class ArtifactService:
 
     def delete(self, artifact_id: str) -> bool:
         """Retention 删除（§25.8）：移除 manifest + 未被其他 manifest 引用的对象。"""
+        self._validate_artifact_id(artifact_id)
         m = self._read_manifest(artifact_id)
-        obj = Path(m.storage_uri)
+        obj = self._validated_object_path(m.storage_uri)
         self._manifest_path(artifact_id).unlink(missing_ok=True)
         # 仅当没有其他 manifest 引用同一对象时才删对象
         if not self._object_referenced(obj):
@@ -189,8 +195,10 @@ class ArtifactService:
         return True
 
     def supersede(self, old_id: str, declaration: ArtifactDeclaration) -> ArtifactManifest:
-        declaration.supersedes = old_id
-        return self.publish(declaration)
+        self._validate_artifact_id(old_id)
+        decl = declaration.model_copy(deep=True)
+        decl.supersedes = old_id
+        return self.publish(decl)
 
     def load_manifests(self) -> List[ArtifactManifest]:
         out = []
@@ -203,6 +211,18 @@ class ArtifactService:
 
     # ── 内部 ─────────────────────────────────────────────────────
 
+    @staticmethod
+    def _validate_artifact_id(artifact_id: str) -> None:
+        if not _ARTIFACT_ID_RE.fullmatch(artifact_id):
+            raise ValueError(f"非法 artifact_id: {artifact_id!r}")
+
+    def _validated_object_path(self, storage_uri: str) -> Path:
+        obj = Path(storage_uri).resolve()
+        objects_root = self._dirs["objects_dir"].resolve()
+        if obj != objects_root and not obj.is_relative_to(objects_root):
+            raise ValueError(f"Artifact storage_uri {obj} 逃逸 objects 目录 {objects_root}")
+        return obj
+
     def _validate_containment(self, src_real: Path) -> None:
         if not self._allowed_roots:
             return  # 无 allowed_roots 时不强制（测试/离线场景）
@@ -212,6 +232,7 @@ class ArtifactService:
         raise ValueError(f"发布源 {src_real} 逃逸 allowed_roots {self._allowed_roots}")
 
     def _manifest_path(self, artifact_id: str) -> Path:
+        self._validate_artifact_id(artifact_id)
         return self._dirs["manifests_dir"] / f"{artifact_id}.json"
 
     def _write_manifest(self, manifest: ArtifactManifest) -> None:

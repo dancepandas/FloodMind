@@ -1,6 +1,6 @@
 """Sandbox 契约（target §11.4）。"""
 
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, Protocol, runtime_checkable
 
 from pydantic import BaseModel, Field
 
@@ -53,3 +53,15 @@ class SandboxViolation(Exception):
 
 # 取消令牌：返回 True 表示请求取消
 CancellationToken = Callable[[], bool]
+
+
+@runtime_checkable
+class SandboxBackend(Protocol):
+    """沙盒后端结构化契约；容器/Windows Sandbox 实现均通过此 seam 注入。"""
+
+    def execute(
+        self,
+        invocation: ToolInvocation,
+        policy: SandboxPolicy,
+        cancellation: Optional[CancellationToken] = None,
+    ) -> ExecutionResult: ...

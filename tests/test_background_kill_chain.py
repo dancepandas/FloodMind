@@ -82,6 +82,20 @@ def test_completion_emits_completed_event(tmp_path):
     assert done["status"] == "completed"
 
 
+def test_completion_event_precedes_subscriber_notification(tmp_path):
+    ordering = []
+    svc = BackgroundTaskService(
+        base_dir=str(tmp_path),
+        event_sink=lambda event_type, payload: ordering.append(event_type),
+    )
+    svc.subscribe(lambda task: ordering.append("subscriber"), session_id="sess_1")
+    svc.start("sess_1", "true", _sleep_cmd(0.1), cwd=str(tmp_path))
+    deadline = time.time() + 10
+    while "subscriber" not in ordering and time.time() < deadline:
+        time.sleep(0.05)
+    assert ordering.index("background.completed") < ordering.index("subscriber")
+
+
 def test_reducer_tracks_active_background_tasks(tmp_path):
     auth = open_journal_authority(tmp_path / "j", conversation_id="c", task_id="t",
                                    run_id="run_1", thread_id="th", turn_id="tu")

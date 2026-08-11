@@ -2916,6 +2916,12 @@ class NativeFloodAgent:
                     self._orchestrator_executor._journal_authority = auth
 
                     workspace_id = str(_ws.workspace_dir) if _ws is not None else ""
+                    from floodmind.agent.runtime.services.artifact_service import ArtifactService
+                    artifact_service = ArtifactService(
+                        runtime_dir / "artifacts",
+                        authority=auth,
+                        allowed_roots=[workspace_id] if workspace_id else [],
+                    )
                     runtime_context = RuntimeContext(
                         conversation_id=ident["conversation_id"],
                         task_id=ident["task_id"],
@@ -2930,6 +2936,7 @@ class NativeFloodAgent:
                         permission_service=self._permission_service,
                         path_service=self._path_service,
                         background_service=self._background_task_service,
+                        artifact_service=artifact_service,
                         journal_authority=auth,
                     )
                     set_runtime_context(runtime_context)

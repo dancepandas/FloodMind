@@ -263,6 +263,21 @@ class NativeAgentExecutor:
         # 每次 run 干净的压缩失败抑制状态（executor 可跨 run/session 复用）
         self._compaction_failed = False
 
+        # C2: 把后台任务生命周期事件接入 Canonical Journal（§12）
+        background_service = getattr(self, "_background_task_service", None)
+        if self._journal_authority is not None and background_service is not None:
+            try:
+                thread_id = getattr(state, "thread_id", "") or getattr(
+                    getattr(context, "runtime_context", None), "thread_id", ""
+                ) or self._journal_authority.thread_id
+                background_service.set_event_sink(
+                    lambda event_type, payload: self._journal_authority.emit(
+                        event_type, payload, thread_id=thread_id,
+                    )
+                )
+            except Exception as exc:
+                logger.warning("[EXEC] wire background event sink failed: %s", exc)
+
         # 用户中断检查回调
         effective_abort = context.abort_check
 

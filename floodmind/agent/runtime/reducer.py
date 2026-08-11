@@ -428,15 +428,8 @@ def _reduce_run_terminal(
 def _reduce_artifact_declared(
     state: RunState, payload: Dict[str, Any],
 ) -> RunState:
-    """artifact.declared：计入 run 级 artifacts 列表（去重）。"""
-    artifact_id = payload.get("artifact_id", "")
-    if not artifact_id:
-        return state
-    if artifact_id in state.artifacts:
-        return state
-    ns = state.model_copy(deep=True)
-    ns.artifacts = state.artifacts + [artifact_id]
-    return ns
+    """artifact.declared 仅为提交前元数据；不构成 durable artifact fact。"""
+    return state
 
 
 def _reduce_artifact_committed(

@@ -59,6 +59,29 @@ class TestNativeAgentExecutor:
         assert "Hello" in result.final_output
         assert not result.is_timeout
 
+    def test_run_from_state_wires_background_service_to_journal(self, tmp_path):
+        from floodmind.agent.runtime.services.background_task_service import BackgroundTaskService
+        from floodmind.agent.runtime.services.journal_authority import open_journal_authority
+
+        mc = MagicMock(spec=ModelClient)
+        mc.stream_chat.return_value = [ModelEvent(type="token", content="done"), ModelEvent(type="done")]
+        service = BackgroundTaskService(base_dir=str(tmp_path / "sessions"))
+        authority = open_journal_authority(
+            tmp_path / "runtime", conversation_id="c", task_id="t",
+            run_id="run_1", thread_id="th_1", turn_id="tu_1",
+        )
+        executor = self._make_executor(mc, tools_schema=[])
+        executor._background_task_service = service
+        executor._journal_authority = authority
+
+        executor.run(self._make_context(), "hello")
+
+        assert service._event_sink is not None
+        service._event_sink("background.started", {"task_id": "bg_1", "session_id": "test-session"})
+        events = authority.read_after(0)
+        event = next(e for e in events if e.event_type == "background.started")
+        assert event.thread_id == "th_1"
+
     def test_attempt_started_payload_uses_envelope_scope_for_attempt_id(self):
         mc = MagicMock(spec=ModelClient)
         mc.model_name = "test-model"
