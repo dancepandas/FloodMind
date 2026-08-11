@@ -308,6 +308,18 @@ class BackgroundTaskService:
             running = [t for t in self._active_tasks.values() if t.session_id == session_id]
             return completed + running
 
+    def has_active(self, session_id: str) -> bool:
+        """Return whether the session has any non-terminal background task."""
+        session_id = validate_session_id(session_id)
+        with self._lock:
+            return any(
+                task.session_id == session_id
+                and task.status in (
+                    "starting", "running", "kill_requested", "terminating",
+                )
+                for task in self._active_tasks.values()
+            )
+
     def kill(self, session_id: str, task_id: str, confirm_timeout: float = 10.0) -> bool:
         """杀掉任务进程树并验证退出（§12 kill 验证链）。
 

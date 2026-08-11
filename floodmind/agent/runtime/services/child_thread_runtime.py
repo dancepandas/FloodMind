@@ -312,13 +312,26 @@ class ChildThreadRuntime:
             }, thread_id=child_thread.thread_id)
             raise
         finally:
-            # 7. 清理：先终止子会话后台任务，再销毁沙盒（避免进程写已删目录）
+            # 7. 清理：先确认子会话后台任务终态，再销毁沙盒。
+            self._cleanup_child(child_session_id, sandbox_ctx)
+
+    def _cleanup_child(self, child_session_id: str, sandbox_ctx: Any) -> None:
+        """Wait for child background tasks, force-kill them, then destroy sandbox."""
+        try:
+            deadline = time.monotonic() + 10.0
+            while (
+                self._background_task_service.has_active(child_session_id)
+                and time.monotonic() < deadline
+            ):
+                time.sleep(0.05)
+            self._background_task_service.kill_session(child_session_id)
+        except Exception as exc:
+            logger.warning("child cleanup background failed: %s", exc)
+        if sandbox_ctx is not None:
             try:
-                self._background_task_service.kill_session(child_session_id)
-            except Exception as e:
-                logger.warning("child cleanup background failed: %s", e)
-            if sandbox_ctx is not None:
                 self._sandbox_service.destroy(sandbox_ctx)
+            except Exception as exc:
+                logger.warning("child sandbox destroy failed: %s", exc)
 
     def _build_child_executor(
         self, child_auth, child_model_client, registry, tool_loader, event_bus,
