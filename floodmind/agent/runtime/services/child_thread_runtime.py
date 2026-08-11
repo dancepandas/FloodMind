@@ -318,7 +318,10 @@ class ChildThreadRuntime:
                 "artifact_ids": [],
                 "reason": str(exc),
             }
-            self._cleanup_child(child_session_id, sandbox_ctx)
+            verified = self._cleanup_child(child_session_id, sandbox_ctx)
+            if terminal == "child_thread.cancelled" and not verified:
+                terminal = "child_thread.failed"
+                payload["reason"] = "cleanup_incomplete"
             parent_auth.emit(
                 terminal, payload, thread_id=child_thread.thread_id,
             )

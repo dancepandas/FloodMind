@@ -125,6 +125,30 @@ def test_cancelled_result_downgrades_when_cleanup_is_incomplete(tmp_path):
     assert {event.payload["reason"] for event in terminal_events} == {"cleanup_incomplete"}
 
 
+def test_exception_cancel_downgrades_when_cleanup_is_incomplete(tmp_path):
+    cancel = threading.Event()
+    mc = MagicMock(spec=ModelClient)
+    runtime, bg, parent_auth = _runtime(tmp_path, mc)
+    runtime._sandbox_service.create = MagicMock(side_effect=RuntimeError("create failed"))
+    bg.has_active = MagicMock(side_effect=RuntimeError("verification failed"))
+    cancel.set()
+
+    try:
+        runtime.run(_child(), _ctx("sess_main", abort_check=cancel.is_set))
+    except RuntimeError as exc:
+        assert str(exc) == "create failed"
+    else:
+        raise AssertionError("expected stream failure")
+
+    terminal_events = [
+        event for event in parent_auth.read_after(0)
+        if event.event_type in ("child_thread.cancelled", "child_thread.failed")
+    ]
+    assert terminal_events
+    assert {event.event_type for event in terminal_events} == {"child_thread.failed"}
+    assert {event.payload["reason"] for event in terminal_events} == {"cleanup_incomplete"}
+
+
 def test_child_bg_tasks_killed_and_verified_on_cancel(tmp_path):
     mc = MagicMock(spec=ModelClient)
     runtime, bg, parent_auth = _runtime(tmp_path, mc)
