@@ -382,7 +382,6 @@ class NativeFloodAgent:
         self._model_client: Optional[ModelClient] = None
         self._orchestrator_executor: Optional[NativeAgentExecutor] = None
         self._specialist_executor: Optional[NativeAgentExecutor] = None
-        self._child_thread_runtime = None
         self._child_thread_defaults = {
             "max_turns": 50,
             "max_tokens": 32768,
@@ -1988,15 +1987,20 @@ class NativeFloodAgent:
         return registry, loader
 
     def _ensure_child_thread_runtime(self, parent_runtime_context) -> ChildThreadRuntime:
-        if self._child_thread_runtime is not None:
-            return self._child_thread_runtime
+        """构建绑定到当前 run 的 ChildThreadRuntime（每次现建，不缓存）。
+
+        每个 run 有独立的 JournalAuthority / runtime_dir / artifact 根；若缓存，
+        后续 run 会复用首个 run 的绑定，导致子代理事件写进旧 run 的 Journal、
+        lineage 丢失（§13.2 / §25.7）。每次调用按当前 parent authority 现建，
+        并行 specialist 各持独立 runtime，天然无共享可变状态与懒初始化竞态。
+        """
         parent_auth = getattr(self, "_journal_authority", None)
         if parent_auth is None:
             parent_auth = parent_runtime_context.journal_authority
         if parent_auth is None:
             raise ValueError("specialist requires parent JournalAuthority")
         runtime_dir = Path(parent_auth._writer._base_dir)
-        self._child_thread_runtime = ChildThreadRuntime(
+        return ChildThreadRuntime(
             model_client=self._model_client,
             tool_executor=self._tool_executor,
             event_bus=self._event_bus,
@@ -2014,7 +2018,6 @@ class NativeFloodAgent:
             runtime_dir=runtime_dir,
             tool_runtime_factory=self._make_specialist_tool_runtime,
         )
-        return self._child_thread_runtime
 
     def _run_specialist_task(
         self,
@@ -2029,7 +2032,7 @@ class NativeFloodAgent:
         parent_runtime_context = parent_context.runtime_context
         if parent_runtime_context is None:
             raise ValueError("specialist requires parent RuntimeContext identity")
-        self._ensure_child_thread_runtime(parent_runtime_context)
+        runtime = self._ensure_child_thread_runtime(parent_runtime_context)
         child_thread = ChildThread(
             thread_id=new_id("thread"),
             parent_thread_id=parent_runtime_context.thread_id or "",
@@ -2041,7 +2044,7 @@ class NativeFloodAgent:
             max_tokens=self._child_thread_defaults["max_tokens"],
             wall_clock_budget_seconds=self._child_thread_defaults["wall_clock_budget_seconds"],
         )
-        return self._child_thread_runtime.run(
+        return runtime.run(
             child_thread,
             parent_context,
             step_event_bus=step_event_bus,

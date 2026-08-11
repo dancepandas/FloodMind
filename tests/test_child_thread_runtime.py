@@ -171,3 +171,36 @@ def _stub_registry_and_loader():
     reg.tools_schema.return_value = []
     loader = MagicMock()
     return reg, loader
+
+
+def test_child_thread_runtime_not_cached_across_runs(tmp_path):
+    """终审发现：缓存 runtime 跨 run 复用旧 authority。改为每次现建后两个 run 各绑自己的 authority。"""
+    from types import SimpleNamespace
+
+    from floodmind.agent.native.native_flood_agent import NativeFloodAgent
+
+    agent = object.__new__(NativeFloodAgent)
+    agent._model_client = MagicMock(spec=ModelClient)
+    agent._tool_executor = MagicMock()
+    agent._event_bus = EventBus()
+    agent._max_iterations = 5
+    agent._specialist_executor = MagicMock()
+    agent._specialist_executor.system_prompts = ["p"]
+    agent._checkpoint_service = None
+    agent._tracing_service = None
+    agent._background_task_service = MagicMock()
+    agent._sandbox_service = MagicMock()
+    agent._permission_service = PermissionService()
+    agent._path_service = PathService()
+    agent._make_specialist_tool_runtime = lambda: (MagicMock(), MagicMock())
+    agent._journal_authority = None
+    auth_a = open_journal_authority(tmp_path / "r_a", conversation_id="c", task_id="t",
+                                    run_id="run_a", thread_id="th", turn_id="tu")
+    auth_b = open_journal_authority(tmp_path / "r_b", conversation_id="c", task_id="t",
+                                    run_id="run_b", thread_id="th", turn_id="tu")
+    rt_a = agent._ensure_child_thread_runtime(SimpleNamespace(journal_authority=auth_a))
+    rt_b = agent._ensure_child_thread_runtime(SimpleNamespace(journal_authority=auth_b))
+    # 两个 run 各持独立 runtime + 各自 authority（旧缓存实现下 rt_a is rt_b 且都绑 run_a）
+    assert rt_a is not rt_b
+    assert rt_a._journal_authority is auth_a
+    assert rt_b._journal_authority is auth_b

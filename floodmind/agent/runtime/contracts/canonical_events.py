@@ -88,6 +88,10 @@ _EVENT_TYPES: Dict[str, frozenset[str]] = {
         "thread.spawn.requested", "thread.created", "thread.message.sent",
         "thread.completed", "thread.failed", "thread.cancelled",
     }),
+    "child_thread": frozenset({
+        "child_thread.accepted", "child_thread.running", "child_thread.result",
+        "child_thread.failed", "child_thread.cancelled",
+    }),
     "artifact": frozenset({
         "artifact.declared", "artifact.committed", "artifact.verified",
         "artifact.superseded",
