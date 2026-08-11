@@ -109,16 +109,34 @@ def test_history_projections_exclude_child_turns(tmp_path):
     ]
 
 
-def test_specialist_preparation_failure_emits_failed_terminal(tmp_path, monkeypatch):
+def test_specialist_preparation_failure_emits_failed_terminal(tmp_path):
     parent = open_journal_authority(
         tmp_path, conversation_id="c", task_id="t", run_id="run_1",
         thread_id="thread_parent", turn_id="turn_parent",
     )
     agent = NativeFloodAgent.__new__(NativeFloodAgent)
     agent._journal_authority = parent
-    agent._build_specialist_user_input = lambda *_: (_ for _ in ()).throw(RuntimeError("prepare failed"))
+    agent._child_thread_runtime = None
+    agent._child_thread_defaults = {
+        "max_turns": 50,
+        "max_tokens": 32768,
+        "wall_clock_budget_seconds": 300.0,
+    }
+    agent._model_client = None
+    agent._tool_executor = None
+    agent._event_bus = SimpleNamespace()
+    agent._max_iterations = 4
+    agent._specialist_executor = SimpleNamespace(system_prompts=["specialist"])
+    agent._checkpoint_service = None
+    agent._tracing_service = None
     agent._background_task_service = SimpleNamespace(kill_session=lambda _session: 0)
-    agent._sandbox_service = SimpleNamespace(destroy=lambda _ctx: None)
+    agent._sandbox_service = SimpleNamespace(
+        create=lambda **_kwargs: (_ for _ in ()).throw(RuntimeError("prepare failed")),
+        destroy=lambda _ctx: None,
+    )
+    agent._permission_service = None
+    agent._path_service = None
+    agent._make_specialist_tool_runtime = lambda: (None, None)
     context = RunContext(
         session_id="parent", user_text="task", state_dir="",
         runtime_context=RuntimeContext(
@@ -132,7 +150,7 @@ def test_specialist_preparation_failure_emits_failed_terminal(tmp_path, monkeypa
 
     events = parent.read_after(0)
     assert [e.event_type for e in events] == [
-        "thread.spawn.requested", "thread.created", "thread.failed",
+        "child_thread.accepted", "child_thread.failed",
     ]
     assert all(e.run_id == "run_1" for e in events)
 

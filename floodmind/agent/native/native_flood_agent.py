@@ -26,7 +26,7 @@ from floodmind.agent.native.types import (
     ExecutionPlan,
     RunContext,
 )
-from floodmind.agent.runtime.contracts.subagent import SubAgentReport
+from floodmind.agent.runtime.contracts.child_thread import ChildThread, SubagentResult
 from floodmind.agent.runtime.contracts.identity import new_id
 from floodmind.agent.runtime.reducer import initial_run_state
 from floodmind.agent.runtime.contracts.tools import ToolSpec
@@ -50,6 +50,7 @@ from floodmind.skills.skill_curator import SkillCurator, run_maintenance_if_need
 
 from floodmind.config.settings import settings
 from floodmind.agent.runtime.services.checkpoint_service import CheckpointService
+from floodmind.agent.runtime.services.child_thread_runtime import ChildThreadRuntime
 from floodmind.agent.runtime.services.path_service import PathService
 from floodmind.agent.runtime.services.sandbox_service import SandboxService
 from floodmind.agent.runtime.services.tracing_service import TracingService
@@ -381,6 +382,12 @@ class NativeFloodAgent:
         self._model_client: Optional[ModelClient] = None
         self._orchestrator_executor: Optional[NativeAgentExecutor] = None
         self._specialist_executor: Optional[NativeAgentExecutor] = None
+        self._child_thread_runtime = None
+        self._child_thread_defaults = {
+            "max_turns": 50,
+            "max_tokens": 32768,
+            "wall_clock_budget_seconds": 300.0,
+        }
         self._tool_executor: Optional[Any] = None
         self._artifact_watcher: Optional[ArtifactWatcher] = None
         self._artifact_lock = threading.Lock()
@@ -1980,256 +1987,66 @@ class NativeFloodAgent:
         registry.register(make_get_tool_tool(loader, registry))
         return registry, loader
 
+    def _ensure_child_thread_runtime(self, parent_runtime_context) -> ChildThreadRuntime:
+        if self._child_thread_runtime is not None:
+            return self._child_thread_runtime
+        parent_auth = getattr(self, "_journal_authority", None)
+        if parent_auth is None:
+            parent_auth = parent_runtime_context.journal_authority
+        if parent_auth is None:
+            raise ValueError("specialist requires parent JournalAuthority")
+        runtime_dir = Path(parent_auth._writer._base_dir)
+        self._child_thread_runtime = ChildThreadRuntime(
+            model_client=self._model_client,
+            tool_executor=self._tool_executor,
+            event_bus=self._event_bus,
+            message_builder=MessageBuilder(),
+            max_iterations=self._max_iterations,
+            system_prompts=list(self._specialist_executor.system_prompts),
+            checkpoint_service=self._checkpoint_service,
+            tracing_service=self._tracing_service,
+            background_task_service=self._background_task_service,
+            journal_authority=parent_auth,
+            sandbox_service=self._sandbox_service,
+            permission_service=self._permission_service,
+            path_service=self._path_service,
+            artifact_store_root=runtime_dir / "artifacts",
+            runtime_dir=runtime_dir,
+            tool_runtime_factory=self._make_specialist_tool_runtime,
+        )
+        return self._child_thread_runtime
+
     def _run_specialist_task(
         self,
         task_text: str,
         skill_name: str,
         parent_context: RunContext,
         step_key: str,
-        step_event_bus: Optional[EventBus] = None,
+        step_event_bus=None,
         delegate_cwd: Optional[str] = None,
-    ) -> SubAgentReport:
-        """在独立 session 中运行一个 specialist 子代理，并保存独立 checkpoint。
-
-        子代理有自己的 session_id、AgentLoopState、checkpoint 和沙盒工作区。
-        delegate_cwd（阶段C）：主代理委派时指定子代理工作目录。指定则子代理默认 cwd =
-        delegate_cwd（桌面版直接在 user_dir 子目录干活，无需回流）；未指定走 sandbox。
-        """
-        import uuid
-        from floodmind.agent.native.artifact_watcher import ArtifactWatcher
-        from floodmind.agent.runtime.services.journal_authority import open_journal_authority
-        from floodmind.agent.runtime.services.runtime_layout import thread_dirs
-
+    ) -> SubagentResult:
+        """P7：ChildThreadRuntime 替身 ad-hoc Specialist。返回 Typed SubagentResult。"""
         parent_runtime_context = parent_context.runtime_context
         if parent_runtime_context is None:
             raise ValueError("specialist requires parent RuntimeContext identity")
-        parent_auth = getattr(self, "_journal_authority", None)
-        if parent_auth is None:
-            parent_auth = parent_runtime_context.journal_authority
-        if parent_auth is None:
-            raise ValueError("specialist requires parent JournalAuthority")
-
-        runtime_dir = Path(parent_auth._writer._base_dir)
-        child_thread_id = new_id("thread")
-        child_turn_id = new_id("turn")
-        thread_payload = {"thread_id": child_thread_id, "parent_call_id": step_key}
-        sub_session_id = f"sub-{parent_context.session_id}-{step_key}-{uuid.uuid4().hex[:8]}"
-        sandbox_ctx = None
-
-        try:
-            parent_auth.emit("thread.spawn.requested", thread_payload)
-            parent_auth.emit("thread.created", thread_payload)
-            child_auth = open_journal_authority(
-                runtime_dir,
-                conversation_id=parent_runtime_context.conversation_id,
-                task_id=parent_runtime_context.task_id,
-                run_id=parent_runtime_context.run_id,
-                thread_id=child_thread_id,
-                turn_id=child_turn_id,
-            )
-            tdirs = thread_dirs(
-                runtime_dir,
-                parent_runtime_context.conversation_id,
-                parent_runtime_context.task_id,
-                parent_runtime_context.run_id,
-                child_thread_id,
-            )
-            specialist_input = self._build_specialist_user_input(task_text, skill_name)
-            child_auth.emit("thread.message.sent", {
-                "content": specialist_input,
-                "turn_index": 0,
-            })
-
-            sandbox_ctx = self._sandbox_service.create(
-                sub_session_id=sub_session_id,
-                parent_output_dir=Path(parent_context.output_dir) if parent_context.output_dir else None,
-                delegate_cwd=Path(delegate_cwd) if delegate_cwd else None,
-            )
-
-            # 子代理默认 cwd：delegate_cwd 优先，否则 sandbox outputs
-            sub_cwd = str(sandbox_ctx.delegate_cwd) if sandbox_ctx.delegate_cwd else str(sandbox_ctx.outputs_dir)
-            from floodmind.agent.runtime.contracts.runtime_context import RuntimeContext
-            from floodmind.agent.runtime.services.artifact_service import ArtifactService
-
-            sub_artifact_service = ArtifactService(
-                runtime_dir / "artifacts",
-                authority=child_auth,
-                allowed_roots=[str(sandbox_ctx.workspace_dir)],
-            )
-            sub_runtime_context = RuntimeContext(
-                conversation_id=parent_runtime_context.conversation_id,
-                task_id=parent_runtime_context.task_id,
-                run_id=parent_runtime_context.run_id,
-                thread_id=child_thread_id,
-                turn_id=child_turn_id,
-                actor_type="agent",
-                actor_id=sub_session_id,
-                agent_tier="sub",
-                runtime_mode="execution",
-                workspace_id=str(sandbox_ctx.workspace_dir),
-                sandbox_id=sub_session_id,
-                permission_service=self._permission_service,
-                path_service=self._path_service,
-                background_service=self._background_task_service,
-                artifact_service=sub_artifact_service,
-                journal_authority=child_auth,
-            )
-            sub_context = RunContext(
-                session_id=sub_session_id,
-                user_text=specialist_input,
-                attachments=list(parent_context.attachments),
-                output_dir=str(sandbox_ctx.outputs_dir),
-                upload_dir=str(sandbox_ctx.uploads_dir),
-                cwd=sub_cwd,
-                workspace_dir=str(sandbox_ctx.workspace_dir),
-                state_dir=str(tdirs["state_dir"]),
-                artifact_dir=str(sandbox_ctx.outputs_dir),
-                tmp_dir=str(tdirs["tmp_dir"]),
-                scripts_dir=str(tdirs["scripts_dir"]),
-                enable_reasoning=parent_context.enable_reasoning,
-                abort_check=parent_context.abort_check,
-                delegate_cwd=sub_cwd,
-                agent_tier="sub",
-                runtime_context=sub_runtime_context,
-            )
-
-            sub_state = AgentLoopState(
-                session_id=sub_session_id,
-                run_id=sub_runtime_context.run_id,
-                status="created",
-                user_message=specialist_input,
-                original_input=specialist_input,
-            )
-            sub_state.messages = self._specialist_executor._build_initial_messages(
-                context=sub_context,
-                user_text=specialist_input,
-                attachments=list(parent_context.attachments),
-                memory_messages=[],
-            )
-
-            # 包装 event_bus：确保子代理事件带 _trace_session，写入子代理自己的 trace
-            base_bus = step_event_bus or self._event_bus
-            if isinstance(base_bus, StepEventBus) and not getattr(base_bus, "_trace_session_id", ""):
-                # 并行路径传入的 StepEventBus 没有 trace_session_id，补上
-                base_bus._trace_session_id = sub_session_id
-                event_bus = base_bus
-            elif isinstance(base_bus, StepEventBus):
-                event_bus = base_bus
-            else:
-                # 串行委派：用父 EventBus 包装一层带 trace_session 的 StepEventBus
-                event_bus = StepEventBus(base_bus, step_key, trace_session_id=sub_session_id)
-            specialist_registry, specialist_tool_loader = self._make_specialist_tool_runtime()
-            specialist_executor = NativeAgentExecutor(
-                model_client=self._model_client,
-                tool_executor=self._tool_executor,
-                event_bus=event_bus,
-                message_builder=MessageBuilder(),
-                max_iterations=self._max_iterations,
-                system_prompts=list(self._specialist_executor.system_prompts),
-                tools_schema=specialist_registry.tools_schema(),
-                tool_registry=specialist_registry,
-                tool_loader=specialist_tool_loader,
-                checkpoint_service=self._checkpoint_service,
-                tracing_service=self._tracing_service,
-                background_task_service=self._background_task_service,
-                journal_authority=child_auth,
-            )
-
-            # Baseline before any specialist tool can write.  Detection and copying
-            # happen before sandbox destruction on both successful and failed runs.
-            watcher = ArtifactWatcher(
-                output_dir=sub_context.output_dir,
-                upload_dir=sub_context.upload_dir,
-            )
-            watcher.take_snapshot()
-            execution_error: Optional[Exception] = None
-            try:
-                result = specialist_executor.run_from_state(
-                    context=sub_context,
-                    state=sub_state,
-                    run_state=initial_run_state(
-                        parent_runtime_context.run_id,
-                        conversation_id=parent_runtime_context.conversation_id,
-                        task_id=parent_runtime_context.task_id,
-                        thread_id=child_thread_id,
-                    ),
-                )
-            except Exception as exc:
-                logger.exception("specialist %s 执行失败", sub_session_id)
-                execution_error = exc
-                result = AgentResult(final_output="", reasoning="", tool_results=[])
-
-            workspace_artifacts = [
-                artifact.file_path for artifact in watcher.detect_new_artifacts()
-            ]
-            artifacts = self._sandbox_service.copy_artifacts_to_parent(
-                sandbox_ctx,
-                workspace_artifacts,
-            )
-
-            has_tool_success = any(tr.status == "completed" for tr in result.tool_results) if result.tool_results else False
-            completed = execution_error is None and bool(result.final_output or has_tool_success or artifacts)
-
-            tool_summaries = []
-            for tr in result.tool_results:
-                tool_summaries.append({
-                    "tool_name": tr.name,
-                    "status": tr.status,
-                    "summary": (tr.content[:200] + "...") if len(tr.content) > 200 else tr.content,
-                })
-
-            report = SubAgentReport(
-                summary=result.final_output or (str(execution_error) if execution_error else ""),
-                completed=completed,
-                outputs={"error": str(execution_error)} if execution_error else {},
-                artifacts=artifacts,
-                next_steps=[],
-                needs_human=False,
-                sub_session_id=sub_session_id,
-                tool_result_summaries=tool_summaries,
-            )
-            cancelled = bool(parent_context.abort_check and parent_context.abort_check())
-            terminal_event = (
-                "thread.completed" if completed
-                else "thread.cancelled" if cancelled
-                else "thread.failed"
-            )
-            parent_auth.emit(
-                terminal_event,
-                {
-                    "thread_id": child_thread_id,
-                    "parent_call_id": step_key,
-                    "summary": report.summary,
-                    "artifact_ids": report.artifacts,
-                },
-                thread_id=child_thread_id,
-            )
-            return report
-        except Exception as exc:
-            parent_auth.emit(
-                "thread.cancelled"
-                if parent_context.abort_check and parent_context.abort_check()
-                else "thread.failed",
-                {
-                    "thread_id": child_thread_id,
-                    "parent_call_id": step_key,
-                    "summary": str(exc),
-                    "artifact_ids": [],
-                },
-                thread_id=child_thread_id,
-            )
-            raise
-        finally:
-            # 子代理可能启动了长时后台命令；先终止进程树再销毁其 sandbox，
-            # 避免进程继续写入已删除目录或逃逸子会话生命周期。
-            try:
-                killed = self._background_task_service.kill_session(sub_session_id)
-                if killed:
-                    logger.info("specialist cleanup: kill %d 个子会话后台任务", killed)
-            except Exception as e:
-                logger.warning("specialist cleanup 后台任务失败: %s", e)
-            if sandbox_ctx is not None:
-                self._sandbox_service.destroy(sandbox_ctx)
+        self._ensure_child_thread_runtime(parent_runtime_context)
+        child_thread = ChildThread(
+            thread_id=new_id("thread"),
+            parent_thread_id=parent_runtime_context.thread_id or "",
+            parent_call_id=step_key,
+            workspace_snapshot_id="",
+            sandbox_id="",
+            tool_allowlist=[],
+            max_turns=self._child_thread_defaults["max_turns"],
+            max_tokens=self._child_thread_defaults["max_tokens"],
+            wall_clock_budget_seconds=self._child_thread_defaults["wall_clock_budget_seconds"],
+        )
+        return self._child_thread_runtime.run(
+            child_thread,
+            parent_context,
+            step_event_bus=step_event_bus,
+            delegate_cwd=delegate_cwd,
+        )
 
     def _handle_delegate_specialist(self, task: str = "", skill_name: str = "", workdir: str = "") -> str:
         task = (task or "").strip()
@@ -2278,7 +2095,7 @@ class NativeFloodAgent:
 
         step_status = "completed" if sub_report.completed else "error"
         output = sub_report.summary
-        artifacts = sub_report.artifacts
+        artifacts = sub_report.artifact_ids
 
         if self._last_loop_state is not None and self._last_loop_state.plan is not None:
             plan_step = self._last_loop_state.plan.find_step(step_key)
@@ -2301,7 +2118,7 @@ class NativeFloodAgent:
             "skill_name": skill_name,
             "summary": output,
             "artifacts": artifacts,
-            "sub_session_id": sub_report.sub_session_id,
+            "sub_session_id": sub_report.session_id,
         }
         return json.dumps(payload, ensure_ascii=False, indent=2)
 
@@ -2386,7 +2203,7 @@ class NativeFloodAgent:
 
             step_status = "completed" if sub_report.completed else "error"
             output = sub_report.summary
-            artifacts = sub_report.artifacts
+            artifacts = sub_report.artifact_ids
 
             if self._last_loop_state is not None and self._last_loop_state.plan is not None:
                 with self._plan_lock:
@@ -2405,7 +2222,7 @@ class NativeFloodAgent:
                 "status": step_status,
                 "summary": output[:500] if output else "",
                 "artifacts": artifacts,
-                "sub_session_id": sub_report.sub_session_id,
+                "sub_session_id": sub_report.session_id,
             })
 
         with ThreadPoolExecutor(max_workers=max_concurrent) as pool:
@@ -2512,7 +2329,7 @@ class NativeFloodAgent:
 
                 step_status = "completed" if sub_report.completed else "error"
                 output = sub_report.summary
-                artifacts = sub_report.artifacts
+                artifacts = sub_report.artifact_ids
 
                 if plan:
                     plan_step = plan.find_step(step_id)
@@ -2530,7 +2347,7 @@ class NativeFloodAgent:
                     "status": step_status,
                     "summary": output[:500] if output else "",
                     "artifacts": artifacts,
-                    "sub_session_id": sub_report.sub_session_id,
+                    "sub_session_id": sub_report.session_id,
                 })
 
             max_workers = max(1, min(max_concurrent or 3, 5))

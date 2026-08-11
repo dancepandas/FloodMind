@@ -33,8 +33,10 @@ class PendingApproval(BaseModel):
 
 class ChildThreadState(BaseModel):
     thread_id: str
+    parent_thread_id: str = ""
     parent_call_id: str = ""
     status: str = "running"
+    reason: str = ""
 
 
 class RunState(BaseModel):

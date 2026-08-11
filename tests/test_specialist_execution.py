@@ -55,6 +55,12 @@ def _specialist_agent(tmp_path: Path) -> NativeFloodAgent:
         tmp_path, conversation_id="conv", task_id="task", run_id="run_parent",
         thread_id="thread_parent", turn_id="turn_parent",
     )
+    agent._child_thread_runtime = None
+    agent._child_thread_defaults = {
+        "max_turns": 50,
+        "max_tokens": 32768,
+        "wall_clock_budget_seconds": 300.0,
+    }
     return agent
 
 
@@ -99,11 +105,14 @@ def test_specialist_run_injects_background_task_service(tmp_path, monkeypatch):
         def __init__(self, **kwargs):
             captured.update(kwargs)
 
+        def _build_initial_messages(self, **kwargs):
+            return []
+
         def run_from_state(self, context, state, run_state=None):
             return AgentResult(final_output="done", reasoning="")
 
     monkeypatch.setattr(
-        "floodmind.agent.native.native_flood_agent.NativeAgentExecutor",
+        "floodmind.agent.runtime.services.child_thread_runtime.NativeAgentExecutor",
         CapturingExecutor,
     )
     agent._run_specialist_task(
@@ -132,12 +141,15 @@ def test_specialist_copies_only_artifacts_created_during_run(tmp_path, monkeypat
         def __init__(self, **kwargs):
             pass
 
+        def _build_initial_messages(self, **kwargs):
+            return []
+
         def run_from_state(self, context, state, run_state=None):
             (Path(context.output_dir) / "generated.md").write_text("new", encoding="utf-8")
             return AgentResult(final_output="done", reasoning="")
 
     monkeypatch.setattr(
-        "floodmind.agent.native.native_flood_agent.NativeAgentExecutor", WritingExecutor
+        "floodmind.agent.runtime.services.child_thread_runtime.NativeAgentExecutor", WritingExecutor
     )
     report = agent._run_specialist_task(
         task_text="write report",
@@ -147,7 +159,7 @@ def test_specialist_copies_only_artifacts_created_during_run(tmp_path, monkeypat
     )
 
     assert report.completed is True
-    assert report.artifacts == [str(parent_output / "generated.md")]
+    assert report.artifact_ids == [str(parent_output / "generated.md")]
     assert (parent_output / "generated.md").read_text(encoding="utf-8") == "new"
     assert not (parent_output / "preexisting.md").exists()
 
@@ -160,12 +172,15 @@ def test_specialist_copies_new_artifact_when_execution_fails(tmp_path, monkeypat
         def __init__(self, **kwargs):
             pass
 
+        def _build_initial_messages(self, **kwargs):
+            return []
+
         def run_from_state(self, context, state, run_state=None):
             (Path(context.output_dir) / "partial.txt").write_text("partial", encoding="utf-8")
             raise RuntimeError("specialist failed")
 
     monkeypatch.setattr(
-        "floodmind.agent.native.native_flood_agent.NativeAgentExecutor", FailingExecutor
+        "floodmind.agent.runtime.services.child_thread_runtime.NativeAgentExecutor", FailingExecutor
     )
     report = agent._run_specialist_task(
         task_text="write report",
@@ -176,6 +191,6 @@ def test_specialist_copies_new_artifact_when_execution_fails(tmp_path, monkeypat
 
     assert report.completed is False
     assert report.summary == "specialist failed"
-    assert report.outputs == {"error": "specialist failed"}
-    assert report.artifacts == [str(parent_output / "partial.txt")]
+    assert report.reason == "specialist failed"
+    assert report.artifact_ids == [str(parent_output / "partial.txt")]
     assert (parent_output / "partial.txt").read_text(encoding="utf-8") == "partial"

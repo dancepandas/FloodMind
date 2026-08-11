@@ -186,7 +186,8 @@ def test_thread_created_records_child():
         "thread_id": "thread_child", "parent_call_id": "call_1",
     }))
     assert [ct.model_dump() for ct in out.child_threads] == [{
-        "thread_id": "thread_child", "parent_call_id": "call_1", "status": "running",
+        "thread_id": "thread_child", "parent_thread_id": "",
+        "parent_call_id": "call_1", "status": "running", "reason": "",
     }]
 
 

@@ -75,6 +75,41 @@ def _reduce_thread_terminal(
     return ns
 
 
+def _reduce_child_thread_accepted(state, payload):
+    ns = _clone(state)
+    ns.child_threads.append(ChildThreadState(
+        thread_id=str(payload["thread_id"]),
+        parent_thread_id=str(payload.get("parent_thread_id", "")),
+        parent_call_id=str(payload.get("parent_call_id", "")),
+        status="accepted",
+    ))
+    return ns
+
+
+def _reduce_child_thread_running(state, payload):
+    ns = _clone(state)
+    tid = str(payload.get("thread_id", ""))
+    for ct in ns.child_threads:
+        if ct.thread_id == tid:
+            ct.status = "running"
+    return ns
+
+
+def _reduce_child_thread_terminal(state, payload, event_type):
+    ns = _clone(state)
+    tid = str(payload.get("thread_id", ""))
+    status = {
+        "child_thread.result": "completed",
+        "child_thread.failed": "failed",
+        "child_thread.cancelled": "cancelled",
+    }.get(event_type, "running")
+    for ct in ns.child_threads:
+        if ct.thread_id == tid:
+            ct.status = status
+            ct.reason = str(payload.get("reason", ""))
+    return ns
+
+
 def _reduce_thread_message_sent(
     state: RunState, payload: Dict[str, Any], thread_id: str,
 ) -> RunState:
@@ -488,6 +523,12 @@ def reduce(state: RunState, event: EventEnvelope) -> RunState:
         return _reduce_thread_created(ns, event.payload)
     if et in ("thread.completed", "thread.failed", "thread.cancelled"):
         return _reduce_thread_terminal(ns, event.payload, et)
+    if et == "child_thread.accepted":
+        return _reduce_child_thread_accepted(ns, event.payload)
+    if et == "child_thread.running":
+        return _reduce_child_thread_running(ns, event.payload)
+    if et in ("child_thread.result", "child_thread.failed", "child_thread.cancelled"):
+        return _reduce_child_thread_terminal(ns, event.payload, et)
     if et == "model.attempt.started":
         return _reduce_attempt_started(ns, event.payload, event.thread_id)
     if et == "model.attempt.completed":
