@@ -26,6 +26,16 @@ from floodmind.agent.runtime.contracts.projection import ProjectionManifest
 
 logger = logging.getLogger(__name__)
 
+# §9.6 摘要来源切到 Canonical Events：产生对话轮次的 journal 事件类型。
+# 用于把被压缩中间区映射到 journal 事件（source_event_ids / covered_sequence_* /
+# source_sha256 可被 replay 复现）。
+_TURN_EVENT_TYPES = frozenset({
+    "thread.message.sent",
+    "model.attempt.completed",
+    "tool.execution.completed",
+    "tool.execution.failed",
+})
+
 # ── Handoff Prefix（必须）─────────────────────────────────────────
 # 明确告知 LLM：这是背景参考，不是活跃指令
 SUMMARY_PREFIX = (
@@ -70,8 +80,9 @@ COMPRESSION_PROMPT = """你是一个上下文压缩助手。你的任务是将�
 class CompactSummary(BaseModel):
     """结构化 Summary Event 载荷（目标 §9.5 全字段）。
 
-    摘要来源切到 Canonical Events：source_sha256 对被覆盖的源消息的 canonical_json
-    取 SHA256；covered_sequence_* 来自边界；unresolved_transactions 来自未决事务 id。
+    摘要来源切到 Canonical Events（§9.6 注）：source_sha256 对被覆盖内容的 canonical
+    投影取 SHA256（有 authority 时来自 journal 事件 payload，可被 replay 复现）；
+    covered_sequence_* 为 journal SEQUENCE 范围；source_event_ids 引用实际 journal 事件。
     """
 
     covered_sequence_start: int = 0
@@ -267,6 +278,48 @@ class ContextCompressor:
             saved_tokens=saved,
         )
 
+    @staticmethod
+    def _is_content_message(msg: Dict[str, Any]) -> bool:
+        """Wire 消息是否对应 canonical journal turn（system/compaction 块不对应）。
+
+        用于把被压缩中间区映射到 journal 事件（§9.6 摘要来源切到 Canonical Events）：
+        system prompt 是宿主注入、[compact] 摘要块是压缩产物，均非原始 journal 事件。
+        """
+        if not isinstance(msg, dict):
+            return False
+        if msg.get("role") == "system":
+            return False
+        if msg.get("compaction"):
+            return False
+        content = str(msg.get("content", ""))
+        if content.startswith("[compact]"):
+            return False
+        return True
+
+    def _journal_covered_events(
+        self,
+        messages: List[Dict[str, Any]],
+        start: int,
+        end: int,
+        authority: Optional[Any],
+    ) -> List[Any]:
+        """Best-effort 把被压缩中间区 messages[start:end] 映射到 journal turn 事件。
+
+        计数对齐：head/tail 中可对应 journal turn 的消息数决定偏移，取中间的 turn 事件
+        （thread.message.sent / model.attempt.completed / tool.execution.completed|failed）。
+        返回空列表表示无法从 journal 复现（authority 缺失或映射为空）。
+        """
+        if authority is None:
+            return []
+        events = authority.read_after(0)
+        turn_events = [e for e in events if e.event_type in _TURN_EVENT_TYPES]
+        if not turn_events:
+            return []
+        head_backed = sum(1 for m in messages[:start] if self._is_content_message(m))
+        tail_backed = sum(1 for m in messages[end:] if self._is_content_message(m))
+        covered = turn_events[head_backed:max(head_backed, len(turn_events) - tail_backed)]
+        return covered
+
     def compress_journal(
         self,
         messages: List[Dict[str, Any]],
@@ -281,6 +334,8 @@ class ContextCompressor:
 
         只 append ``context.compaction.completed`` 到 journal，绝不修改原始事件；
         可压缩段不拆任何 Atomic Group；仍超限时扩大 Offload，绝不静默截断当前用户请求。
+        摘要来源切到 Canonical Events：source_event_ids / covered_sequence_* / source_sha256
+        在有 authority 时来自 journal 事件，可被 replay 复现。
         """
         from floodmind.agent.native.atomic_groups import AtomicGroups
         from floodmind.agent.native.projection import build_manifest, compute_input_budget
@@ -297,14 +352,15 @@ class ContextCompressor:
         )
         start, end = self._aligned_split_points(messages)
 
-        # 2) 可压缩段 = 早期低优先级来源（整体位于保留头之前，不拆 Atomic Group）
+        # 2) 可压缩段 = 保留头与保留尾之间的完整段（不拆 Atomic Group；
+        #    不折叠保留头/保留尾——system prompt 与当前用户请求绝不进摘要源）。
         compressible = [
             messages[r0:r1]
             for r0, r1 in ranges
-            if r1 <= start and (r0, r1) != (0, 0)
+            if r0 >= start and r1 <= end
         ]
 
-        # 3) 从较早来源压缩（规则/LLM 摘要引擎）
+        # 3) 从较早低优先级来源压缩（规则/LLM 摘要引擎）
         summary = (
             self._generate_summary([m for seg in compressible for m in seg])
             if compressible else ""
@@ -313,12 +369,24 @@ class ContextCompressor:
         # 4) 大工具结果 Artifact Offload
         trimmed = self._trim_tool_outputs(messages)
 
-        # 5) 结构化 Summary Event（源 = 被覆盖消息的 canonical 投影）
-        source_text = canonical_json([m for seg in compressible for m in seg])
+        # 5) 结构化 Summary Event（源 = Canonical Events，可被 replay 复现）
+        covered = self._journal_covered_events(messages, start, end, authority)
+        if covered:
+            source_event_ids = [e.event_id for e in covered]
+            covered_sequence_start = covered[0].sequence
+            covered_sequence_end = covered[-1].sequence
+            source_text = canonical_json([e.payload for e in covered])
+        else:
+            # authority 缺失或映射为空：退回被覆盖 wire 消息的 canonical 投影
+            source_event_ids = []
+            covered_sequence_start = 0
+            covered_sequence_end = 0
+            source_text = canonical_json([m for seg in compressible for m in seg])
+
         summary_event = CompactSummary(
-            covered_sequence_start=start,
-            covered_sequence_end=end,
-            source_event_ids=[],
+            covered_sequence_start=covered_sequence_start,
+            covered_sequence_end=covered_sequence_end,
+            source_event_ids=source_event_ids,
             source_sha256=hashlib.sha256(source_text.encode("utf-8")).hexdigest(),
             summary=summary,
             completed_facts=[],
