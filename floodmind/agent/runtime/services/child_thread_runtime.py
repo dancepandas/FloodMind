@@ -5,6 +5,7 @@
 forward-only：不向后兼容。
 """
 import logging
+import time
 import uuid
 from pathlib import Path
 from typing import Any, Callable, List, Optional
@@ -25,6 +26,49 @@ from floodmind.agent.runtime.services.journal_authority import open_journal_auth
 from floodmind.agent.runtime.services.runtime_layout import thread_dirs
 
 logger = logging.getLogger(__name__)
+
+
+class ChildThreadQuota:
+    """子线程配额：turn 数、累计 token、墙钟预算。任一耗尽即终止子线程。"""
+
+    def __init__(self, *, max_turns=50, max_tokens=32768, wall_clock_budget_seconds=300.0):
+        self.max_turns = max_turns
+        self.max_tokens = max_tokens
+        self._deadline = time.monotonic() + wall_clock_budget_seconds
+        self.turn_count = 0
+        self.token_total = 0
+
+    def note_turn(self, usage_total: int) -> None:
+        self.turn_count += 1
+        self.token_total += usage_total
+
+    def expired_reason(self) -> Optional[str]:
+        if self.max_turns is not None and self.turn_count >= self.max_turns:
+            return f"quota:max_turns({self.turn_count}/{self.max_turns})"
+        if self.max_tokens is not None and self.token_total >= self.max_tokens:
+            return f"quota:max_tokens({self.token_total}/{self.max_tokens})"
+        if time.monotonic() >= self._deadline:
+            return "quota:wall_clock"
+        return None
+
+
+class _TokenBudgetModelClient:
+    """按次/按量计数模型客户端：每次 stream_chat = 1 turn；usage 事件累计 total_tokens。"""
+
+    def __init__(self, inner, quota: ChildThreadQuota):
+        self._inner = inner
+        self._quota = quota
+
+    def stream_chat(self, *args, **kwargs):
+        usage_total = 0
+        for event in self._inner.stream_chat(*args, **kwargs):
+            if event.type == "usage" and event.raw is not None:
+                usage_total = int(event.raw.get("total_tokens", 0))
+            yield event
+        self._quota.note_turn(usage_total)
+
+    def __getattr__(self, name):
+        return getattr(self._inner, name)
 
 
 class ChildThreadRuntime:
@@ -67,7 +111,6 @@ class ChildThreadRuntime:
         self._runtime_dir = Path(runtime_dir)
         self._tool_runtime_factory = tool_runtime_factory
         self._quota = None               # Task 2 注入
-        self._cancel_reason = ""
 
     def run(
         self,
@@ -99,7 +142,7 @@ class ChildThreadRuntime:
         child_turn_id = new_id("turn")
         child_auth = None
         sandbox_ctx = None
-        self._cancel_reason = ""
+        run_state = {"cancel_reason": ""}
         try:
             # 1. 身份 + Journal（父 run 内 thread_id 作用域）
             parent_auth.emit("child_thread.accepted", {
@@ -168,7 +211,7 @@ class ChildThreadRuntime:
                 tmp_dir=str(tdirs["tmp_dir"]),
                 scripts_dir=str(tdirs["scripts_dir"]),
                 enable_reasoning=context.enable_reasoning,
-                abort_check=self._child_abort_check(context.abort_check),
+                abort_check=self._child_abort_check(context.abort_check, run_state),
                 delegate_cwd=sub_cwd,
                 agent_tier="sub",
                 runtime_context=sub_runtime_context,
@@ -182,8 +225,16 @@ class ChildThreadRuntime:
             )
             # 4. 独立 ToolRuntime（§13.2：loaded set / GetTool closure 不共享）
             specialist_registry, specialist_tool_loader = self._tool_runtime_factory()
+            if self._quota is None:
+                self._quota = ChildThreadQuota(
+                    max_turns=child_thread.max_turns,
+                    max_tokens=child_thread.max_tokens,
+                    wall_clock_budget_seconds=child_thread.wall_clock_budget_seconds,
+                )
+            child_model_client = _TokenBudgetModelClient(self._model_client, self._quota)
             child_executor = self._build_child_executor(
-                child_auth, specialist_registry, specialist_tool_loader, child_event_bus,
+                child_auth, child_model_client, specialist_registry,
+                specialist_tool_loader, child_event_bus,
             )
             sub_state.messages = child_executor._build_initial_messages(
                 context=sub_context,
@@ -222,6 +273,10 @@ class ChildThreadRuntime:
                 sandbox_ctx, workspace_artifacts,
             )
             tool_summaries = self._summarize_tools(result)
+            # 执行器可能在产生最终文本后直接终止；在分类前再检查一次配额，
+            # 确保最后一个完整 turn 的计数参与终态判定。
+            if sub_context.abort_check is not None:
+                sub_context.abort_check()
             # 6. 终态分类 + Typed Handoff
             return self._finish(
                 child_thread=child_thread,
@@ -233,6 +288,7 @@ class ChildThreadRuntime:
                 artifact_ids=artifact_ids,
                 tool_summaries=tool_summaries,
                 abort=bool(context.abort_check and context.abort_check()),
+                run_state=run_state,
             )
         except Exception as exc:
             logger.exception("child thread runtime 异常")
@@ -260,10 +316,10 @@ class ChildThreadRuntime:
                 self._sandbox_service.destroy(sandbox_ctx)
 
     def _build_child_executor(
-        self, child_auth, registry, tool_loader, event_bus,
+        self, child_auth, child_model_client, registry, tool_loader, event_bus,
     ) -> NativeAgentExecutor:
         return NativeAgentExecutor(
-            model_client=self._model_client,
+            model_client=child_model_client,
             tool_executor=self._tool_executor,
             event_bus=event_bus,
             message_builder=self._message_builder,
@@ -278,22 +334,23 @@ class ChildThreadRuntime:
             journal_authority=child_auth,
         )
 
-    def _child_abort_check(self, parent_abort):
+    def _child_abort_check(self, parent_abort, run_state):
         """组合取消：父取消 或 配额耗尽。Task 2/3 填充配额逻辑。"""
         def check():
             if parent_abort is not None and parent_abort():
-                self._cancel_reason = "parent_cancelled"
+                run_state["cancel_reason"] = "parent_cancelled"
                 return True
             if self._quota is not None:
                 reason = self._quota.expired_reason()
                 if reason:
-                    self._cancel_reason = reason
+                    run_state["cancel_reason"] = reason
                     return True
             return False
         return check
 
     def _finish(self, *, child_thread, child_session_id, child_auth, parent_auth,
-                result, execution_error, artifact_ids, tool_summaries, abort):
+                result, execution_error, artifact_ids, tool_summaries, abort,
+                run_state):
         has_tool_success = any(
             getattr(tr, "status", "") == "completed" for tr in (result.tool_results or [])
         )
@@ -305,12 +362,12 @@ class ChildThreadRuntime:
         if abort:
             event_type, terminal_event, reason = (
                 SubagentEventType.cancelled, "child_thread.cancelled",
-                self._cancel_reason or "parent_cancelled",
+                run_state["cancel_reason"] or "parent_cancelled",
             )
             completed = False
-        elif self._cancel_reason.startswith("quota:"):
+        elif run_state["cancel_reason"].startswith("quota:"):
             event_type, terminal_event, reason = (
-                SubagentEventType.failed, "child_thread.failed", self._cancel_reason,
+                SubagentEventType.failed, "child_thread.failed", run_state["cancel_reason"],
             )
             completed = False
         elif completed:

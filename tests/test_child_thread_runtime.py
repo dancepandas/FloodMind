@@ -143,9 +143,9 @@ def test_runtime_child_executor_uses_trace_scoped_event_bus(tmp_path, monkeypatc
     captured = {}
     original = rt._build_child_executor
 
-    def capture(child_auth, registry, tool_loader, event_bus):
+    def capture(child_auth, child_model_client, registry, tool_loader, event_bus):
         captured["event_bus"] = event_bus
-        return original(child_auth, registry, tool_loader, event_bus)
+        return original(child_auth, child_model_client, registry, tool_loader, event_bus)
 
     monkeypatch.setattr(rt, "_build_child_executor", capture)
     result = rt.run(
