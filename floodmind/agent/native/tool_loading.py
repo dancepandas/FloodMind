@@ -171,13 +171,18 @@ class ToolLoader:
     def __init__(self, config: Optional[ToolLoadingConfig] = None):
         self.config = config or ToolLoadingConfig()
         self.loaded_tools: Set[str] = set(self.config.core_tools)
-        self.last_search_results: List[str] = []
 
     @property
     def mode(self) -> str:
         return self.config.mode
 
-    def clone(self) -> "ToolLoader":
+    def clean_clone(self) -> "ToolLoader":
+        """Create an independent loader with the same configuration and no run state.
+
+        ``loaded_tools`` is deliberately reset. This is the factory used for
+        specialist executors, which may run concurrently and must not consume one
+        another's progressive-loading allowance.
+        """
         return ToolLoader(config=ToolLoadingConfig(
             mode=self.config.mode,
             core_tools=list(self.config.core_tools),
@@ -185,6 +190,10 @@ class ToolLoader:
             max_loaded_tools=self.config.max_loaded_tools,
             get_tool_loads_tool=self.config.get_tool_loads_tool,
         ))
+
+    def clone(self) -> "ToolLoader":
+        """Backward-compatible alias for :meth:`clean_clone`."""
+        return self.clean_clone()
 
     def request_tools(self, registry: Any, fallback_schema: Optional[List[dict]] = None) -> Optional[List[dict]]:
         if self.mode in ("eager", "catalog"):
@@ -267,7 +276,6 @@ class ToolLoader:
                 "loaded": entry.name in self.loaded_tools,
                 "match": ",".join(sorted(set(reasons))),
             })
-        self.last_search_results = [r["name"] for r in results]
         return results
 
     def get_tool_detail(self, registry: Any, name: str, include_schema: bool = True) -> str:

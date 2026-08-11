@@ -100,6 +100,48 @@ class TestUpdatePlan:
         target["needs"] = ["step-3"]
         assert agent._last_loop_state.plan.has_cycle()
 
+    def test_add_step_rejects_missing_dependency_transactionally(self):
+        agent = _make_bare_agent()
+        agent._last_loop_state.plan = _make_plan([_step("step-1")])
+
+        result = agent._handle_update_plan(
+            action="add_step",
+            step={"step_id": "step-2", "title": "新增", "needs": ["missing"]},
+        )
+
+        assert "不存在" in result
+        assert [step["step_id"] for step in agent._last_loop_state.plan.steps] == ["step-1"]
+
+    def test_update_needs_cycle_rejected_transactionally(self):
+        agent = _make_bare_agent()
+        agent._last_loop_state.plan = _make_plan([
+            _step("step-1"),
+            {**_step("step-2"), "needs": ["step-1"]},
+        ])
+
+        result = agent._handle_update_plan(
+            action="update_step",
+            step_id="step-1",
+            step={"needs": ["step-2"]},
+        )
+
+        assert "依赖环" in result
+        assert agent._last_loop_state.plan.find_step("step-1")["needs"] == []
+        assert agent._last_loop_state.plan.find_step("step-2")["needs"] == ["step-1"]
+
+    def test_update_needs_accepts_json_string_list(self):
+        agent = _make_bare_agent()
+        agent._last_loop_state.plan = _make_plan([_step("step-1"), _step("step-2")])
+
+        result = agent._handle_update_plan(
+            action="update_step",
+            step_id="step-2",
+            step={"needs": '["step-1"]'},
+        )
+
+        assert "计划已更新" in result
+        assert agent._last_loop_state.plan.find_step("step-2")["needs"] == ["step-1"]
+
     def test_update_step_status(self):
         agent = _make_bare_agent()
         agent._last_loop_state.plan = _make_plan([{

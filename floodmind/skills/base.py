@@ -7,7 +7,7 @@
 
 import logging
 from pathlib import Path
-from typing import List, Optional, Any
+from typing import List, Optional, Any, Callable
 from dataclasses import dataclass, field
 import yaml
 
@@ -80,7 +80,10 @@ class Skill:
         return f"Skill(name={self.name}, v={self.version}, scripts={len(self.scripts)}, refs={len(self.references)}, assets={len(self.assets)})"
 
 
-def _parse_skill_md(skill_md_path: Path) -> Optional[Skill]:
+def _parse_skill_md(
+    skill_md_path: Path,
+    threat_scanner: Optional[Callable[[str], Any]] = None,
+) -> Optional[Skill]:
     """
     解析 SKILL.md 文件
     
@@ -171,19 +174,17 @@ def _parse_skill_md(skill_md_path: Path) -> Optional[Skill]:
 
         logger.debug(f"解析技能: {skill.name} (scripts={len(scripts)}, refs={len(references)}, assets={len(assets)})")
 
-        # 安全扫描：检查 SKILL.md 内容是否包含威胁模式
-        try:
-            from floodmind.agent.runtime.services.permission_service import get_permission_service
-            svc = get_permission_service()
-            if svc:
-                result = svc.scan_content_threats(prompt_text)
+        # 安全扫描由调用方显式注入，避免扫描结果依赖最后构造的 Agent 全局状态。
+        if threat_scanner is not None:
+            try:
+                result = threat_scanner(prompt_text)
                 if result.threat_detected:
                     logger.warning(
                         f"Skill {skill.name} 内容命中威胁模式，跳过加载: {result.threat_types}"
                     )
                     return None
-        except Exception as e:
-            logger.debug(f"Skill 安全扫描跳过: {e}")
+            except Exception as e:
+                logger.debug(f"Skill 安全扫描跳过: {e}")
 
         return skill
 
@@ -192,7 +193,10 @@ def _parse_skill_md(skill_md_path: Path) -> Optional[Skill]:
         return None
 
 
-def discover_skills(skills_dir: Path) -> List[Skill]:
+def discover_skills(
+    skills_dir: Path,
+    threat_scanner: Optional[Callable[[str], Any]] = None,
+) -> List[Skill]:
     """
     发现目录中的所有技能
     
@@ -211,7 +215,7 @@ def discover_skills(skills_dir: Path) -> List[Skill]:
     skills = []
     
     for skill_md in skills_dir.glob("*/SKILL.md"):
-        skill = _parse_skill_md(skill_md)
+        skill = _parse_skill_md(skill_md, threat_scanner=threat_scanner)
         if skill:
             skills.append(skill)
     
@@ -219,7 +223,10 @@ def discover_skills(skills_dir: Path) -> List[Skill]:
     return skills
 
 
-def discover_skills_from_roots(roots: List[Path]) -> List[Skill]:
+def discover_skills_from_roots(
+    roots: List[Path],
+    threat_scanner: Optional[Callable[[str], Any]] = None,
+) -> List[Skill]:
     """
     从多个根目录发现技能
     
@@ -239,7 +246,7 @@ def discover_skills_from_roots(roots: List[Path]) -> List[Skill]:
             logger.debug(f"技能根目录不存在: {root}")
             continue
         
-        skills = discover_skills(root)
+        skills = discover_skills(root, threat_scanner=threat_scanner)
         
         for skill in skills:
             if skill.name not in seen_names:

@@ -107,13 +107,87 @@ class TestContextCompressor:
         assert c._last_summary is None
 
     def test_messages_to_text(self):
-        """Multi-modal content is handled."""
+        """Multi-modal and structured tool data are preserved with identifiers."""
         c = ContextCompressor()
         messages = [
             {"role": "user", "content": [{"type": "text", "text": "hello"}]},
+            {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [{
+                    "id": "call-123",
+                    "type": "function",
+                    "function": {"name": "lookup", "arguments": "{\"key\":\"value\"}"},
+                }],
+            },
+            {"role": "tool", "tool_call_id": "call-123", "name": "lookup", "content": {"ok": True}},
         ]
         text = c._messages_to_text(messages)
         assert "hello" in text
+        assert '"id": "call-123"' in text
+        assert '"tool_call_id": "call-123"' in text
+        assert '"name": "lookup"' in text
+        assert '"ok": true' in text
+
+    def test_messages_to_text_bounds_large_structured_values(self):
+        c = ContextCompressor()
+        text = c._messages_to_text([{
+            "role": "assistant",
+            "tool_calls": [{"id": "tc", "function": {"name": "big", "arguments": "x" * 5000}}],
+        }])
+        assert "tc" in text and "big" in text
+        assert "chars omitted" in text
+        assert len(text) < 2500
+
+    def test_estimate_tokens_includes_complete_message_envelope(self):
+        """Tool metadata counts even when textual content is empty."""
+        c = ContextCompressor()
+        plain = [{"role": "assistant", "content": ""}]
+        structured = [{
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [{
+                "id": "call-" + "x" * 100,
+                "type": "function",
+                "function": {"name": "lookup", "arguments": "{\"query\":\"" + "y" * 500 + "\"}"},
+            }],
+        }]
+        assert c._estimate_tokens(structured) > c._estimate_tokens(plain) + 200
+
+    def test_incremental_summary_only_for_strict_continuation(self):
+        c = ContextCompressor(head_keep=1, tail_keep=1, trigger_threshold=0)
+        c._generate_summary = MagicMock(side_effect=["first", "rebuilt"])
+        c._incremental_summary = MagicMock(return_value="continued")
+        first = [
+            {"role": "user", "content": "start"},
+            {"role": "assistant", "content": "a"},
+            {"role": "user", "content": "b"},
+            {"role": "assistant", "content": "c"},
+            {"role": "assistant", "content": "tail"},
+        ]
+        c.compress(first, 1)
+        continuation = first[:-1] + [
+            {"role": "assistant", "content": "d"},
+            {"role": "user", "content": "new tail"},
+        ]
+        c.compress(continuation, 1)
+        c._incremental_summary.assert_called_once()
+        incremental_messages = c._incremental_summary.call_args.args[0]
+        assert incremental_messages == [{"role": "assistant", "content": "d"}]
+
+        rewritten = [dict(m) for m in continuation]
+        rewritten[1] = {"role": "assistant", "content": "history was rewritten"}
+        result = c.compress(rewritten, 1)
+        assert result.summary == "rebuilt"
+        assert c._generate_summary.call_count == 2
+
+    def test_reset_clears_summary_coverage(self):
+        c = ContextCompressor()
+        c._last_summary = "something"
+        c._summary_coverage = (1, 2, "digest")
+        c.reset()
+        assert c._last_summary is None
+        assert c._summary_coverage is None
 
     def test_estimate_tokens(self):
         """Token estimation is positive."""

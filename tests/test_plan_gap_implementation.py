@@ -1,5 +1,7 @@
 import json
 
+import pytest
+
 from floodmind.agent.native.event_bus import EventBus
 from floodmind.agent.runtime.contracts.events import VALID_EVENT_TYPES
 from floodmind.agent.runtime.services.journal_authority import open_journal_authority
@@ -8,18 +10,61 @@ from floodmind.memory.session_manager import SessionManager
 from floodmind.plugin.loader import PluginLoader
 
 
+@pytest.mark.parametrize(
+    "session_id",
+    [".", "..", "name.", "../escape", "..\\escape", "/absolute", "C:\\escape", "bad\x00id", "COM1.log"],
+)
+def test_session_manager_rejects_unsafe_session_ids(tmp_path, session_id):
+    sm = SessionManager(config={"data_dir": str(tmp_path)})
+
+    with pytest.raises(ValueError, match="session_id"):
+        sm.get_session_dir(session_id)
+
+
+def test_session_manager_preserves_valid_generated_subagent_id(tmp_path):
+    sm = SessionManager(config={"data_dir": str(tmp_path)})
+    path = sm.get_session_dir("sub-researcher-a1b2c3")
+
+    assert path == (tmp_path / "sessions" / "sub-researcher-a1b2c3").resolve()
+    assert path.is_relative_to((tmp_path / "sessions").resolve())
+
+
 def test_session_manager_messages_page_cursor(tmp_path):
     sm = SessionManager(config={"data_dir": str(tmp_path)})
     session_id = "ses_page"
-    identity = resolve_identity(session_id, sm.get_session_dir(session_id))
-    authority = open_journal_authority(tmp_path, conversation_id=identity["conversation_id"], task_id="task", run_id="run", thread_id="thread", turn_id="turn")
+    session_dir = sm.get_session_dir(session_id)
+    identity = resolve_identity(session_id, session_dir)
     for i in range(6):
+        authority = open_journal_authority(
+            tmp_path,
+            conversation_id=identity["conversation_id"],
+            task_id=f"task_{i}",
+            run_id=f"run_{i}",
+            thread_id=f"thread_{i}",
+            turn_id=f"turn_{i}",
+        )
         authority.emit("thread.message.sent", {"content": f"u{i}", "turn_index": i})
-        authority.emit("model.attempt.completed", {"attempt_id": f"a{i}", "terminal_reason": "completed", "content": f"a{i}", "reasoning": "", "tool_calls": [], "is_final": True, "usage": {}})
+        authority.emit(
+            "model.attempt.completed",
+            {
+                "attempt_id": f"attempt_{i}",
+                "terminal_reason": "completed",
+                "content": f"a{i}",
+                "reasoning": "",
+                "tool_calls": [],
+                "is_final": True,
+                "usage": {},
+            },
+        )
+
     page1 = sm.get_messages_page(session_id, limit=3)
     assert [m["content"] for m in page1["items"]] == ["a4", "u5", "a5"]
+    assert page1["more"] is True
+    assert page1["cursor"]
+
     page2 = sm.get_messages_page(session_id, limit=3, before_cursor=page1["cursor"])
     assert [m["content"] for m in page2["items"]] == ["u3", "a3", "u4"]
+    assert page2["more"] is True
 
 
 def test_compaction_aliases_emit_current_event_names():

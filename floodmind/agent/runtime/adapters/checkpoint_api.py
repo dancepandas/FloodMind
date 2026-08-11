@@ -7,7 +7,11 @@ import logging
 from typing import Any
 
 from floodmind.agent.runtime.contracts.checkpoints import CheckpointManifest, CheckpointSummary
-from floodmind.agent.runtime.services.checkpoint_service import CheckpointService
+from floodmind.agent.runtime.services.checkpoint_service import (
+    CheckpointNotFoundError,
+    CheckpointRollbackUnsupportedError,
+    CheckpointService,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -74,6 +78,10 @@ def handle_rollback_checkpoint(session_id: str, checkpoint_id: str, base_dir: st
             "checkpoint_id": checkpoint_id,
             "restored_files": restored,
         }, 200
+    except CheckpointNotFoundError as e:
+        return {"status": "not_found", "message": str(e)}, 404
+    except CheckpointRollbackUnsupportedError as e:
+        return {"status": "unsupported", "message": str(e)}, 409
     except Exception as e:
         logger.error(f"回滚 checkpoint 失败: {e}", exc_info=True)
         return {"status": "error", "message": "服务器内部错误"}, 500

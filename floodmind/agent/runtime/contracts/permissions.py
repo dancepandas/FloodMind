@@ -132,6 +132,9 @@ class ToolPermissionPolicy(BaseModel):
     path_field: str = "file_path"
     command_field: str = "command"
     path_fields: list[str] = []
+    # Narrow capability for host-controlled planning workflow state transitions.
+    # It does not bypass agent-tier or any other permission gate.
+    allow_in_planning: bool = False
 
 
 class ValidationResult(BaseModel):

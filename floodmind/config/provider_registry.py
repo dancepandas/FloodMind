@@ -16,6 +16,7 @@ import json
 import logging
 import os
 from typing import Any, Dict, List, Optional, Tuple
+from urllib.parse import urlparse
 
 logger = logging.getLogger(__name__)
 
@@ -46,9 +47,11 @@ PROVIDER_DEFS: Dict[str, Dict[str, Any]] = {
         "default_base_url": "https://api.minimaxi.com/v1",
     },
     "anthropic": {
-        "name": "Anthropic",
+        "name": "Anthropic (OpenAI-compatible gateway required)",
         "env": ["ANTHROPIC_API_KEY"],
-        "default_base_url": "https://api.anthropic.com",
+        # FloodMind currently speaks OpenAI Chat Completions.  The official
+        # Anthropic endpoint speaks Messages API and is rejected at validation.
+        "default_base_url": "",
     },
     "google": {
         "name": "Google Gemini",
@@ -154,6 +157,30 @@ KNOWN_MODELS: Dict[str, List[str]] = {
         "llama-4-maverick",
     ],
 }
+
+
+# ---------------------------------------------------------------------------
+# Transport contract validation
+# ---------------------------------------------------------------------------
+
+_OFFICIAL_ANTHROPIC_HOSTS = {"api.anthropic.com"}
+
+
+def validate_openai_compatible_transport(provider_id: str, base_url: str) -> None:
+    """Reject endpoints that cannot serve the OpenAI Chat Completions wire format.
+
+    Model names do not select a transport: a custom OpenAI-compatible gateway may
+    legitimately serve ``claude-*`` models.  Only the official Anthropic host is
+    rejected because it exposes Messages API rather than Chat Completions.
+    """
+    parsed = urlparse((base_url or "").strip())
+    hostname = (parsed.hostname or "").lower().rstrip(".")
+    if hostname in _OFFICIAL_ANTHROPIC_HOSTS:
+        raise ValueError(
+            "The official Anthropic endpoint (api.anthropic.com) does not support "
+            "OpenAI Chat Completions. Configure an OpenAI-compatible gateway base "
+            "URL for Claude models; direct Anthropic transport is not implemented."
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -272,6 +299,7 @@ def get_llm_client(provider_id: str = "", model_id: str = "", **kwargs):
     base_url = kwargs.get("base_url") or rm.base_url
     provider_id = rm.provider
     model_id = rm.id
+    validate_openai_compatible_transport(provider_id, base_url)
 
     ck = _cache_key(provider_id, model_id, api_key, base_url)
     if ck in _client_cache:

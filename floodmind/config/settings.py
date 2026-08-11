@@ -13,34 +13,14 @@ import json
 import logging
 import os
 import re
-import socket
-import ssl
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 _logger = logging.getLogger(__name__)
 
-# IPv4-only 模式
-if os.getenv("PYTHON_IPV6", "0") != "1":
-    _orig_getaddrinfo = socket.getaddrinfo
-    def _ipv4_only(host, port, family=0, type=0, proto=0, flags=0):
-        return _orig_getaddrinfo(host, port, socket.AF_INET, type, proto, flags)
-    socket.getaddrinfo = _ipv4_only
 
-# SSL
-if os.getenv("ALLOW_INSECURE_SSL", "0") == "1":
-    try:
-        _create_unverified_https_context = ssl._create_unverified_context
-    except AttributeError:
-        pass
-    else:
-        ssl._create_default_https_context = _create_unverified_https_context
-
-os.environ.setdefault("HF_ENDPOINT", "https://hf-mirror.com")
-_hf_home = os.getenv("HF_HOME")
-if _hf_home:
-    os.environ["HF_HOME"] = _hf_home
-    os.makedirs(_hf_home, exist_ok=True)
+# Network policy belongs on individual HTTP clients. Importing configuration must
+# never alter process-wide DNS resolution or TLS verification.
 
 
 # ── Config Path ────────────────────────────────────────────
@@ -114,6 +94,62 @@ def _config_path() -> Path:
 
 def _template_path() -> Path:
     return Path(__file__).parent / "settings_template.json"
+
+
+def initialize_floodmind_home() -> Path:
+    """Create the configured FloodMind home and seed settings when absent.
+
+    This is an explicit runtime operation. Importing :mod:`floodmind.config`
+    never creates directories or copies configuration files.
+    """
+    home = get_floodmind_home()
+    home.mkdir(parents=True, exist_ok=True)
+    user_path = home / "settings.json"
+    if not user_path.exists():
+        template_path = _template_path()
+        if template_path.exists():
+            user_path.write_text(template_path.read_text(encoding="utf-8"), encoding="utf-8")
+            _logger.info("已创建初始配置: %s (请编辑此文件配置 API 密钥)", user_path)
+    return home
+
+
+def migrate_settings() -> bool:
+    """Persist legacy settings and MCP layouts in the current FloodMind home.
+
+    Returns ``True`` when any file changed. The operation is idempotent and is
+    deliberately separate from imports and ordinary read-only config loading.
+    """
+    user_path = _config_path()
+    user_cfg = _load_json_config(user_path)
+    next_cfg, migrated = _migrate_legacy_config(user_cfg)
+    legacy_servers = next_cfg.pop("mcpServers", next_cfg.pop("mcp_servers", []))
+    mcp_path = _mcp_config_path()
+    migrate_mcp = bool(
+        legacy_servers and isinstance(legacy_servers, list) and not mcp_path.exists()
+    )
+    if not migrated and not migrate_mcp:
+        return False
+
+    initialize_floodmind_home()
+    if user_path.exists():
+        from datetime import datetime
+
+        stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        backup = user_path.with_name(f"settings.json.bak.{stamp}")
+        backup.write_text(user_path.read_text(encoding="utf-8"), encoding="utf-8")
+        _logger.info("已备份旧 settings.json: %s", backup)
+
+    user_path.write_text(json.dumps(next_cfg, ensure_ascii=False, indent=2), encoding="utf-8")
+    if migrate_mcp:
+        mcp_path.write_text(
+            json.dumps({"servers": legacy_servers}, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        _logger.info("已将 mcpServers 从 settings.json 迁移到 mcp.json")
+
+    global _config_cache
+    _config_cache = None
+    return True
 
 
 # ── Built-in Defaults ──────────────────────────────────────
@@ -284,59 +320,27 @@ def _migrate_legacy_config(cfg: dict) -> tuple:
 
 
 def _load_config() -> dict:
-    """加载配置：DEFAULT_CONFIG + 用户 JSON 配置合并。
-
-    首次启动时自动从模板复制用户配置（仅 providers），后续不再合并模板
-    （用户在 settings.json 中删除某个 model 就应该从最终配置中消失）。
-    检测到旧格式时自动迁移并备份原文件为 settings.json.bak.<timestamp>。
-    """
+    """Load defaults and existing configuration without writing to disk."""
     cfg = dict(DEFAULT_CONFIG)
 
-    # 用户级 JSON 配置
     user_path = _config_path()
     user_cfg = _load_json_config(user_path)
     if user_cfg:
-        cfg = _deep_merge(cfg, user_cfg)
+        normalized, _ = _migrate_legacy_config(user_cfg)
+        cfg = _deep_merge(cfg, normalized)
         _logger.debug("已加载用户配置: %s", user_path)
-    else:
-        # 首次启动：自动复制模板作为初始配置
-        try:
-            get_floodmind_home().mkdir(parents=True, exist_ok=True)
-            template_path = _template_path()
-            template_cfg = _load_json_config(template_path)
-            if template_cfg:
-                cfg = _deep_merge(cfg, template_cfg)
-            with open(template_path, "r", encoding="utf-8") as src:
-                with open(user_path, "w", encoding="utf-8") as dst:
-                    dst.write(src.read())
-            _logger.info("已创建初始配置: %s (请编辑此文件配置 API 密钥)", user_path)
-        except Exception:
-            _logger.debug("无法自动创建配置文件: %s", user_path)
+    elif not user_path.exists():
+        # Preserve the historical effective defaults without seeding HOME.
+        template_cfg = _load_json_config(_template_path())
+        if template_cfg:
+            cfg = _deep_merge(cfg, template_cfg)
 
-    # 兼容旧的 config.json 路径
     old_path = Path.home() / ".config" / "floodmind" / "config.json"
     old_cfg = _load_json_config(old_path)
     if old_cfg:
-        cfg = _deep_merge(cfg, old_cfg)
+        normalized, _ = _migrate_legacy_config(old_cfg)
+        cfg = _deep_merge(cfg, normalized)
         _logger.debug("已加载旧配置: %s", old_path)
-
-    # 旧格式 → 新格式迁移；发生迁移则备份并回写
-    cfg, migrated = _migrate_legacy_config(cfg)
-    if migrated and user_path.exists():
-        try:
-            from datetime import datetime
-            stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            backup = user_path.with_name(f"settings.json.bak.{stamp}")
-            # 先备份原文件，再写新结构
-            with open(user_path, "r", encoding="utf-8") as f:
-                original_text = f.read()
-            with open(backup, "w", encoding="utf-8") as f:
-                f.write(original_text)
-            with open(user_path, "w", encoding="utf-8") as f:
-                json.dump(cfg, f, ensure_ascii=False, indent=2)
-            _logger.info("settings.json 已从旧格式迁移到新格式，备份: %s", backup)
-        except Exception as e:
-            _logger.warning("迁移后回写 settings.json 失败（内存中仍为新格式）: %s", e)
 
     return cfg
 
@@ -581,37 +585,9 @@ def _mcp_config_path() -> Path:
 
 
 def load_mcp_config() -> Dict[str, Any]:
-    """加载 MCP 配置：mcp.json + 环境变量覆盖。
-
-    首次启动时自动从 settings.json 的 mcpServers 字段迁移。
-    """
+    """Load MCP configuration and apply environment overrides, without writes."""
     mcp_path = _mcp_config_path()
-
-    # 加载 mcp.json
-    if mcp_path.exists():
-        mcp_cfg = _load_json_config(mcp_path)
-    else:
-        mcp_cfg = {}
-
-    # 首次迁移：从 settings.json 的 mcpServers 字段迁移到 mcp.json
-    if not mcp_cfg.get("servers") and mcp_path == get_floodmind_home() / "mcp.json":
-        user_cfg = _load_json_config(_config_path())
-        legacy = user_cfg.get("mcpServers", user_cfg.get("mcp_servers", []))
-        if legacy and isinstance(legacy, list):
-            mcp_cfg = {"servers": legacy}
-            # 从 settings.json 中移除旧字段
-            if "mcpServers" in user_cfg or "mcp_servers" in user_cfg:
-                user_cfg.pop("mcpServers", None)
-                user_cfg.pop("mcp_servers", None)
-                save_config(user_cfg)
-                _logger.info("已将 mcpServers 从 settings.json 迁移到 mcp.json")
-            # 写入 mcp.json
-            try:
-                get_floodmind_home().mkdir(parents=True, exist_ok=True)
-                with open(mcp_path, "w", encoding="utf-8") as f:
-                    json.dump(mcp_cfg, f, ensure_ascii=False, indent=2)
-            except Exception as e:
-                _logger.warning("写入 mcp.json 失败: %s", e)
+    mcp_cfg = _load_json_config(mcp_path) if mcp_path.exists() else {}
 
     if not mcp_cfg:
         mcp_cfg = {"servers": []}

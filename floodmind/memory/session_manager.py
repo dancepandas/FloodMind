@@ -21,16 +21,55 @@ from typing import Any, Dict, List, Optional, Callable
 logger = logging.getLogger(__name__)
 
 
+_MAX_SESSION_ID_LENGTH = 128
+_ALLOWED_SESSION_ID_CHARS = frozenset(
+    "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_."
+)
+_WINDOWS_RESERVED_NAMES = frozenset(
+    {"CON", "PRN", "AUX", "NUL"}
+    | {f"COM{i}" for i in range(1, 10)}
+    | {f"LPT{i}" for i in range(1, 10)}
+)
+
+
 def validate_session_id(session_id: str) -> str:
+    """Return the canonical session ID or reject values unsafe as path segments.
+
+    Session IDs are persisted as directory names on every supported platform, so
+    the accepted format deliberately uses a portable, single-segment alphabet.
+    Surrounding whitespace is canonicalized for compatibility with existing web
+    inputs; embedded whitespace and all control characters remain invalid.
+    """
     session_id = str(session_id or "").strip()
     if not session_id:
         raise ValueError("session_id 不能为空")
-    if len(session_id) > 128:
+    if len(session_id) > _MAX_SESSION_ID_LENGTH:
         raise ValueError("session_id 过长")
-    allowed = set("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_.")
-    if any(ch not in allowed for ch in session_id):
+    if session_id in {".", ".."}:
+        raise ValueError("session_id 不能为 . 或 ..")
+    if session_id.endswith("."):
+        raise ValueError("session_id 不能以句点结尾")
+    if any(ch not in _ALLOWED_SESSION_ID_CHARS for ch in session_id):
         raise ValueError("session_id 含非法字符")
+
+    # Windows device names are unsafe even with an extension (for example,
+    # ``CON.json``). Reject them on every platform for consistent SDK/web use.
+    basename = session_id.split(".", 1)[0].upper()
+    if basename in _WINDOWS_RESERVED_NAMES:
+        raise ValueError("session_id 使用了系统保留名称")
     return session_id
+
+
+def session_path(session_root: Path, session_id: str, *parts: str) -> Path:
+    """Build a contained path below ``session_root`` for one validated session."""
+    canonical_id = validate_session_id(session_id)
+    root = Path(session_root).resolve()
+    candidate = (root / canonical_id / Path(*parts)).resolve()
+    try:
+        candidate.relative_to(root)
+    except ValueError as exc:
+        raise ValueError("session_id 对应路径超出会话根目录") from exc
+    return candidate
 
 
 @dataclass
@@ -327,9 +366,8 @@ class SessionManager:
         logger.info(f"淘汰会话（已持久化）: {session_id}")
     
     def get_session_dir(self, session_id: str) -> Path:
-        """获取会话目录路径"""
-        session_id = validate_session_id(session_id)
-        return self.sessions_dir / session_id
+        """获取会话目录路径，并保证结果始终位于 sessions 根目录内。"""
+        return session_path(self.sessions_dir, session_id)
     
     def get_memory_dir(self, session_id: str) -> Path:
         """获取会话记忆目录路径"""
@@ -403,11 +441,14 @@ class SessionManager:
     
     def _conversation_projection(self, session_id: str) -> List[Dict[str, Any]]:
         session_id = validate_session_id(session_id)
-        meta_path = self.get_session_dir(session_id) / "session.json"
+        session_dir = self.get_session_dir(session_id)
+        meta_path = session_dir / "session.json"
         if not meta_path.exists():
             return []
         try:
-            conversation_id = str(json.loads(meta_path.read_text(encoding="utf-8")).get("conversation_id") or "")
+            conversation_id = str(
+                json.loads(meta_path.read_text(encoding="utf-8")).get("conversation_id") or ""
+            )
         except (OSError, ValueError, TypeError):
             return []
         if not conversation_id:
@@ -425,6 +466,7 @@ class SessionManager:
         for turn in self._conversation_projection(session_id):
             if turn.get("role") == "user" and turn.get("content"):
                 return self._extract_title_from_user_input(turn["content"])
+
         return "新会话"
 
     @staticmethod
@@ -476,11 +518,7 @@ class SessionManager:
         limit: int = 50,
         before_cursor: Optional[str] = None,
     ) -> Dict[str, Any]:
-        """Cursor-based 分页读取前端消息历史。
-
-        当前权威历史源是 memory/chat_history.json（DualMemory._turns），不是
-        SQLite messages 表；接口语义仍按 IMPLEMENTATION_PLAN.md 提供：返回
-        items/more/cursor。limit <= 0 表示兼容旧 get_session_messages 路径。
+        """Cursor-based pagination over the canonical Journal projection.
         """
         session_id = validate_session_id(session_id)
         all_items = self._load_frontend_messages(session_id)
