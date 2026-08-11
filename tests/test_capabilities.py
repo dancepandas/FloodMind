@@ -18,6 +18,20 @@ def test_layered_resolution_precedence():
     assert src3 == CapabilitySource.provider_default
 
 
+def test_exact_override_inherits_family_layer():
+    # exact override 只声明 max_output_tokens，其余必须继承 family 层与 provider 默认（§7.6 分层覆盖）。
+    reg = CapabilityRegistry()
+    reg.register_provider_defaults("openai", ModelCapabilities(
+        transport_family="openai", supports_tools=True))
+    reg.register_family("openai", "o", ModelCapabilities(context_window=1000))
+    reg.register_exact("o4-mini", ModelCapabilities(max_output_tokens=500))
+    caps, src = reg.resolve_capabilities("openai", "o", "o4-mini")
+    assert src == CapabilitySource.exact
+    assert caps.context_window == 1000
+    assert caps.max_output_tokens == 500
+    assert caps.transport_family == "openai"
+
+
 def test_capability_snapshot_records_source_and_version():
     reg = CapabilityRegistry()
     reg.register_provider_defaults("kimi", ModelCapabilities(supports_tools=True))
