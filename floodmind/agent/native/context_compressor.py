@@ -13,12 +13,16 @@ Context Compression — 上下文压缩
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
+
+from pydantic import BaseModel
 
 from floodmind.agent.native.model_client import ModelClient
+from floodmind.agent.runtime.contracts.projection import ProjectionManifest
 
 logger = logging.getLogger(__name__)
 
@@ -63,6 +67,28 @@ COMPRESSION_PROMPT = """你是一个上下文压缩助手。你的任务是将�
 """
 
 
+class CompactSummary(BaseModel):
+    """结构化 Summary Event 载荷（目标 §9.5 全字段）。
+
+    摘要来源切到 Canonical Events：source_sha256 对被覆盖的源消息的 canonical_json
+    取 SHA256；covered_sequence_* 来自边界；unresolved_transactions 来自未决事务 id。
+    """
+
+    covered_sequence_start: int = 0
+    covered_sequence_end: int = 0
+    source_event_ids: List[str] = []
+    source_sha256: str = ""
+    summary: str = ""
+    completed_facts: List[str] = []
+    open_commitments: List[str] = []
+    decisions: List[str] = []
+    files_and_symbols: List[str] = []
+    tool_side_effects: List[str] = []
+    artifacts: List[str] = []
+    unresolved_transactions: List[str] = []
+    recipe_version: str = "1"
+
+
 @dataclass
 class CompressionResult:
     """压缩结果"""
@@ -71,6 +97,8 @@ class CompressionResult:
     compressed_messages: List[Dict[str, Any]]
     summary: str
     saved_tokens: int = 0
+    compressed_messages_count: int = 0
+    manifest: Optional[ProjectionManifest] = None
 
 
 class ContextCompressor:
@@ -95,6 +123,7 @@ class ContextCompressor:
         self.tail_keep = tail_keep
         self.trigger_threshold = trigger_threshold
         self._last_summary: Optional[str] = None
+        self._summary_coverage: Optional[Tuple[int, int, str]] = None
 
     def should_compress(self, messages: List[Dict[str, Any]], max_context_tokens: int) -> bool:
         """判断是否需要压缩"""
@@ -193,13 +222,27 @@ class ContextCompressor:
         # 1. 裁剪工具输出
         trimmed_middle = self._trim_tool_outputs(middle)
 
-        # 2. 生成或增量更新摘要
-        if self._last_summary:
-            summary = self._incremental_summary(trimmed_middle, self._last_summary)
+        # 2. 仅当本次 middle 严格延续上次已摘要范围时增量更新。
+        # 对历史插入、删除、改写或回退到较短范围，一律重建，避免把不相干摘要串入。
+        previous_coverage = self._summary_coverage
+        can_increment = bool(
+            self._last_summary
+            and previous_coverage
+            and self._is_strict_continuation(messages, head_end, tail_start, previous_coverage)
+        )
+        if can_increment:
+            _, previous_end, _ = previous_coverage
+            newly_covered = self._trim_tool_outputs(messages[previous_end:tail_start])
+            summary = self._incremental_summary(newly_covered, self._last_summary or "")
         else:
             summary = self._generate_summary(trimmed_middle)
 
         self._last_summary = summary
+        self._summary_coverage = (
+            head_end,
+            tail_start,
+            self._coverage_digest(messages[head_end:tail_start]),
+        )
 
         # 3. 组装压缩后的消息
         summary_message = {
@@ -224,6 +267,110 @@ class ContextCompressor:
             saved_tokens=saved,
         )
 
+    def compress_journal(
+        self,
+        messages: List[Dict[str, Any]],
+        authority: Optional[Any] = None,
+        *,
+        capabilities: Optional[Any] = None,
+        budget: Optional[Any] = None,
+        pending_transaction_ids: Optional[List[str]] = None,
+        max_context_tokens: Optional[int] = None,
+    ) -> CompressionResult:
+        """§9.6 Journal-backed Compact：Atomic Groups + 结构化 Summary Event + Manifest。
+
+        只 append ``context.compaction.completed`` 到 journal，绝不修改原始事件；
+        可压缩段不拆任何 Atomic Group；仍超限时扩大 Offload，绝不静默截断当前用户请求。
+        """
+        from floodmind.agent.native.atomic_groups import AtomicGroups
+        from floodmind.agent.native.projection import build_manifest, compute_input_budget
+        from floodmind.agent.runtime.contracts.canonical_events import canonical_json
+        from floodmind.agent.runtime.contracts.projection import InputBudget, ProjectionSource
+
+        pending_transaction_ids = pending_transaction_ids or []
+        budget = budget or (compute_input_budget(capabilities) if capabilities else InputBudget())
+        limit = max_context_tokens or budget.effective_input or 1200
+
+        # 1) 固定保留 System/Soul/AGENTS/当前用户请求/未决事务 + 最近完整 Group
+        ranges = AtomicGroups().aligned_ranges(
+            messages, pending_transaction_ids=pending_transaction_ids
+        )
+        start, end = self._aligned_split_points(messages)
+
+        # 2) 可压缩段 = 早期低优先级来源（整体位于保留头之前，不拆 Atomic Group）
+        compressible = [
+            messages[r0:r1]
+            for r0, r1 in ranges
+            if r1 <= start and (r0, r1) != (0, 0)
+        ]
+
+        # 3) 从较早来源压缩（规则/LLM 摘要引擎）
+        summary = (
+            self._generate_summary([m for seg in compressible for m in seg])
+            if compressible else ""
+        )
+
+        # 4) 大工具结果 Artifact Offload
+        trimmed = self._trim_tool_outputs(messages)
+
+        # 5) 结构化 Summary Event（源 = 被覆盖消息的 canonical 投影）
+        source_text = canonical_json([m for seg in compressible for m in seg])
+        summary_event = CompactSummary(
+            covered_sequence_start=start,
+            covered_sequence_end=end,
+            source_event_ids=[],
+            source_sha256=hashlib.sha256(source_text.encode("utf-8")).hexdigest(),
+            summary=summary,
+            completed_facts=[],
+            open_commitments=[],
+            decisions=[],
+            files_and_symbols=[],
+            tool_side_effects=[],
+            artifacts=[],
+            unresolved_transactions=pending_transaction_ids,
+            recipe_version="1",
+        )
+        if authority is not None:
+            authority.emit("context.compaction.completed", summary_event.model_dump())
+
+        # 6) 重建压缩后消息：头部（固定保留） + 摘要块 + 尾部（最近完整 Group）
+        compressed = [dict(m) for m in messages[:start]]
+        if summary:
+            compressed.append(
+                {"role": "system", "content": "[compact] " + summary, "compaction": True}
+            )
+        compressed.extend(dict(m) for m in trimmed[end:])
+
+        # 7) 再次计数；仍超限 → 扩大 Offload，不截断当前用户请求
+        if self._estimate_tokens(compressed) > limit:
+            compressed = self._trim_tool_outputs(compressed)
+
+        # 8) Projection Manifest（source_type="episode"，transform="compact"）
+        manifest = build_manifest(
+            model="", codec_version="", capability_snapshot_id="",
+            budget=budget,
+            sources=[
+                ProjectionSource(
+                    source_id="", source_type="episode",
+                    content_sha256=summary_event.source_sha256,
+                    original_tokens=self._estimate_tokens(trimmed),
+                    projected_tokens=self._estimate_tokens(compressed),
+                    transform="compact", priority=1, selected=True,
+                )
+            ],
+        )
+
+        return CompressionResult(
+            original_messages=messages,
+            compressed_messages=compressed,
+            summary=summary,
+            saved_tokens=max(
+                0, self._estimate_tokens(messages) - self._estimate_tokens(compressed)
+            ),
+            compressed_messages_count=len(compressed),
+            manifest=manifest,
+        )
+
     def _trim_tool_outputs(self, messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         """
         裁剪工具输出：删除冗长的详细输出，只保留结论。
@@ -233,6 +380,8 @@ class ContextCompressor:
         for msg in messages:
             if msg.get("role") == "tool" or msg.get("role") == "function":
                 content = msg.get("content", "")
+                if not isinstance(content, str):
+                    content = json.dumps(content, ensure_ascii=False, sort_keys=True, default=str)
                 if len(content) > 2000:
                     # 保留前 500 字 + 后 500 字，中间用省略号
                     prefix = content[:500]
@@ -301,7 +450,12 @@ class ContextCompressor:
 
         for msg in messages:
             role = msg.get("role", "")
-            content = msg.get("content", "")[:200]
+            raw_content = msg.get("content", "")
+            content = (
+                raw_content
+                if isinstance(raw_content, str)
+                else json.dumps(raw_content, ensure_ascii=False, sort_keys=True, default=str)
+            )[:200]
             if role == "user":
                 lines.append(f"用户: {content}")
             elif role == "assistant":
@@ -311,40 +465,81 @@ class ContextCompressor:
 
         return "\n".join(lines[:50])  # 最多 50 行
 
+    @classmethod
+    def _coverage_digest(cls, messages: List[Dict[str, Any]]) -> str:
+        """Return a stable digest for the exact normalized covered history."""
+        payload = cls._normalized_serialization(messages).encode("utf-8")
+        return hashlib.sha256(payload).hexdigest()
+
+    @classmethod
+    def _is_strict_continuation(
+        cls,
+        messages: List[Dict[str, Any]],
+        head_end: int,
+        tail_start: int,
+        previous: Tuple[int, int, str],
+    ) -> bool:
+        previous_start, previous_end, previous_digest = previous
+        return (
+            head_end == previous_start
+            and tail_start > previous_end
+            and previous_end <= len(messages)
+            and cls._coverage_digest(messages[head_end:previous_end]) == previous_digest
+        )
+
     @staticmethod
-    def _messages_to_text(messages: List[Dict[str, Any]]) -> str:
-        """将消息列表转换为文本"""
+    def _bounded(value: Any, limit: int) -> Any:
+        """Bound summary input without dropping tool structure or identifiers."""
+        if isinstance(value, str):
+            if len(value) <= limit:
+                return value
+            half = max(1, limit // 2)
+            return value[:half] + f"...[{len(value) - 2 * half} chars omitted]..." + value[-half:]
+        if isinstance(value, list):
+            items = [ContextCompressor._bounded(item, limit) for item in value[:20]]
+            if len(value) > 20:
+                items.append({"_omitted_items": len(value) - 20})
+            return items
+        if isinstance(value, dict):
+            items = list(value.items())
+            bounded = {
+                str(k): ContextCompressor._bounded(v, limit)
+                for k, v in items[:50]
+            }
+            if len(items) > 50:
+                bounded["_omitted_fields"] = len(items) - 50
+            return bounded
+        return value
+
+    @classmethod
+    def _normalized_message(cls, message: Dict[str, Any], *, bounded: bool) -> Dict[str, Any]:
+        """Normalize the complete message envelope for deterministic serialization."""
+        normalized = {str(key): value for key, value in message.items()}
+        if bounded:
+            normalized = cls._bounded(normalized, 1000)
+        return normalized
+
+    @classmethod
+    def _normalized_serialization(cls, messages: List[Dict[str, Any]]) -> str:
+        normalized = [cls._normalized_message(msg, bounded=False) for msg in messages]
+        return json.dumps(normalized, ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=str)
+
+    @classmethod
+    def _messages_to_text(cls, messages: List[Dict[str, Any]]) -> str:
+        """Serialize bounded messages, including structured tool calls/results and IDs."""
         parts = []
         for msg in messages:
-            role = msg.get("role", "unknown")
-            content = msg.get("content", "")
-            if isinstance(content, list):
-                # 多模态 content parts
-                content = "\n".join(
-                    p.get("text", "") for p in content if isinstance(p, dict) and p.get("type") == "text"
-                )
-            parts.append(f"[{role}] {content[:1000]}")
+            normalized = cls._normalized_message(msg, bounded=True)
+            parts.append(json.dumps(normalized, ensure_ascii=False, sort_keys=True, default=str))
         return "\n\n".join(parts)
 
-    @staticmethod
-    def _estimate_tokens(messages: List[Dict[str, Any]]) -> int:
-        """
-        粗略估计 Token 数。
-        中文按 1 字 ≈ 1 token，英文按 4 字符 ≈ 1 token。
-        """
-        total_chars = 0
-        for msg in messages:
-            content = msg.get("content", "")
-            if isinstance(content, str):
-                total_chars += len(content)
-            elif isinstance(content, list):
-                for part in content:
-                    if isinstance(part, dict) and "text" in part:
-                        total_chars += len(part["text"])
-
-        # 粗略估算：混合文本按 1 字符 ≈ 0.6 token
-        return int(total_chars * 0.6) + len(messages) * 4  # +4 为消息格式开销
+    @classmethod
+    def _estimate_tokens(cls, messages: List[Dict[str, Any]]) -> int:
+        """Estimate tokens from the complete normalized request-message serialization."""
+        serialized = cls._normalized_serialization(messages)
+        return int(len(serialized) * 0.6) + len(messages) * 4
 
     def reset(self) -> None:
         """重置状态（会话切换时）"""
         self._last_summary = None
+        self._summary_coverage = None

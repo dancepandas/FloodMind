@@ -356,7 +356,13 @@ class NativeAgentExecutor:
                 {"reason": reason, "before_messages": before_messages},
             )
         try:
-            result = self._context_compressor.compress(state.messages, max_context_tokens=self.context_window)
+            capabilities = self._capabilities if hasattr(self, "_capabilities") else None
+            result = self._context_compressor.compress_journal(
+                state.messages,
+                self._journal_authority,
+                capabilities=capabilities,
+                max_context_tokens=self.context_window,
+            )
             if result.saved_tokens > 0:
                 state.messages = result.compressed_messages
                 self.event_bus.emit({
@@ -374,15 +380,8 @@ class NativeAgentExecutor:
                 )
             else:
                 logger.info("[EXEC] context_compress triggered but no compression performed")
-            if self._journal_authority is not None:
-                self._journal_authority.emit(
-                    "context.compaction.completed",
-                    {
-                        "reason": reason,
-                        "before_messages": before_messages,
-                        "after_messages": len(result.compressed_messages),
-                    },
-                )
+            # Summary Event（§9.5 CompactSummary）已由 compress_journal 经 authority
+            # 落 journal——只 append context.compaction.completed，不改原始事件。
         except Exception as e:
             logger.error("[EXEC] context compression failed: %s", e)
             self.event_bus.emit_error(f"上下文压缩失败: {str(e)[:200]}")
