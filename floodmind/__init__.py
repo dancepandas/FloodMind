@@ -19,6 +19,7 @@ FloodMind — 基于大语言模型的智能 Agent 框架
         ToolLoader,           # 渐进式工具加载状态（高级）
         Workspace,            # Harness 工作区契约
         build_folder_workspace, # folder-first 工作区工厂
+        build_workspace,       # 通用工作区构造器（web_session / folder-first）
         build_agent_tool,     # 工具构造器
         DualMemory,           # 记忆系统
         AgentTool,            # 工具基类
@@ -58,6 +59,7 @@ def __getattr__(name):
         "compact_prompt_catalog": "floodmind.agent.native.tool_loading",
         "Workspace": "floodmind.agent.runtime.contracts.workspace",
         "build_folder_workspace": "floodmind.agent.runtime.services.workspace_service",
+        "build_workspace": "floodmind.agent.runtime.services.workspace_service",
         "build_agent_tool": "floodmind.tools.agent_tool",
         "DualMemory": "floodmind.memory.dual_memory",
         "AgentTool": "floodmind.tools.agent_tool",
@@ -101,6 +103,7 @@ __all__ = [
     "compact_prompt_catalog",
     "Workspace",
     "build_folder_workspace",
+    "build_workspace",
     "build_agent_tool",
     "DualMemory",
     "AgentTool",

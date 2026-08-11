@@ -6,6 +6,7 @@ from unittest.mock import patch
 import pytest
 
 from floodmind.config.model_resolver import resolve_model, list_models, ResolvedModel
+from floodmind.config.provider_registry import PROVIDER_DEFS
 
 
 # 测试用 catalog：两个 provider，各含若干模型，context_window 各异
@@ -39,6 +40,9 @@ def _isolated_config():
 
 
 class TestResolveModel:
+    def test_anthropic_registry_does_not_advertise_incompatible_direct_url(self):
+        assert PROVIDER_DEFS["anthropic"]["default_base_url"] == ""
+
     def test_default_is_first(self):
         """无参 → catalog 第一个模型（dashscope/model-a）。"""
         rm = resolve_model()
@@ -97,10 +101,10 @@ class TestResolveModel:
         assert rm.api_key == "sk-mm"
         assert rm.context_window == 1000000
 
-    def test_unknown_model_key_falls_back(self):
-        """未知 model_key → 回退到 catalog 第一个（不抛错）。"""
-        rm = resolve_model(model_key="does-not-exist")
-        assert rm.id == "model-a"
+    def test_unknown_model_key_raises(self):
+        """未知 model_key → 精确匹配失败即 raise（不静默错配回退到别的模型）。"""
+        with pytest.raises(ValueError):
+            resolve_model(model_key="does-not-exist")
 
     def test_returns_frozen_dataclass(self):
         rm = resolve_model()

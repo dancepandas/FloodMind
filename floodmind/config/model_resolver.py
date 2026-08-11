@@ -136,19 +136,31 @@ def resolve_model(
 
     candidates = list_models()
 
-    # 1) 精确匹配 model_key（+ 可选 provider 限定）
+    # 1) model_key 显式指定 → 必须精确命中；不静默错配回退到别的模型。
+    #    限定 provider 内未找到时，先在全部 provider 中搜同名模型，仍无则 raise。
     if model_key:
         for pid, pdata, m in candidates:
             if m.get("id") == model_key and (not provider_id or pid == provider_id):
                 return _build(pid, pdata, m)
+        for pid, pdata, m in candidates:
+            if m.get("id") == model_key:
+                return _build(pid, pdata, m)
+        raise ValueError(
+            f"配置中找不到模型 {model_key!r}"
+            + (f"（provider={provider_id!r}）" if provider_id else "")
+            + "。请在 settings.json 的 providers.<id>.models[] 中添加该模型。"
+        )
 
-    # 2) 仅指定 provider → 该 provider 下第一个模型
+    # 2) 仅指定 provider → 该 provider 下第一个模型；provider 不存在则 raise（不静默错配）
     if provider_id:
         for pid, pdata, m in candidates:
             if pid == provider_id:
                 return _build(pid, pdata, m)
+        raise ValueError(
+            f"配置中找不到 provider {provider_id!r}。请在 settings.json 中配置。"
+        )
 
-    # 3) catalog 第一个（全局默认激活模型）
+    # 3) 未指定 model_key / provider → catalog 第一个（全局默认激活模型）
     if candidates:
         pid, pdata, m = candidates[0]
         return _build(pid, pdata, m)
