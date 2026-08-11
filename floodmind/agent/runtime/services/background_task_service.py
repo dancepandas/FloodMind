@@ -31,6 +31,7 @@ from pathlib import Path
 from typing import Any, Callable, Deque, Dict, List, Optional, Tuple
 
 from floodmind.memory.session_manager import session_path, validate_session_id
+from floodmind.agent.runtime.contracts.sandbox import ToolInvocation
 
 logger = logging.getLogger(__name__)
 
@@ -66,6 +67,7 @@ class BackgroundTask:
     error: str = ""
     process_identity: Optional[Dict[str, Any]] = None  # {pid, create_time}
     journal_authority: Optional[Any] = None
+    sandbox_capabilities: List[str] = field(default_factory=list)
 
     @property
     def running(self) -> bool:
@@ -100,6 +102,7 @@ class BackgroundTaskService:
         self._thread_authority = threading.local()
 
         self._lock = threading.RLock()
+        self._session_sandbox: Dict[str, tuple] = {}
         self._active_tasks: Dict[str, BackgroundTask] = {}
         # start() 在释放锁执行目录/文件/Popen IO 前预占的并发槽位。
         self._pending_tasks: Dict[str, str] = {}  # task_id -> session_id
@@ -147,6 +150,15 @@ class BackgroundTaskService:
         return stack[-1] if stack else None
 
     # ── 公开 API ─────────────────────────────────────────────────────
+
+    def set_session_sandbox(self, session_id: str, policy, backend) -> None:
+        """Set or clear mandatory launch enforcement for a session."""
+        session_id = validate_session_id(session_id)
+        with self._lock:
+            if policy is None or backend is None:
+                self._session_sandbox.pop(session_id, None)
+            else:
+                self._session_sandbox[session_id] = (policy, backend)
 
     def start(
         self,
@@ -209,6 +221,29 @@ class BackgroundTaskService:
             if self._platform == "posix" and "preexec_fn" not in kwargs:
                 kwargs["preexec_fn"] = os.setsid  # 独立进程组，killpg 可靠
 
+            with self._lock:
+                session_sandbox = self._session_sandbox.get(session_id)
+            sandbox_capabilities: List[str] = []
+            if session_sandbox is not None:
+                policy, backend = session_sandbox
+                try:
+                    prepared = backend.prepare_launch(
+                        ToolInvocation(
+                            command=shell_cmd,
+                            cwd=cwd,
+                            env=env or {},
+                        ),
+                        policy,
+                    )
+                    kwargs["env"] = prepared["env"]
+                    kwargs["cwd"] = prepared["cwd"]
+                    sandbox_capabilities = sorted(
+                        str(capability)
+                        for capability in backend.enforced_capabilities
+                    )
+                except Exception as exc:
+                    raise RuntimeError(f"session sandbox 强制失败: {exc}") from exc
+
             process = subprocess.Popen(shell_cmd, **kwargs)
             from floodmind.agent.runtime.services.process_identity import process_create_time
             task = BackgroundTask(
@@ -225,6 +260,7 @@ class BackgroundTaskService:
                 max_lifetime_seconds=lifetime,
                 process_identity={"pid": process.pid, "create_time": process_create_time(process.pid)},
                 journal_authority=self._current_authority(),
+                sandbox_capabilities=sandbox_capabilities,
             )
             self._emit_for(task, "background.start.requested", {
                 "task_id": task_id,

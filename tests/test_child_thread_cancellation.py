@@ -59,7 +59,7 @@ def test_cancelled_event_only_after_verified_cleanup(tmp_path):
             child_session_id,
             "sleep",
             _sleep_cmd(30),
-            cwd=str(tmp_path),
+            cwd=runtime._child_sandbox_policy.file_root,
         )
         started["session_id"] = child_session_id
         release.wait(timeout=10)
@@ -164,7 +164,7 @@ def test_child_bg_tasks_killed_and_verified_on_cancel(tmp_path):
             child_session_id,
             "sleep",
             _sleep_cmd(30),
-            cwd=str(tmp_path),
+            cwd=runtime._child_sandbox_policy.file_root,
         )
         return [ModelEvent(type="token", content="ok"), ModelEvent(type="done")]
 

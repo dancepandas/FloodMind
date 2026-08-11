@@ -218,6 +218,14 @@ class LocalRestrictedSandbox:
             caps.add("filesystem_root")
         return caps
 
+    def prepare_launch(self, invocation: ToolInvocation, policy: SandboxPolicy) -> dict:
+        """Return enforced launch parameters without spawning a process."""
+        root = Path(policy.file_root).resolve()
+        cwd = self._validate_cwd(root, invocation.cwd)
+        (root / "tmp").mkdir(parents=True, exist_ok=True)
+        env = self._build_env(invocation.env, policy, root)
+        return {"env": env, "cwd": str(cwd)}
+
     def execute(
         self,
         invocation: ToolInvocation,
@@ -225,9 +233,9 @@ class LocalRestrictedSandbox:
         cancellation: Optional[CancellationToken] = None,
     ) -> ExecutionResult:
         root = Path(policy.file_root).resolve()
-        cwd = self._validate_cwd(root, invocation.cwd)
-        (root / "tmp").mkdir(parents=True, exist_ok=True)
-        env = self._build_env(invocation.env, policy, root)
+        prepared = self.prepare_launch(invocation, policy)
+        cwd = Path(prepared["cwd"])
+        env = prepared["env"]
         process_sandbox = ProcessSandbox(
             max_processes=policy.resources.max_processes,
             workspace_dir=root / "tmp",

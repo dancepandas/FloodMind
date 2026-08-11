@@ -112,6 +112,8 @@ class ChildThreadRuntime:
         self._runtime_dir = Path(runtime_dir)
         self._tool_runtime_factory = tool_runtime_factory
         self._quota_factory = quota_factory
+        self._child_sandbox_policy = None
+        self._child_sandbox_backend = None
 
     def run(
         self,
@@ -169,6 +171,25 @@ class ChildThreadRuntime:
                 sub_session_id=child_session_id,
                 parent_output_dir=Path(context.output_dir) if context.output_dir else None,
                 delegate_cwd=Path(delegate_cwd) if delegate_cwd else None,
+            )
+            from floodmind.agent.runtime.contracts.sandbox import (
+                ResourceLimits,
+                SandboxPolicy,
+            )
+            from floodmind.agent.runtime.services.sandbox_backend import (
+                LocalRestrictedSandbox,
+            )
+            self._child_sandbox_policy = SandboxPolicy(
+                file_root=str(sandbox_ctx.workspace_dir),
+                resources=ResourceLimits(
+                    max_seconds=child_thread.wall_clock_budget_seconds,
+                ),
+            )
+            self._child_sandbox_backend = LocalRestrictedSandbox()
+            self._background_task_service.set_session_sandbox(
+                child_session_id,
+                self._child_sandbox_policy,
+                self._child_sandbox_backend,
             )
             sub_cwd = (
                 str(sandbox_ctx.delegate_cwd)
@@ -341,6 +362,12 @@ class ChildThreadRuntime:
 
     def _cleanup_child(self, child_session_id: str, sandbox_ctx: Any) -> bool:
         """Clean up child resources and report whether terminal state was verified."""
+        try:
+            self._background_task_service.set_session_sandbox(
+                child_session_id, None, None,
+            )
+        except Exception:
+            pass
         background_verified = False
         try:
             deadline = time.monotonic() + 10.0
