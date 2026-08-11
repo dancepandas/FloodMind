@@ -131,11 +131,20 @@ class BackgroundTaskService:
         self._emit(event_type, payload)
 
     def bind_thread_authority(self, authority: Any) -> None:
-        self._thread_authority.value = authority
+        stack = getattr(self._thread_authority, "stack", None)
+        if stack is None:
+            stack = []
+            self._thread_authority.stack = stack
+        stack.append(authority)
 
     def unbind_thread_authority(self) -> None:
-        if hasattr(self._thread_authority, "value"):
-            del self._thread_authority.value
+        stack = getattr(self._thread_authority, "stack", None)
+        if stack:
+            stack.pop()
+
+    def _current_authority(self) -> Optional[Any]:
+        stack = getattr(self._thread_authority, "stack", None)
+        return stack[-1] if stack else None
 
     # ── 公开 API ─────────────────────────────────────────────────────
 
@@ -215,7 +224,7 @@ class BackgroundTaskService:
                 started_at=time.time(),
                 max_lifetime_seconds=lifetime,
                 process_identity={"pid": process.pid, "create_time": process_create_time(process.pid)},
-                journal_authority=getattr(self._thread_authority, "value", None),
+                journal_authority=self._current_authority(),
             )
             self._emit_for(task, "background.start.requested", {
                 "task_id": task_id,

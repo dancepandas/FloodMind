@@ -13,6 +13,14 @@ def _sleep_cmd(seconds: float) -> list:
     return [sys.executable, "-c", f"import time; time.sleep({seconds})"]
 
 
+class _RecordingAuthority:
+    def __init__(self):
+        self.events = []
+
+    def emit(self, event_type, payload):
+        self.events.append(event_type)
+
+
 class _Sink:
     def __init__(self):
         self.events = []
@@ -76,6 +84,26 @@ def test_task_captures_thread_authority_and_meta_excludes_it(tmp_path):
     svc.unbind_thread_authority()
     assert task.journal_authority is authority
     assert "journal_authority" not in task.to_meta_dict()
+
+
+def test_nested_bind_restores_parent_authority(tmp_path):
+    svc = BackgroundTaskService(base_dir=str(tmp_path))
+    parent = _RecordingAuthority()
+    child = _RecordingAuthority()
+    svc.bind_thread_authority(parent)
+    svc.bind_thread_authority(child)
+    svc.unbind_thread_authority()
+
+    task = svc.start("sess_1", "true", _sleep_cmd(0.1), cwd=str(tmp_path))
+    assert task.journal_authority is parent
+    deadline = time.time() + 10
+    while task.status in ("running", "starting") and time.time() < deadline:
+        time.sleep(0.05)
+    assert task.status == "completed"
+    assert "background.started" in parent.events
+    assert "background.completed" in parent.events
+    assert child.events == []
+    svc.unbind_thread_authority()
 
 
 def test_completion_emits_completed_event(tmp_path):
