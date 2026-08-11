@@ -24,9 +24,23 @@ class ProviderCodec:
         return dict(params)
 
     def decode_chunk(self, raw_chunk: Any) -> Iterator[CanonicalPart]:
-        """Provider Raw Event → Canonical Parts（保留原生块 raw）。"""
-        if raw_chunk is None or not getattr(raw_chunk, "choices", None):
-            yield CanonicalPart(event="error", text="no choices")
+        """Provider Raw Event → Canonical Parts（保留原生块 raw）。
+
+        usage-only 末帧（choices=[] + 顶层 usage，标准 usage 位置）也必须产出
+        usage part——先于 no-choices 守卫检查 usage，避免 §25.2 usage-only final
+        chunk 被吞成 error。
+        """
+        if raw_chunk is None:
+            yield CanonicalPart(event="error", text="no chunk")
+            return
+        usage = getattr(raw_chunk, "usage", None)
+        if usage is not None:
+            yield CanonicalPart(event="usage", kind="text",
+                                text=json.dumps(_usage_dict(usage), ensure_ascii=False),
+                                raw=_asdict(raw_chunk))
+        if not getattr(raw_chunk, "choices", None):
+            if usage is None:
+                yield CanonicalPart(event="error", text="no choices")
             return
         choice = raw_chunk.choices[0]
         delta = getattr(choice, "delta", None) or type("D", (), {})()
@@ -45,11 +59,6 @@ class ProviderCodec:
                     event="tool_call_delta", kind="tool_call", index=int(getattr(tc, "index", 0)),
                     name=getattr(func, "name", "") or "", arguments=getattr(func, "arguments", "") or "",
                     raw=_asdict(raw_chunk))
-        usage = getattr(raw_chunk, "usage", None)
-        if usage is not None:
-            yield CanonicalPart(event="usage", kind="text",
-                                text=json.dumps(_usage_dict(usage), ensure_ascii=False),
-                                raw=_asdict(raw_chunk))
         finish = getattr(choice, "finish_reason", None)
         if finish is not None:
             yield CanonicalPart(event="response_end", kind="text", text=str(finish),
@@ -74,6 +83,14 @@ def _asdict(raw: Any) -> dict:
 
 
 def _usage_dict(usage: Any) -> dict:
+    if hasattr(usage, "model_dump"):
+        usage = usage.model_dump()
+    if isinstance(usage, dict):
+        return {
+            "prompt_tokens": int(usage.get("prompt_tokens") or 0),
+            "completion_tokens": int(usage.get("completion_tokens") or 0),
+            "total_tokens": int(usage.get("total_tokens") or 0),
+        }
     return {
         "prompt_tokens": int(getattr(usage, "prompt_tokens", 0) or 0),
         "completion_tokens": int(getattr(usage, "completion_tokens", 0) or 0),
