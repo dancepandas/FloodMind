@@ -2,6 +2,18 @@
 
 All notable changes to FloodMind are documented in this file.
 
+## [2.0.2] - 2026-08-12
+
+### Fixed
+
+- **Agent 尊重 ModelClient 的 `enable_thinking`（"模型思考中" tag 修复）**：`NativeFloodAgent.stream(enable_reasoning=False)` 默认值此前会强制把 `model_client.enable_thinking` 覆盖为 False，即使宿主注入的 ModelClient 自带 `enable_thinking=True` —— 请求带 `thinking:disabled`，模型不流式推理，前端收不到 `thought_delta`。现 `enable_reasoning` 默认 `None`，仅显式传 True/False 时覆盖；`None` 尊重 ModelClient 自身设置。
+  - 真实 MiniMax API 验证：直连与带 tools 的 `stream_chat` 均正常流式推理（29~215 个 reasoning 事件）；修复后 agent 路径稳定产出 `thought_delta`（实测 146 个）。
+  - 回归测试：`test_agent_preserves_modelclient_enable_thinking`（捕获请求断言 `thinking:adaptive`，修复前必失败）。
+
+### Verification
+
+- 完整回归：**1162 passed, 1 skipped**（clean checkout）。
+
 ## [2.0.1] - 2026-08-12
 
 ### Added
