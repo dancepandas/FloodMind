@@ -15,6 +15,7 @@ import logging
 import os
 import threading
 import uuid
+from contextlib import contextmanager
 from datetime import datetime, timedelta
 from dataclasses import dataclass, field, asdict
 from typing import Any, Dict, List, Optional
@@ -164,6 +165,7 @@ class SummaryNode:
     sealed_at: str = field(default_factory=lambda: datetime.now().isoformat())
     hit_count: int = 0
     last_hit_at: str = ""
+    skill_generated: bool = False
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
@@ -172,6 +174,7 @@ class SummaryNode:
     def from_dict(cls, data: Dict[str, Any]) -> 'SummaryNode':
         data.setdefault("hit_count", 0)
         data.setdefault("last_hit_at", "")
+        data.setdefault("skill_generated", False)
         return cls(**data)
 
 
@@ -209,6 +212,8 @@ class ExperienceTree:
         self._summaries: Dict[str, SummaryNode] = {}  # key = "/".join(tree_path)
         self._archived: Dict[str, ExperienceLeaf] = {}  # 归档叶子，不参与搜索和注入
         self._lock = threading.RLock()  # 可重入锁，防止递归方法死锁
+        self._batch_depth = 0
+        self._batch_dirty = False
         self._load()
 
     def _load(self) -> None:
@@ -264,21 +269,41 @@ class ExperienceTree:
 
     def _save(self) -> None:
         with self._lock:
-            try:
-                nodes_data = [node.to_dict() for node in self._nodes.values()]
-                summaries_data = [s.to_dict() for s in self._summaries.values()]
+            if self._batch_depth:
+                self._batch_dirty = True
+                return
+            self._save_now()
 
-                data = {
-                    "updated_at": datetime.now().isoformat(),
-                    "nodes": nodes_data,
-                    "summaries": summaries_data,
-                    "archived": [leaf.to_dict() for leaf in self._archived.values()],
-                }
-                with open(self._index_file + ".tmp", "w", encoding="utf-8") as f:
-                    json.dump(data, f, ensure_ascii=False, indent=2)
-                os.replace(self._index_file + ".tmp", self._index_file)
-            except Exception as e:
-                logger.error(f"经验树索引保存失败: {e}")
+    def _save_now(self) -> None:
+        """Persist the current tree. Caller must hold ``_lock``."""
+        try:
+            nodes_data = [node.to_dict() for node in self._nodes.values()]
+            summaries_data = [s.to_dict() for s in self._summaries.values()]
+
+            data = {
+                "updated_at": datetime.now().isoformat(),
+                "nodes": nodes_data,
+                "summaries": summaries_data,
+                "archived": [leaf.to_dict() for leaf in self._archived.values()],
+            }
+            with open(self._index_file + ".tmp", "w", encoding="utf-8") as f:
+                json.dump(data, f, ensure_ascii=False, indent=2)
+            os.replace(self._index_file + ".tmp", self._index_file)
+        except Exception as e:
+            logger.error(f"经验树索引保存失败: {e}")
+
+    @contextmanager
+    def save_batch(self):
+        """Coalesce all nested mutations into one persisted tree write."""
+        with self._lock:
+            self._batch_depth += 1
+            try:
+                yield self
+            finally:
+                self._batch_depth -= 1
+                if self._batch_depth == 0 and self._batch_dirty:
+                    self._batch_dirty = False
+                    self._save_now()
 
     def find_node(self, path: List[str]) -> Optional[ExperienceNode]:
         """按路径查找节点"""
@@ -419,6 +444,12 @@ class ExperienceTree:
             )
             return leaf
 
+    def bump_hotness_many(self, node_ids: List[str]) -> None:
+        """Update a group of hotness counters with one persisted save."""
+        with self.save_batch():
+            for node_id in node_ids:
+                self.bump_hotness(node_id)
+
     def bump_hotness(self, node_id: str) -> None:
         """命中时更新热度"""
         with self._lock:
@@ -459,6 +490,16 @@ class ExperienceTree:
             self._save()
             logger.info(f"经验树 seal: path={path}, {len(child_ids)} 个叶子")
             return summary
+
+    def mark_skill_generated(self, path: List[str]) -> bool:
+        """Persist that the sealed branch has produced its owner-scoped Skill."""
+        with self._lock:
+            summary = self._summaries.get("/".join(path))
+            if summary is None:
+                return False
+            summary.skill_generated = True
+            self._save()
+            return True
 
     def get_summary(self, path: List[str]) -> Optional[SummaryNode]:
         """获取某路径下的摘要"""

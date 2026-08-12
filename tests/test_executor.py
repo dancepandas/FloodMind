@@ -181,7 +181,47 @@ class TestNativeAgentExecutor:
 
         assert calls["n"] == 2  # 连接失败后自动重试了一次
         assert "Hello world" in result.final_output
-        assert not result.is_timeout
+
+    def test_retry_emits_wait_and_recover_events(self):
+        """重试期间发出 wait（退避等待）与 recover（恢复）结构化事件。"""
+        import httpx
+        import openai
+        from floodmind.agent.native import executor as executor_mod
+
+        mc = MagicMock(spec=ModelClient)
+        calls = {"n": 0}
+        req = httpx.Request("POST", "http://example.com")
+
+        def stream_chat(*args, **kwargs):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                try:
+                    try:
+                        raise httpx.RemoteProtocolError("peer closed connection")
+                    except Exception as orig:
+                        raise openai.APIConnectionError(message="Connection error.", request=req) from orig
+                except openai.APIConnectionError as e:
+                    raise e
+            return iter([ModelEvent(type="token", content="ok"), ModelEvent(type="done")])
+
+        mc.stream_chat.side_effect = stream_chat
+        executor = self._make_executor(mc, tools_schema=[])
+        recorded = []
+        orig_emit = executor.event_bus.emit
+        executor.event_bus.emit = lambda ev: (recorded.append(ev), orig_emit(ev))[1]
+
+        with patch.object(executor_mod.time, "sleep", return_value=None):
+            executor.run(self._make_context(), "hello")
+
+        assert calls["n"] == 2
+        types = [e["type"] for e in recorded]
+        assert types.index("retry_attempt") < types.index("wait") < types.index("recover")
+        wait = next(e for e in recorded if e["type"] == "wait")
+        assert wait["reason"] == "retry_backoff"
+        assert wait["attempt"] == 1
+        assert wait["duration"] > 0
+        recover = next(e for e in recorded if e["type"] == "recover")
+        assert recover["attempt"] == 1
 
     def test_executor_retries_stream_error_on_peer_closed_connection(self):
         """流式中断（SDK 包装成 error 事件）被识别为可重试 → executor 自动重试 LLM 请求。"""

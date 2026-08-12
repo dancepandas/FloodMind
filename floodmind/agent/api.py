@@ -321,6 +321,16 @@ class Agent:
         self._agent._last_loop_state = loop_state
         self._journal_authority = authority
 
+        # §10.1/§4.4：公开 resume 进度事件（desktop 契约），与 Journal 的 resume.started 对齐。
+        # 走续接所用 executor 的 event_bus，与续接产出的事件同一条公开流。
+        _resume_bus = getattr(executor, "event_bus", None)
+        if _resume_bus is not None:
+            _resume_bus.emit({
+                "type": "resume",
+                "checkpoint_id": checkpoint_id,
+                "status": "started",
+            })
+
         run_ctx = RunContext(
             session_id=session_id,
             user_text=user_message,
@@ -339,6 +349,12 @@ class Agent:
         finally:
             # fencing lease 覆盖整个 resumed run；终态后释放。
             outcome.lease.release()
+            if _resume_bus is not None:
+                _resume_bus.emit({
+                    "type": "resume",
+                    "checkpoint_id": checkpoint_id,
+                    "status": "completed",
+                })
         final_output = getattr(result, "final_output", "") or ""
         return final_output
 
@@ -346,6 +362,25 @@ class Agent:
         """清空底层 NativeFloodAgent 的会话记忆。"""
         if hasattr(self._agent, "clear_memory"):
             self._agent.clear_memory()
+
+    # ── 后台任务公开 API（desktop/LS 契约；宿主不再需要 agent.raw._background_task_service） ──
+    def list_background_tasks(self) -> List[Dict[str, Any]]:
+        """列出本会话后台任务（运行中 / 已完成 / 重启对账后的 orphaned / unknown）。
+
+        每个条目: ``task_id / session_id / command / pid / status / exit_code /
+        stdout_path / stderr_path / started_at / finished_at / tail / error``。
+        """
+        svc = getattr(self._agent, "_background_task_service", None)
+        if svc is None:
+            return []
+        return [t.to_public_dict() for t in svc.list(self.session_id or "")]
+
+    def kill_background_task(self, task_id: str) -> bool:
+        """终止本会话指定后台任务（进程树 + 验证退出；kill 验证链）。"""
+        svc = getattr(self._agent, "_background_task_service", None)
+        if svc is None:
+            return False
+        return svc.kill(self.session_id or "", task_id)
 
     def cleanup(self) -> None:
         """释放资源：kill 本会话存活的后台任务（meta.json 保留供审计）。幂等。"""
@@ -430,7 +465,10 @@ class Agent:
         LLM 生命周期:
           - llm_step_start: LLM 调用开始     {"type": "llm_step_start", "iteration": N, "model"?}
           - llm_step_end:   LLM 调用结束     {"type": "llm_step_end", "finish_reason": "...", "tokens": {...}}
-          - retry_attempt:  模型重试         {"type": "retry_attempt", "attempt": N}
+          - retry_attempt:  模型重试         {"type": "retry_attempt", "attempt": N, "error": "...", "delay": seconds}
+          - wait:           重试前退避等待    {"type": "wait", "reason": "retry_backoff", "attempt": N, "duration": seconds}
+          - recover:        重试成功后恢复    {"type": "recover", "attempt": N}
+          - resume:         checkpoint 恢复  {"type": "resume", "checkpoint_id": "...", "status": "started|completed"}
           - context_compress_start/done: 上下文压缩
 
         产物:

@@ -2565,6 +2565,10 @@ class NativeFloodAgent:
         set_workspace()，使 _get_output_dir / _get_upload_dir / PathService 写读根一致。
         """
         self._workspace = ws
+        bg_svc = getattr(self, "_background_task_service", None)
+        if bg_svc is not None:
+            # bind_workspace 后重设后台任务存储根，避免任务落进旧工作区
+            bg_svc.set_base_dir(str(ws.session_root) if ws is not None else None)
         path_service = getattr(self, "_path_service", None)
         if path_service is not None:
             path_service.bind_workspace(ws)

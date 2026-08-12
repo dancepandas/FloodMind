@@ -5,6 +5,7 @@
 
 from floodmind.tools.base_tools import (
     get_skill,
+    make_get_skill_tool,
     exec_bash,
     web_search,
     fetch_webpage,
@@ -39,6 +40,7 @@ from floodmind.tools.agent_tool import (
 
 __all__ = [
     'get_skill',
+    'make_get_skill_tool',
     'exec_bash',
     'web_search',
     'fetch_webpage',

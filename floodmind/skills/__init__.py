@@ -1,19 +1,22 @@
 """
-技能注册表 - 单一发现源版本（skill 体系统一）
+技能注册表 - 默认全局兼容 + Agent 实例隔离。
 
-按 OpenClaw / Claude Code 风格自动扫描 SKILL.md，但收敛为**唯一权威源**：
-``SkillRegistry`` 单例（``floodmind/skills/registry.py``）。GetSkill / refresh_skills /
-CRUD 工具 / curator 全部经 ``get_skill_registry()``。
-
-新增技能只需在发现根（默认 ``floodmind/skills/`` 内置、``<repo>/skills/`` 项目、
-``<repo>/.claude/skills/`` CC 兼容）下创建 ``<name>/SKILL.md``，无需改代码。
+``get_skill_registry()``、模块级 ``register_skill`` 和 live 视图继续操作默认全局
+Registry；嵌入式 runtime 通过 ``create_skill_registry()`` 为每个 Agent 构造独立实例。
+所有发现根均基于包位置或宿主显式路径，不依赖进程 CWD。
 """
 
 import logging
 from typing import List
 
 from floodmind.skills.base import Skill, discover_skills, discover_skills_from_roots, generate_skill_catalog, register_skill
-from floodmind.skills.registry import SkillRegistry, default_roots, get_skill_registry
+from floodmind.skills.registry import (
+    SkillRegistry,
+    SkillRoot,
+    create_skill_registry,
+    default_roots,
+    get_skill_registry,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -40,6 +43,8 @@ def __getattr__(name):
 __all__ = [
     "Skill",
     "SkillRegistry",
+    "SkillRoot",
+    "create_skill_registry",
     "discover_skills",
     "discover_skills_from_roots",
     "generate_skill_catalog",

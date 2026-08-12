@@ -1,8 +1,11 @@
 """Tests for exec command write-target static scanner (SDK 收敛项 ①)."""
 
 from floodmind.agent.runtime.services.exec_write_scanner import (
+    approve_unresolved_exec_writes,
     check_exec_write_targets,
+    dangerous_command_reason,
     extract_write_targets,
+    scan_exec_writes,
 )
 
 
@@ -37,9 +40,36 @@ class TestExtractWriteTargets:
     def test_plain_command_no_targets(self):
         assert extract_write_targets("python script.py") == []
 
-    def test_relative_in_workspace_name_not_extracted(self):
-        # 相对文件名落在工作区内、无需拦截 → 不提取
-        assert extract_write_targets("echo hi > out.txt") == []
+    def test_relative_in_workspace_name_is_extracted_for_boundary_check(self):
+        assert extract_write_targets("echo hi > out.txt") == ["out.txt"]
+
+    def test_powershell_literal_variable_is_resolved(self):
+        scan = scan_exec_writes('$target = "C:\\ext\\out.txt"; Set-Content -Path $target x')
+        assert scan.targets == ("C:\\ext\\out.txt",)
+        assert scan.unresolved == ()
+
+    def test_powershell_dynamic_variable_is_unresolved(self):
+        scan = scan_exec_writes("Set-Content -Path $target x")
+        assert scan.targets == ()
+        assert scan.unresolved
+
+    def test_powershell_command_wrapper_is_scanned(self):
+        assert extract_write_targets(
+            'powershell -Command "Set-Content -Path C:\\ext\\wrapped.txt x"'
+        ) == ["C:\\ext\\wrapped.txt"]
+    def test_fd_duplication_is_not_a_write_target(self):
+        assert scan_exec_writes("pytest -q 2>&1").unresolved == ()
+        assert scan_exec_writes("echo hi >/dev/null 2>&1").unresolved == ()
+
+    def test_obvious_shell_writers(self):
+        assert extract_write_targets("touch outside.txt") == ["outside.txt"]
+        assert extract_write_targets("echo hi | tee outside.txt") == ["outside.txt"]
+
+    def test_python_inline_literal_write(self):
+        assert extract_write_targets("python -c \"open('/tmp/out.txt','w').write('x')\"") == ["/tmp/out.txt"]
+
+    def test_python_inline_dynamic_write_is_unresolved(self):
+        assert scan_exec_writes("python -c \"open(target,'w').write('x')\"").unresolved
 
 
 class _FakeResult:
@@ -67,3 +97,37 @@ class TestCheckExecWriteTargets:
 
     def test_no_targets_passes_even_when_resolver_denies(self):
         assert check_exec_write_targets("python script.py", resolver=lambda t: _FakeResult(allowed=False)) is None
+
+    def test_unresolved_write_target_fails_closed(self):
+        deny = check_exec_write_targets(
+            "Set-Content -Path $target x",
+            resolver=lambda t: _FakeResult(allowed=True),
+        )
+        assert deny is not None
+        assert "无法静态解析" in deny
+
+    def test_approved_unresolved_write_is_consumed_once(self):
+        command = "Set-Content -Path $target x"
+        approve_unresolved_exec_writes(command)
+        assert check_exec_write_targets(
+            command,
+            resolver=lambda t: _FakeResult(allowed=True),
+            allow_approved_unresolved=True,
+        ) is None
+        assert check_exec_write_targets(
+            command,
+            resolver=lambda t: _FakeResult(allowed=True),
+            allow_approved_unresolved=True,
+        ) is not None
+
+    def test_dangerous_union_includes_stricter_handler_rules(self):
+        assert dangerous_command_reason("chmod -R 777 /tmp/x")
+        assert dangerous_command_reason("pip uninstall floodmind")
+
+    def test_resolver_exception_fails_closed(self):
+        deny = check_exec_write_targets(
+            "echo hi > out.txt",
+            resolver=lambda t: (_ for _ in ()).throw(RuntimeError("bad path")),
+        )
+        assert deny is not None
+        assert "路径解析失败" in deny

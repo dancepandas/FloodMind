@@ -155,6 +155,22 @@ class TestExperienceTreeHotness:
         assert leaf.hit_count == 1
         assert leaf.last_hit_at
 
+    def test_bump_hotness_many_persists_once(self, tree, sample_leaf, monkeypatch):
+        other = ExperienceLeaf(
+            node_id="leaf-2", experience_id="exp-2", path=["水文预报"],
+            label="另一个案例", task_description="another",
+        )
+        tree.add_leaf(sample_leaf, ["水文预报", "敖江流域"])
+        tree.add_leaf(other, ["水文预报", "敖江流域"])
+        saves = []
+        monkeypatch.setattr(tree, "_save_now", lambda: saves.append("save"))
+
+        tree.bump_hotness_many([sample_leaf.node_id, other.node_id])
+
+        assert saves == ["save"]
+        assert tree._leaves[sample_leaf.node_id].hit_count == 1
+        assert tree._leaves[other.node_id].hit_count == 1
+
     def test_archive_leaf(self, tree, sample_leaf):
         tree.add_leaf(sample_leaf, ["水文预报", "敖江流域"])
         tree.archive_leaf(sample_leaf.node_id)

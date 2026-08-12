@@ -13,17 +13,26 @@ import json
 import logging
 import os
 import threading
+from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 from floodmind.config.settings import settings
 from floodmind.memory.experience_tree import ExperienceLeaf, ExperienceTree, SummaryNode, SUMMARY_PROMPT
 
 logger = logging.getLogger(__name__)
 
-# Skill 生成后回调：由 NativeFloodAgent.refresh_skills 注册
-_on_skill_generated = None
+
+@dataclass(frozen=True)
+class SkillGenerationOwner:
+    """Owner-scoped destination and notification for generated Skills."""
+
+    writable_root: Path
+    on_generated: Optional[Callable[[], None]] = None
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "writable_root", Path(self.writable_root).resolve())
 
 
 # ── 经验提取 Prompt ──────────────────────────────────────────
@@ -110,7 +119,11 @@ class TaskExperienceStore:
     _instance: Optional['TaskExperienceStore'] = None
     _lock = threading.Lock()
 
-    def __new__(cls, persist_dir: str = ""):
+    def __new__(cls, persist_dir: str = "", *, shared: bool = True):
+        if not shared:
+            instance = super().__new__(cls)
+            instance._initialized = False
+            return instance
         with cls._lock:
             if cls._instance is None:
                 instance = super().__new__(cls)
@@ -118,13 +131,13 @@ class TaskExperienceStore:
                 cls._instance = instance
             return cls._instance
 
-    def __init__(self, persist_dir: str = ""):
+    def __init__(self, persist_dir: str = "", *, shared: bool = True):
         with self._lock:
             if self._initialized:
                 return
 
             cfg = settings.task_experience
-            self.persist_dir = persist_dir or cfg.persist_dir
+            self.persist_dir = str(Path(persist_dir or cfg.persist_dir).resolve())
             self._tree: Optional[ExperienceTree] = None
             self._llm_service = None
             self._version: int = 0
@@ -140,13 +153,19 @@ class TaskExperienceStore:
             self._tree = ExperienceTree(persist_dir=self.persist_dir)
         return self._tree
 
-    def record_experience(self, leaf: ExperienceLeaf, tree_path: List[str]) -> ExperienceLeaf:
-        """存储经验到树索引 JSON，并在积累足够经验后触发 seal"""
+    def record_experience(
+        self,
+        leaf: ExperienceLeaf,
+        tree_path: List[str],
+        *,
+        skill_owner: Optional[SkillGenerationOwner] = None,
+    ) -> ExperienceLeaf:
+        """Store experience and seal using only the explicitly supplied Skill owner."""
         added_leaf = self.tree.add_leaf(leaf, tree_path)
         self._version += 1
         logger.info(f"经验已记录: path={added_leaf.path}, outcome={added_leaf.final_outcome}, version={self._version}")
         try:
-            self.seal_if_needed()
+            self.seal_if_needed(skill_owner=skill_owner)
         except Exception as e:
             logger.error(f"seal_if_needed 失败: {e}")
         return added_leaf
@@ -194,13 +213,35 @@ class TaskExperienceStore:
 
     # ── 渐进压缩 ──────────────────────────────────────────────
 
-    def seal_if_needed(self) -> List[SummaryNode]:
-        """遍历所有分支，叶子数 >= threshold 的触发 seal"""
+    def seal_if_needed(
+        self,
+        *,
+        skill_owner: Optional[SkillGenerationOwner] = None,
+    ) -> List[SummaryNode]:
+        """Seal eligible branches; generate Skills only for an explicit owner."""
         cfg = settings.task_experience
         threshold = getattr(cfg, "seal_threshold", 5)
         branches = self.tree.get_branches_needing_seal(threshold)
 
         sealed = []
+        skill_threshold = getattr(cfg, "skill_generation_threshold", 5)
+
+        # A branch sealed without an owner remains eligible for owner-scoped
+        # generation later; sealing controls context size, not generation state.
+        if skill_owner is not None:
+            for summary in self.tree.get_all_summaries():
+                if summary.skill_generated or len(summary.child_ids) < skill_threshold:
+                    continue
+                try:
+                    self._try_generate_skill(
+                        summary.tree_path,
+                        len(summary.child_ids),
+                        summary.summary_text,
+                        owner=skill_owner,
+                    )
+                except Exception as e:
+                    logger.warning("Skill 生成失败 path=%s: %s", summary.tree_path, e)
+
         for path, leaf_count in branches:
             try:
                 summary_text = self._generate_summary(path)
@@ -210,10 +251,11 @@ class TaskExperienceStore:
                     logger.info(f"seal 完成: path={path}, {leaf_count} 条经验")
 
                     # 经验→Skill 自动生成
-                    threshold = getattr(cfg, "skill_generation_threshold", 5)
-                    if leaf_count >= threshold:
+                    if leaf_count >= skill_threshold:
                         try:
-                            self._try_generate_skill(path, leaf_count, summary_text)
+                            self._try_generate_skill(
+                                path, leaf_count, summary_text, owner=skill_owner
+                            )
                         except Exception as e:
                             logger.warning(f"Skill 生成失败 path={path}: {e}")
             except Exception as e:
@@ -221,9 +263,17 @@ class TaskExperienceStore:
 
         return sealed
 
-    def _try_generate_skill(self, path: List[str], leaf_count: int, summary_text: str) -> None:
-        """尝试从密封分支生成 Skill"""
+    def _try_generate_skill(
+        self,
+        path: List[str],
+        leaf_count: int,
+        summary_text: str,
+        *,
+        owner: SkillGenerationOwner,
+    ) -> None:
+        """Generate a Skill into the explicit owner's writable root."""
         from floodmind.memory.skill_generator import generate_skill_from_branch, write_skill_to_disk
+        from floodmind.skills.registry import SkillRegistry
 
         node = self.tree.find_node(path)
         if not node:
@@ -233,6 +283,10 @@ class TaskExperienceStore:
             return
 
         skill_slug = "-".join(p.replace(" ", "-") for p in path)
+        # Reuse the registry's portable-name and containment checks even though
+        # this owner facade intentionally has no global registry dependency.
+        owner_registry = SkillRegistry(roots=[], writable_root=owner.writable_root)
+        skill_dir = owner_registry.writable_skill_dir(skill_slug)
         skill_content = generate_skill_from_branch(
             leaves=leaves,
             summary_text=summary_text,
@@ -240,12 +294,12 @@ class TaskExperienceStore:
             llm_service=self._llm_service,
         )
         if skill_content:
-            project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-            skill_dir = os.path.join(project_root, "skills", skill_slug)
-            filepath = write_skill_to_disk(skill_content, skill_dir)
-            if filepath and _on_skill_generated:
+            filepath = write_skill_to_disk(skill_content, str(skill_dir))
+            if filepath:
+                self.tree.mark_skill_generated(path)
+            if filepath and owner.on_generated:
                 try:
-                    _on_skill_generated()
+                    owner.on_generated()
                 except Exception as e:
                     logger.warning(f"Skill 生成后回调失败: {e}")
 
@@ -307,9 +361,8 @@ class TaskExperienceStore:
     # ── 热度管理 ──────────────────────────────────────────────
 
     def bump_hotness(self, query: str, matched_leaves: List[ExperienceLeaf]) -> None:
-        """搜索命中后更新热度"""
-        for leaf in matched_leaves:
-            self.tree.bump_hotness(leaf.node_id)
+        """搜索命中后批量更新热度并只持久化一次。"""
+        self.tree.bump_hotness_many([leaf.node_id for leaf in matched_leaves])
 
     def _hotness_score(self, leaf: ExperienceLeaf) -> float:
         """计算热度加权分"""
@@ -432,7 +485,7 @@ class TaskExperienceStore:
     def should_run_maintenance(self) -> bool:
         """检查是否应该执行巡检（基于时间标记文件）"""
         cfg = settings.task_experience
-        marker_file = os.path.join(cfg.persist_dir, ".last_maintenance")
+        marker_file = os.path.join(self.persist_dir, ".last_maintenance")
         if not os.path.exists(marker_file):
             return True
         try:
@@ -446,7 +499,7 @@ class TaskExperienceStore:
     def _mark_maintenance_done(self) -> None:
         """写入巡检完成时间标记"""
         cfg = settings.task_experience
-        marker_file = os.path.join(cfg.persist_dir, ".last_maintenance")
+        marker_file = os.path.join(self.persist_dir, ".last_maintenance")
         try:
             with open(marker_file, "w", encoding="utf-8") as f:
                 f.write(datetime.now().isoformat())
@@ -454,6 +507,11 @@ class TaskExperienceStore:
             logger.warning(f"写入巡检标记失败: {e}")
 
     def run_maintenance(self, llm_service=None) -> Dict[str, int]:
+        """执行巡检，并将所有树变更合并为一次持久化写入。"""
+        with self.tree.save_batch():
+            return self._run_maintenance_batched(llm_service)
+
+    def _run_maintenance_batched(self, llm_service=None) -> Dict[str, int]:
         """执行经验树巡检：去重 → 归档 → seal
 
         返回巡检统计：{"merged": N, "archived": N, "removed": N, "sealed": N}
@@ -709,9 +767,50 @@ class TaskExperienceCapture:
 
     _instance: Optional['TaskExperienceCapture'] = None
 
-    def __init__(self, llm_service=None):
+    def __init__(
+        self,
+        llm_service=None,
+        *,
+        skill_owner: Optional[SkillGenerationOwner] = None,
+        store: Optional[TaskExperienceStore] = None,
+    ):
         self.llm_service = llm_service
+        self.skill_owner = skill_owner
+        self.store = store
         self._extractor = TaskExperienceExtractor(llm_service) if llm_service else None
+        self._pending_threads: set[threading.Thread] = set()
+        self._pending_lock = threading.Lock()
+
+    def wait_for_pending(self, timeout: Optional[float] = None) -> None:
+        """Wait for captures already submitted by this owner to become visible."""
+        with self._pending_lock:
+            pending = list(self._pending_threads)
+        for thread in pending:
+            thread.join(timeout=timeout)
+
+    def _capture_finished(self, thread: threading.Thread) -> None:
+        with self._pending_lock:
+            self._pending_threads.discard(thread)
+
+    def bind_skill_generation(
+        self,
+        writable_root: Path,
+        on_generated: Optional[Callable[[], None]] = None,
+        *,
+        llm_service=None,
+    ) -> "TaskExperienceCapture":
+        """Return a capture with an owner-specific store, tree, and extractor."""
+        owner = SkillGenerationOwner(writable_root, on_generated)
+        service = llm_service if llm_service is not None else self.llm_service
+        persist_dir = owner.writable_root / ".floodmind" / "task_experience"
+        store = TaskExperienceStore(str(persist_dir), shared=False)
+        if service is not None:
+            store.set_llm_service(service)
+        return TaskExperienceCapture(
+            llm_service=service,
+            skill_owner=owner,
+            store=store,
+        )
 
     def on_task_complete(
         self,
@@ -739,18 +838,26 @@ class TaskExperienceCapture:
                     execution_duration=execution_duration,
                 )
                 if leaf:
-                    store = get_task_experience_store()
+                    store = self.store or get_task_experience_store()
                     if self.llm_service and not store._llm_service:
                         store.set_llm_service(self.llm_service)
                     tree_path = leaf.path
-                    store.record_experience(leaf, tree_path)
+                    store.record_experience(
+                        leaf,
+                        tree_path,
+                        skill_owner=self.skill_owner,
+                    )
                     logger.info(f"任务经验自动捕获成功: {leaf.path}")
                 else:
                     logger.debug("任务经验提取结果为空，跳过记录")
             except Exception as e:
                 logger.error(f"任务经验自动捕获失败: {e}")
+            finally:
+                self._capture_finished(threading.current_thread())
 
         t = threading.Thread(target=_capture, daemon=True, name="experience-capture")
+        with self._pending_lock:
+            self._pending_threads.add(t)
         t.start()
 
 

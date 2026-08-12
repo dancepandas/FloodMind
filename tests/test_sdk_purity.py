@@ -55,7 +55,9 @@ def test_packaging_metadata_is_platform_safe_and_deployment_is_explicit():
     assert "deployment" in extras
     # deployment 不再拉入 web extras（web 已弃用移除）
     assert "floodmind[web" not in extras["deployment"]
-    assert "floodmind[gpu,doc]" in extras["deployment"]
+    # gpu extra 已移除（chronos 外置 MCP，核心不引 torch/transformers）
+    assert "floodmind[gpu" not in extras["deployment"]
+    assert "floodmind[doc]" in extras["deployment"]
 
     requirements = Path("requirements.txt").read_text(encoding="utf-8")
     assert 'comtypes>=1.4.0; platform_system == "Windows"' in requirements

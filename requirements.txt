@@ -6,17 +6,6 @@ openai>=1.0.0
 httpx>=0.24.0
 tiktoken>=0.5.0
 
-# RAG
-chromadb>=0.4.0
-sentence-transformers>=2.2.0
-
-# AI / ML
-torch>=2.0.0
-transformers>=4.30.0
-accelerate>=0.20.0
-scikit-learn>=1.2.0
-chronos-forecasting>=2.0.0
-
 # Data
 pandas>=2.0.0
 openpyxl>=3.1.0

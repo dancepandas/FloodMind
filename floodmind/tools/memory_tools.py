@@ -326,14 +326,19 @@ def _impl_journal_get_full_result(ref_id: str = "") -> str:
 
     session_id = _get_session_id()
     try:
-        svc = ExecutionJournalService()
-        archived = svc.get_full_result(session_id, ref_id)
+        archived = next(
+            (entry for entry in reversed(_canonical_tool_results()) if entry.get("full_ref") == ref_id),
+            None,
+        )
         logger.info("[JournalGetFullResult] session_id=%s, ref_id=%s, found=%s", session_id, ref_id, archived is not None)
         if archived is None:
             return _finalize_tool_output("journal_get_full_result", f"未找到归档结果: {ref_id}", ref_id=ref_id)
         return _finalize_tool_output(
             "journal_get_full_result",
-            f"# 完整工具结果\nTool: {archived.tool_name}\nStatus: {archived.status}\n\n{archived.content}",
+            (
+                f"# 完整工具结果\nTool: {archived.get('tool_id', '')}\n"
+                f"Status: {archived.get('status', '')}\n\n{archived.get('result_summary', '')}"
+            ),
             ref_id=ref_id,
         )
     except Exception as e:

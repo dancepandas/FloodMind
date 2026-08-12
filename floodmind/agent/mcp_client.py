@@ -25,7 +25,7 @@ import subprocess
 import threading
 import time
 import uuid
-from queue import Queue, Empty
+from queue import Empty, Queue
 from typing import Any, Callable, Dict, List, Optional
 
 import httpx
@@ -36,21 +36,24 @@ from floodmind.agent.runtime.contracts.tools import ToolSpec
 logger = logging.getLogger(__name__)
 
 _SSE_CONNECT_TIMEOUT = 15.0
+_STDIO_REQUEST_TIMEOUT = 30.0
+_HTTP_REQUEST_TIMEOUT = 30.0
 
-# MCP 工具 model-visible 名 sanitize：OpenAI 兼容端点要求工具名匹配 ^[a-zA-Z0-9_-]+$。
+
+class _McpToolCallResult(str):
+    """String-compatible public result carrying typed MCP call status."""
+
+    def __new__(cls, value: str, *, is_error: bool, error: Optional[str], raw: dict):
+        obj = str.__new__(cls, value)
+        obj.is_error = is_error
+        obj.error = error
+        obj.raw = raw
+        return obj
+
+
 # SDK 构造 ToolSpec 时统一把 `mcp:<server>:<tool>` 转成下划线分隔的安全名，
 # 实际调用仍用原始冒号分隔 full name（bound function 不变）。
 _MCP_NAME_RE = re.compile(r"[^a-zA-Z0-9_-]+")
-
-# MCP 调用失败标记：命中任一即记录 call health ok=False。
-_MCP_FAIL_MARKERS = (
-    "调用失败",
-    "无法连接",
-    "连接失败",
-    "ConnectionError",
-    "ECONNREFUSED",
-    "connection refused",
-)
 
 
 def _mcp_tool_spec_name(server_name: str, tool_name: str) -> str:
@@ -88,6 +91,8 @@ class McpClientConnection:
         self._process: Optional[subprocess.Popen] = None
         self._message_url: str = ""
         self._lock = threading.Lock()
+        self._stdio_transactions = threading.Lock()
+        self._stdio_messages: Queue = Queue()
 
     # ── 连接生命周期 ──────────────────────────────────────
 
@@ -134,40 +139,26 @@ class McpClientConnection:
         self._tools.clear()
 
     def _connect_sse(self) -> None:
+        """Configure the remote endpoint as MCP Streamable HTTP.
+
+        The former implementation performed legacy SSE endpoint discovery, closed
+        that response channel, and then treated the discovered POST endpoint as a
+        JSON request/response endpoint.  That hybrid cannot receive responses sent
+        on the legacy SSE channel.  ``sse`` remains accepted as the public config
+        name for compatibility, but now has explicit Streamable HTTP semantics.
+        """
         url = self._config.get("url", "")
         if not url:
             raise McpConnectionError("SSE transport 需要 url 参数")
 
-        self._client = httpx.Client(timeout=httpx.Timeout(60.0, connect=_SSE_CONNECT_TIMEOUT))
-        headers = self._config.get("headers", {})
-        resp = self._client.get(url, headers={**headers, "Accept": "text/event-stream"})
-        resp.raise_for_status()
-
-        # 解析 SSE endpoint 事件（MCP 规范：server 发送 event: endpoint 携带消息 URL）
-        endpoint = ""
-        current_event = ""
-        for line in resp.iter_lines():
-            line = line.strip()
-            if line.startswith("event:"):
-                current_event = line[6:].strip()
-            elif line.startswith("data:"):
-                data = line[5:].strip()
-                if current_event == "endpoint" and data:
-                    if data.startswith("http://") or data.startswith("https://"):
-                        endpoint = data
-                    elif data.startswith("/"):
-                        base = url.rstrip("/")
-                        endpoint = base + data
-                    if endpoint:
-                        break
-                current_event = ""
-
-        if not endpoint:
-            # fallback: 使用 url + /messages
-            endpoint = url.rstrip("/") + "/messages"
-
-        self._message_url = endpoint
-        logger.debug("MCP SSE endpoint: %s", endpoint)
+        headers = dict(self._config.get("headers", {}))
+        timeout = float(self._config.get("request_timeout", _HTTP_REQUEST_TIMEOUT))
+        self._client = httpx.Client(
+            timeout=httpx.Timeout(timeout, connect=_SSE_CONNECT_TIMEOUT),
+            headers=headers,
+        )
+        self._message_url = url
+        logger.debug("MCP Streamable HTTP endpoint: %s", url)
 
     def _connect_stdio(self) -> None:
         command = self._config.get("command", "")
@@ -198,6 +189,89 @@ class McpClientConnection:
                 pass
         threading.Thread(target=_drain_stderr, daemon=True, name=f"mcp-stderr-{self.name}").start()
 
+        # A dedicated reader makes the transaction timeout a real wall-clock bound;
+        # blocking readline() itself cannot be interrupted portably on Windows.
+        def _read_stdout():
+            try:
+                while self._process and self._process.poll() is None:
+                    line = self._process.stdout.readline()
+                    if not line:
+                        break
+                    try:
+                        self._stdio_messages.put(json.loads(line))
+                    except json.JSONDecodeError:
+                        logger.debug("MCP %s ignored non-JSON stdio line", self.name)
+            except Exception as exc:
+                self._stdio_messages.put(exc)
+        threading.Thread(target=_read_stdout, daemon=True, name=f"mcp-stdout-{self.name}").start()
+
+    def _send_http_jsonrpc(self, msg: str, req_id: int) -> dict:
+        if self._client is None:
+            raise McpConnectionError(f"MCP {self.name}: HTTP client 未连接")
+        timeout = float(self._config.get("request_timeout", _HTTP_REQUEST_TIMEOUT))
+        completed: Queue = Queue(maxsize=1)
+
+        def _request() -> None:
+            try:
+                with self._client.stream(
+                    "POST",
+                    self._message_url,
+                    content=msg,
+                    headers={
+                        "Content-Type": "application/json",
+                        "Accept": "application/json, text/event-stream",
+                    },
+                ) as resp:
+                    resp.raise_for_status()
+                    if resp.status_code == 202:
+                        raise McpConnectionError(
+                            f"MCP {self.name}: server returned HTTP 202 without an in-response "
+                            "result; legacy SSE response-channel semantics are unsupported"
+                        )
+                    content_type = resp.headers.get("content-type", "").lower()
+                    if "text/event-stream" in content_type:
+                        deadline = time.monotonic() + timeout
+                        for line in resp.iter_lines():
+                            if time.monotonic() >= deadline:
+                                raise McpConnectionError(
+                                    f"MCP {self.name}: HTTP 请求超时 ({timeout:g}s)"
+                                )
+                            if not line.startswith("data:"):
+                                continue
+                            data = line[5:].strip()
+                            if not data:
+                                continue
+                            candidate = json.loads(data)
+                            if candidate.get("id") == req_id:
+                                completed.put(candidate)
+                                return
+                        raise McpConnectionError(
+                            f"MCP {self.name}: SSE response ended before request id {req_id}"
+                        )
+                    candidate = json.loads(resp.read())
+                    if candidate.get("id") != req_id:
+                        raise McpConnectionError(
+                            f"MCP {self.name}: JSON-RPC response id mismatch "
+                            f"(expected {req_id}, got {candidate.get('id')})"
+                        )
+                    completed.put(candidate)
+            except Exception as exc:
+                completed.put(exc)
+
+        # httpx read timeouts reset on every chunk.  Waiting outside the request
+        # thread enforces a real wall-clock bound even if a peer trickles bytes.
+        worker = threading.Thread(target=_request, daemon=True, name=f"mcp-http-{self.name}")
+        worker.start()
+        try:
+            outcome = completed.get(timeout=timeout)
+        except Empty as exc:
+            raise McpConnectionError(f"MCP {self.name}: HTTP 请求超时 ({timeout:g}s)") from exc
+        if isinstance(outcome, Exception):
+            if isinstance(outcome, McpConnectionError):
+                raise outcome
+            raise McpConnectionError(f"MCP {self.name}: HTTP 请求失败: {outcome}") from outcome
+        return outcome
+
     def _send_jsonrpc(self, method: str, params: Optional[dict] = None) -> dict:
         with self._lock:
             self._request_id += 1
@@ -211,27 +285,47 @@ class McpClientConnection:
         })
 
         if self.transport == "sse":
-            resp = self._client.post(
-                self._message_url,
-                content=msg,
-                headers={"Content-Type": "application/json"},
-            )
-            resp.raise_for_status()
-            return resp.json()
+            return self._send_http_jsonrpc(msg, req_id)
 
         elif self.transport == "stdio":
-            self._process.stdin.write(msg + "\n")
-            self._process.stdin.flush()
-            line = self._process.stdout.readline()
-            if not line:
-                raise McpConnectionError(f"MCP {self.name}: stdio 无响应")
-            return json.loads(line)
+            timeout = float(self._config.get("request_timeout", _STDIO_REQUEST_TIMEOUT))
+            deadline = time.monotonic() + timeout
+            # Serialize the entire write/read transaction: request IDs alone cannot
+            # prevent two callers from consuming each other's responses.
+            with self._stdio_transactions:
+                if self._process is None or self._process.poll() is not None:
+                    raise McpConnectionError(f"MCP {self.name}: stdio 进程未运行")
+                try:
+                    self._process.stdin.write(msg + "\n")
+                    self._process.stdin.flush()
+                except (BrokenPipeError, OSError) as exc:
+                    raise McpConnectionError(f"MCP {self.name}: stdio 写入失败") from exc
+
+                while True:
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        raise McpConnectionError(f"MCP {self.name}: stdio 请求超时 ({timeout:g}s)")
+                    if self._process.poll() is not None and self._stdio_messages.empty():
+                        raise McpConnectionError(
+                            f"MCP {self.name}: stdio 进程已退出 ({self._process.returncode})"
+                        )
+                    try:
+                        response = self._stdio_messages.get(timeout=min(remaining, 0.1))
+                    except Empty:
+                        continue
+                    if isinstance(response, Exception):
+                        raise McpConnectionError(f"MCP {self.name}: stdio 读取失败") from response
+                    # Notifications have no id. Responses for another ID are stale
+                    # or unsolicited and must not complete this transaction.
+                    if response.get("id") != req_id:
+                        continue
+                    return response
 
     def _initialize(self) -> None:
         result = self._send_jsonrpc("initialize", {
             "protocolVersion": "2024-11-05",
             "capabilities": {},
-            "clientInfo": {"name": "FloodMind", "version": "1.1.9"},
+            "clientInfo": {"name": "FloodMind", "version": "1.2.0"},
         })
         if "error" in result:
             raise McpConnectionError(f"MCP {self.name} initialize 失败: {result['error']}")
@@ -256,8 +350,11 @@ class McpClientConnection:
                 pass
         elif self.transport == "stdio":
             try:
-                self._process.stdin.write(msg + "\n")
-                self._process.stdin.flush()
+                with self._stdio_transactions:
+                    if self._process is None or self._process.poll() is not None:
+                        return
+                    self._process.stdin.write(msg + "\n")
+                    self._process.stdin.flush()
             except Exception:
                 pass
 
@@ -276,22 +373,29 @@ class McpClientConnection:
         return list(self._tools)
 
     def call_tool(self, tool_name: str, arguments: dict) -> str:
-        result = self._send_jsonrpc("tools/call", {
+        response = self._send_jsonrpc("tools/call", {
             "name": tool_name,
             "arguments": arguments,
         })
 
-        if "error" in result:
-            return f"MCP 工具 {tool_name} 调用失败: {result['error'].get('message', str(result['error']))}"
+        rpc_error = response.get("error")
+        if rpc_error is not None:
+            message = rpc_error.get("message", str(rpc_error)) if isinstance(rpc_error, dict) else str(rpc_error)
+            text = f"MCP 工具 {tool_name} 调用失败: {message}"
+            return _McpToolCallResult(text, is_error=True, error=message, raw=response)
 
-        content = result.get("result", {}).get("content", [])
+        result = response.get("result", {})
+        content = result.get("content", []) if isinstance(result, dict) else []
         texts = []
         for item in content:
             if isinstance(item, dict) and item.get("type") == "text":
                 texts.append(item.get("text", ""))
             elif isinstance(item, str):
                 texts.append(item)
-        return "\n".join(texts) if texts else json.dumps(result.get("result", {}), ensure_ascii=False)
+        text = "\n".join(texts) if texts else json.dumps(result, ensure_ascii=False)
+        is_error = bool(result.get("isError", False)) if isinstance(result, dict) else False
+        error = text[:200] if is_error else None
+        return _McpToolCallResult(text, is_error=is_error, error=error, raw=response)
 
     @property
     def is_connected(self) -> bool:
@@ -325,19 +429,15 @@ def build_mcp_tool_specs(
     specs: List[ToolSpec] = []
     for mt in conn.list_tools():
         tool_name = mt.get("name", "")
-        input_schema = mt.get("inputSchema", {})
+        input_schema = mt.get("inputSchema") or {"type": "object", "properties": {}}
         specs.append(ToolSpec(
             name=_mcp_tool_spec_name(server_name, tool_name),
             description=f"[MCP:{server_name}] {mt.get('description', '')}",
-            parameters={
-                "type": "object",
-                "properties": input_schema.get("properties", {}),
-                "required": input_schema.get("required", []),
-            },
+            parameters=dict(input_schema),
             func=_make_func(tool_name),
             is_readonly=False,
             is_destructive=True,
-            is_concurrency_safe=True,
+            is_concurrency_safe=conn.transport != "stdio",
             permission_policy=ToolPermissionPolicy(policy_type="network"),
         ))
     return specs
@@ -368,6 +468,9 @@ class McpClientPool:
         explicit_name = server_config.get("name")
         if explicit_name:
             name = explicit_name
+            with self._lock:
+                if name in self._connections:
+                    raise McpConnectionError(f"MCP Server 名称冲突: {name}")
         else:
             # 省略 name 时在锁内生成 fallback，避免并发未命名连接撞 mcp-dynamic-N
             with self._lock:
@@ -375,6 +478,13 @@ class McpClientPool:
         conn = McpClientConnection(name=name, transport=transport, **cfg)
         conn.connect()
         with self._lock:
+            if name in self._connections:
+                # A concurrent connection won the name after our preflight check.
+                # Never replace/leak the established connection.
+                try:
+                    conn.disconnect()
+                finally:
+                    raise McpConnectionError(f"MCP Server 名称冲突: {name}")
             self._connections[name] = conn
             listeners = list(self._server_connected_listeners)
         # 连接成功且已入池后触发 server-connected 监听器（异常不阻断连接）
@@ -449,8 +559,12 @@ class McpClientPool:
         except Exception as e:
             self._record_call_health(server_name, False, str(e)[:200])
             raise
-        if isinstance(result, str) and any(m in result for m in _MCP_FAIL_MARKERS):
-            self._record_call_health(server_name, False, result[:200])
+        if bool(getattr(result, "is_error", False)):
+            self._record_call_health(
+                server_name,
+                False,
+                getattr(result, "error", None) or str(result)[:200],
+            )
         else:
             self._record_call_health(server_name, True, None)
         return result

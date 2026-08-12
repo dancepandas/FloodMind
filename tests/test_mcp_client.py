@@ -6,7 +6,10 @@ registry unregister used to clean up a disconnected server's tools.
 """
 
 import re
+import threading
 from unittest.mock import MagicMock
+
+import pytest
 
 from floodmind.agent.mcp_client import (
     McpClientPool,
@@ -61,6 +64,17 @@ class TestBuildMcpToolSpecs:
         # closure 仍以原始冒号分隔 full name 调用 call_tool_fn
         assert s.func(a="x") == "ok"
         assert calls == [("mcp:srv:t1", {"a": "x"})]
+
+    def test_preserves_full_input_schema_and_marks_stdio_serial(self):
+        schema = {
+            "type": "object",
+            "properties": {"mode": {"oneOf": [{"const": "a"}, {"const": "b"}]}},
+            "additionalProperties": False,
+            "$defs": {"unused": {"type": "string"}},
+        }
+        spec = build_mcp_tool_specs(FakeConn("srv", [{"name": "t", "inputSchema": schema}], transport="stdio"), "srv", lambda *_: "ok")[0]
+        assert spec.parameters == schema
+        assert spec.is_concurrency_safe is False
 
     def test_each_closure_captures_own_tool_name(self):
         conn = FakeConn("srv", [{"name": "t1"}, {"name": "t2"}])
@@ -121,6 +135,18 @@ class TestPoolLifecycle:
         assert pool.disconnect_server("a") is True
         assert c.disconnected is True
         assert pool.get_server_info("a") is None  # removed from pool
+
+    def test_duplicate_name_rejected_without_touching_old_connection(self, monkeypatch):
+        old = FakeConn("same", [])
+        pool = self._pool_with([old])
+        monkeypatch.setattr(
+            "floodmind.agent.mcp_client.McpClientConnection",
+            lambda **kwargs: pytest.fail("duplicate must fail before connecting"),
+        )
+        with pytest.raises(Exception, match="名称冲突"):
+            pool.connect_server({"name": "same", "transport": "sse", "url": "http://new"})
+        assert pool.connections()["same"] is old
+        assert old.disconnected is False
 
     def test_disconnect_server_missing_returns_false(self):
         pool = McpClientPool()
@@ -198,6 +224,115 @@ class TestMcpManagementHandlers:
         assert pool.get_server_info("srv") is None
 
 
+class TestMcpTransports:
+    def test_streamable_http_preserves_headers_and_correlates_sse_response(self, monkeypatch):
+        from floodmind.agent.mcp_client import McpClientConnection
+
+        class Response:
+            status_code = 200
+            headers = {"content-type": "text/event-stream"}
+            def raise_for_status(self): pass
+            def iter_lines(self):
+                yield 'data: {"jsonrpc":"2.0","id":999,"result":{"wrong":true}}'
+                yield 'data: {"jsonrpc":"2.0","id":1,"result":{"ok":true}}'
+            def read(self): return b""
+
+        class Stream:
+            def __enter__(self): return Response()
+            def __exit__(self, *_): pass
+
+        class Client:
+            instance = None
+            def __init__(self, **kwargs):
+                Client.instance = self
+                self.headers = kwargs["headers"]
+                self.streams = []
+            def stream(self, method, url, **kwargs):
+                self.streams.append((method, url, kwargs))
+                return Stream()
+            def post(self, url, **kwargs): return MagicMock()
+
+        monkeypatch.setattr("floodmind.agent.mcp_client.httpx.Client", Client)
+        conn = McpClientConnection("s", headers={"Authorization": "Bearer token"}, url="https://host/mcp")
+        conn._connect_sse()
+        assert conn._message_url == "https://host/mcp"
+        assert Client.instance.headers["Authorization"] == "Bearer token"
+        assert conn._send_jsonrpc("tools/list")["result"] == {"ok": True}
+        assert Client.instance.streams[0][2]["headers"] == {
+            "Content-Type": "application/json",
+            "Accept": "application/json, text/event-stream",
+        }
+
+    def test_http_202_explicitly_rejects_legacy_response_channel(self, monkeypatch):
+        from floodmind.agent.mcp_client import McpClientConnection, McpConnectionError
+
+        response = MagicMock(status_code=202, headers={"content-type": "application/json"})
+        response.raise_for_status.return_value = None
+        stream = MagicMock()
+        stream.__enter__.return_value = response
+        client = MagicMock()
+        client.stream.return_value = stream
+        conn = McpClientConnection("s", url="https://host/mcp")
+        conn._client = client
+        conn._message_url = "https://host/mcp"
+        with pytest.raises(McpConnectionError, match="legacy SSE response-channel semantics are unsupported"):
+            conn._send_jsonrpc("tools/list")
+
+    def test_stdio_skips_notifications_and_mismatched_ids(self):
+        from floodmind.agent.mcp_client import McpClientConnection
+
+        conn = McpClientConnection("s", transport="stdio", request_timeout=0.5)
+        conn._process = MagicMock()
+        conn._process.poll.return_value = None
+        conn._stdio_messages.put({"jsonrpc": "2.0", "method": "notifications/progress"})
+        conn._stdio_messages.put({"jsonrpc": "2.0", "id": 999, "result": {"wrong": True}})
+        conn._stdio_messages.put({"jsonrpc": "2.0", "id": 1, "result": {"ok": True}})
+        assert conn._send_jsonrpc("tools/list")["result"] == {"ok": True}
+
+    def test_stdio_dead_process_and_timeout_are_bounded(self):
+        from floodmind.agent.mcp_client import McpClientConnection, McpConnectionError
+
+        dead = McpClientConnection("dead", transport="stdio")
+        dead._process = MagicMock(returncode=7)
+        dead._process.poll.return_value = 7
+        with pytest.raises(McpConnectionError, match="未运行"):
+            dead._send_jsonrpc("tools/list")
+
+        waiting = McpClientConnection("wait", transport="stdio", request_timeout=0.02)
+        waiting._process = MagicMock()
+        waiting._process.poll.return_value = None
+        with pytest.raises(McpConnectionError, match="请求超时"):
+            waiting._send_jsonrpc("tools/list")
+
+    def test_stdio_transactions_are_serialized(self):
+        from floodmind.agent.mcp_client import McpClientConnection
+
+        conn = McpClientConnection("s", transport="stdio", request_timeout=1)
+        conn._process = MagicMock()
+        conn._process.poll.return_value = None
+        entered = []
+
+        def respond():
+            while conn._process.stdin.write.call_count < 1:
+                pass
+            entered.append(conn._process.stdin.write.call_count)
+            conn._stdio_messages.put({"jsonrpc": "2.0", "id": 1, "result": {}})
+            while conn._process.stdin.write.call_count < 2:
+                pass
+            entered.append(conn._process.stdin.write.call_count)
+            conn._stdio_messages.put({"jsonrpc": "2.0", "id": 2, "result": {}})
+
+        responder = threading.Thread(target=respond)
+        responder.start()
+        threads = [threading.Thread(target=conn._send_jsonrpc, args=("tools/list",)) for _ in range(2)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+        responder.join()
+        assert entered == [1, 2]
+
+
 class TestMcpConnectionLiveness:
     def _conn(self, transport="stdio"):
         from floodmind.agent.mcp_client import McpClientConnection
@@ -247,13 +382,43 @@ class TestMcpCallHealth:
         assert pool.call_tool("mcp:a:t1", {}) == "ok result"
         assert pool.call_health()["a"] == {"ok": True, "error": None}
 
-    def test_fail_marker_records_failure(self):
-        conn = FakeConn("a", [{"name": "t1"}], call_result="工具调用失败: backend down")
+    def test_ordinary_failure_words_do_not_mark_unhealthy(self):
+        conn = FakeConn("a", [{"name": "t1"}], call_result="调用失败只是文档中的普通文字")
         pool = self._pool_with([conn])
         pool.call_tool("mcp:a:t1", {})
-        h = pool.call_health()["a"]
-        assert h["ok"] is False
-        assert "backend down" in h["error"]
+        assert pool.call_health()["a"] == {"ok": True, "error": None}
+
+    def test_structured_mcp_is_error_marks_unhealthy_and_preserves_raw(self):
+        from floodmind.agent.mcp_client import McpClientConnection
+
+        conn = McpClientConnection("a")
+        raw = {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "result": {"isError": True, "content": [{"type": "text", "text": "backend down"}]},
+        }
+        conn._send_jsonrpc = MagicMock(return_value=raw)
+        result = conn.call_tool("t1", {})
+        assert result == "backend down"
+        assert result.is_error is True
+        assert result.raw is raw
+
+        pool = self._pool_with([conn])
+        pool.call_tool("mcp:a:t1", {})
+        assert pool.call_health()["a"] == {"ok": False, "error": "backend down"}
+
+    def test_structured_jsonrpc_error_marks_unhealthy(self):
+        from floodmind.agent.mcp_client import McpClientConnection
+
+        conn = McpClientConnection("a")
+        conn._send_jsonrpc = MagicMock(return_value={
+            "jsonrpc": "2.0", "id": 1, "error": {"code": -32000, "message": "typed failure"}
+        })
+        pool = self._pool_with([conn])
+        result = pool.call_tool("mcp:a:t1", {})
+        assert "typed failure" in result
+        assert result.raw["error"]["code"] == -32000
+        assert pool.call_health()["a"]["ok"] is False
 
     def test_exception_records_failure_and_reraises(self):
         import pytest
@@ -333,8 +498,6 @@ class TestBareModeMcpLoading:
         fake_pool.connect_all.return_value = 1
         fake_pool.connections.return_value = {"srv": fake_conn}
         fake_pool.call_tool.return_value = "ok"
-        # _load_mcp_tools 内从 floodmind.agent.mcp_client import get_mcp_client_pool
-        monkeypatch.setattr("floodmind.agent.mcp_client.get_mcp_client_pool", lambda: fake_pool)
 
         agent = NativeFloodAgent(
             llm_service=ModelClient(api_key="k", base_url="http://mock/v1", model_name="m"),
@@ -342,6 +505,7 @@ class TestBareModeMcpLoading:
             session_id="s1",
             bare=True,
             tools=[],
+            mcp_pool=fake_pool,
         )
         names = {t.name for t in agent._orchestrator_registry.all()}
         assert "mcp_srv_t1" in names  # MCP 工具已注册（sanitized model-visible 名）

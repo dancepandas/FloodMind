@@ -110,7 +110,7 @@ pip install -r requirements.txt
 
 # 可选能力
 pip install "floodmind[doc]"       # 文档处理
-pip install "floodmind[gpu]"       # GPU/时序预测相关能力
+pip install "floodmind[doc]"       # 文档处理
 ```
 
 ### 配置

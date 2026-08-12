@@ -1,5 +1,6 @@
 """Tests for Settings configuration (v2: providers-only schema + resolver facade)."""
 
+import json
 import os
 from pathlib import Path
 from unittest.mock import patch
@@ -10,6 +11,7 @@ from floodmind.config.settings import (
     Settings, ModelConfig, AgentConfig, TaskExperienceConfig,
     get_config, _deep_merge, _load_json_config, _migrate_legacy_config,
     DEFAULT_CONFIG, DEFAULT_MAX_ITERATIONS,
+    initialize_floodmind_home, migrate_settings, reload_config,
 )
 
 
@@ -24,6 +26,36 @@ class TestConfigLoading:
 
     def test_load_json_not_found(self):
         assert _load_json_config(Path("/nonexistent/path.json")) == {}
+
+
+class TestExplicitInitialization:
+    def test_initialize_home_seeds_settings_only_when_called(self, tmp_path):
+        home = tmp_path / "state"
+        with patch.dict(os.environ, {"FLOODMIND_HOME": str(home)}, clear=False):
+            assert not home.exists()
+            assert initialize_floodmind_home() == home
+            assert (home / "settings.json").is_file()
+            original = (home / "settings.json").read_text(encoding="utf-8")
+            initialize_floodmind_home()
+            assert (home / "settings.json").read_text(encoding="utf-8") == original
+
+    def test_migrate_settings_is_explicit_and_idempotent(self, tmp_path):
+        home = tmp_path / "state"
+        home.mkdir()
+        legacy = {
+            "provider": {"p": {"options": {"apiKey": "secret"}, "models": {"m": {}}}},
+            "mcpServers": [{"name": "local", "command": "python"}],
+        }
+        (home / "settings.json").write_text(json.dumps(legacy), encoding="utf-8")
+        with patch.dict(os.environ, {"FLOODMIND_HOME": str(home)}, clear=False):
+            assert migrate_settings() is True
+            migrated = json.loads((home / "settings.json").read_text(encoding="utf-8"))
+            assert "providers" in migrated and "provider" not in migrated
+            assert "mcpServers" not in migrated
+            assert json.loads((home / "mcp.json").read_text(encoding="utf-8"))["servers"]
+            assert len(list(home.glob("settings.json.bak.*"))) == 1
+            assert migrate_settings() is False
+            reload_config()
 
 
 class TestModelConfig:

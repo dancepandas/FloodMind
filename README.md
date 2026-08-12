@@ -73,7 +73,6 @@ pip install -r requirements.txt
 
 # 按需安装可选能力
 pip install "floodmind[doc]"       # 文档处理
-pip install "floodmind[gpu]"       # GPU/时序预测相关能力
 ```
 
 ### 2. 配置 API 密钥
