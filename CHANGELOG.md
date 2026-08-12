@@ -2,6 +2,20 @@
 
 All notable changes to FloodMind are documented in this file.
 
+## [2.0.3] - 2026-08-12
+
+### Fixed
+
+- **create_plan / update_plan 工具契约（desktop 实验 2 报告，三处 schema 与实现不一致）：**
+  - `expected_deliverables` 每项接受字符串或对象（此前 schema 只收对象、实现却归一化字符串 → 模型传字符串被 jsonschema 拒 `is not of type object`）；
+  - 步骤 `status` 枚举并入 `in_progress`（子任务习惯状态），handler 归一化为 `running`，两套枚举不再打架；
+  - 多余参数键不再崩 `_handle_create_plan/update_plan`：handler 接受 `**kwargs`，且 `create_plan`/`update_plan`/子任务 schema 均加 `additionalProperties:false`（多余键被 jsonschema 干净拒绝，create_plan 步骤 schema 补全实现读取的全部字段避免误拒）。
+  - 回归测试：`tests/test_plan_contract.py` 4 项。
+
+### Verification
+
+- 完整回归：**1166 passed, 1 skipped**（clean checkout）。
+
 ## [2.0.2] - 2026-08-12
 
 ### Fixed
