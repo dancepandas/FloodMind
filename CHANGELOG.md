@@ -10,11 +10,18 @@ All notable changes to FloodMind are documented in this file.
   - `wait`：LLM 重试前的退避等待 `{"type":"wait","reason":"retry_backoff","attempt":N,"duration":seconds}`（executor 在 `sleep(delay)` 前发出）；
   - `recover`：重试成功后恢复 `{"type":"recover","attempt":N}`；
   - `resume`：`Agent.resume(checkpoint_id, ...)` 在 orchestrator event_bus 上发出 `{"type":"resume","checkpoint_id":"...","status":"started|completed"}`，与 Journal 的 `resume.started/completed` 对齐。
+- **后台任务宿主契约**（desktop Phase-1 反馈，SDK 侧补齐）：
+  - `Agent.list_background_tasks()` / `Agent.kill_background_task(task_id)` 公共 API —— 宿主不再需要 `agent.raw._background_task_service` 私有字段壳；
+  - 完成通知不再消费查询集：`drain_completions` 只注入一次，完成的任务 `list()/get()` 仍可查（桌面面板不消失）；
+  - 重启对账回填：`reconcile_background` 把 orphaned/unknown 写 meta 的同时回填 `_completed` 查询集；
+  - `list()/get()` 覆盖完整声明的状态集（含 starting 与对账后的 orphaned/unknown）；
+  - `bind_workspace` 重设后台任务存储根（任务不再落旧工作区）；
+  - 日志尾部语义：stdout+stderr 合并尾部（stderr-only 失败可见）、`TaskOutput` 改有界尾部读（大文件不整读）。
 - `Agent.stream()` docstring 事件契约同步更新，作为宿主（LS Agent 等）薄适配层的文档化依据。
 
 ### Verification
 
-- 完整回归：**1155 passed, 1 skipped**（clean checkout）。
+- 完整回归：**1161 passed, 1 skipped**（clean checkout）。
 
 ## [2.0.0] - 2026-08-11
 

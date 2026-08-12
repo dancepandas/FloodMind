@@ -363,6 +363,25 @@ class Agent:
         if hasattr(self._agent, "clear_memory"):
             self._agent.clear_memory()
 
+    # ── 后台任务公开 API（desktop/LS 契约；宿主不再需要 agent.raw._background_task_service） ──
+    def list_background_tasks(self) -> List[Dict[str, Any]]:
+        """列出本会话后台任务（运行中 / 已完成 / 重启对账后的 orphaned / unknown）。
+
+        每个条目: ``task_id / session_id / command / pid / status / exit_code /
+        stdout_path / stderr_path / started_at / finished_at / tail / error``。
+        """
+        svc = getattr(self._agent, "_background_task_service", None)
+        if svc is None:
+            return []
+        return [t.to_public_dict() for t in svc.list(self.session_id or "")]
+
+    def kill_background_task(self, task_id: str) -> bool:
+        """终止本会话指定后台任务（进程树 + 验证退出；kill 验证链）。"""
+        svc = getattr(self._agent, "_background_task_service", None)
+        if svc is None:
+            return False
+        return svc.kill(self.session_id or "", task_id)
+
     def cleanup(self) -> None:
         """释放资源：kill 本会话存活的后台任务（meta.json 保留供审计）。幂等。"""
         if hasattr(self._agent, "cleanup"):

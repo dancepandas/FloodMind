@@ -777,18 +777,11 @@ def _impl_task_output(task_id: str = "", tail_lines: int = 200) -> str:
     ]
     if task.error:
         lines.append(f"error: {task.error}")
-    for path, label in ((task.stdout_path, "stdout"), (task.stderr_path, "stderr")):
-        try:
-            p = Path(path)
-            if not p.exists():
-                continue
-            text = p.read_text(encoding="utf-8", errors="replace")
-            tl = text.splitlines()[-max(tail_lines, 0):] if tail_lines > 0 else []
-            if tl:
-                lines.append(f"--- {label} 尾部 ---")
-                lines.extend(tl)
-        except Exception as e:
-            lines.append(f"--- {label} 读取失败: {e}")
+    # 有界尾部读取（运行中亦可；大文件不整读）
+    tail = service.read_output_tail(task, tail_lines)
+    if tail:
+        lines.append("--- 输出尾部 ---")
+        lines.extend(tail.splitlines())
     return "\n".join(lines)
 
 

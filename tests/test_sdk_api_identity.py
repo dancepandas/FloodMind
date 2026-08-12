@@ -113,3 +113,36 @@ def test_agent_resume_returns_string_and_binds_authority(tmp_path):
     types = [e.event_type for e in auth.read_after(0)]
     assert "resume.started" in types
     assert "resume.completed" in types
+
+
+def test_agent_list_and_kill_background_tasks(tmp_path):
+    """#3 Agent.list_background_tasks()/kill_background_task() 公共 API（桌面端可去壳）。"""
+    import sys
+    import time
+
+    workspace = Workspace.from_folder(tmp_path, session_id="sdk-sess").ensure()
+    agent = _agent(workspace, tmp_path)
+    svc = agent._agent._background_task_service
+    t = svc.start(
+        "sdk-sess", "sleep",
+        [sys.executable, "-c", "import time; time.sleep(30)"], cwd=str(tmp_path),
+    )
+    deadline = time.time() + 10
+    while t.status not in ("running",) and time.time() < deadline:
+        time.sleep(0.05)
+    tasks = agent.list_background_tasks()
+    assert any(x["task_id"] == t.task_id for x in tasks)
+    assert agent.kill_background_task("no-such-task") is False
+    assert agent.kill_background_task(t.task_id) is True
+    assert t.status == "killed"
+
+
+def test_bind_workspace_repoints_bg_storage_root(tmp_path):
+    """#4 bind_workspace 重设后台任务存储根（任务不落旧工作区）。"""
+    ws_a = Workspace.from_folder(tmp_path / "a", session_id="s").ensure()
+    ws_b = Workspace.from_folder(tmp_path / "b", session_id="s").ensure()
+    agent = _agent(ws_a, tmp_path)
+    svc = agent._agent._background_task_service
+    assert str(svc._base_dir) == str(ws_a.session_root)
+    agent.bind_workspace(ws_b)
+    assert str(svc._base_dir) == str(ws_b.session_root)

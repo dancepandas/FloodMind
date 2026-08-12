@@ -80,6 +80,23 @@ class BackgroundTask:
         d.pop("journal_authority", None)
         return d
 
+    def to_public_dict(self) -> Dict[str, Any]:
+        """宿主公开 API（Agent.list_background_tasks）返回的任务信息。"""
+        return {
+            "task_id": self.task_id,
+            "session_id": self.session_id,
+            "command": self.command,
+            "pid": self.pid,
+            "status": self.status,
+            "exit_code": self.exit_code,
+            "stdout_path": self.stdout_path,
+            "stderr_path": self.stderr_path,
+            "started_at": self.started_at,
+            "finished_at": self.finished_at,
+            "tail": self.tail,
+            "error": self.error,
+        }
+
 
 class BackgroundTaskService:
     """后台任务管理器（进程启动 / 状态跟踪 / 完成通知 / 进程树清理）。"""
@@ -107,6 +124,8 @@ class BackgroundTaskService:
         # start() 在释放锁执行目录/文件/Popen IO 前预占的并发槽位。
         self._pending_tasks: Dict[str, str] = {}  # task_id -> session_id
         self._completed: List[BackgroundTask] = []
+        # 已完成任务中已被注入完成通知的 task_id（drain 消费标记；_completed 查询集不清空）。
+        self._notified: set = set()
         # (session_id, callback)；session_id=None 是显式兼容的 legacy 全局订阅。
         self._subscribers: List[Tuple[Optional[str], Callable[[BackgroundTask], None]]] = []
         self._processes: Dict[str, subprocess.Popen] = {}
@@ -325,7 +344,7 @@ class BackgroundTaskService:
         return task
 
     def get(self, session_id: str, task_id: str) -> Optional[BackgroundTask]:
-        """按 task_id 查任务（活跃 + 已完成均可）。"""
+        """按 task_id 查任务（活跃 + 已完成 + starting + 对账后均可）。"""
         session_id = validate_session_id(session_id)
         with self._lock:
             t = self._active_tasks.get(task_id)
@@ -334,15 +353,30 @@ class BackgroundTaskService:
             for t in self._completed:
                 if t.task_id == task_id and t.session_id == session_id:
                     return t
+            if self._pending_tasks.get(task_id) == session_id:
+                return self._starting_task(task_id, session_id)
         return None
 
+    @staticmethod
+    def _starting_task(task_id: str, session_id: str) -> "BackgroundTask":
+        """starting 阶段的轻量占位（真实 task 在 Popen 后进 _active_tasks）。"""
+        return BackgroundTask(
+            task_id=task_id, session_id=session_id, command="", pid=None,
+            status="starting", exit_code=None, stdout_path="",
+            stderr_path="", meta_path="", started_at=0.0, max_lifetime_seconds=0,
+        )
+
     def list(self, session_id: str) -> List[BackgroundTask]:
-        """列出会话全部任务（已完成在前，活跃在后）。"""
+        """列出会话全部任务（已完成在前，活跃在后；含 starting 与对账后的 orphaned/unknown）。"""
         session_id = validate_session_id(session_id)
         with self._lock:
             completed = [t for t in self._completed if t.session_id == session_id]
             running = [t for t in self._active_tasks.values() if t.session_id == session_id]
-            return completed + running
+            starting = [
+                self._starting_task(tid, sid)
+                for tid, sid in self._pending_tasks.items() if sid == session_id
+            ]
+            return completed + starting + running
 
     def child_namespace(self, session_id: str) -> List[BackgroundTask]:
         """子代理专用后台命名空间：仅该 session 的任务（别名，语义清晰化）。"""
@@ -390,7 +424,7 @@ class BackgroundTaskService:
             task.status = "terminating"
             confirmed = self._wait_exit(process, confirm_timeout)
             task.finished_at = time.time()
-            task.tail = self._read_tail(task.stdout_path)
+            task.tail = self._read_tail(task.stdout_path, task.stderr_path)
 
             if confirmed:
                 task.status = "killed"
@@ -489,14 +523,56 @@ class BackgroundTaskService:
             meta_file.write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
             if meta["status"] in ("orphaned", "unknown"):
                 logger.info("Background reconcile: %s=%s pid=%s", task_id, meta["status"], pid)
+                # 回填查询集：orphaned/unknown 只写 meta 会让 list()/get() 查不到，
+                # 桌面端重启对账后需要能查到并展示这些任务。
+                task = self._task_from_meta(meta_file, meta)
+                if task is not None:
+                    with self._lock:
+                        if not any(t.task_id == task.task_id for t in self._completed):
+                            self._completed.append(task)
         return result
 
+    def _task_from_meta(self, meta_file, meta: Dict[str, Any]) -> Optional[BackgroundTask]:
+        """从 meta.json 重建 BackgroundTask（reconcile 回填查询集用）。"""
+        task_id = str(meta.get("task_id", ""))
+        session_id = str(meta.get("session_id", "")) or meta_file.parent.parent.parent.name
+        bg_dir = Path(meta_file).parent
+        return BackgroundTask(
+            task_id=task_id,
+            session_id=session_id,
+            command=str(meta.get("command", "")),
+            pid=meta.get("pid"),
+            status=str(meta.get("status", "unknown")),
+            exit_code=meta.get("exit_code"),
+            stdout_path=str(meta.get("stdout_path", "")) or str(bg_dir / "out.log"),
+            stderr_path=str(meta.get("stderr_path", "")) or str(bg_dir / "err.log"),
+            meta_path=str(meta_file),
+            started_at=float(meta.get("started_at", 0) or 0),
+            max_lifetime_seconds=int(meta.get("max_lifetime_seconds", 0) or 0),
+            finished_at=meta.get("finished_at"),
+            process_identity=meta.get("process_identity"),
+            sandbox_capabilities=list(meta.get("sandbox_capabilities") or []),
+        )
+
+    def set_base_dir(self, base_dir: Optional[str]) -> None:
+        """宿主 bind_workspace 后重设存储根（新工作区会话目录）。线程安全。"""
+        with self._lock:
+            self._base_dir = Path(base_dir) if base_dir else None
+
     def drain_completions(self, session_id: str) -> List[BackgroundTask]:
-        """取出本会话已完成的全部任务（注入完成通知用，取后清空）。"""
+        """取出本会话尚未注入过完成通知的任务（不消费 _completed 查询集）。
+
+        完成的任务保留在 ``_completed``，list()/get() 仍可查询；每个任务的通知
+        只被注入一次（``_notified`` 去重）。桌面端面板因此不会因完成通知消失。
+        """
         session_id = validate_session_id(session_id)
         with self._lock:
-            drained = [t for t in self._completed if t.session_id == session_id]
-            self._completed = [t for t in self._completed if t.session_id != session_id]
+            drained = [
+                t for t in self._completed
+                if t.session_id == session_id and t.task_id not in self._notified
+            ]
+            for t in drained:
+                self._notified.add(t.task_id)
             return drained
 
     def subscribe(
@@ -576,7 +652,7 @@ class BackgroundTaskService:
                 except Exception:
                     pass
             task.finished_at = task.finished_at or time.time()
-            task.tail = self._read_tail(task.stdout_path)
+            task.tail = self._read_tail(task.stdout_path, task.stderr_path)
             self._write_meta(task)
             # Completion 先写 Journal（§12）；kill 已由 kill() 发 killed/kill_failed。
             if task.status in ("completed", "failed"):
@@ -607,7 +683,10 @@ class BackgroundTaskService:
             self._processes.pop(task.task_id, None)
             self._completed.append(task)
             if len(self._completed) > self._completed_retention:
+                trimmed = self._completed[: len(self._completed) - self._completed_retention]
                 del self._completed[: len(self._completed) - self._completed_retention]
+                for t in trimmed:
+                    self._notified.discard(t.task_id)
             subscribers = [
                 callback
                 for subscribed_session_id, callback in self._subscribers
@@ -646,20 +725,64 @@ class BackgroundTaskService:
         except Exception as e:
             logger.warning("BackgroundTask kill failed pid=%s: %s", process.pid, e)
 
-    def _read_tail(self, path: str, limit: int = _NOTIFICATION_TAIL_MAX) -> str:
-        """有界读取 stdout 尾部（供完成通知注入），不把大日志整体载入内存。"""
-        if limit <= 0:
+    def _read_tail(self, stdout_path: str, stderr_path: str = "", limit: int = _NOTIFICATION_TAIL_MAX) -> str:
+        """有界读取 stdout+stderr 尾部（供完成通知注入），stderr-only 失败也能看到输出。
+
+        按 UTF-8 至多 4 bytes/字符，多读以保证解码后能返回 limit 字符。
+        """
+        parts = []
+        for path in (stdout_path, stderr_path):
+            if not path or limit <= 0:
+                continue
+            try:
+                p = Path(path)
+                if not p.exists():
+                    continue
+                with p.open("rb") as stream:
+                    stream.seek(0, os.SEEK_END)
+                    size = stream.tell()
+                    stream.seek(max(0, size - limit * 4), os.SEEK_SET)
+                    data = stream.read(limit * 4)
+                text = data.decode("utf-8", errors="replace")[-limit:]
+                if text.strip():
+                    parts.append(text)
+            except Exception:
+                continue
+        return "\n".join(parts)
+
+    def read_output_tail(self, task: "BackgroundTask", tail_lines: int = 200) -> str:
+        """有界读取任务 stdout+stderr 尾部（按行；运行中亦可；大文件不整读）。"""
+        out = []
+        for path in (task.stdout_path, task.stderr_path):
+            lines = self._read_tail_lines(path, tail_lines)
+            if lines:
+                out.append(lines)
+        return "\n".join(out)
+
+    @staticmethod
+    def _read_tail_lines(path: str, n: int) -> str:
+        """从文件尾部按块读最近 n 行（大文件不整读）。"""
+        if n <= 0 or not path:
             return ""
         try:
             p = Path(path)
+            if not p.exists():
+                return ""
             with p.open("rb") as stream:
                 stream.seek(0, os.SEEK_END)
                 size = stream.tell()
-                # UTF-8 最多 4 bytes/字符；多读以确保解码后能返回 limit 字符。
-                stream.seek(max(0, size - limit * 4), os.SEEK_SET)
-                data = stream.read(limit * 4)
-            text = data.decode("utf-8", errors="replace")
-            return text[-limit:]
+                if size == 0:
+                    return ""
+                block = b""
+                pos = size
+                chunk = min(size, 8192)
+                while pos > 0 and block.count(b"\n") < n:
+                    pos = max(0, pos - chunk)
+                    stream.seek(pos)
+                    block = stream.read(size - pos)
+            text = block.decode("utf-8", errors="replace")
+            lines = text.splitlines()
+            return "\n".join(lines[-n:]) if lines else ""
         except Exception:
             return ""
 

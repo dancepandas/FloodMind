@@ -370,3 +370,66 @@ class TestExecutorInjection:
         svc.kill_session("sess-cleanup")
         status = _wait_status(svc, task, {"killed", "failed", "completed"})
         assert status == "killed"
+
+
+# ── v2.0.1 桌面端契约：查询集 / 对账回填 / 尾部 / 状态集 ─────────────────────
+
+def test_drain_completions_keeps_query_set(tmp_path):
+    """#1 drain 完成通知不消费查询集：完成的任务 list()/get() 仍可查到。"""
+    svc = BackgroundTaskService(base_dir=tmp_path)
+    t = svc.start("sess-drain", "true", [sys.executable, "-c", "pass"], cwd=str(tmp_path))
+    _wait_status(svc, t, {"completed", "failed"})
+    assert svc.drain_completions("sess-drain")          # 首次取到
+    assert svc.drain_completions("sess-drain") == []    # 通知去重
+    # 关键：drain 后任务仍在查询集（桌面面板不消失）
+    assert any(x.task_id == t.task_id for x in svc.list("sess-drain"))
+    assert svc.get("sess-drain", t.task_id) is not None
+
+
+def test_list_includes_starting_task(tmp_path):
+    """#6 starting 状态可查。"""
+    svc = BackgroundTaskService(base_dir=tmp_path)
+    svc._pending_tasks["bg_pending"] = "sess-start"
+    listed = svc.list("sess-start")
+    assert any(x.task_id == "bg_pending" and x.status == "starting" for x in listed)
+    got = svc.get("sess-start", "bg_pending")
+    assert got is not None and got.status == "starting"
+
+
+def test_tail_combines_stderr(tmp_path):
+    """#5 stderr-only 失败也能看到输出尾部。"""
+    svc = BackgroundTaskService(base_dir=tmp_path)
+    t = svc.start(
+        "sess-tail", "false",
+        [sys.executable, "-c", "import sys; print('boom-stderr', file=sys.stderr); sys.exit(1)"],
+        cwd=str(tmp_path),
+    )
+    _wait_status(svc, t, {"completed", "failed"})
+    assert t.status == "failed"
+    assert "boom-stderr" in (t.tail or "")
+
+
+def test_reconcile_backfills_orphaned_into_query_set(tmp_path):
+    """#2 重启对账：orphaned 回填查询集，list()/get() 可查。"""
+    import json
+
+    from floodmind.agent.runtime.services import process_identity
+
+    svc = BackgroundTaskService(base_dir=tmp_path)
+    task_dir = tmp_path / "sess-rc" / "background" / "bg_old"
+    task_dir.mkdir(parents=True, exist_ok=True)
+    (task_dir / "out.log").write_bytes(b"")
+    (task_dir / "err.log").write_bytes(b"")
+    meta = {
+        "task_id": "bg_old", "session_id": "sess-rc", "command": "sleep",
+        "pid": 99999999, "status": "running", "exit_code": None,
+        "process_identity": {"pid": 99999999, "create_time": None},
+    }
+    (task_dir / "meta.json").write_text(json.dumps(meta), encoding="utf-8")
+    with patch.object(process_identity, "process_exists", return_value=False):
+        res = svc.reconcile_background()
+    assert res["orphaned"] == 1
+    listed = svc.list("sess-rc")
+    assert any(x.task_id == "bg_old" and x.status == "orphaned" for x in listed)
+    got = svc.get("sess-rc", "bg_old")
+    assert got is not None and got.status == "orphaned"
