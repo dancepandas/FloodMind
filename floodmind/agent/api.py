@@ -321,6 +321,16 @@ class Agent:
         self._agent._last_loop_state = loop_state
         self._journal_authority = authority
 
+        # §10.1/§4.4：公开 resume 进度事件（desktop 契约），与 Journal 的 resume.started 对齐。
+        # 走续接所用 executor 的 event_bus，与续接产出的事件同一条公开流。
+        _resume_bus = getattr(executor, "event_bus", None)
+        if _resume_bus is not None:
+            _resume_bus.emit({
+                "type": "resume",
+                "checkpoint_id": checkpoint_id,
+                "status": "started",
+            })
+
         run_ctx = RunContext(
             session_id=session_id,
             user_text=user_message,
@@ -339,6 +349,12 @@ class Agent:
         finally:
             # fencing lease 覆盖整个 resumed run；终态后释放。
             outcome.lease.release()
+            if _resume_bus is not None:
+                _resume_bus.emit({
+                    "type": "resume",
+                    "checkpoint_id": checkpoint_id,
+                    "status": "completed",
+                })
         final_output = getattr(result, "final_output", "") or ""
         return final_output
 
@@ -430,7 +446,10 @@ class Agent:
         LLM 生命周期:
           - llm_step_start: LLM 调用开始     {"type": "llm_step_start", "iteration": N, "model"?}
           - llm_step_end:   LLM 调用结束     {"type": "llm_step_end", "finish_reason": "...", "tokens": {...}}
-          - retry_attempt:  模型重试         {"type": "retry_attempt", "attempt": N}
+          - retry_attempt:  模型重试         {"type": "retry_attempt", "attempt": N, "error": "...", "delay": seconds}
+          - wait:           重试前退避等待    {"type": "wait", "reason": "retry_backoff", "attempt": N, "duration": seconds}
+          - recover:        重试成功后恢复    {"type": "recover", "attempt": N}
+          - resume:         checkpoint 恢复  {"type": "resume", "checkpoint_id": "...", "status": "started|completed"}
           - context_compress_start/done: 上下文压缩
 
         产物:

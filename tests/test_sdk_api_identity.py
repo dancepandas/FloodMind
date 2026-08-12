@@ -89,8 +89,20 @@ def test_agent_resume_returns_string_and_binds_authority(tmp_path):
         llm=mc, session_id="sdk-sess", bare=True, workspace=workspace,
     )
 
+    # 捕获公开 resume 事件（v2.0.1：Agent.resume 在 orchestrator event_bus 上发 resume started/completed）
+    resume_events = []
+    exec_bus = agent._agent._orchestrator_executor.event_bus
+    orig_emit = exec_bus.emit
+    exec_bus.emit = lambda ev: (resume_events.append(ev), orig_emit(ev))[1]
+
     out = agent.resume(record.checkpoint_id, user_message="continue please")
     assert isinstance(out, str)
+
+    # 公开流上发出 resume started/completed，且携带 checkpoint_id
+    resume_msgs = [e for e in resume_events if e["type"] == "resume"]
+    assert {e["status"] for e in resume_msgs} == {"started", "completed"}
+    assert all(e["checkpoint_id"] == record.checkpoint_id for e in resume_msgs)
+    assert resume_msgs[0]["status"] == "started"  # started 先于 completed
 
     # resumed authority 已绑到 executor，identity 与 manifest 一致
     auth = agent._agent._journal_authority

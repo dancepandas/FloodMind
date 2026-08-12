@@ -520,6 +520,9 @@ class NativeAgentExecutor:
                         self.event_bus.emit_reasoning(content)
                     else:
                         self.event_bus.emit_token(content)
+                if attempt > 0:
+                    # §10.1/§4.4：重试成功后显式上报"已恢复"，前端可据此切出"重试中"状态
+                    self.event_bus.emit({"type": "recover", "attempt": attempt})
                 break  # stream completed successfully
 
             except Exception as e:
@@ -544,6 +547,13 @@ class NativeAgentExecutor:
                     "attempt": attempt,
                     "error": str(e)[:200],
                     "delay": delay,
+                })
+                # §10.1/§4.4：退避等待期间显式上报 wait，前端可渲染"等待重试"并显示剩余时长
+                self.event_bus.emit({
+                    "type": "wait",
+                    "reason": "retry_backoff",
+                    "attempt": attempt,
+                    "duration": delay,
                 })
                 # 清空本轮已收集的内容，重试重新生成
                 state.current_answer = ""
