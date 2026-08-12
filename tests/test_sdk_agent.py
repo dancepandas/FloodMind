@@ -941,3 +941,35 @@ class TestSdkEnhancements:
         assert agent.raw._tool_loading_config is cfg
         assert agent.raw._orchestrator_tool_loader.config.max_loaded_tools == 3
         assert agent.raw._specialist_tool_loader.config.core_tools == ["GetTool"]
+
+
+def test_agent_preserves_modelclient_enable_thinking():
+    """Agent 不强制关闭 ModelClient 的 enable_thinking（desktop「模型思考」tag 根因）。
+
+    修复前：NativeFloodAgent.stream(enable_reasoning=False 默认) 强制把
+    model_client.enable_thinking 覆盖为 False → 请求 thinking:disabled → 无 thought_delta。
+    修复后：enable_reasoning 默认 None，尊重 ModelClient 自身 enable_thinking=True →
+    请求 thinking:adaptive → 模型流式推理。
+    """
+    from floodmind.agent.native.model_client import ModelClient
+
+    mc = ModelClient(
+        api_key="k", base_url="https://api.minimaxi.chat/v1",
+        model_name="MiniMax-M3", enable_thinking=True, provider="minimax",
+    )
+    sent = []
+
+    def capture_send(params):
+        sent.append(dict(params))
+        class _Resp:
+            def chunks(self):
+                return iter([])
+        return _Resp()
+
+    mc._transport.send = capture_send
+    agent = Agent(llm=mc, session_id="t", bare=True, system_prompt="你是助手。")
+    list(agent.stream("hi"))
+
+    assert sent, "agent 应发出模型请求"
+    extra = sent[-1].get("extra_body") or {}
+    assert extra.get("thinking", {}).get("type") == "adaptive"

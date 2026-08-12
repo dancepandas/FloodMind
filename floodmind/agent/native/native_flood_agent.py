@@ -2676,7 +2676,7 @@ class NativeFloodAgent:
     def stream(
         self,
         user_input: str,
-        enable_reasoning: bool = False,
+        enable_reasoning: Optional[bool] = None,
         user_message: str = "",
         attachments: Optional[List[Attachment]] = None,
         abort_check: Optional[Any] = None,
@@ -2879,8 +2879,11 @@ class NativeFloodAgent:
                         memory_messages=memory_messages,
                     )
 
-                    # 思考开关只翻语义位——厂商方言由 model_client.pipeline 翻译
-                    self._model_client.enable_thinking = bool(enable_reasoning)
+                    # 思考开关只翻语义位——厂商方言由 model_client.pipeline 翻译。
+                    # enable_reasoning 未显式提供（None）时尊重 ModelClient 自身 enable_thinking，
+                    # 不再默认强制关掉宿主注入的 thinking（desktop 修复：模型思考 tag）。
+                    if enable_reasoning is not None:
+                        self._model_client.enable_thinking = bool(enable_reasoning)
 
                     self._event_bus.set_queue(q)
 
