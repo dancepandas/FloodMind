@@ -2,6 +2,20 @@
 
 All notable changes to FloodMind are documented in this file.
 
+## [2.0.1] - 2026-08-12
+
+### Added
+
+- **公开 `wait` / `recover` / `resume` 结构化流事件**（§10.1/§4.4，desktop/LS 契约）——补齐前端可靠区分"重试前退避等待 / 重试后恢复 / checkpoint 恢复"的能力：
+  - `wait`：LLM 重试前的退避等待 `{"type":"wait","reason":"retry_backoff","attempt":N,"duration":seconds}`（executor 在 `sleep(delay)` 前发出）；
+  - `recover`：重试成功后恢复 `{"type":"recover","attempt":N}`；
+  - `resume`：`Agent.resume(checkpoint_id, ...)` 在 orchestrator event_bus 上发出 `{"type":"resume","checkpoint_id":"...","status":"started|completed"}`，与 Journal 的 `resume.started/completed` 对齐。
+- `Agent.stream()` docstring 事件契约同步更新，作为宿主（LS Agent 等）薄适配层的文档化依据。
+
+### Verification
+
+- 完整回归：**1155 passed, 1 skipped**（clean checkout）。
+
 ## [2.0.0] - 2026-08-11
 
 > 重大版本：按 `FM_ARCHITECTURE_BASELINE.md` 完成 **forward-only 架构迁移（P0–P8）**。不向后兼容、不 fallback、不保留 legacy adapter，直接落 TARGET 契约。
