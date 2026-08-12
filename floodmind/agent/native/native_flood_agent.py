@@ -71,6 +71,7 @@ _SUBTASK_SCHEMA = {
     "type": "array",
     "items": {
         "type": "object",
+        "additionalProperties": False,
         "properties": {
             "id": {"type": "string"},
             "content": {"type": "string"},
@@ -981,26 +982,38 @@ class NativeFloodAgent:
             description="复杂任务建议先规划。创建结构化执行计划，明确用户意图、预期交付物和执行步骤。简单任务无需调用。",
             parameters={
                 "type": "object",
+                "additionalProperties": False,
                 "properties": {
                     "user_goal": {"type": "string", "description": "用户的原始意图描述"},
                     "deliverables": {"type": "string", "description": "预期最终交付物类型，逗号分隔。可选: image, excel, report, other"},
                     "steps": {
                         "type": "array",
-                        "description": "执行步骤JSON数组，每个元素含title、executor、skill_name(可选)、purpose、expected_deliverables(JSON数组)、subtasks(可选)",
+                        "description": "执行步骤JSON数组，每个元素含 step_id、title、executor、skill_name(可选)、purpose、expected_deliverables、needs(可选)、subtasks(可选)",
                         "items": {
                             "type": "object",
+                            "additionalProperties": False,
                             "properties": {
+                                "step_id": {"type": "string", "description": "步骤ID（不传则自动生成）"},
                                 "title": {"type": "string"},
                                 "executor": {"type": "string"},
                                 "skill_name": {"type": "string"},
                                 "purpose": {"type": "string"},
-                                "expected_deliverables": {"type": "array", "items": {"type": "object"}},
+                                "status": {"type": "string", "enum": ["pending", "running", "in_progress", "completed", "error", "skipped"], "description": "步骤状态（创建时忽略，恒为 pending）"},
+                                "expected_deliverables": {
+                                    "type": "array",
+                                    "description": "每个元素为字符串（SDK 自动归一化），或 {type: 产物类型, ...} 对象",
+                                    "items": {"anyOf": [{"type": "string"}, {"type": "object"}]},
+                                },
                                 "needs": {
                                     "type": "array",
                                     "items": {"type": "string"},
                                     "description": "本步骤依赖的前置步骤 step_id 列表",
                                 },
                                 "subtasks": _SUBTASK_SCHEMA,
+                                "output_artifacts": {"type": "array", "items": {"type": "string"}, "description": "该步骤产出的文件路径"},
+                                "output_summary": {"type": "string"},
+                                "error_message": {"type": "string"},
+                                "attempt_count": {"type": "integer"},
                             },
                         },
                     },
@@ -1027,10 +1040,12 @@ class NativeFloodAgent:
             ),
             parameters={
                 "type": "object",
+                "additionalProperties": False,
                 "properties": {
                     "action": {"type": "string", "enum": ["add_step", "update_step", "remove_step"], "description": "操作类型"},
                     "step": {
                         "type": "object",
+                        "additionalProperties": False,
                         "description": "add_step 时传入完整步骤定义（含 step_id/title/purpose/needs/subtasks 等）",
                         "properties": {
                             "step_id": {"type": "string"},
@@ -1039,7 +1054,7 @@ class NativeFloodAgent:
                             "skill_name": {"type": "string"},
                             "executor": {"type": "string"},
                             "needs": {"type": "array", "items": {"type": "string"}},
-                            "expected_deliverables": {"type": "array", "items": {"type": "object"}},
+                            "expected_deliverables": {"type": "array", "items": {"anyOf": [{"type": "string"}, {"type": "object"}]}, "description": "每个元素为字符串（SDK 自动归一化）或 {type: ...} 对象"},
                             "subtasks": {
                                 "type": "array",
                                 "items": {
@@ -1056,7 +1071,7 @@ class NativeFloodAgent:
                         },
                     },
                     "step_id": {"type": "string", "description": "update_step / remove_step 时传入目标步骤ID"},
-                    "status": {"type": "string", "enum": ["pending", "running", "completed", "error", "skipped"]},
+                    "status": {"type": "string", "enum": ["pending", "running", "in_progress", "completed", "error", "skipped"], "description": "步骤状态（in_progress 等价 running，SDK 自动归一化）"},
                     "output_summary": {"type": "string", "description": "该步骤的产出摘要"},
                     "output_artifacts": {"type": "array", "items": {"type": "string"}, "description": "该步骤产出的文件路径"},
                     "subtasks": {
@@ -1813,7 +1828,7 @@ class NativeFloodAgent:
                 input={"title": title or plan.user_message, "steps": plan.steps},
             )
 
-    def _handle_create_plan(self, user_goal: str = "", deliverables: str = "", steps: Any = "") -> str:
+    def _handle_create_plan(self, user_goal: str = "", deliverables: str = "", steps: Any = "", **kwargs) -> str:
         steps_str = json.dumps(steps, ensure_ascii=False) if isinstance(steps, (list, dict)) else str(steps)
         try:
             parsed_steps = json.loads(steps_str) if steps_str else []
@@ -1867,6 +1882,7 @@ class NativeFloodAgent:
         output_summary: str = "",
         output_artifacts: Any = "",
         subtasks: Any = "",
+        **kwargs,
     ) -> str:
         """动态调整执行计划：add_step / update_step / remove_step。"""
         plan = self._last_loop_state.plan if self._last_loop_state else None
@@ -1898,6 +1914,9 @@ class NativeFloodAgent:
                     plan.replace_needs(step_id, step.get("needs"))
                 except ValueError as exc:
                     return f"错误：更新步骤 {step_id} 的依赖失败：{exc}，已回滚"
+            # in_progress 是子任务习惯状态；步骤级归一化为 running（§坑2：两套枚举打架）
+            if status == "in_progress":
+                status = "running"
             if status in ("pending", "running", "completed", "error", "skipped"):
                 target["status"] = status
             if step and isinstance(step, dict):
