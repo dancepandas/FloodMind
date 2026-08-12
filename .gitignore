@@ -40,3 +40,11 @@ docs/key.txt
 
 # SDD workspaces (scratch: ledgers, briefs, reports)
 .superpowers/
+# SDD workspaces (scratch: ledgers, briefs, reports)
+.superpowers/
+
+# 外部化服务副本（chronos/hydro_case_client 等，属独立服务仓库）
+/contrib/
+
+# 前端/工具依赖（根 node_modules）
+/node_modules/
