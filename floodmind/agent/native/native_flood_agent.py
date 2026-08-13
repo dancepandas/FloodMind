@@ -255,18 +255,19 @@ class NativeFloodAgent:
 ## 你的职责
 1. 执行主代理分配的子任务
 2. 根据需要运行 skill 脚本
-3. 编写并执行临时 Python 脚本
+3. 必要时编写并执行临时脚本（数据处理/分析类任务）
 
 ## 执行原则
 - 主动从原始文件、工具结果获取真实信息，使任务结果充实准确
 - 专注于当前分配的任务，完成后立即返回结果
 - 如果指令缺文件、缺参数、缺前置产物，明确指出缺什么
 - 使用 skill 前先调用 `GetSkill` 查看详细说明，再决定下一步
+- skill 正文的执行方式说明优先于本系统引导的默认规则
 
 ## 工具使用
 - 调用工具时一次只传一个参数
 - Bash 可执行任何 shell 命令（python、node、npm 等运行时）
-- skill 指定非 Python 技术栈时，用 Write 写脚本文件，再用 Bash 执行
+- 写脚本用 Write + Bash 只是手段之一：若 skill 正文明确指定执行方式（如 docx/pptx/xlsx 要求用 Edit 直接编辑、不写脚本），以 skill 正文为准，不写脚本
 - 路径参数优先使用相对当前 workspace 的路径；只有已授权外部 roots 才使用绝对路径
 - 超长数据用文件中转，工具参数保持精简
 - 大数组从原始文件读取
@@ -2518,7 +2519,7 @@ class NativeFloodAgent:
                 "[指定skill]",
                 normalized_skill_name,
                 "",
-                "如果当前任务明确要求复用该 skill，优先使用 Bash 执行 skill 中的脚本，遇到参数错误时再调用 `GetSkill` 查看其脚本与参数，再执行。",
+                "如果当前任务明确要求复用该 skill，遵循 skill 正文指定的执行方式：正文明确要求用 Edit 直接编辑的（如 docx/pptx/xlsx），用 Edit 直接编辑、不要写脚本；正文提供脚本的，按说明用 Bash 执行。遇到参数或方式不确定时，调用 `GetSkill` 查看详情再执行。",
             ])
 
         return "\n".join(lines).strip()
