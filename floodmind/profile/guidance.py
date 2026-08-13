@@ -27,7 +27,7 @@ TOOL_EXECUTION_GUIDANCE = """## 工具使用
 - 一次只传一个参数（逐个调用 GetSkill）
 - 相关 skill 先用 GetSkill 查看说明再执行
 - Bash 可执行任何 shell 命令，支持 python/node/npm
-- Write + Bash 执行非 Python 脚本
+- Write + Bash 写脚本只是手段之一：若 skill 正文明确指定执行方式（如 docx/pptx/xlsx 要求用 Edit 直接编辑、不写脚本），以 skill 正文为准
 - 执行前检查依赖"""
 
 # ── 任务规划 / 工作流 ──

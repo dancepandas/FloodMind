@@ -2,6 +2,19 @@
 
 All notable changes to FloodMind are documented in this file.
 
+## [2.0.4] - 2026-08-13
+
+### Fixed
+
+- **系统提示词引导冲突：文档编辑类 skill 被"写脚本"默认引导压制。** 系统级引导此前给出绝对化指令——主代理 `Write + Bash 执行非 Python 脚本`、子代理 `编写并执行临时 Python 脚本` / `优先使用 Bash 执行 skill 中的脚本`——压过了 docx/pptx/xlsx 等 skill 正文的 `Use the Edit tool directly. Do not write Python scripts`，导致 MiniMax-M3 倾向写脚本而非用 Edit。现统一确立优先级：**skill 正文的执行方式说明优先于系统默认引导**。
+  - 主代理 `TOOL_EXECUTION_GUIDANCE`：`Write + Bash` 从绝对指令改为"手段之一"，明确正文指定执行方式（docx/pptx/xlsx 用 Edit 直接编辑）时以正文为准；
+  - 子代理 `SPECIALIST_STATIC_GLOBAL`：临时脚本限定为"数据处理/分析类任务"，新增"skill 正文优先"执行原则，`Write + Bash` 同改为"手段之一"；
+  - 子代理用户输入注入：`优先使用 Bash 执行 skill 脚本` 改为 `遵循 skill 正文指定的执行方式`（正文要求 Edit 就用 Edit、不写脚本；正文提供脚本才用 Bash）。
+
+### Verification
+
+- 完整回归：**1166 passed, 1 skipped**（clean checkout）。
+
 ## [2.0.3] - 2026-08-12
 
 ### Fixed
