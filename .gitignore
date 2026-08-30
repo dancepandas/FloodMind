@@ -48,3 +48,16 @@ docs/key.txt
 
 # 前端/工具依赖（根 node_modules）
 /node_modules/
+/runtime/
+/scripts/gw_*
+
+# Chainlit 本地运行时配置（启动自动生成）
+.chainlit/
+# Chainlit 服务的工作区 public 目录（启动时从 floodmind/gateway/chainlit_public/ 拷贝生成）
+/public/
+# UI 测试截图
+/gui-test-screenshots/
+# 网关运行日志
+/scripts/*.log
+# 本地临时测试产物
+/sorry_forward.txt

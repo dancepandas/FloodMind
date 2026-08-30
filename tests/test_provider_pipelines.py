@@ -619,3 +619,21 @@ class TestToolCallIdAlignment:
         assert done.terminal_reason.code == code
         assert done.terminal_reason.raw == raw
 
+
+class TestNonStreamChat:
+    def test_empty_choices_returns_error_event_instead_of_indexerror(self):
+        """非流式 chat 空 choices：返回带 terminal_reason 的错误事件，而非 IndexError。"""
+        from floodmind.agent.native.model_client import ModelClient
+        from floodmind.agent.native.types import ModelEvent
+
+        client = ModelClient(api_key="k", base_url="https://example.com/v1", model_name="m")
+        mock_client = MagicMock()
+        mock_client.chat.completions.create.return_value = _ns(choices=[], usage=None)
+        client._transport._client = mock_client
+
+        result = client.chat(messages=[{"role": "user", "content": "x"}])
+        assert isinstance(result, ModelEvent)
+        assert result.type == "error"
+        assert result.terminal_reason is not None
+        assert "choices 为空" in result.content
+

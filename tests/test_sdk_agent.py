@@ -687,12 +687,18 @@ class TestSdkEnhancements:
 
         assert "GetSkill" in names
         assert {"Read", "Glob", "Grep"} <= names
+        # 执行类工具必须提供给 specialist（每次调用仍走各自 permission policy，
+        # 子代理层还有 ASK 降级 DENY 兜底）；此前按 is_destructive 一刀切过滤，
+        # 导致子代理只剩 GetTool/GetSkill 元工具，无法执行任何实际操作。
+        assert {"Bash", "Write", "Edit"} <= names
         assert "CoreMemoryAppend" not in names
         assert "AddTaskExperience" not in names
         assert "CreateScheduledTask" not in names
         assert "CancelScheduledTask" not in names
         assert "TaskKill" not in names
-        assert all(not tool.is_destructive for tool in specialist)
+        assert "UpdateProjectInstructions" not in names
+        assert "MemorySearch" not in names
+        assert "ConversationSearch" not in names
         assert all(
             getattr(getattr(tool, "permission_policy", None), "policy_type", None)
             != "state_write"
@@ -940,7 +946,12 @@ class TestSdkEnhancements:
         agent = Agent(llm=llm, tools=sample_tools, tool_loading=cfg)
         assert agent.raw._tool_loading_config is cfg
         assert agent.raw._orchestrator_tool_loader.config.max_loaded_tools == 3
-        assert agent.raw._specialist_tool_loader.config.core_tools == ["GetTool"]
+        # specialist 预载核心执行工具：宿主 core_tools 保留为前缀，追加 Bash/Read 等；
+        # 预载集合始终受 registry 过滤（registry 不存在的名字不会进 schema），bare
+        # 模式 specialist 无内置工具时预载不产生实际效果。
+        spec_core = agent.raw._specialist_tool_loader.config.core_tools
+        assert spec_core[:1] == ["GetTool"]
+        assert {"Bash", "Read", "Write"} <= set(spec_core)
 
 
 def test_agent_preserves_modelclient_enable_thinking():

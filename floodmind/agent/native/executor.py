@@ -1299,13 +1299,13 @@ class NativeAgentExecutor:
         if self._checkpoint_service is None:
             return
         try:
-            journal_cursor = (
-                self._journal_authority.cursor()
-                if self._journal_authority is not None
-                else state.journal_cursor
-            )
             identity_metadata = {}
+            run_state = None
             if self._journal_authority is not None:
+                # 原子快照：cursor 与 replay 基于同一批 journal 事件。此前两次独立
+                # 读取之间若被并行 specialist 的 append 插队，cursor 会与
+                # last_committed_sequence 错位，checkpoint 一致性校验误报失败。
+                journal_cursor, run_state = self._journal_authority.checkpoint_snapshot()
                 identity_metadata = {
                     "conversation_id": self._journal_authority.conversation_id,
                     "task_id": self._journal_authority.task_id,
@@ -1314,9 +1314,8 @@ class NativeAgentExecutor:
                     "turn_id": self._journal_authority.turn_id,
                     "runtime_dir": str(self._journal_authority._writer._base_dir),
                 }
-            run_state = None
-            if self._journal_authority is not None:
-                run_state = self._journal_authority.replay()
+            else:
+                journal_cursor = state.journal_cursor
             record = self._checkpoint_service.save(
                 state,
                 metadata={

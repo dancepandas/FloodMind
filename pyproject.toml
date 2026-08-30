@@ -46,6 +46,16 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+gateway = [
+    "fastapi>=0.110",
+    "uvicorn>=0.29",
+]
+chainlit-ui = [
+    "floodmind[gateway]",
+    "chainlit>=2.12",
+    "sqlalchemy>=2",
+    "aiosqlite>=0.20",
+]
 doc = [
     "pypdf>=3.0",
     "pdfplumber>=0.10",
@@ -63,6 +73,8 @@ deployment = [
 ]
 all = [
     "floodmind[doc]",
+    "floodmind[gateway]",
+    "floodmind[chainlit-ui]",
 ]
 
 [project.scripts]
@@ -85,6 +97,8 @@ floodmind = [
     "skills/**/templates/**",
     "skills/**/references/**",
     "skills/**/assets/**",
+    "gateway/static/**",
+    "gateway/chainlit_public/**",
 ]
 
 [tool.setuptools.dynamic]

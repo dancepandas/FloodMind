@@ -2,6 +2,211 @@
 
 All notable changes to FloodMind are documented in this file.
 
+## [2.1.9] - 2026-08-30
+
+> 折叠栏设计 v2：默认折叠 + 下方实时显示最近 2 条过程活动摘要。
+
+### Changed
+
+- **折叠栏默认折叠（可点开）**：用户偏好"折叠屏就是折叠屏"，不再强制展开。`cl.Step(type="run", default_open=False)`，前端 Radix Accordion 行为：默认 `data-state="closed"`，点击折叠头切到 `open` 展开完整过程活动。
+- **折叠栏下方最近 2 条活动摘要**：每次工具调用时 `cl.Message(content="<marker>**{verb}** {summary}", author="FloodMind")` 发送一条 15 字摘要（超长截断 + …）；超出 2 条的标记为 stale 由 JS 隐藏。content 嵌入 `` `<span data-fm-act="N"></span>` `` 反引号代码块（markdown 不会解析内部 HTML），前端用 `textContent.indexOf('data-fm-act=')` 识别 + JS 把含 sentinel 的 text node 包成透明 span 隐藏。
+- **点击展开时整组摘要隐藏**：JS 监听折叠头 button 的 `data-state` 变化（Radix Accordion 状态），展开时 `.fm-activity` 类 `display:none`，收起时恢复显示（stale 始终隐藏）。这样用户展开折叠栏看完整过程时，摘要不重复占用空间。
+- **运行中过程中折叠头**：turn container `default_open=False`——Chainlit 不再强行打开 Accordion。折叠头始终显示"正在工作"（运行中）或"已完成 · X · 1 次工具调用 · k tokens"（完成后），用户主动点击展开。
+- **任务完成后活动摘要自动消失**：`llm_step_end(reason=stop)` 时后端额外发一条 `cl.Message(content="\`fm-final\`")` sentinel，前端识别后整组 `.fm-activity` 永久隐藏（包括 sentinel 自身）。这样最终回答呈现时只有折叠头 + 最终回答两件事，干净清爽。
+
+## [2.1.8] - 2026-08-30
+
+> 折叠屏关键 bug 修复：子代理事件污染 + 主体被默认折叠 + 容器渲染策略。
+
+### Fixed
+
+- **子代理叙述回流污染主代理 UI**：`StepEventBus` 让子代理（SubAgent/ParallelTask 内）的 `answer_delta` / `thought_delta` / `llm_step_end` 全部回流到主 agent 的 event_bus 队列。Chainlit 端把所有带 `step_key` 字段的事件视为子代理事件并 `continue` 跳过（仅累加 token 到 turn 统计）。子代理结果通过 ParallelTask 工具步骤的 `action_end` 一次性呈现（`action_end` 不带 `step_key` 标识，路径是子代理整体完成上报的工具事件而非子代理单步 LLM 事件）。
+- **折叠屏主体被默认折叠、用户无法展开**：`cl.Step(type="run", default_open=False)` 在 Chainlit 里渲染为 Radix Accordion 折叠步骤，且我之前用 JS 拦截了 click 阻止切换——结果折叠头显示但内容永远不可见。改为 `default_open=True`，配合 JS 拦截 click 即可做到"始终展开 + 不可点击"的 Codex 式屏幕效果。
+- **in_turn_narr 容器在嵌套场景下 `default_open` 失效**：嵌套 Radix Accordion 子容器的 `defaultOpen` 行为不可靠，叙述 step 折叠头显示但内容藏起来。改为 `cl.Message(parent_id=turn.id)`：Message 没有折叠头，作为 turn 容器的子级渲染时内容始终可见，符合"折叠屏内所有内容平铺展开"的设计意图。
+- **HTML 错误页直接糊在 chat 里**：DeepSeek 平台风控触发 429 时把 `<!DOCTYPE html><title>Error - Request Blocked</title>` 当成普通 content 抛上来。前端友好的做法是识别 `<!DOCTYPE` / `<html` 标记后换成"LLM 端点返回了非 JSON 错误（疑似触发平台风控/限流），请稍后重试或切换 provider"。
+
+## [2.1.7] - 2026-08-30
+
+> 品牌标识位置调整 + author avatar 隐藏：把 FloodMind logo 放到与折叠栏齐平的顶栏左侧，顶层消息 author avatar 不再显示。
+
+### Changed
+
+- **聊天主区顶部 brand slot 注入**：Chainlit 在 `<main>` 顶部 `<div id="header">` 内预留了一个空的 `.flex.items-center` brand slot（原本无内容），JS 现在把 FloodMind logo + 名称注入到该 slot（`.fm-header-brand`），位置在顶栏**最左侧**，与下方消息/折叠栏左缘齐平。语义上是 Chainlit 自己的 brand bar，UI 风格一致。
+- **顶层消息 author avatar 隐藏**：每条 FloodMind 顶层 `cl.Message` 左侧原本会渲染 author 的字母 logo（`Author for FloodMind`），现在通过 JS 识别 `.ai-message` 第一个 avatar 子元素（`role=img` 或含 Radix collection item）后 `display:none`，并把 `.ai-message` 的 `gap` 归零，让消息内容贴左对齐。**品牌标识统一在顶栏 + 侧栏呈现**，消息栏不再出现冗余字母 logo。
+- **`_close_in_turn_narr` 返回叙述文本**：`llm_step_end(reason=stop)` 路径在关闭 in_turn_narr 容器内叙述 step 后才能拿到完整文本，函数签名改为返回 `str`，避免叙述在容器关闭后丢失。
+
+## [2.1.6] - 2026-08-29
+
+> 折叠逻辑重构：折叠行变为不可点击的"屏幕"，所有过程活动与最终答复严格分离。
+
+### Changed
+
+- **折叠行变为不可点击的"屏幕"**：用户要求"折叠框就是一个屏幕，里面的内容按顺序展示"，但 Chainlit 的 mKn 折叠头默认可点击切换展开。改为：（1）CSS 让折叠头 cursor:default、关闭 hover 反馈；（2）JS 拦截折叠头 click/keydown，preventDefault + stopPropagation 让 Radix Accordion state 不被切换。容器始终保持展开状态，所有过程活动（思考/工具/中间叙述）按顺序流式累加显示。
+- **中间叙述严格收到容器内**：此前中间叙述（如"好的，我立即并行启动两个子代理..."）在 turn 容器创建前已流式到顶层 answer（独立顶层 message），无法移入容器。重构后 turn 容器一旦创建，全部 `answer_delta` 写入容器的子 step (`in_turn_narr`)，不再独立顶层；turn 容器未创建时（纯问答场景）维持原行为流式到顶层 answer。
+- **最终答复识别更精准**：原依赖 turn 容器中累积的叙述输出判断最终答复，现在综合三个来源——`answer` 顶层流（容器未创建时）、`in_turn_narr` 容器内叙述（容器已创建时），按 `llm_step_end(reason=stop)` 触发。避免容器创建前后行为不一致。
+- **思考与叙述互斥**：同一容器内思考与叙述不能同时存在（它们都是 run-类型子 step）。新事件到来时关闭上一个：思考 → 关闭叙述、工具 → 关闭叙述、叙述 → 关闭思考。
+
+## [2.1.5] - 2026-08-29
+
+> 回合折叠 UI 微调与右上角冗余按钮清理。
+
+### Changed
+
+- **移除右上角 "说明" 按钮（README 弹窗）**：与品牌定位无关，且本服务无 README 文档。通过 `floodmind-ui.js` 直接 `#readme-button` 设置 `display:none; visibility:hidden;`。
+- **welcome 页 logo 缩小 + 加副标题**：原 200px 偏大，覆盖为 96px；logo 下方追加 "FloodMind · 您的智能水文助手" 副标题（floodmind-ui.js 注入 `.fm-tagline`）。
+- **侧栏顶部品牌行**：侧栏 logo 由 150px 缩到 28px（与新建会话图标同高），并追加 "FloodMind" 产品名（floodmind-ui.js 注入 `.fm-brand`）。
+- **叙述段折叠行不再显示首行标题**：模型在工具之间的过程叙述（如"输出为："）以前会被 mKn 截首行作为折叠标题，造成冗余"输出为："折叠行。叙述段 `cl.Step(name="")` 后不再渲染标题，仅展开填充内容。
+- **品牌资源部署链路修复**：发现 `<workspace>/public/floodmind-ui.{js,css}` 与随包源文件不同步会导致修改不生效。手动同步已修复；后续品牌定制需同时改源包并 cp 到 `<workspace>/public/`（install 流程启动时会自动覆盖回源包最新版）。
+
+## [2.1.4] - 2026-08-29
+
+> 2.1.3 修复后用户实测暴露的委派路径体验问题（首轮只说不做、开局失败行、过程自白混排）。
+
+### Fixed
+
+- **主 agent 首轮"只说不做"**：实测模型第一轮只输出"好的，并行启动两个子代理…"便结束回合，用户不得不重发同一句话。双重修复——WORK_METHOD_GUIDANCE 增加"已决定的操作直接调用工具执行，不要输出准备性叙述后停止"；同时修正该段工具名漂移（"用 Task 委派"→SubAgent，Task 工具并不存在）。
+- **开局"✗ 调用 SubAgent · 0.0s"失败行**：委派工具在 progressive 模式下需先 GetTool 加载，模型首轮直调必被拒且 UI 留下失败行。orchestrator 的 core_tools 预载 SubAgent/ParallelTask（registry 缺名自动过滤，bare 模式不受影响）。
+- **过程自白与最终答案混排**：所有 answer_delta 拼进同一条消息，"工具尚未加载，先获取工具参数"之类的过程自白与最终汇总连成一坨。改为工具调用发生时切断回答流（Codex 式叙述段——短叙述独立成消息，与工具折叠行交替出现）。
+- **委派工具行动词与结果**：_TOOL_VERBS 补 SubAgent→"委派子代理"、ParallelTask→"并行委派"（此前显示"调用 SubAgent"，另有无用的 Spawn 映射已删）；委派结果不再 JSON dump，解析提取 status/任务/summary/产物为可读文本。
+- Chainlit UI 真实浏览器端到端复验：首轮即"并行委派 · 9.6s"折叠行（无失败行），叙述段独立，结果正确。
+
+## [2.1.3] - 2026-08-29
+
+> 修复子代理（SubAgent/ParallelTask）委派后无法执行任何实际操作的缺陷——用户实测"启动两个子代理正反向拼写"暴露。
+
+### Fixed
+
+- **子代理工具集被误清空（根因）**：`_is_specialist_builtin_safe` 按 `is_destructive` 一刀切过滤，而 Bash/Write/Edit 均标记 `is_destructive=True`，导致 specialist 注册表只剩 GetTool/GetSkill 元工具——子代理调用 Bash 收到"当前未加载，不能执行"，最终只能放弃并自行编造结果（与设计注释"Specialists execute scoped work, including file edits and shell commands"直接矛盾）。改为排除 agent 全局状态与管理类工具（state_write 策略 + MemorySearch/ConversationSearch/UpdateProjectInstructions/TaskKill 名单），执行类工具交给每次调用的权限策略兜底（exec/write 路径校验、危险命令硬拒、子代理 ASK 自动降级 DENY，均已实测）。
+- **子代理系统提示词缺工具目录**：SPECIALIST_STATIC_GLOBAL 只注入 skill_catalog，progressive 模式下子代理看不到"有哪些工具、如何加载"，只能盲猜工具名（实测幻觉出 `Agent`）。补上 `## 可用工具` 目录段（full 模式初始构建与 `_rebuild_system_prompts` 重建、bare 模式均覆盖）。
+- **specialist 渐进加载预载核心工具**：specialist 的 core_tools 追加 Bash/Read/Write/Edit/Glob/Grep（不占 max_loaded_tools 配额，registry 不存在的名字自动过滤）——子代理生命周期短，此前每次委派都要先绕 1-2 轮"未加载→GetTool→重调"。实测修复后子代理首轮 Bash 直接执行成功（4/4，修复前先失败 4 次才走上正轨）。
+- **child_thread.result Journal 双写**：子线程与父线程 JournalAuthority 共享同一份 run journal（同 runtime_dir/run_id，thread_id 作用域在此处本就相同），终态事件被连续 append 两条内容完全相同的事件；且与 accepted/running 及异常路径（仅 parent_auth.emit）不一致。去重为单次记录。
+- **checkpoint 保存的并发一致性（压力测试确证）**：并行 specialist 共享同一份 run journal，`_save_checkpoint` 先 `cursor()` 再 `replay()` 的两次独立读取之间可能被并发 append 插队，触发"RunState snapshot cursor 与 checkpoint journal_cursor 不一致"校验失败（checkpoint 静默跳存）。新增 `JournalAuthority.checkpoint_snapshot()` 原子快照（单次 read_from，cursor 取批内最后一条 sequence，偏旧安全、偏新有害），并发压力测试从 130 次错位降为 0。
+- 同步更新 `test_full_specialist_excludes_state_write_and_destructive_tools`、`test_agent_accepts_tool_loading_config`（此前固化了误清空行为）；全量测试 1188 通过。
+
+## [2.1.2] - 2026-08-29
+
+> 采纳开源 Chainlit（github.com/Chainlit/chainlit，50k+ star）作为 gateway 前端，并补齐历史会话持久化；思考/工具展示对齐 Codex 桌面端风格（经用户确认的调研结论）。
+
+### Added
+
+- **Codex 风格过程展示**：调研 Codex 桌面端（官方截图 + 逐字 UI 字符串交叉验证）后对齐——工具行动词化（"运行/读取/写入/搜索/抓取 `对象`"）+ 成败标记（✗）+ 耗时（·0.4s），运行态"使用中"前缀；思考流折叠为"思考了 N 秒"；每轮状态行（TaskList）结束回填"已完成/失败 · N 秒"；审批改为普通消息卡片 + 允许/拒绝按钮（Codex 式内联审批）。
+- **审批闭环修复（Chainlit 环境缺陷绕开）**：
+  - **AskActionMessage 弃用**：其 socket call/ack 机制在本环境前端不渲染（stub 步骤未上树、无 ack），90s 超时被静默当作"拒绝"（`timeout=90` 默认值），实测复现并经服务端 sio.call 日志确证。改为普通消息 + `cl.Action` + `@cl.action_callback` 回调，走与工具行相同的 new_message 渲染链路；
+  - **stub 步骤挂载陷阱**：打开中的 Step 首次 `stream_token` 会向 `local_steps` 压入一条前端不渲染的 stub 消息，其后发送的消息（含审批卡）默认挂在它下面被前端整棵丢弃——发审批卡前显式清空 `local_steps` 使卡片挂根；
+  - **运行中按钮禁用**：前端在 loading 态禁用全部 Action 按钮（bundle 实证 `disabled: loading`）——审批卡发出后 `task_end()` 启用按钮，批准回调里 `task_start()` 恢复运行态。
+- **Chainlit UI（`floodmind gateway --ui chainlit`）**：`floodmind/gateway/chainlit_app.py` 把 Agent SDK 流式事件桥接到 Chainlit——answer_delta → 流式 markdown、thought_delta → 思考折叠、action_* → 工具面板、permission_ask → 审批卡（AskService 闭环续跑）、产物 → File/Image 元素；CLI 以子进程拉起 `chainlit run`（`[chainlit-ui]` extra：chainlit + sqlalchemy + aiosqlite）。
+- **历史会话持久化（`floodmind/gateway/chainlit_history.py`）**：
+  - SQLite 数据层（SQLAlchemyDataLayer，落 `<workspace>/.floodmind/chainlit/threads.db`）：内置建表与旧表 ALTER 迁移（数据层不自动建表；StepDict 列集如 defaultOpen/autoCollapse 需显式覆盖）；
+  - thread → FloodMind session 确定性映射 + metadata 双保险，`on_chat_resume` 恢复历史会话后续聊接续同一份 Journal（实测：恢复后 agent 能复述会话开头的 session 编号）；
+  - 首条用户消息自动命名会话，恢复后不重命名；
+  - LocalStorageClient：产物文件落盘 `.floodmind/chainlit/files/`，注册 `/floodmind-files/*` 路由（插到 SPA 兜底路由之前）回源，历史中的产物卡片重启后仍可打开；
+  - 本地无感鉴权补丁：Chainlit 历史侧栏仅在 `requireLogin && dataPersistence` 时渲染、`/project/threads` 未鉴权 401、websocket 握手无 cookie 直接拒绝——将 auth 解析补丁为固定本地用户（对齐 gateway 回环免鉴权惯例），浏览器零交互。
+- **FloodMind 品牌化与 UI 增强**：名称/logo/favicon/消息头像全部替换为 FloodMind 品牌（复用 `web/public/floodmind-icon.svg`，主题色 #0ea5e9/#38bdf8，随包分发于 `gateway/chainlit_public/`，启动时落到 `<workspace>/public/`）；`config.ui.name="FloodMind"`；CLI 启动 Chainlit 子进程固定 `cwd` 与 `CHAINLIT_APP_ROOT` 到工作区（不再随 shell cwd 漂移）；custom_js 给原生新建会话图标按钮补 title/aria-label；服务重启导致旧页面跳 /login 时自动送回主页（sessionStorage 防循环，本地模式无登录表单）。
+- **"新建会话"确认弹窗文案修正**：默认文案"这将清除您当前的聊天记录"与实际行为不符（有数据层时旧会话完整存入侧栏历史并可恢复，实测验证）——包装 `load_translation`（pydantic 类级补丁）按语言替换为准确描述，不改 Chainlit 包文件。
+- **新会话回归原生 welcome 空页**：移除 on_chat_start 的 greeting 消息（会话/模型信息按需向 agent 询问），新建会话即见品牌 logo 居中的空状态页。
+- **Codex 式降噪**：GetTool/ListTools 等内部加载步骤不再渲染（此前每轮多出 2-3 条"加载工具"行）；工具行/思考行显式收起（default_open=False）。
+- 新增回归：Chainlit UI 端到端手工验证（新会话 → 侧栏列表 → 刷新持久 → 点击恢复完整消息 → 续聊 session 连续；审批卡显示 → 允许 → executor 续跑 → 文件写入/读取 → 状态回填；品牌 logo/标题/头像；新建会话按钮；降噪后的工具行）。
+
+## [2.1.1] - 2026-08-29
+
+> 第二轮对抗性审查：对第一轮改动本身（发现 4 个 P1 回归）、尚未覆盖的记忆/上下文/Skill 域（1 个 P0 + 17 项）、工具实现/MCP/Provider 域（44 项，其中 2 项实验复现）做全量复查并修复。
+
+### Fixed（第一轮改动引入的回归）
+
+- **journal 撕裂尾上追加致事件静默丢失（P1-1）**：append 以 "a" 模式写在物理 EOF，坏尾未处理时新事件落在坏行之后（本次可见、重启即丢、序列复用、哈希链断链）。现 append/append_many 前主动探测并安全截断撕裂尾（中部损坏仍拒修 fail-closed）。
+- **exec 预授权与执行层自相矛盾（P1-2）**：host_preapproved / authorized_ask_id 放行的 exec 调用未登记"未解析写目标"批准，执行层消费不到批准而拒绝——always-trust 模式与网关批准路径最该跑通的场景反而失败。现登记统一收敛到 ToolExecutionService 的 ALLOW 分支（三条放行路径全覆盖）。
+- **stream 串行锁竞态（P1-3）**：消费端提前关闭后 generator finally 立即释放锁，worker 仍在收尾，新 stream() 可与旧 worker 并存（复现 D-02）。现锁释放权归 worker（含归属守卫 `_current_run_context`），generator 仅兜底线程未启动场景。
+- **调度器跨进程重复执行（P1-4）**：claim 现记录 `claimed_by`（pid@host），recover 前探测进程存活（psutil），存活者仅超硬上限（2×阈值）才回收；一次性任务恢复后顺延 5 分钟防 fire 循环。
+- 工具池：线程启动失败归还信号量槽位（防静默泄漏）；饱和语义恢复"排队等待 10s"（等效旧 8+32 缓冲，并行委派不再轻易饱和）；删除不可达的 cancelled_before_start 死分支。
+- checkpoint：路径校验提前到 state 变更之前（校验失败不再残留脏值）。
+- StepEventBus：set_queue/listener/persist 槽位方法全部委托 parent，消除"静默操作死槽位"。
+- Gateway：SSE 生成器 finally 不再 yield（GeneratorExit 后 yield 抛 RuntimeError）；同会话新 run 先中止旧 run；DELETE 会话先 abort；session_id 校验失败返回 400；token 常量时间比较、空 token 拒绝启动。
+- 长期记忆：add 路径写前 reload-merge，多 Agent 实例不再 last-writer-wins 互相覆盖。
+- PROJECT_ROOT：site-packages 安装形态回退 `~/.floodmind`（D02 真正闭环）；settings.json / mcp.json 保存改原子写；gateway 不再配置永不生效的清理线程；临时脚本清理 + e2e 去 token 硬编码。
+
+### Fixed（记忆/上下文/Skill 域）
+
+- **上下文压缩静默丢消息（P0）**：head 边界落在 assistant(tool_calls) 原子组上时，整组被三处（head/摘要/tail）同时排除。改为窗口交集语义：与压缩窗口有任何重叠的原子组整组纳入摘要源。
+- **压缩触发震荡（P1）**：need_compress 此前用上次返回文本估算，稳态"压缩/全量"交替、压缩形同虚设；改基于本次全量文本。
+- **bind_journal 不清压缩缓存（P1）**：重绑会话后旧摘要跨会话泄漏进 system prompt；bind 时清缓存 + cache key 掺 conversation_id。
+- context_window 回退链删除 maxTokens 兜底（生成上限不再冒充记忆窗口）+ 数值钳制；经验树/索引 JSON 损坏先隔离 .corrupt 文件再降级（不再被空数据覆盖）；curator 归档/恢复同名冲突报错（不再 rmtree）；CreateSkill frontmatter 改 yaml.safe_dump（防注入）；Skill 路径校验补 Windows junction（reparse point）检查；经验摘要按 6000 字符预算裁剪；渐进收紧实现真三轮（2000→1000→500）；context_runtime 跳块加日志。
+
+### Fixed（工具实现/MCP/Provider 域）
+
+- **exec_bash 超时杀进程树（P0 级资源泄漏）**：主代理超时只 kill 直接子进程，孙进程全泄漏且无兜底；统一 taskkill /T /F（POSIX killpg）。
+- **文件工具数据损坏三连（实测复现）**：GBK 回退写回可截断文件为 0 字节（先试编码再写）；LF 文件被改成 CRLF（bytes 直写零翻译）；ApplyPatch 把非 UTF-8 文件乱码化（无法无损解码即拒绝）；ApplyPatch 空行丢弃致 hunk 错位（保留原始行 + 上下文校验 fail-closed）；Write/Edit/ApplyPatch 全部原子写。
+- **中文 Windows 输出乱码（P1）**：exec_bash 强制 UTF-8 解码 powershell GBK 输出；改 UTF-8→GBK 探测解码；输出 64KB 封顶截断；timeout 钳制 [1,240]；WebFetch 对无 charset 中文页改用 apparent_encoding。
+- **MCP stdio 断开杀进程树（P1）**：terminate 只杀直接子进程，node 孙进程泄漏。
+- **子代理 token 配额失效（P1）**：从 usage 事件的 content JSON 取值（原读恒空的 raw）。
+- 杂项：codec tool_call index=None 不再崩流；非流式 chat 空 choices 返回中文错误事件；子代理复用父 StepEventBus 的 _trace_session_id 用后复原。
+
+### Removed
+
+- 删除未接线死模块：`tool_guardrails.py`（356 行，防循环由 executor doom_loop_tracker 承担）、`error_classifier.py`（330 行）、`model_router.py`（178 行，SMART_TIMEOUTS 引用不存在的工具名）及对应测试文件。
+
+### Verification
+
+- 完整回归：**1188 passed, 6 skipped**（新增：journal 撕裂尾追加、调度器 7 项、文件工具 12 项、GBK 解码、压缩窗口覆盖、junction、frontmatter 等约 45 个新测试；删除死模块测试）。
+
+## [2.1.0] - 2026-08-29
+
+> 本版本由对抗性审查驱动：以 Claude Code（hooks/permission 决策模型）、OpenAI Agents SDK（guardrails + human-in-the-loop）、LangGraph（checkpointer/thread/interrupt）、OpenHands（事件溯源/增量持久化）的公开工程实践为硬标准，对 Agent runtime 的鉴权、钩子、会话管理三域做全量审查（鉴权 13 项 / 会话 22 项 / 钩子 17 项缺陷），按 P0→P2 分波修复。
+
+### Added
+
+- **Gateway 网关 + Web UI（`floodmind gateway`）**：把 SDK Runtime 暴露为 HTTP 服务（`floodmind/gateway/`）。
+  - 鉴权默认策略对齐本地工具惯例（Ollama/ComfyUI/Open WebUI 单用户模式）：**回环地址默认免鉴权，启动即拉浏览器直进 Web 界面**；非回环地址（局域网）自动开启 token 并采用 Jupyter 式一键进入（token 自动拼入打开的 URL，前端收下后从地址栏抹掉）；`--auth`/`--token`/`--no-auth` 显式覆盖；
+  - Web UI 全量重写为 Codex 风格（近黑单色、扁平无气泡、mono 工具行）：会话侧栏（过滤/删除/自动标题）、流式 markdown（代码块复制）、Thinking 折叠块、工具调用行（状态点/耗时/输入输出展开）、计划进度卡片、权限审批卡片（键盘 Y/N）、产物卡片（图片内联预览/下载，新增 `GET /api/file` 会话内文件服务）、错误块、token 计数、空状态建议提示词、Esc 停止；
+  - 会话自动命名：首条用户消息截断作为标题（"Untitled"/"新会话" 视为未命名）；
+  - 端点：会话列表/创建/删除/历史投影（v2 canonical journal 投影）、`POST /api/chat` SSE 流（answer/thought/tool/permission_ask 原样转发）、`POST /api/chat/abort`（run 级取消）、`POST /api/permission/respond`（非阻塞 ASK 闭环）、`GET /api/file`、`/api/health`；
+  - CLI：`floodmind gateway --host --port --workspace --token --auth --no-auth --no-open`；pyproject 新增 `[gateway]` extra（fastapi+uvicorn）。
+- **共享跨进程文件锁 `floodmind/common/filelock.py`**：Windows msvcrt（循环重试至超时）+ POSIX flock 统一封装，`FileLockTimeoutError` 语义明确。
+- **定时任务调度循环**：`ScheduledTaskRuntime.start_scheduler(execute_fn)` / `stop_scheduler()` / `recover_stale_running()`——此前 `claim_due_tasks` 全仓无调用方，任务创建后永不执行（P0）；僵尸 running 状态（崩溃残留）自动重置 pending。
+- 新增回归：`tests/test_journal_writer.py` 撕裂尾 2 项；`tests/test_permission_host_fixes.py` 预授权门语义 4 项。
+
+### Fixed（安全/权限，P0-P1）
+
+- **宿主 `permission_handler` 不再越过 SDK 安全层（原 P0）**：`True` 语义从"直接 ALLOW 跳过全部检查"降级为"宿主预授权"——可满足策略级 ASK（桌面 always-trust），但子代理 tier、planning 硬门、路径校验、危险命令、全局 deny 规则照常生效；与 `permission_decision_hook`（只能收紧）语义对齐。
+- **全局 deny 规则先于 ASK（F-05）**：用户批准不再能翻越宿主显式拒绝规则。
+- **`skill_script` 纳入 planning 硬门；缺参 fail-closed DENY（F-11）**。
+- **长期记忆静默丢失（D02，P0）**：`LongTermMemory` 从安装包目录迁至 `PROJECT_ROOT/data/memory/`（site-packages 只读安装下写入失败即全部丢失）；tmp+fsync+os.replace 原子写；进程级锁；读路径不再整文件重写；首次运行自动迁移旧文件。
+- **CheckpointService 路径穿越（D01，P0）**：`session_id`/`checkpoint_id` 白名单校验（字母表 + Windows 保留名 + `ckpt-` 前缀 + containment 断言）。
+- **默认根收敛（D19）**：CheckpointService 默认 `PROJECT_ROOT/data/sessions`，不再依赖 cwd。
+- **checkpoint 链断链（D08）**：save 失败回滚 `state.checkpoint_id`。
+
+### Fixed（持久化健壮性）
+
+- **多字节撕裂尾令 journal 整体不可读（D05，P1）**：segment 读路径改二进制逐行解码（errors=replace），坏行只影响自身；append 失败补 repair_tail 恢复契约。
+- **repair_tail 可误删合法事件（D04，P0）**：只允许截断"最后一个完整合法行之后直到 EOF"的撕裂尾；中部损坏抛 `JournalMidFileCorruption` 拒绝截断。
+- **坏行读/写语义统一（D14）**：read_from 与 reconcile 一致按"坏行即段尾"。
+- **journal 跨进程锁统一走 FileLock**：Windows LK_LOCK ~10 秒抛裸 OSError → 循环重试至 30s 超时。
+- **resume lease TOCTOU + 误删（D06 子集）**：open_lease 的 exists→read→write 在 FileLock 内原子完成；lease 携带 owner token，release 只删除自己的 lease。
+- **scheduled_tasks.json**：tmp+fsync+os.replace 原子写；跨进程 FileLock 保护 read-modify-write。
+
+### Fixed（运行时健壮性）
+
+- **共享工具池卡死瘫痪面（D-01，P1）**：固定 8 worker 共享队列（卡死即永久占位，8 个卡死全进程工具执行瘫痪）改为"每调用一线程 + 信号量限流"；超时遗弃线程立即归还并发额度（exactly-once 归还），饱和错误携带 in_flight/max_concurrency 诊断。
+- **同一 Agent 并发 stream() 守卫（D-02，P1）**：非阻塞 `_stream_lock` 探测，冲突显式 RuntimeError（此前 queue/journal/memory 绑定互相覆盖、事件串台）。
+- **abort_check 异常不再炸穿 run 循环（D-05）**：统一包装按"未中止"处理；消费端提前关闭（GeneratorExit）触发 run 级取消（D-13）。
+- **async 宿主回调显式拒绝（D-09）**：on_event / permission_handler / permission_decision_hook / abort_check 传 async 函数时构造期 TypeError（此前协程被静默丢弃或当"无意见"）。
+- **幂等键单一来源（D-04）**：executor 透传的 idempotency_key 不再被 service 本地二次派生遮蔽。
+- **StepEventBus 继承重构（D-11）**：删除逐字复制的 19 个 emit 方法，只覆写 emit()。
+- **background_review 接线（D-10 子集）**：`spawn_background_review` 受 `settings.background_review` 开关控制并接入 stream 收尾（偏好→长期记忆、经验→经验树、Skill 建议→待审核队列）。
+- **SDK 构造不再依赖全局配置**：`Agent(llm=...)` 在 `~/.floodmind/settings.json` 无 providers 时以默认记忆窗口（32768）降级构造并告警，不再抛错（此问题曾导致干净机器上 70 个测试失败）。
+
+### Changed
+
+- `Agent(permission_handler=True)` 语义变更见上；README/接口文档同步更新。
+- 测试基线：**1167 passed, 6 skipped**（含新增撕裂尾/预授权门回归）。
+
+### Known issues（后续批次）
+
+- journal 每次追加重扫全量 segment、`_sealed` 无界缓存（长会话 O(N²) I/O，D13）；
+- resume 全量 replay 多次重复（executor 每 checkpoint 一次全量重放 + 全量序列化）；
+- 未接线死组件待清理：tool_guardrails / error_classifier / model_router / 全局 ToolRegistry（约 1200 行，均有单测引用，删除需同步清测试）；
+- plugin 钩子无卸载路径、cwd 相对插件目录的任意代码执行面（D-07/D-08）；
+- 事件类型白名单与实际发射漂移（D-12）。
+
 ## [2.0.4] - 2026-08-13
 
 ### Fixed

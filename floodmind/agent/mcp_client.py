@@ -111,6 +111,36 @@ class McpClientConnection:
             self.name, self.transport, len(self._tools),
         )
 
+    def _terminate_process_tree(self, process: subprocess.Popen) -> None:
+        """终止 stdio 子进程。Windows 用 taskkill /T /F 杀整棵树（terminate 只杀
+        直接子进程，node 等 runtime 派生的孙进程会泄漏）；POSIX 保持 terminate → kill 路径。"""
+        try:
+            if process.poll() is not None:
+                return
+            if os.name == "nt":
+                subprocess.run(
+                    ["taskkill", "/PID", str(process.pid), "/T", "/F"],
+                    capture_output=True,
+                    timeout=10,
+                    check=False,
+                )
+            else:
+                process.terminate()
+            try:
+                process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                try:
+                    process.wait(timeout=3)
+                except subprocess.TimeoutExpired:
+                    pass
+        except Exception:
+            try:
+                process.kill()
+                process.wait(timeout=3)
+            except Exception:
+                pass
+
     def disconnect(self) -> None:
         if self._client:
             try:
@@ -119,21 +149,7 @@ class McpClientConnection:
                 pass
             self._client = None
         if self._process:
-            try:
-                self._process.terminate()
-                self._process.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                self._process.kill()
-                try:
-                    self._process.wait(timeout=3)
-                except subprocess.TimeoutExpired:
-                    pass
-            except Exception:
-                try:
-                    self._process.kill()
-                    self._process.wait(timeout=3)
-                except Exception:
-                    pass
+            self._terminate_process_tree(self._process)
             self._process = None
         self._initialized = False
         self._tools.clear()

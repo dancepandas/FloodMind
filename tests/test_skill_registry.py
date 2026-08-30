@@ -28,6 +28,17 @@ def _make_skill_md(root: Path, name: str, desc: str = "d", body: str = "body") -
     return d
 
 
+def _create_junction(src: Path, dst: Path) -> Path:
+    """Windows junction（兼容 3.10：Path 无 mkdir(junctions=...)，用 _winapi）。"""
+    import _winapi
+
+    _winapi.CreateJunction(str(src), str(dst))
+    return dst
+
+
+_junction_only = pytest.mark.skipif(os.name != "nt", reason="junction 仅 Windows")
+
+
 # ---------------------------------------------------------------------------
 # SkillRegistry
 # ---------------------------------------------------------------------------
@@ -172,6 +183,42 @@ class TestSkillRegistry:
 
         with pytest.raises(ValueError, match="符号链接"):
             SkillRegistry(roots=[linked_parent], writable_root=linked_parent)
+
+    @_junction_only
+    def test_writable_root_rejects_junction(self, tmp_path):
+        """Windows junction 不是 Path.is_symlink()，但必须同样被拒绝。"""
+        target = tmp_path / "real-skills"
+        target.mkdir()
+        junction = _create_junction(target, tmp_path / "junction-skills")
+        assert not junction.is_symlink()  # 前置：junction 不算 symlink
+        with pytest.raises(ValueError, match="junction"):
+            SkillRegistry(roots=[junction], writable_root=junction)
+
+    @_junction_only
+    def test_writable_skill_dir_rejects_junction_skill_dir(self, tmp_path):
+        """writable_root 下已是 junction 的 skill 目录同样拒绝。"""
+        root = tmp_path / "skills"
+        root.mkdir()
+        real = tmp_path / "elsewhere"
+        real.mkdir()
+        _create_junction(real, root / "victim")
+        reg = SkillRegistry(roots=[root], writable_root=root)
+        with pytest.raises(ValueError, match="junction"):
+            reg.writable_skill_dir("victim")
+
+    @_junction_only
+    def test_discover_skills_skips_junction_dirs(self, tmp_path):
+        """发现阶段对根下的 junction 目录拒绝加载（防止越权来源混入）。"""
+        from floodmind.skills.base import discover_skills
+
+        _make_skill_md(tmp_path, "real")
+        outside = tmp_path / "outside"
+        _make_skill_md(outside, "smuggled")
+        _create_junction(outside, tmp_path / "jdir")
+
+        names = {s.name for s in discover_skills(tmp_path)}
+        assert "real" in names
+        assert "smuggled" not in names
 
     @pytest.mark.parametrize(
         "name",
@@ -329,6 +376,21 @@ class TestSkillCrudHandlers:
         h, _ = crud_setup
         h._handle_create_skill(name="dup", description="d", body="b")
         assert "已存在" in h._handle_create_skill(name="dup", description="d", body="b")
+
+    def test_create_skill_frontmatter_survives_yaml_specials(self, crud_setup):
+        """description 含冒号/换行/引号时 frontmatter 不被破坏（yaml.safe_dump 构造）。"""
+        import yaml as _yaml
+
+        h, tmp = crud_setup
+        desc = "第一行: 带冒号\n第二行 '含引号' 与 # 注释符"
+        assert "已创建" in h._handle_create_skill(name="yaml-safe", description=desc, body="b")
+        text = (tmp / "yaml-safe" / "SKILL.md").read_text(encoding="utf-8")
+        fm, _ = h._split_skill_md(text)
+        parsed = _yaml.safe_load(fm)
+        assert parsed["name"] == "yaml-safe"
+        assert parsed["description"] == desc
+        # 技能仍能正常加载
+        assert get_skill_registry().get_skill("yaml-safe") is not None
 
     def test_remove_ephemeral_rejected(self, crud_setup):
         h, _ = crud_setup

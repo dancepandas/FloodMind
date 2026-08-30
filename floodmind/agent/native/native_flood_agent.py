@@ -9,15 +9,19 @@ import contextvars
 import json
 import logging
 import os
+import inspect
 import queue
 import re
 import threading
 import time
 import uuid
+from dataclasses import replace
 from concurrent.futures import ThreadPoolExecutor, as_completed, wait, FIRST_COMPLETED
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, TYPE_CHECKING, Union
+
+import yaml
 
 from floodmind.agent.native.types import (
     AgentLoopState,
@@ -83,6 +87,17 @@ _SUBTASK_SCHEMA = {
 }
 
 _active_input_var: contextvars.ContextVar[str] = contextvars.ContextVar("active_user_input", default="")
+
+
+def _require_sync_callback(name: str, fn: Any) -> Any:
+    """拒绝 async 宿主回调（D-09）：本 SDK 是同步运行时，协程回调会被静默丢弃或
+    误判为"无意见"，必须在注入点显式报错，而不是静默产出错误结果。"""
+    if fn is not None and inspect.iscoroutinefunction(fn):
+        raise TypeError(
+            f"{name} 不支持 async 函数：FloodMind 运行时是同步的，请提供同步回调"
+            f"（或在线程内用 asyncio.run 桥接）。"
+        )
+    return fn
 
 
 class _InstanceToolRegistry:
@@ -279,6 +294,9 @@ class NativeFloodAgent:
 ## 可使用 skills
 {skill_catalog}
 
+## 可用工具
+{tool_catalog}
+
 ## 输出要求
 - 简洁说明本次任务是否完成
 - 返回直接结果：生成文件路径、读取/搜索结果、关键输出摘要
@@ -396,8 +414,26 @@ class NativeFloodAgent:
 
         self._skill_catalog = ""
         self._tool_loading_config = resolve_tool_loading_config(tool_loading, settings)
-        self._orchestrator_tool_loader = ToolLoader(self._tool_loading_config)
-        self._specialist_tool_loader = ToolLoader(self._tool_loading_config)
+        # orchestrator 预载委派工具：SubAgent/ParallelTask 是委派入口，若也要先
+        # GetTool 加载，模型首轮直调会被拒（UI 留下"✗ 未加载"失败行）并多绕一轮。
+        # registry 不存在的名字由 _effective_loaded_names 过滤，bare 模式不受影响。
+        self._orchestrator_tool_loader = ToolLoader(replace(
+            self._tool_loading_config,
+            core_tools=list(dict.fromkeys(
+                list(self._tool_loading_config.core_tools) + ["SubAgent", "ParallelTask"]
+            )),
+        ))
+        # specialist 预载核心执行工具（core_tools 不占 max_loaded_tools 配额）：子代理
+        # 生命周期短、任务聚焦，Bash/Read/Write 等高频工具若也要先 GetTool 加载，
+        # 每次委派都会多绕 1-2 轮"未加载→GetTool→重调"。registry 中不存在的名字
+        # 由 ToolLoader._effective_loaded_names 过滤，bare 模式（无内置工具）不受影响。
+        self._specialist_tool_loader = ToolLoader(replace(
+            self._tool_loading_config,
+            core_tools=list(dict.fromkeys(
+                list(self._tool_loading_config.core_tools)
+                + ["Bash", "Read", "Write", "Edit", "Glob", "Grep"]
+            )),
+        ))
         self._active_user_message = ""
         self._step_start_time = 0.0
         self._last_loop_state: Optional[AgentLoopState] = None
@@ -406,12 +442,18 @@ class NativeFloodAgent:
         self._cached_experience_context: str = ""
         self._cached_experience_version: int = -1
         self._tracing_service = tracing_service or TracingService()
+        # 单 run 串行契约：并发 stream() 会互相覆盖 queue/journal/memory 绑定（D-02）
+        self._stream_lock = threading.Lock()
         # SDK 可配置项（bare 模式由 _init_bare 消费）
         self._max_iterations = max_iterations
-        self._permission_handler = permission_handler
+        self._permission_handler = _require_sync_callback(
+            "permission_handler", permission_handler
+        )
         # Host-level 权限决策钩子：SDK 基础判断后调整最终决策（只能收紧不能放开）。
         # bare 与完整 runtime 均透传给 ToolExecutionService。
-        self._permission_decision_hook = permission_decision_hook
+        self._permission_decision_hook = _require_sync_callback(
+            "permission_decision_hook", permission_decision_hook
+        )
         self._sandbox_service = SandboxService(workspace=self._workspace)
         # 后台任务服务（exec_bash run_in_background）：按 Agent 实例显式注入。
         from floodmind.agent.runtime.services.background_task_service import BackgroundTaskService
@@ -606,7 +648,12 @@ class NativeFloodAgent:
             event_bus=self._event_bus,
             message_builder=self._message_builder,
             max_iterations=self._max_iterations,
-            system_prompts=[prompt],
+            # 宿主 prompt + 工具目录独立段：bare specialist 同样走 GetTool 渐进加载，
+            # 没有目录段时模型只能盲猜工具名（直接调用未加载工具会被拒）。
+            system_prompts=[prompt, "## 可用工具\n" + self._build_tool_descriptions(
+                self._specialist_registry,
+                mode=self._tool_loading_config.mode,
+            )],
             tools_schema=self._specialist_registry.tools_schema(),
             tool_registry=self._specialist_registry,
             tool_loader=self._specialist_tool_loader,
@@ -1204,18 +1251,24 @@ class NativeFloodAgent:
 
     @staticmethod
     def _is_specialist_builtin_safe(tool: Any) -> bool:
-        """Allow execution tools, but reject agent-state and destructive management tools."""
-        if getattr(tool, "is_destructive", False):
-            return False
-        policy = getattr(tool, "permission_policy", None)
-        if getattr(policy, "policy_type", None) == "state_write":
-            return False
-        return getattr(tool, "name", "") not in {
+        """Allow execution tools, but reject agent-state and destructive management tools.
+
+        Bash/Write/Edit 标记 is_destructive=True，但设计上 specialist 必须持有它们
+        （见 _init_tools 中 specialist_tools 注释）；安全性由每次调用的 permission
+        policy 兜底（exec/write 路径校验、危险命令硬拒、子代理 ASK 降级 DENY）。
+        因此这里不能按 is_destructive 一刀切——那会剔除全部执行工具，子代理只剩
+        GetTool/GetSkill 元工具。排除对象是 agent 全局状态与管理类工具。
+        """
+        name = getattr(tool, "name", "")
+        if name in {
             "MemorySearch",          # requires the orchestrator's memory instance
             "ConversationSearch",    # same
             "UpdateProjectInstructions",
             "TaskKill",
-        }
+        }:
+            return False
+        policy = getattr(tool, "permission_policy", None)
+        return getattr(policy, "policy_type", None) != "state_write"
 
     @staticmethod
     def _is_specialist_host_tool_safe(tool: Any) -> bool:
@@ -1395,7 +1448,13 @@ class NativeFloodAgent:
             ]
 
         specialist_prompts = [
-            self.SPECIALIST_STATIC_GLOBAL.format(skill_catalog=self._skill_catalog),
+            self.SPECIALIST_STATIC_GLOBAL.format(
+                skill_catalog=self._skill_catalog,
+                tool_catalog=self._build_tool_descriptions(
+                    self._specialist_registry,
+                    mode=self._tool_loading_config.mode,
+                ),
+            ),
             self.SPECIALIST_PROJECT_TEMPLATE.format(project_context=project_context),
             self.SPECIALIST_SESSION_TEMPLATE.format(session_env=session_env),
         ]
@@ -1494,7 +1553,13 @@ class NativeFloodAgent:
                 orch_prompts.append(self._host_system_prompt)
             self._orchestrator_executor.system_prompts = orch_prompts
 
-        new_spec_global = self.SPECIALIST_STATIC_GLOBAL.format(skill_catalog=self._skill_catalog)
+        new_spec_global = self.SPECIALIST_STATIC_GLOBAL.format(
+            skill_catalog=self._skill_catalog,
+            tool_catalog=self._build_tool_descriptions(
+                self._specialist_registry,
+                mode=self._tool_loading_config.mode,
+            ),
+        )
         spec_prompts = list(self._specialist_executor.system_prompts)
         spec_prompts[0] = new_spec_global
         self._specialist_executor.system_prompts = spec_prompts
@@ -1680,10 +1745,34 @@ class NativeFloodAgent:
             return f"错误：{exc}"
         if path.exists() or reg.get_skill(name):
             return f"错误：技能 '{name}' 已存在。用 UpdateSkill 修改，或先 RemoveSkill。"
-        content = (f"---\nname: {name}\ndescription: {description}\n"
-                   f"version: {version}\ncategory: {category}\n---\n\n{body.strip()}\n")
+        # frontmatter 用 yaml.safe_dump 构造：裸 f-string 插值在 description 含
+        # 换行/冒号/引号时会破坏 YAML 结构（注入/解析失败）。
+        try:
+            frontmatter = yaml.safe_dump(
+                {
+                    "name": name,
+                    "description": description,
+                    "version": version,
+                    "category": category,
+                },
+                allow_unicode=True,
+                sort_keys=False,
+                default_flow_style=False,
+            ).rstrip("\n")
+        except yaml.YAMLError as exc:
+            return f"错误：frontmatter 序列化失败：{exc}"
+        content = f"---\n{frontmatter}\n---\n\n{body.strip()}\n"
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(content, encoding="utf-8")
+        # 写后回读校验：frontmatter 必须能解析且 name 与输入一致，否则回滚
+        try:
+            fm_text, _ = self._split_skill_md(path.read_text(encoding="utf-8"))
+            parsed = yaml.safe_load(fm_text) or {}
+            if not isinstance(parsed, dict) or parsed.get("name") != name:
+                raise ValueError("name 与输入不一致")
+        except (yaml.YAMLError, ValueError, OSError) as exc:
+            path.unlink(missing_ok=True)
+            return f"错误：SKILL.md 写出校验失败，已回滚：{exc}"
         self.refresh_skills()
         return f"技能 '{name}' 已创建并加载（{path}）。"
 
@@ -2716,6 +2805,26 @@ class NativeFloodAgent:
                 "resume_checkpoint_id is unsupported: the memory-first runtime cannot "
                 "reconstruct AgentLoopState from a checkpoint"
             )
+        # 单 run 串行契约（D-02）：queue/journal/memory 绑定都是单槽，并发 stream 会
+        # 事件串台、Journal 写错 run。非阻塞探测，冲突立即显式报错而非静默错乱。
+        _require_sync_callback("abort_check", abort_check)
+        if not self._stream_lock.acquire(blocking=False):
+            raise RuntimeError(
+                "同一 Agent 实例不支持并发 stream()：上一个 run 尚未结束。"
+                "请为每个并发任务创建独立 Agent 实例，或等待当前 run 完成。"
+            )
+        consumer_gone = threading.Event()  # 消费端提前关闭 → run 级取消（D-13）
+        # P1-3：锁释放权归 worker——consumer 提前关闭是协作式取消，worker 可能
+        # 还在收尾；若 generator finally 立即释放锁，新 stream() 会与旧 worker
+        # 并存，复现 D-02 的绑定串台。worker 结束（含 abort 后）才释放；
+        # 线程启动失败的兜底由 generator finally 处理。
+        lock_released = [False]
+
+        def _release_stream_lock() -> None:
+            if not lock_released[0]:
+                lock_released[0] = True
+                self._stream_lock.release()
+
         try:
             logger.info("NativeFloodAgent 收到用户输入(流式): %s...", user_input[:50])
             _active_input_var.set(user_message or user_input)
@@ -2825,10 +2934,17 @@ class NativeFloodAgent:
                     )
                     self._current_run_context = context
 
-                    # 包装 abort_check：同时检查用户中断
+                    # 包装 abort_check（D-05）：宿主回调异常按"未中止"处理，不得炸穿 run 循环；
+                    # 消费端提前关闭同样触发取消（D-13），worker 在下一个检查点停止。
                     def _effective_abort_check():
-                        if abort_check and abort_check():
+                        if consumer_gone.is_set():
                             return True
+                        if abort_check:
+                            try:
+                                if abort_check():
+                                    return True
+                            except Exception as exc:
+                                logger.warning("abort_check 回调异常（按未中止处理）: %s", exc)
                         return False
 
                     context.abort_check = _effective_abort_check
@@ -2934,7 +3050,10 @@ class NativeFloodAgent:
                 finally:
                     if auth is not None:
                         self._deactivate_run_authority(auth)
-                    self._current_run_context = None
+                    # 归属守卫：仅当仍是本 run 的上下文时才复位，避免并发/迟到
+                    # 收尾清掉新 run 的绑定（P1-3）
+                    if self._current_run_context is context:
+                        self._current_run_context = None
                     self._model_client.enable_thinking = saved_thinking
                     try:
                         from floodmind.agent.runtime.services.ask_service import get_ask_service
@@ -2946,6 +3065,7 @@ class NativeFloodAgent:
                     except Exception:
                         pass
                     q.put({"type": "__done__"})
+                    _release_stream_lock()
 
             current_ctx = contextvars.copy_context()
             t = threading.Thread(target=lambda: current_ctx.run(_run_loop), daemon=True)
@@ -3041,6 +3161,26 @@ class NativeFloodAgent:
                 except Exception as e:
                     logger.debug("反馈回写跳过: %s", e)
 
+            # 后台回顾（接线 background_review）：流结束后在 daemon 线程回顾本轮对话，
+            # 提取用户偏好→长期记忆、任务经验→经验树、Skill 改进建议→待审核队列。
+            # 受 settings.background_review 开关控制，失败不影响主流程。
+            try:
+                from floodmind.agent.native.background_review import spawn_background_review
+                _turns = self.memory.get_turns() if hasattr(self.memory, "get_turns") else []
+                spawn_background_review(
+                    session_id=self.session_id,
+                    messages=_turns[-20:],
+                    model_client=self._model_client,
+                    memory_instance=self.memory,
+                    experience_tree=(
+                        self._task_experience_capture.store.tree
+                        if self._task_experience_capture is not None
+                        else None
+                    ),
+                )
+            except Exception as e:
+                logger.debug("background_review 启动失败（非致命）: %s", e)
+
             if agent_result and agent_result.is_timeout:
                 logger.warning("NativeFloodAgent 流式执行超时")
             else:
@@ -3048,6 +3188,12 @@ class NativeFloodAgent:
 
             self._event_bus.clear_queue()
 
+        except GeneratorExit:
+            # 宿主提前放弃消费（break / close）：请求取消，worker 在下一个 abort
+            # 检查点停止，不再无人消费地写满无界队列（D-13）。
+            consumer_gone.set()
+            logger.info("stream 消费端提前关闭，已请求运行取消")
+            raise
         except Exception as e:
             logger.error("NativeFloodAgent 流式执行失败: %s", e)
             # 错误必须以 error 类型上报：web_server 会把 reasoning/thought_delta 归一为
@@ -3055,6 +3201,9 @@ class NativeFloodAgent:
             yield {"type": "error", "content": f"抱歉，处理您的请求时出错了：{str(e)}"}
         finally:
             _active_input_var.set("")
+            consumer_gone.set()
+            # 正常路径锁已由 worker 释放；此处只兜底线程未启动/启动失败的场景
+            _release_stream_lock()
 
     def run(self, user_input: str) -> str:
         """非流式运行（收集所有流式事件后返回最终回答）。"""

@@ -60,27 +60,55 @@ PermissionDecisionHook = Callable[
 ]
 
 
-class _DaemonBoundedExecutor:
-    """Small shared worker pool whose stuck jobs cannot block interpreter shutdown."""
+class _ToolRunnerPool:
+    """有界并发的工具执行器：每调用一个 daemon 线程 + 信号量限流（D-01）。
 
-    def __init__(self, max_workers: int = 8, max_pending: int = 32):
-        self._queue: queue.Queue = queue.Queue(maxsize=max_pending)
-        for index in range(max_workers):
-            worker = threading.Thread(
-                target=self._run,
-                name=f"floodmind-tool-{index}",
-                daemon=True,
-            )
-            worker.start()
+    旧实现是固定 8 worker 的共享队列：一个卡死的工具就永久占用一个 worker，
+    8 个卡死即全进程所有会话的工具执行瘫痪直至重启。改为"每调用一线程 + 信号量限流"：
 
-    def submit(self, fn: Callable[[], Any]) -> concurrent.futures.Future:
+    - 并发上限 8，但提交时最多等待 ``QUEUE_WAIT_SECONDS`` 秒排队——并发满时新调用
+      先排队等额度，等待超时才报 TOOL_EXECUTION_SATURATED（等效恢复旧的
+      8 运行 + 32 排队缓冲语义，并行委派下不会轻易饱和）；
+    - 超时的卡死线程被"遗弃"时立即归还并发额度（exactly-once 归还：遗弃方与
+      线程结束方通过标志交接），宁可短暂超出软上限也不累积成进程级瘫痪；
+    - daemon 线程不阻塞解释器退出。
+    """
+
+    QUEUE_WAIT_SECONDS = 10.0
+
+    def __init__(self, max_concurrency: int = 8):
+        self._sem = threading.BoundedSemaphore(max_concurrency)
+        self._handoff_lock = threading.Lock()
+
+    @property
+    def max_concurrency(self) -> int:
+        return self._sem._initial_value  # noqa: SLF001 - 同模块内部诊断
+
+    @property
+    def in_flight(self) -> int:
+        """当前占用的并发额度（诊断用）。"""
+        return self.max_concurrency - self._sem._value  # noqa: SLF001
+
+    def submit(self, fn: Callable[[], Any]) -> "tuple[concurrent.futures.Future, Any]":
+        """提交任务。排队等待超时/线程启动失败时抛 queue.Full（保持饱和语义）。
+
+        Returns:
+            (future, detach) —— detach 是超时遗弃时调用的回调（归还额度的 exactly-once 侧）。
+        """
+        if not self._sem.acquire(timeout=self.QUEUE_WAIT_SECONDS):
+            raise queue.Full
         future: concurrent.futures.Future = concurrent.futures.Future()
-        self._queue.put_nowait((future, fn))
-        return future
+        detached = [False]
 
-    def _run(self) -> None:
-        while True:
-            future, fn = self._queue.get()
+        def _release_once() -> None:
+            with self._handoff_lock:
+                if detached[0]:
+                    return False
+                detached[0] = True
+            self._sem.release()
+            return True
+
+        def _worker() -> None:
             try:
                 if future.set_running_or_notify_cancel():
                     try:
@@ -88,10 +116,18 @@ class _DaemonBoundedExecutor:
                     except BaseException as exc:
                         future.set_exception(exc)
             finally:
-                self._queue.task_done()
+                _release_once()
+
+        try:
+            threading.Thread(target=_worker, name="floodmind-tool-call", daemon=True).start()
+        except Exception:
+            # 线程资源耗尽等启动失败：立即归还额度，否则信号量槽位永久泄漏（P2-1）
+            _release_once()
+            raise queue.Full
+        return future, _release_once
 
 
-_TOOL_EXECUTOR = _DaemonBoundedExecutor()
+_TOOL_EXECUTOR = _ToolRunnerPool()
 
 
 class ToolExecutionService:
@@ -367,6 +403,11 @@ class ToolExecutionService:
                         content=feedback.to_output_string(),
                         status="error",
                     )
+            # P1-2：exec 未解析写目标的批准登记。凡最终决策走到 ALLOW（用户批准 /
+            # 宿主预授权 / authorized_ask_id 授权重放），都要为执行层的
+            # consume_unresolved_exec_write_approval 登记"精确命令串"批准——
+            # 否则权限层放行、执行层拒绝，自相矛盾。
+            self._register_unresolved_exec_write_approval(policy, perm_input)
 
         validation = tool.validate_input(clean_arguments)
         if hasattr(validation, "valid") and not validation.valid:
@@ -425,12 +466,15 @@ class ToolExecutionService:
         # 与 executor 的 tool.call.proposed 使用同一 canonical 形态（call.arguments），
         # 保证幂等键一致；dummy journal_authority（无 read_after）跳过查询。
         # 幂等短路在本处之前 return，因此重放不会发出 execution.started（不重执行）。
-        side_effect_class = side_effect_class_for_spec(tool)
-        idempotency_key = derive_idempotency_key(
-            tool_id=call.name,
-            canonical_arguments=canon,
-            side_effect_class=side_effect_class,
-        )
+        # 幂等键单一来源（D-04）：executor 的 tool.call.proposed 已派生并透传时直接使用，
+        # 避免本地二次派生与 proposed 事件分叉；仅在直接调用（键为空）时本地派生。
+        if not idempotency_key:
+            side_effect_class = side_effect_class_for_spec(tool)
+            idempotency_key = derive_idempotency_key(
+                tool_id=call.name,
+                canonical_arguments=canon,
+                side_effect_class=side_effect_class,
+            )
         if idempotency_key and hasattr(journal_authority, "read_after"):
             committed = find_committed_result(journal_authority, idempotency_key)
             if committed is not None:
@@ -459,35 +503,28 @@ class ToolExecutionService:
         try:
             ctx = contextvars.copy_context()
             try:
-                future = _TOOL_EXECUTOR.submit(lambda: ctx.run(tool.func, **validated_args))
+                future, detach_slot = _TOOL_EXECUTOR.submit(lambda: ctx.run(tool.func, **validated_args))
             except queue.Full:
                 return ToolResult(
                     tool_call_id=call.id,
                     name=call.name,
-                    content="工具执行队列已满，请稍后重试。",
+                    content=(
+                        f"工具执行并发已满（{_TOOL_EXECUTOR.in_flight}/{_TOOL_EXECUTOR.max_concurrency}），请稍后重试。"
+                    ),
                     status="error",
-                    metadata={"error_code": "TOOL_EXECUTION_SATURATED", "retryable": True},
+                    metadata={
+                        "error_code": "TOOL_EXECUTION_SATURATED",
+                        "retryable": True,
+                        "in_flight": _TOOL_EXECUTOR.in_flight,
+                        "max_concurrency": _TOOL_EXECUTOR.max_concurrency,
+                    },
                 )
             try:
                 output = future.result(timeout=self.TOOL_TIMEOUT_SECONDS)
             except concurrent.futures.TimeoutError:
-                # Python cannot stop a running thread. Cancellation only succeeds while queued;
-                # once running, side effects may still complete after this response.
-                cancelled = future.cancel()
-                if cancelled:
-                    return ToolResult(
-                        tool_call_id=call.id,
-                        name=call.name,
-                        content=f"工具在执行前等待超时（{self.TOOL_TIMEOUT_SECONDS}秒），已取消。",
-                        status="error",
-                        metadata={
-                            "error_code": "TOOL_EXECUTION_TIMEOUT",
-                            "timeout_seconds": self.TOOL_TIMEOUT_SECONDS,
-                            "execution_state": "cancelled_before_start",
-                            "indeterminate": False,
-                            "retryable": True,
-                        },
-                    )
+                # 每调用一线程：任务提交即开跑，超时时 future 必为 RUNNING，取消不可达。
+                # 卡死线程遗弃：立即归还并发额度（D-01），避免累积成进程级工具执行瘫痪。
+                detach_slot()
                 return ToolResult(
                     tool_call_id=call.id,
                     name=call.name,
@@ -672,9 +709,11 @@ class ToolExecutionService:
     ) -> PermissionDecision:
         if journal_authority is None:
             raise ValueError("journal_authority is required for permission checks")
-        # SDK permission_handler 钩子（宿主最高裁决）：True = 宿主显式放行 → 直接 ALLOW 并跳过
-        # permission_service（宿主放行是最高权威）；False = 宿主拒绝 → DENY；None = 宿主无意见 →
-        # 交给 SDK 正常判断。此前实现把 True 当"不拒绝"，permission_service 仍会 ASK/DENY，宿主无法真正放行。
+        # SDK permission_handler 钩子（宿主预授权）：True = 宿主同意执行，可满足策略级 ASK
+        #（跳过用户交互确认），但不可翻越 SDK 安全硬门——tier / planning / 路径 / 危险命令 /
+        # 全局 deny 规则照常生效（钩子只能收紧不能放开，与 permission_decision_hook 语义对齐）；
+        # False = 宿主拒绝 → DENY；None = 宿主无意见 → 交给 SDK 正常判断（含 ASK 交互）。
+        host_preapproved = False
         if self._permission_handler is not None:
             clean_input = {k: v for k, v in perm_input.items() if k != "__call_id"}
             try:
@@ -684,11 +723,8 @@ class ToolExecutionService:
                 logger.warning("permission_handler 执行异常（按无意见处理，交给 SDK 判断）: %s", e)
                 approved = None
             if approved is True:
-                return PermissionDecision(
-                    behavior=PermissionBehavior.ALLOW,
-                    reason=f"permission_handler 宿主显式放行 {tool.name}",
-                )
-            if approved is False:
+                host_preapproved = True
+            elif approved is False:
                 return PermissionDecision(
                     behavior=PermissionBehavior.DENY,
                     reason=f"permission_handler 拒绝了工具 {tool.name} 的调用",
@@ -712,11 +748,29 @@ class ToolExecutionService:
             return self._permission_service.check(
                 request,
                 journal_authority=journal_authority,
+                host_preapproved=host_preapproved,
             )
 
         result = tool.check_permissions(perm_input)
         if hasattr(result, "behavior"):
-            return PermissionDecision(behavior=result.behavior, reason=getattr(result, "reason", ""))
+            behavior = result.behavior
+            if isinstance(behavior, PermissionBehavior):
+                if behavior == PermissionBehavior.ASK and host_preapproved:
+                    return PermissionDecision(
+                        behavior=PermissionBehavior.ALLOW,
+                        reason="宿主 permission_handler 预授权，跳过用户确认",
+                    )
+                return PermissionDecision(behavior=behavior, reason=getattr(result, "reason", ""))
+            # 决策对象不可识别（如测试桩）：预授权放行，否则 fail-closed。
+            if host_preapproved:
+                return PermissionDecision(
+                    behavior=PermissionBehavior.ALLOW,
+                    reason="宿主 permission_handler 预授权（决策对象不可识别）",
+                )
+            return PermissionDecision(
+                behavior=PermissionBehavior.DENY,
+                reason="权限决策对象不可识别且无宿主预授权（fail-closed）",
+            )
         return PermissionDecision(behavior=PermissionBehavior.ALLOW)
 
     # 行为严格度排序：用于保证 hook 只能收紧决策、不能放开。
@@ -777,6 +831,31 @@ class ToolExecutionService:
             return decision
 
         return PermissionDecision(behavior=behavior, reason=getattr(next_decision, "reason", ""))
+
+    def _register_unresolved_exec_write_approval(self, policy: Any, perm_input: Dict[str, Any]) -> None:
+        """exec ALLOW 路径统一登记"未解析写目标"批准（与执行层按命令串一次性消费配对）。
+
+        归一化与 PermissionService._handle_ask 的登记保持同源，避免批准串与消费串
+        因去引号/JSON 解包差异而不一致。失败仅告警：执行层消费不到批准时按既有
+        契约 fail-closed 拒绝，不会放大权限。
+        """
+        try:
+            from floodmind.agent.runtime.services.exec_write_scanner import (
+                approve_unresolved_exec_writes,
+                scan_exec_writes,
+            )
+
+            command_field = getattr(policy, "command_field", "") or "command"
+            command = str(perm_input.get(command_field, "") or "").strip()
+            if not command:
+                return
+            if self._permission_service is not None:
+                normalized = self._permission_service._normalize_tool_input(dict(perm_input))
+                command = str(normalized.get(command_field, "") or "").strip()
+            if command and scan_exec_writes(command).unresolved:
+                approve_unresolved_exec_writes(command)
+        except Exception as exc:
+            logger.warning("登记 exec 未解析写目标批准失败（执行层将 fail-closed 兜底）: %s", exc)
 
     def _make_permission_feedback(self, decision: PermissionDecision) -> ToolFeedback:
         if self._permission_service is not None:

@@ -14,12 +14,33 @@ from typing import Any, Dict, List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
-_MEMORY_DIR = os.path.dirname(os.path.abspath(__file__))
-LONG_TERM_MEMORY_FILE = os.path.join(_MEMORY_DIR, "long_term_memory.json")
+# 记忆文件默认落在运行时数据目录（可被 FLOODMIND_PROJECT_ROOT 重定向），
+# 不再写安装包目录——site-packages 只读安装下旧路径会静默丢失全部长期记忆。
+try:
+    from floodmind.agent.runtime.services._runtime_root import PROJECT_ROOT as _RUNTIME_ROOT
+except Exception:  # pragma: no cover - 防御性回退，保持模块可独立导入
+    _RUNTIME_ROOT = None
+
+if _RUNTIME_ROOT is not None:
+    _DEFAULT_MEMORY_FILE = str(_RUNTIME_ROOT / "data" / "memory" / "long_term_memory.json")
+else:  # pragma: no cover
+    _DEFAULT_MEMORY_FILE = os.path.join(os.path.expanduser("~"), ".floodmind", "long_term_memory.json")
+
+LONG_TERM_MEMORY_FILE = _DEFAULT_MEMORY_FILE
+
+# SDK 未配置 providers 时的记忆窗口回退值（api.Agent._resolve_context_window 使用）
+DEFAULT_CONTEXT_WINDOW_FALLBACK = 32768
+
+# 进程级互斥：LongTermMemory 为多 Agent 实例共享的进程内单文件存储
+_LTM_LOCK = threading.RLock()
 
 
 class LongTermMemory:
-    """长期记忆管理器（独立的事实存储：偏好/决策/规则）"""
+    """长期记忆管理器（独立的事实存储：偏好/决策/规则）
+
+    单进程假设：跨进程并发写同一文件不在本类保证范围内（与 SessionManager 一致）。
+    写入为 tmp + fsync + os.replace 原子替换，崩溃不会留下半写文件。
+    """
 
     def __init__(self, memory_file: Optional[str] = None):
         self.memory_file = memory_file or LONG_TERM_MEMORY_FILE
@@ -34,8 +55,9 @@ class LongTermMemory:
             "timestamp": datetime.now().isoformat(),
             "access_count": 0,
         }
-        self.entries.append(entry)
-        self._save()
+        with _LTM_LOCK:
+            self.entries.append(entry)
+            self._save(merge=True)
         logger.info(f"[长期记忆] 添加条目: {content[:50]}... (类别: {category})")
 
     def search(self, query: str, top_k: int = 5) -> List[Dict[str, Any]]:
@@ -54,7 +76,7 @@ class LongTermMemory:
             if score > 0:
                 entry["access_count"] = entry.get("access_count", 0) + 1
                 results.append(entry)
-        self._save()
+        # access_count 只在内存累加，随下一次写操作持久化——读路径不再整文件重写
         return results
 
     def get_recent(self, n: int = 5) -> List[Dict[str, Any]]:
@@ -64,29 +86,75 @@ class LongTermMemory:
         return [e for e in self.entries if e.get("category") == category]
 
     def clear(self):
-        self.entries.clear()
-        self._save()
+        with _LTM_LOCK:
+            self.entries.clear()
+            self._save()
 
     def _load(self):
-        if not os.path.exists(self.memory_file):
-            self.entries = []
+        with _LTM_LOCK:
+            if not os.path.exists(self.memory_file):
+                self.entries = []
+                self._migrate_legacy_file()
+                return
+            try:
+                with open(self.memory_file, "r", encoding="utf-8") as f:
+                    content = f.read()
+                if content.strip():
+                    self.entries = json.loads(content)
+                else:
+                    self.entries = []
+            except Exception as e:
+                logger.error(f"[长期记忆] 加载失败: {e}")
+                self.entries = []
+
+    def _migrate_legacy_file(self):
+        """旧版本把记忆文件放在安装包目录，首次运行时迁移到数据目录。"""
+        legacy = os.path.join(os.path.dirname(os.path.abspath(__file__)), "long_term_memory.json")
+        if not os.path.isfile(legacy) or os.path.abspath(legacy) == os.path.abspath(self.memory_file):
             return
         try:
-            with open(self.memory_file, "r", encoding="utf-8") as f:
+            with open(legacy, "r", encoding="utf-8") as f:
                 content = f.read()
             if content.strip():
                 self.entries = json.loads(content)
-            else:
-                self.entries = []
+                self._save()
+                logger.info(f"[长期记忆] 已从旧路径迁移 {len(self.entries)} 条记录: {legacy}")
         except Exception as e:
-            logger.error(f"[长期记忆] 加载失败: {e}")
-            self.entries = []
+            logger.warning(f"[长期记忆] 旧路径迁移失败（忽略）: {e}")
 
-    def _save(self):
+    def _save(self, merge: bool = False):
+        """原子落盘。merge=True 时（add 路径）先合并磁盘上的其他实例新增条目——
+        LongTermMemory 虽有进程级写锁，但各 DualMemory 实例各持快照整文件覆写，
+        不合并会 last-writer-wins 丢掉其他实例的条目（P2-9/D03）。"""
         try:
+            entries_to_write = self.entries
+            if merge:
+                disk_entries = []
+                try:
+                    if os.path.exists(self.memory_file):
+                        with open(self.memory_file, "r", encoding="utf-8") as f:
+                            text = f.read()
+                        if text.strip():
+                            loaded = json.loads(text)
+                            if isinstance(loaded, list):
+                                disk_entries = [e for e in loaded if isinstance(e, dict)]
+                except Exception as e:
+                    logger.warning(f"[长期记忆] 合并前读取失败（按内存快照写）: {e}")
+                if disk_entries:
+                    seen = {(str(e.get("content")), str(e.get("timestamp"))) for e in self.entries}
+                    for e in disk_entries:
+                        key = (str(e.get("content")), str(e.get("timestamp")))
+                        if key not in seen:
+                            self.entries.append(e)
+                            seen.add(key)
+                    entries_to_write = self.entries
             os.makedirs(os.path.dirname(self.memory_file), exist_ok=True)
-            with open(self.memory_file, "w", encoding="utf-8") as f:
-                json.dump(self.entries, f, ensure_ascii=False, indent=2)
+            tmp_path = self.memory_file + ".tmp"
+            with open(tmp_path, "w", encoding="utf-8") as f:
+                json.dump(entries_to_write, f, ensure_ascii=False, indent=2)
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(tmp_path, self.memory_file)
         except Exception as e:
             logger.error(f"[长期记忆] 保存失败: {e}")
 
@@ -146,7 +214,14 @@ class DualMemory:
         self._journal_authority = authority
         self._runtime_dir = runtime_dir
         self._conversation_id = conversation_id
-        self._cached_history_text = ""
+        # 重绑新会话必须清空派生缓存：_compression_cache 的 key 只含 turn_index:role，
+        # 旧会话残留的摘要在新会话会按相同 key 命中复现（跨会话内容泄漏）；
+        # 同时复位 history 文本缓存，避免用旧会话长度误判压缩需求。
+        with self._lock:
+            self._compression_cache.clear()
+            self._history_compressed = False
+            self._last_sent_turn_index = 0
+            self._cached_history_text = ""
 
     def _current_turns(self) -> List[Dict[str, Any]]:
         if self._journal_authority is None:
@@ -276,7 +351,11 @@ class DualMemory:
         with self._lock:
             need_compress = False
             if context_window > 0 and len(turns) > self.HISTORY_KEEP_RECENT_ENTRIES:
-                estimated_tokens = (total_context_chars + len(self._cached_history_text)) / 1.5
+                # 基于本次将生成的全量历史文本估算，而非上次返回值 _cached_history_text：
+                # 用缓存估算会"压缩后低估→本轮返回全量→再高估"交替震荡，改为对
+                # _build_turns_text(turns) 的长度做无状态判定，天然收敛。
+                full_text = self._build_turns_text(turns)
+                estimated_tokens = (total_context_chars + len(full_text)) / 1.5
                 need_compress = estimated_tokens / context_window > self.HISTORY_COMPRESS_RATIO
 
             if need_compress:
@@ -330,7 +409,11 @@ class DualMemory:
         return "\n".join(lines)
 
     def _get_cached_or_compress_older(self, older_turns: List[Dict[str, Any]], event_bus=None) -> str:
-        cache_key = "|".join(str(t.get("turn_index", "")) + ":" + t.get("role", "") for t in older_turns)
+        # key 掺入 conversation_id 双保险：即使缓存未随 bind_journal 清空，
+        # 跨会话的同 turn_index:role 组合也不会误命中旧会话摘要。
+        cache_key = self._conversation_id + "|" + "|".join(
+            str(t.get("turn_index", "")) + ":" + t.get("role", "") for t in older_turns
+        )
         cached = self._compression_cache.get(cache_key)
         if cached is not None:
             return cached

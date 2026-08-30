@@ -14,7 +14,12 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, List, Optional, Union
 
-from floodmind.skills.base import Skill, discover_skills, generate_skill_catalog
+from floodmind.skills.base import (
+    Skill,
+    discover_skills,
+    generate_skill_catalog,
+    is_reparse_point,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -53,12 +58,13 @@ def _reject_existing_symlink(path: PathLike, label: str) -> None:
     Checking only the final component is insufficient: a writable root or skill
     directory can be redirected later through a symlinked ancestor.  Broken
     symlinks are covered because ``Path.is_symlink()`` does not require the
-    target to exist.
+    target to exist.  Windows junction 属于目录 reparse point 但
+    ``Path.is_symlink()`` 对其返回 False，须用兼容判定一并拒绝。
     """
     expanded = Path(path).expanduser().absolute()
     for component in [*reversed(expanded.parents), expanded]:
-        if component.is_symlink():
-            raise ValueError(f"{label} 不能包含符号链接: {component}")
+        if component.is_symlink() or is_reparse_point(component):
+            raise ValueError(f"{label} 不能包含符号链接/junction: {component}")
 
 
 @dataclass(frozen=True)
@@ -432,9 +438,9 @@ class SkillRegistry:
         return path
 
     def validate_writable_skill_path(self, name: str, require_source: bool = False) -> Path:
-        """CRUD 共用校验：可写根/skill 目录非 symlink，且现有来源确在可写根下。"""
-        if self._writable_root.is_symlink():
-            raise ValueError(f"writable_root 不能是符号链接: {self._writable_root}")
+        """CRUD 共用校验：可写根/skill 目录非 symlink（含 junction），且现有来源确在可写根下。"""
+        if self._writable_root.is_symlink() or is_reparse_point(self._writable_root):
+            raise ValueError(f"writable_root 不能是符号链接/junction: {self._writable_root}")
         path = self.writable_skill_path(name)
         skill = self.get_skill(name)
         if skill and skill.skill_dir:

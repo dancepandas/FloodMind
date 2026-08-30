@@ -363,14 +363,24 @@ def reload_config() -> dict:
     return _config_cache
 
 
+def _atomic_write_json(path, cfg: dict) -> None:
+    """tmp + fsync + os.replace 原子写（P2-8）：崩溃不留半写文件——
+    半写 settings.json 会在下次加载时静默回退为空配置，providers 全部"丢失"。"""
+    tmp_path = str(path) + ".tmp"
+    with open(tmp_path, "w", encoding="utf-8") as f:
+        json.dump(cfg, f, ensure_ascii=False, indent=2)
+        f.flush()
+        os.fsync(f.fileno())
+    os.replace(tmp_path, path)
+
+
 def save_config(cfg: dict) -> None:
     """保存用户配置到 ~/.floodmind/settings.json。"""
     global _config_cache
     config_dir = get_floodmind_home()
     config_dir.mkdir(parents=True, exist_ok=True)
     config_path = _config_path()
-    with open(config_path, "w", encoding="utf-8") as f:
-        json.dump(cfg, f, ensure_ascii=False, indent=2)
+    _atomic_write_json(config_path, cfg)
     _config_cache = None  # 强制下次重新加载
     _logger.info("配置已保存: %s", config_path)
 
@@ -610,8 +620,7 @@ def save_mcp_config(mcp_cfg: Dict[str, Any]) -> None:
     config_dir = get_floodmind_home()
     config_dir.mkdir(parents=True, exist_ok=True)
     mcp_path = _mcp_config_path()
-    with open(mcp_path, "w", encoding="utf-8") as f:
-        json.dump(mcp_cfg, f, ensure_ascii=False, indent=2)
+    _atomic_write_json(mcp_path, mcp_cfg)
     _logger.info("MCP 配置已保存: %s", mcp_path)
 
 

@@ -1,4 +1,5 @@
 """P7 Task 2 — quota enforcement."""
+import json
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -67,6 +68,39 @@ def _parent_context(session_id="sess_main", abort_check=None):
             actor_id="main", agent_tier="main", runtime_mode="execution",
         ),
     )
+
+
+def test_token_budget_reads_usage_from_content_json():
+    """ModelClient 发出的 usage 事件 raw 恒为 None，数值在 content（JSON 字符串）。
+
+    旧实现只读 event.raw["total_tokens"]，导致子代理 token 配额完全失效（回归测试）。
+    """
+    inner = MagicMock(spec=ModelClient)
+    inner.stream_chat.return_value = iter([
+        ModelEvent(type="token", content="x"),
+        ModelEvent(type="usage", content=json.dumps(
+            {"prompt_tokens": 30, "completion_tokens": 50, "total_tokens": 80})),
+        ModelEvent(type="done"),
+    ])
+    quota = ChildThreadQuota(max_turns=10, max_tokens=100, wall_clock_budget_seconds=30.0)
+    client = _TokenBudgetModelClient(inner, quota)
+    list(client.stream_chat())
+    assert quota.token_total == 80
+    assert quota.turn_count == 1
+
+
+def test_token_budget_ignores_malformed_usage_content():
+    """usage content 不是合法 JSON 时容错忽略（计 0），不中断子线程。"""
+    inner = MagicMock(spec=ModelClient)
+    inner.stream_chat.return_value = iter([
+        ModelEvent(type="token", content="x"),
+        ModelEvent(type="usage", content="not-json"),
+        ModelEvent(type="done"),
+    ])
+    quota = ChildThreadQuota(max_turns=10, max_tokens=100, wall_clock_budget_seconds=30.0)
+    client = _TokenBudgetModelClient(inner, quota)
+    list(client.stream_chat())
+    assert quota.token_total == 0
 
 
 def test_quota_max_turns_terminates_child_as_failed():

@@ -534,3 +534,27 @@ class TestBareModeMcpLoading:
             bare=False,
         )
         assert called["n"] == 1
+
+
+class TestStdioDisconnect:
+    def test_disconnect_terminates_child_process(self):
+        """stdio disconnect 必须真正终止子进程（Windows 走 taskkill /T /F 杀进程树，
+        旧实现 Popen.terminate() 会泄漏 node 派生的孙进程）。"""
+        import subprocess
+        import sys
+
+        from floodmind.agent.mcp_client import McpClientConnection
+
+        proc = subprocess.Popen(
+            [sys.executable, "-c", "import time; time.sleep(60)"],
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        )
+        conn = McpClientConnection("t", transport="stdio")
+        conn._process = proc
+        try:
+            conn.disconnect()
+        finally:
+            if proc.poll() is None:
+                proc.kill()
+        assert proc.poll() is not None
+        assert conn._process is None

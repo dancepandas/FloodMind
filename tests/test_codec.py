@@ -42,3 +42,14 @@ def test_codec_usage_only_tail_chunk_is_usage_not_error():
     assert not any(p.event == "error" for p in parts)
     assert json.loads(parts[0].text)["total_tokens"] == 15
     assert parts[0].raw != {}
+
+
+def test_codec_tool_call_index_none_falls_back_to_zero():
+    """部分 provider 的 tool_call.index 为 None：回退 0，而非 TypeError 打断整轮流。"""
+    codec = ProviderCodec(name="openai")
+    func = type("F", (), {"name": "search", "arguments": '{"q":"x"}'})()
+    tc = type("T", (), {"index": None, "id": "c1", "function": func})()
+    chunk = _FakeChunk(delta=type("D", (), {"content": None, "reasoning_content": None, "tool_calls": [tc]})())
+    parts = [p for p in codec.decode_chunk(chunk) if p.event == "tool_call_delta"]
+    assert parts and parts[0].index == 0
+    assert parts[0].name == "search"

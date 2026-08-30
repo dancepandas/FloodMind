@@ -167,6 +167,22 @@ class ModelClient:
             logger.error("ModelClient invoke error: %s", e)
             raise
 
+        if not getattr(response, "choices", None):
+            # 空 choices（部分兼容端点在内容审核/服务异常时返回空列表）：
+            # 旧实现直接 choices[0] 抛 IndexError；改为返回带 terminal_reason 的错误
+            # 事件（消费方按 .content 读取），错误信息中文、可行动。
+            logger.error(
+                "ModelClient chat 返回空 choices: model=%s", self.model_name,
+            )
+            return ModelEvent(
+                type="error",
+                content=(
+                    "模型返回了空响应（choices 为空），本条请求没有生成内容。"
+                    "请重试本次调用；若持续出现，请降低 max_tokens 或更换模型后再试。"
+                ),
+                terminal_reason=TerminalReason.from_raw("error"),
+            )
+
         choice = response.choices[0]
         content = choice.message.content or ""
 

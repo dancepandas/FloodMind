@@ -11,7 +11,8 @@ from floodmind.agent.runtime.contracts.permissions import (
 
 
 class TestPermissionHandlerHostAdjudication:
-    """permission_handler 改为宿主最高裁决：True=ALLOW 跳过 SDK，False=DENY，None=交 SDK。"""
+    """permission_handler 语义：True=宿主预授权（可满足策略级 ASK，但不可翻越 SDK 硬门），
+    False=DENY，None=交 SDK。硬门（tier/planning/路径/危险命令/deny 规则）只能收紧。"""
 
     def _make_svc(self, handler, sdk_behavior=PermissionBehavior.DENY):
         from floodmind.agent.runtime.services.tool_execution_service import ToolExecutionService
@@ -26,12 +27,13 @@ class TestPermissionHandlerHostAdjudication:
         t.permission_policy = None
         return t
 
-    def test_handler_true_direct_allow_bypasses_sdk(self):
-        """True = 宿主显式放行 → 直接 ALLOW，跳过 permission_service（即使 SDK 会 DENY）。"""
+    def test_handler_true_delegates_to_sdk_with_preapproval(self):
+        """True = 宿主预授权 → 仍走 permission_service（SDK 的 DENY 不可被翻越）。"""
         svc, sdk = self._make_svc(lambda name, inp: True, sdk_behavior=PermissionBehavior.DENY)
         decision = svc._check_permissions(self._tool(), {}, "s1", journal_authority=object())
-        assert decision.behavior == PermissionBehavior.ALLOW
-        sdk.check.assert_not_called()
+        assert decision.behavior == PermissionBehavior.DENY
+        sdk.check.assert_called_once()
+        assert sdk.check.call_args.kwargs.get("host_preapproved") is True
 
     def test_handler_false_denies(self):
         """False = 宿主拒绝 → DENY，跳过 permission_service。"""
@@ -56,6 +58,78 @@ class TestPermissionHandlerHostAdjudication:
         decision = svc._check_permissions(self._tool(), {}, "s1", journal_authority=object())
         assert decision.behavior == PermissionBehavior.DENY
         sdk.check.assert_called_once()
+
+
+class TestPermissionHandlerPreapprovalGates:
+    """宿主 True 预授权与 SDK 硬门的组合语义（真实 PermissionService，非 mock）。"""
+
+    def _make(self, handler, tmp_path, deny_rules=None):
+        from floodmind.agent.runtime.contracts.workspace import Workspace
+        from floodmind.agent.runtime.services.path_service import PathService
+        from floodmind.agent.runtime.services.permission_service import PermissionService
+        from floodmind.agent.runtime.services.tool_execution_service import ToolExecutionService
+
+        ws = Workspace.from_folder(tmp_path / "ws", session_id="s1").ensure()
+        ps = PathService(workspace=ws)
+        sdk = PermissionService.create_default(path_service=ps)
+        for rule in (deny_rules or []):
+            sdk.add_deny_rule(rule)
+        svc = ToolExecutionService(permission_service=sdk, permission_handler=handler,
+                                   path_service=ps)
+        return svc, sdk
+
+    def _write_tool(self):
+        from floodmind.agent.runtime.contracts.permissions import ToolPermissionPolicy
+        t = MagicMock()
+        t.name = "Write"
+        t.permission_policy = ToolPermissionPolicy(policy_type="write", path_field="file_path")
+        t.is_readonly = False
+        return t
+
+    def _ask_tool(self):
+        from floodmind.agent.runtime.contracts.permissions import ToolPermissionPolicy
+        t = MagicMock()
+        t.name = "RiskyThing"
+        t.permission_policy = ToolPermissionPolicy(policy_type="ask", reason="需要确认")
+        t.is_readonly = False
+        return t
+
+    def test_preapproval_satisfies_policy_ask(self, tmp_path):
+        """True 预授权可满足策略级 ASK（桌面 always-trust 场景），无需 AskService。"""
+        svc, _ = self._make(lambda name, inp: True, tmp_path)
+        decision = svc._check_permissions(self._ask_tool(), {}, "s1", journal_authority=object())
+        assert decision.behavior == PermissionBehavior.ALLOW
+        assert "预授权" in decision.reason
+
+    def test_preapproval_cannot_bypass_path_deny(self, tmp_path):
+        """True 预授权不可翻越路径硬门：工作区外写入仍 DENY。"""
+        svc, _ = self._make(lambda name, inp: True, tmp_path)
+        outside = str(tmp_path / "outside" / "evil.txt")
+        decision = svc._check_permissions(
+            self._write_tool(), {"file_path": outside}, "s1", journal_authority=object()
+        )
+        assert decision.behavior == PermissionBehavior.DENY
+
+    def test_preapproval_cannot_bypass_deny_rule(self, tmp_path):
+        """True 预授权不可翻越全局 deny 规则（F-05：deny 先于 ASK）。"""
+        from floodmind.agent.runtime.contracts.permissions import PermissionBehavior, PermissionRule
+
+        rule = PermissionRule(
+            name="deny_risky",
+            tool_name="RiskyThing",
+            behavior=PermissionBehavior.DENY,
+            reason="宿主显式拒绝 RiskyThing",
+        )
+        svc, _ = self._make(lambda name, inp: True, tmp_path, deny_rules=[rule])
+        decision = svc._check_permissions(self._ask_tool(), {}, "s1", journal_authority=object())
+        assert decision.behavior == PermissionBehavior.DENY
+        assert "deny_risky" in decision.reason or "RiskyThing" in decision.reason
+
+    def test_no_handler_ask_denies_without_ask_service(self, tmp_path):
+        """无宿主预授权时策略级 ASK 在 AskService 缺席下自动 DENY（fail-closed）。"""
+        svc, _ = self._make(None, tmp_path)
+        decision = svc._check_permissions(self._ask_tool(), {}, "s1", journal_authority=object())
+        assert decision.behavior == PermissionBehavior.DENY
 
 
 class TestAskRequestLifecycle:

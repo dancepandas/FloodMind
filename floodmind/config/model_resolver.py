@@ -19,16 +19,22 @@
 激活模型 = catalog 第一个；会话级切换由调用方传 model_key，不写回配置文件。
 """
 
+import logging
 import os
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple
 
 from floodmind.config.settings import get_config
 
+logger = logging.getLogger(__name__)
+
 # 代码内部默认（模型定义缺失对应字段时兜底，非配置项）
 _DEFAULT_TEMPERATURE = 0.3
 _DEFAULT_MAX_TOKENS = 8192
 _DEFAULT_CONTEXT_WINDOW = 32768
+
+# context_window 合法区间上界（当前主流模型记忆窗口远低于此值）
+_MAX_CONTEXT_WINDOW = 2_000_000
 
 
 @dataclass(frozen=True)
@@ -200,15 +206,15 @@ def _build(pid: str, pdata: Dict[str, Any], m: Dict[str, Any]) -> ResolvedModel:
         name=m.get("name", m.get("id", "")),
         api_key=api_key,
         base_url=base_url,
-        temperature=float(
+        temperature=_clamp_temperature(
             m.get("default_temperature", m.get("temperature", _DEFAULT_TEMPERATURE))
         ),
         max_tokens=int(
             m.get("default_max_tokens", m.get("maxTokens", m.get("max_tokens", _DEFAULT_MAX_TOKENS)))
         ),
-        context_window=int(
-            m.get("context_window", m.get("maxTokens", _DEFAULT_CONTEXT_WINDOW))
-        ),
+        # 记忆窗口只认 context_window 显式配置；绝不用 maxTokens（生成上限）回退，
+        # 否则小生成上限会把记忆窗口错误钳小。非法数值告警后回退默认。
+        context_window=_clamp_context_window(m.get("context_window", _DEFAULT_CONTEXT_WINDOW)),
         supports_reasoning=bool(
             m.get("supports_reasoning", m.get("supportsReasoning", False))
         ),
@@ -219,3 +225,24 @@ def _build(pid: str, pdata: Dict[str, Any], m: Dict[str, Any]) -> ResolvedModel:
             m.get("supports_search", m.get("supportsSearch", False))
         ),
     )
+
+
+def _clamp_context_window(raw: Any) -> int:
+    """context_window 数值钳制：<=0 或超过合理上界时告警并回退默认值。"""
+    value = int(raw)
+    if value <= 0 or value > _MAX_CONTEXT_WINDOW:
+        logger.warning(
+            "模型 context_window 配置非法: %r（要求 0 < 值 <= %d），回退默认 %d",
+            raw, _MAX_CONTEXT_WINDOW, _DEFAULT_CONTEXT_WINDOW,
+        )
+        return _DEFAULT_CONTEXT_WINDOW
+    return value
+
+
+def _clamp_temperature(raw: Any) -> float:
+    """temperature 钳制到 [0, 2]（OpenAI 兼容接口的合法区间）。"""
+    value = float(raw)
+    clamped = min(2.0, max(0.0, value))
+    if clamped != value:
+        logger.warning("模型 temperature 配置 %r 超出 [0, 2]，已钳制为 %s", raw, clamped)
+    return clamped

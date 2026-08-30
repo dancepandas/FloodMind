@@ -1,0 +1,140 @@
+/* FloodMind UI 增强（品牌定制） */
+
+/* 收小 welcome 页中央 logo：原样式 w-[200px] mb-2（200px 偏大），覆盖为 96px */
+img.logo.w-\[200px\] {
+  width: 96px !important;
+  max-height: 96px !important;
+  height: auto !important;
+}
+
+/* 收小侧栏顶部 logo：原样式 w-[150px]，覆盖为 28px（与"新建会话"图标同高） */
+img.logo.w-\[150px\] {
+  width: 28px !important;
+  max-height: 28px !important;
+  height: auto !important;
+}
+
+/* 隐藏右上角 "说明" 按钮（README 弹窗，与品牌定位无关，且本服务无 README） */
+#readme-button,
+button[id="readme-button"] {
+  display: none !important;
+  visibility: hidden !important;
+}
+
+/* welcome 页 logo 容器：让 logo + 副标题水平居中并贴近输入框 */
+#welcome-screen > div > div:first-child {
+  display: flex !important;
+  flex-direction: column !important;
+  align-items: center !important;
+  justify-content: center !important;
+  gap: 12px !important;
+  margin-bottom: 8px !important;
+}
+
+#welcome-screen > div > div:first-child img.logo {
+  width: 96px !important;
+  height: auto !important;
+}
+
+/* welcome 页副标题（在 logo 后注入的 .fm-tagline） */
+.fm-tagline {
+  font-size: 15px;
+  color: #64748b;
+  margin-top: -4px;
+  letter-spacing: 0.02em;
+}
+
+/* 侧栏顶部品牌行（在 logo 后注入的 .fm-brand） */
+.fm-brand {
+  display: inline-flex !important;
+  align-items: center !important;
+  gap: 8px !important;
+  font-weight: 600 !important;
+  font-size: 16px !important;
+  color: #0f172a;
+  margin-left: 8px !important;
+  vertical-align: middle !important;
+}
+.fm-brand img {
+  width: 28px !important;
+  height: 28px !important;
+}
+
+/* 历史会话侧栏顶部品牌区（JS 注入到 [data-sidebar="sidebar"] 首位的 .fm-brand-bar） */
+.fm-brand-bar {
+  display: flex !important;
+  align-items: center !important;
+  gap: 8px !important;
+  padding: 12px 12px 10px 12px !important;
+  border-bottom: 1px solid #e2e8f0 !important;
+  margin-bottom: 6px !important;
+  flex-shrink: 0 !important;
+}
+.fm-brand-bar .fm-brand-logo {
+  width: 28px !important;
+  height: 28px !important;
+  flex-shrink: 0 !important;
+}
+.fm-brand-bar .fm-brand-name {
+  font-weight: 600 !important;
+  font-size: 16px !important;
+  color: #0f172a;
+  letter-spacing: 0.01em;
+}
+
+/* 聊天主区顶部 brand slot（#header 第一个 .flex.items-center）。
+   高度 60px，logo + 名称水平排列，与下方消息/折叠栏左缘对齐。 */
+.fm-header-brand {
+  display: inline-flex !important;
+  align-items: center !important;
+  gap: 8px !important;
+  padding-left: 4px !important;
+  height: 100% !important;
+}
+.fm-header-brand .fm-header-logo {
+  width: 28px !important;
+  height: 28px !important;
+  flex-shrink: 0 !important;
+}
+.fm-header-brand .fm-header-name {
+  font-weight: 600 !important;
+  font-size: 16px !important;
+  color: #0f172a;
+  letter-spacing: 0.01em;
+  white-space: nowrap !important;
+}
+@media (prefers-color-scheme: dark) {
+  .fm-header-brand .fm-header-name { color: #f1f5f9; }
+}
+
+/* 回合折叠屏（.step container）——视觉上是一个始终展开的"屏幕"，不可点击：
+   - 折叠头按钮禁用 hover/cursor（提示用户不可展开）
+   - 取消左侧缩进边线（去掉"我是嵌套元素"的视觉暗示）
+   - 让内部子 step 之间用分割线隔开（屏幕按顺序平铺多个区块） */
+.step.type-run[data-step-type="run"]:not([data-message-type]) {
+  border-left: none !important;
+  padding-left: 0 !important;
+}
+.step.type-run > [class*="Accordion"] button[id^="step-"] {
+  cursor: default !important;
+  pointer-events: none !important;
+}
+.step.type-run > [class*="Accordion"] button[id^="step-"]:hover {
+  text-decoration: none !important;
+}
+
+/* 隐藏 FloodMind 顶层消息左侧的 author avatar（折叠栏下方不再有字母 logo，
+   品牌标识统一在侧栏顶部呈现；消息对齐到主内容栏左侧、与折叠栏齐平） */
+.ai-message > [class*="Avatar"]:not(:empty):first-child,
+.ai-message > [class*="avatar"]:not(:empty):first-child,
+.ai-message > span[data-radix-collection-item]:first-child {
+  display: none !important;
+}
+/* 兜底：avatar 隐藏后消息内容区去掉左 gap，对齐折叠栏左缘 */
+.ai-message {
+  gap: 0 !important;
+}
+.ai-message > .message-content {
+  width: 100% !important;
+  max-width: 100% !important;
+}

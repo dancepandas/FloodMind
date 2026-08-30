@@ -18,6 +18,7 @@ CheckpointService — Agent 执行状态持久化与恢复
 
 import json
 import logging
+import re
 import shutil
 import tempfile
 import uuid
@@ -45,6 +46,31 @@ _RUN_STATE_FILE = "run_state.json"
 _MANIFEST_FILE = "manifest.json"
 _FILES_DIR = "files"
 
+# ── 路径标识符校验（D01：session_id/checkpoint_id 直接拼路径，必须 fail-closed） ──
+# 与 SessionManager.validate_session_id 同字母表；checkpoint_id 额外强制 ckpt- 前缀。
+_IDENTIFIER_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9-_.]{0,127}$")
+_WINDOWS_RESERVED = {
+    "CON", "PRN", "AUX", "NUL",
+    *(f"COM{i}" for i in range(1, 10)),
+    *(f"LPT{i}" for i in range(1, 10)),
+}
+
+
+def validate_path_identifier(value: str, *, kind: str = "session") -> str:
+    """校验用于拼路径的标识符（session_id / checkpoint_id），防路径穿越与 Windows 保留名。
+
+    Raises:
+        ValueError: 标识符为空、含非法字符、为 Windows 保留名或路径穿越形态。
+    """
+    if not value or not isinstance(value, str):
+        raise ValueError(f"{kind} id 不能为空")
+    v = value.strip()
+    if not _IDENTIFIER_RE.match(v) or v in (".", "..") or v.endswith("."):
+        raise ValueError(f"非法 {kind} id: {value!r}")
+    if v.upper() in _WINDOWS_RESERVED or v.split(".")[0].upper() in _WINDOWS_RESERVED:
+        raise ValueError(f"{kind} id 使用了 Windows 保留名: {value!r}")
+    return v
+
 
 class CheckpointService:
     """Agent 执行状态 checkpoint 服务。"""
@@ -63,7 +89,9 @@ class CheckpointService:
         if base_dir:
             self._base_dir = Path(base_dir)
         else:
-            self._base_dir = Path.cwd() / "data" / "sessions"
+            # 默认根收敛到运行时项目根（D19）：cwd 在桌面端/服务端不可靠
+            from floodmind.agent.runtime.services._runtime_root import PROJECT_ROOT
+            self._base_dir = PROJECT_ROOT / "data" / "sessions"
         self._keep_count = max(keep_count, 1)
         self._tracing_service = tracing_service
 
@@ -101,8 +129,14 @@ class CheckpointService:
         if run_state.run_id != run_id:
             raise CheckpointConsistencyError("RunState snapshot run_id 与 loop state 不一致")
 
+        # P2-4：先完成全部路径校验（可能抛 ValueError），再变更 state——
+        # 否则校验失败时 state.checkpoint_id 等字段残留脏值，D08 回滚不完整
         checkpoint_id = self._make_checkpoint_id()
+        checkpoint_dir = self._checkpoint_dir(session_id, checkpoint_id)
+        session_cp_dir = self._session_checkpoints_dir(session_id)
+
         parent_checkpoint_id = getattr(state, "checkpoint_id", None)
+        original_checkpoint_id = parent_checkpoint_id
         state.checkpoint_id = checkpoint_id  # 更新状态指向新 checkpoint
         if hasattr(state, "journal_cursor"):
             state.journal_cursor = journal_cursor
@@ -110,8 +144,6 @@ class CheckpointService:
         manifest_metadata = dict(metadata or {})
         manifest_metadata.update({"run_id": run_id, "journal_cursor": journal_cursor})
 
-        checkpoint_dir = self._checkpoint_dir(session_id, checkpoint_id)
-        session_cp_dir = self._session_checkpoints_dir(session_id)
         session_cp_dir.mkdir(parents=True, exist_ok=True)
         tmp_dir = Path(tempfile.mkdtemp(prefix=f"ckpt-{checkpoint_id}-", dir=session_cp_dir))
 
@@ -185,9 +217,14 @@ class CheckpointService:
             return record
 
         except Exception:
-            # 清理临时目录
+            # 清理临时目录；回滚 state.checkpoint_id，避免内存状态指向不存在的
+            # checkpoint 造成父子链断链（D08）
             try:
                 shutil.rmtree(tmp_dir, ignore_errors=True)
+            except Exception:
+                pass
+            try:
+                state.checkpoint_id = original_checkpoint_id
             except Exception:
                 pass
             raise
@@ -307,10 +344,10 @@ class CheckpointService:
             raise CheckpointConsistencyError("checkpoint RunState run_id 不匹配")
         if snapshot.last_committed_sequence != manifest.journal_cursor:
             raise CheckpointConsistencyError("checkpoint RunState cursor 不匹配")
-        rebuilt = authority.replay()
+        rebuilt = authority.replay()  # 全量重放一次；cursor 校验与快照比对共用（去重复 replay）
         if rebuilt.last_committed_sequence < manifest.journal_cursor:
             raise CheckpointConsistencyError("checkpoint cursor 超出 canonical journal tail")
-        prefix = authority.replay()
+        prefix = rebuilt
         if manifest.journal_cursor != authority.cursor():
             from floodmind.agent.runtime.reducer import initial_run_state, reduce
 
@@ -402,13 +439,29 @@ class CheckpointService:
         return f"ckpt-{uuid.uuid4().hex[:16]}"
 
     def _session_dir(self, session_id: str) -> Path:
-        return self._base_dir / session_id
+        validated = validate_path_identifier(session_id, kind="session")
+        resolved = (self._base_dir / validated).resolve()
+        base_resolved = self._base_dir.resolve()
+        try:
+            resolved.relative_to(base_resolved)
+        except ValueError:
+            raise ValueError(f"session id {session_id!r} 越出 checkpoint 根目录（fail-closed）")
+        return self._base_dir / validated
 
     def _session_checkpoints_dir(self, session_id: str) -> Path:
         return self._session_dir(session_id) / "checkpoints"
 
     def _checkpoint_dir(self, session_id: str, checkpoint_id: str) -> Path:
-        return self._session_checkpoints_dir(session_id) / checkpoint_id
+        if not checkpoint_id.startswith("ckpt-"):
+            raise ValueError(f"非法 checkpoint id（必须以 ckpt- 开头）: {checkpoint_id!r}")
+        validated = validate_path_identifier(checkpoint_id, kind="checkpoint")
+        path = self._session_checkpoints_dir(session_id) / validated
+        resolved = path.resolve()
+        try:
+            resolved.relative_to(self._base_dir.resolve())
+        except ValueError:
+            raise ValueError(f"checkpoint id {checkpoint_id!r} 越出 checkpoint 根目录（fail-closed）")
+        return path
 
     def _list_records(self, session_id: str) -> List[CheckpointRecord]:
         cp_dir = self._session_checkpoints_dir(session_id)

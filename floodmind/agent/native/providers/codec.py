@@ -55,8 +55,13 @@ class ProviderCodec:
         if tool_calls:
             for tc in tool_calls:
                 func = getattr(tc, "function", None) or type("F", (), {})()
+                try:
+                    index = int(getattr(tc, "index", 0))
+                except (TypeError, ValueError):
+                    # 部分 provider 的 index 为 None/非 int：回退 0，避免整轮流中断
+                    index = 0
                 yield CanonicalPart(
-                    event="tool_call_delta", kind="tool_call", index=int(getattr(tc, "index", 0)),
+                    event="tool_call_delta", kind="tool_call", index=index,
                     id=getattr(tc, "id", "") or "", name=getattr(func, "name", "") or "",
                     arguments=getattr(func, "arguments", "") or "",
                     raw=_asdict(raw_chunk))

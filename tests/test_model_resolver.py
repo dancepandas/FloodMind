@@ -143,3 +143,57 @@ class TestListModels:
         ids = [(pid, m["id"]) for pid, _, m in items]
         assert ids[0] == ("dashscope", "model-a")
         assert ids[-1] == ("openai", "gpt-test")
+
+
+class TestContextWindowClamp:
+    """context_window 只认显式配置，maxTokens 不再回退 + 数值钳制。"""
+
+    @staticmethod
+    def _cfg(context_value=None, temperature=None):
+        model = {"id": "m1", "maxTokens": 4096}  # 生成上限，绝不能被当作记忆窗口
+        if context_value is not None:
+            model["context_window"] = context_value
+        if temperature is not None:
+            model["default_temperature"] = temperature
+        return {"providers": {"p": {"base_url": "https://x/v1", "models": [model]}}}
+
+    def _resolve(self, value):
+        with patch("floodmind.config.model_resolver.get_config", return_value=self._cfg(value)):
+            return resolve_model()
+
+    def test_max_tokens_no_longer_falls_back_to_context_window(self):
+        """maxTokens（生成上限）不再作为 context_window 回退，缺失时用默认 32768。"""
+        rm = self._resolve(None)
+        assert rm.max_tokens == 4096
+        assert rm.context_window == 32768  # 旧实现错误回退为 4096
+
+    def test_explicit_context_window_still_used(self):
+        assert self._resolve(131072).context_window == 131072
+
+    def test_non_positive_context_window_falls_back_with_warning(self, caplog):
+        import logging
+        with caplog.at_level(logging.WARNING, logger="floodmind.config.model_resolver"):
+            for bad in (0, -5):
+                rm = self._resolve(bad)
+                assert rm.context_window == 32768
+        assert "context_window 配置非法" in caplog.text
+
+    def test_oversized_context_window_falls_back_with_warning(self, caplog):
+        import logging
+        with caplog.at_level(logging.WARNING, logger="floodmind.config.model_resolver"):
+            rm = self._resolve(5_000_000)
+        assert rm.context_window == 32768
+        assert "context_window 配置非法" in caplog.text
+
+    def test_temperature_out_of_range_clamped(self):
+        with patch("floodmind.config.model_resolver.get_config",
+                   return_value=self._cfg(temperature=3.5)):
+            assert resolve_model().temperature == 2.0
+        with patch("floodmind.config.model_resolver.get_config",
+                   return_value=self._cfg(temperature=-1.0)):
+            assert resolve_model().temperature == 0.0
+
+    def test_temperature_in_range_unchanged(self):
+        with patch("floodmind.config.model_resolver.get_config",
+                   return_value=self._cfg(temperature=1.7)):
+            assert resolve_model().temperature == 1.7
