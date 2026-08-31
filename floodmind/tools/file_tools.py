@@ -12,9 +12,10 @@ import os
 import re
 import shutil
 import subprocess
+import tempfile
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 from pydantic import BaseModel, Field
 
@@ -47,6 +48,48 @@ _BINARY_EXTENSIONS = frozenset({
     ".zip", ".tar", ".gz", ".rar", ".7z",
     ".pkl", ".pyc", ".pyd", ".so", ".dylib",
 })
+
+
+def _decode_file_bytes(raw: bytes) -> Tuple[str, str]:
+    """把文件 bytes 解码为文本并记录实际编码：UTF-8 严格 → GBK（errors=replace）。
+
+    GBK 回退使用 replace 解码（保持旧行为），调用方写回前必须先
+    ``content.encode(encoding)`` 试编码；无法无损写回时拒绝写盘，
+    绝不允许先截断文件再抛编码异常（旧实现会把文件截成 0 字节）。
+    """
+    try:
+        return raw.decode("utf-8"), "utf-8"
+    except (UnicodeDecodeError, UnicodeError):
+        return raw.decode("gbk", errors="replace"), "gbk"
+
+
+def _decode_text_strict(raw: bytes) -> Tuple[str, str]:
+    """无损解码：UTF-8 严格 → GBK 严格，两者都失败时抛 UnicodeDecodeError。
+
+    用于补丁应用等必须保证字节级无损的读写回路（避免 errors=replace 引入
+    U+FFFD 后写回永久损坏非 UTF-8 文件）。
+    """
+    try:
+        return raw.decode("utf-8"), "utf-8"
+    except (UnicodeDecodeError, UnicodeError):
+        pass
+    return raw.decode("gbk"), "gbk"
+
+
+def _atomic_write_bytes(path: Path, data: bytes) -> None:
+    """同目录临时文件 + os.replace 原子写：崩溃不会留下半截的目标文件。"""
+    fd, tmp_name = tempfile.mkstemp(dir=str(path.parent), prefix=f".{path.name}.", suffix=".tmp")
+    tmp_path = Path(tmp_name)
+    try:
+        with os.fdopen(fd, "wb") as f:
+            f.write(data)
+        os.replace(tmp_path, str(path))
+    except Exception:
+        try:
+            tmp_path.unlink()
+        except Exception:
+            pass
+        raise
 
 
 def _get_search_root(path: str) -> tuple[Optional[Path], str]:
@@ -594,11 +637,16 @@ def _impl_write(file_path: str = "", content: str = "", mode: str = "overwrite",
     try:
         target_file.parent.mkdir(parents=True, exist_ok=True)
 
+        # 以 bytes 写（os.replace 原子替换），不做任何换行翻译：
+        # 内容中的 \n / \r\n 原样落盘，避免 write_text 的默认 newline=None
+        # 把 LF 文件整体改写成 CRLF。
+        data = str(content).encode(encoding)
         if mode == "append" and target_file.exists():
-            with open(str(target_file), "a", encoding=encoding) as f:
-                f.write(str(content))
+            # 追加不截断原文件，直接二进制追加（同样不做换行翻译）
+            with open(str(target_file), "ab") as f:
+                f.write(data)
         else:
-            target_file.write_text(str(content), encoding=encoding)
+            _atomic_write_bytes(target_file, data)
 
         action = "追加" if mode == "append" else "写入"
         return _finalize_tool_output(
@@ -691,12 +739,10 @@ def _impl_edit(file_path: str = "", old_string: str = "", new_string: str = "", 
         )
 
     try:
-        file_encoding = "utf-8"
-        try:
-            content = target_file.read_text(encoding="utf-8")
-        except (UnicodeDecodeError, UnicodeError):
-            file_encoding = "gbk"
-            content = target_file.read_text(encoding="gbk", errors="replace")
+        # 二进制读入自行解码（不做换行翻译，保留文件原始 \n / \r\n）；
+        # 记录实际使用的编码，写回时用同一编码（先试编码再写盘，见下）。
+        raw = target_file.read_bytes()
+        content, file_encoding = _decode_file_bytes(raw)
     except Exception as e:
         return _finalize_tool_output(
             "Edit",
@@ -705,6 +751,13 @@ def _impl_edit(file_path: str = "", old_string: str = "", new_string: str = "", 
         )
 
     count = content.count(old_string)
+    search_old, replace_new = old_string, new_string
+    if count == 0 and "\r\n" in content and "\r\n" not in old_string:
+        # CRLF 文件兼容：Read 展示的是 \n 文本，模型常以 \n 拼 old_string；
+        # 精确匹配失败时按文件实际行尾还原再匹配（写回经 bytes 原样输出，行尾不变）。
+        search_old = old_string.replace("\n", "\r\n")
+        replace_new = new_string.replace("\n", "\r\n")
+        count = content.count(search_old)
 
     if count == 0:
         return _finalize_tool_output(
@@ -721,12 +774,24 @@ def _impl_edit(file_path: str = "", old_string: str = "", new_string: str = "", 
         )
 
     if replace_all:
-        new_content = content.replace(old_string, new_string)
+        new_content = content.replace(search_old, replace_new)
     else:
-        new_content = content.replace(old_string, new_string, 1)
+        new_content = content.replace(search_old, replace_new, 1)
 
     try:
-        target_file.write_text(new_content, encoding=file_encoding)
+        # 先试编码：GBK 等编码若无法无损写回（如 errors=replace 读入引入的 U+FFFD），
+        # 拒绝写入并保留原文件。旧实现 open('w') 先截断再抛编码异常，会把文件截成 0 字节。
+        encoded = new_content.encode(file_encoding)
+    except (UnicodeEncodeError, UnicodeError):
+        return _finalize_tool_output(
+            "Edit",
+            "错误：文件编码无法无损写回，请人工处理",
+            file_path=str(target_file),
+        )
+
+    try:
+        # 同目录临时文件 + os.replace 原子写，且不做换行翻译（保持原行尾不变）
+        _atomic_write_bytes(target_file, encoded)
     except Exception as e:
         logger.error(f"编辑文件写入失败: {e}", exc_info=True)
         return _finalize_tool_output(
@@ -846,6 +911,11 @@ def _parse_patch(patch_text: str) -> List[Dict[str, Any]]:
             current["move_to"] = move_match.group(1).strip()
         elif current is not None and line.strip():
             current["lines"].append(line)
+        elif current is not None and in_diff:
+            # Update 段内的空行必须保留原始行：统一 diff 的空上下文行（空行或单个
+            # 空格）strip 后为空，丢弃会让 hunk 行计数错位、应用补丁时损坏文件。
+            # （应用阶段会校验上下文行与原文一致，不匹配即中止，见 _apply_hunks。）
+            current["lines"].append(line)
 
     if current:
         sections.append(current)
@@ -890,7 +960,8 @@ def _apply_section(sec: Dict[str, Any]) -> str:
                 content_lines.append(l[1:])
             elif l.startswith(" ") or not l.startswith("-"):
                 content_lines.append(l)
-        target.write_text("\n".join(content_lines) + "\n", encoding="utf-8")
+        # 原子写 + bytes 直写（不做换行翻译）
+        _atomic_write_bytes(target, ("\n".join(content_lines) + "\n").encode("utf-8"))
         return f"Created {target}"
 
     elif action == "delete":
@@ -903,7 +974,15 @@ def _apply_section(sec: Dict[str, Any]) -> str:
         if not target.exists():
             return f"Update failed: {target} does not exist"
 
-        content = target.read_text(encoding="utf-8", errors="replace")
+        try:
+            # 无损解码（UTF-8 严格 → GBK 严格）：无法无损解码时拒绝执行，
+            # 避免 errors=replace 读 + UTF-8 写回永久损坏 GBK 等非 UTF-8 文件。
+            content, file_encoding = _decode_text_strict(target.read_bytes())
+        except (UnicodeDecodeError, UnicodeError):
+            return (
+                f"Update failed: {target} 不是有效的 UTF-8/GBK 文本文件，"
+                "无法无损解码，为避免损坏已拒绝执行，请人工处理"
+            )
         lines = content.splitlines(keepends=True)
 
         # Parse unified diff hunks from sec["lines"]
@@ -911,8 +990,18 @@ def _apply_section(sec: Dict[str, Any]) -> str:
         if not hunks:
             return f"Update failed: no valid diff hunks found in patch"
 
-        new_lines = _apply_hunks(lines, hunks)
-        target.write_text("".join(new_lines), encoding="utf-8")
+        # 保持原文件行尾风格：CRLF 文件的替换行同样使用 CRLF，避免混入 LF
+        newline_style = "\r\n" if "\r\n" in content else "\n"
+        new_lines, apply_error = _apply_hunks(lines, hunks, newline=newline_style)
+        if apply_error:
+            # fail-closed：上下文与原文不一致时不写盘，绝不损坏目标文件
+            return f"Update failed: {apply_error}"
+
+        try:
+            data = "".join(new_lines).encode(file_encoding)
+        except (UnicodeEncodeError, UnicodeError):
+            return f"Update failed: 文件编码无法无损写回，请人工处理"
+        _atomic_write_bytes(target, data)
 
         if move_to:
             move_result = resolve_tool_path(move_to, access="write")
@@ -936,6 +1025,7 @@ def _parse_hunks(patch_lines: List[str]) -> List[Dict[str, Any]]:
         hunk_match = re.match(r'@@\s+-(\d+)(?:,(\d+))?\s+\+(\d+)(?:,(\d+))?\s*@@(.*)', line)
         if hunk_match:
             if current:
+                _trim_trailing_blank_context(current)
                 hunks.append(current)
             current = {
                 "old_start": int(hunk_match.group(1)),
@@ -949,35 +1039,65 @@ def _parse_hunks(patch_lines: List[str]) -> List[Dict[str, Any]]:
             current["lines"].append(line)
 
     if current:
+        _trim_trailing_blank_context(current)
         hunks.append(current)
     return hunks
 
 
-def _apply_hunks(original_lines: List[str], hunks: List[Dict[str, Any]]) -> List[str]:
-    """Apply unified diff hunks to original lines. Returns new lines list."""
+def _trim_trailing_blank_context(hunk: Dict[str, Any]) -> None:
+    """去掉 hunk 末尾的空白行（patch 段落分隔符或空上下文行）。
+
+    末尾的空上下文行是恒等操作（消耗后原样回填），去掉不会改变应用结果，
+    却能避免模型补丁里常见的尾随空行被当成空上下文而触发误中止。
+    """
+    lines = hunk["lines"]
+    while lines and not lines[-1].strip():
+        lines.pop()
+
+
+def _apply_hunks(
+    original_lines: List[str],
+    hunks: List[Dict[str, Any]],
+    newline: str = "\n",
+) -> Tuple[List[str], str]:
+    """Apply unified diff hunks to original lines. Returns (new_lines, error).
+
+    应用前校验上下文行与原文一致；不一致时返回 error 且不产出新内容，
+    调用方必须放弃写盘（fail-closed，防止 hunk 计数错位损坏文件）。
+    """
     result = list(original_lines)
     # Apply hunks in reverse order to maintain line offsets
     for hunk in reversed(hunks):
         old_start = hunk["old_start"] - 1  # 0-indexed
         old_count = hunk["old_count"]
-        # Build replacement lines
+        # Build replacement lines and verify context lines against the original
         replacement = []
         consumer = 0
         for l in hunk["lines"]:
-            if l.startswith("+") or l.startswith(" "):
-                replacement.append(l[1:] + "\n")
-                if l.startswith(" "):
+            marker = l[0] if l else " "  # 空行按空上下文行处理
+            body = l[1:] if l else ""
+            if marker == "+" or marker == " ":
+                if marker == " ":
+                    idx = old_start + consumer
+                    if idx >= len(original_lines) or \
+                            original_lines[idx].rstrip("\r\n") != body.rstrip("\r\n"):
+                        shown = body.rstrip("\r\n")[:50] or "<空行>"
+                        return [], (
+                            f"补丁上下文与文件内容不一致（原文件第 {idx + 1} 行期望 {shown!r}），"
+                            "已中止且未修改文件"
+                        )
                     consumer += 1
-            elif l.startswith("-"):
+                replacement.append(body if body.endswith("\n") else body + newline)
+            elif marker == "-":
                 consumer += 1
             else:
-                replacement.append(l + "\n")
+                replacement.append(l + newline)
 
         # Remove old lines
         end = min(old_start + consumer, len(result))
         result[old_start:end] = replacement
 
-    return result
+    return result, ""
 
 
 def _check_apply_patch_permissions(tool_input: dict) -> PermissionDecision:

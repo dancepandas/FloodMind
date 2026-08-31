@@ -191,6 +191,39 @@ class TestSkillCuratorArchive:
             archived = curator.list_archived()
             assert "test-skill" in archived
 
+    def test_archive_conflict_keeps_existing_archive(self, tmp_path):
+        """同名归档已存在时归档失败并保留既有归档内容（不再 rmtree 覆盖）。"""
+        skills = tmp_path / "skills"
+        archive = tmp_path / "archive"
+        TestSkillCuratorRegistryBinding._write_skill(skills, "dup", "v1")
+        existing = TestSkillCuratorRegistryBinding._write_skill(archive, "dup", "old-archived")
+
+        registry = SkillRegistry(roots=[skills], writable_root=skills)
+        curator = SkillCurator(
+            registry=registry, state_file=str(tmp_path / "state.json"), archive_root=archive
+        )
+        assert not curator.archive_skill("dup")
+        # 既有归档未被清空，源技能也未被移动
+        assert "old-archived" in (existing / "SKILL.md").read_text(encoding="utf-8")
+        assert (skills / "dup" / "SKILL.md").is_file()
+
+    def test_restore_conflict_keeps_existing_skill_and_archive(self, tmp_path):
+        """恢复目标存在同名技能目录时拒绝覆盖，源归档保持完好。"""
+        skills = tmp_path / "skills"
+        archive = tmp_path / "archive"
+        TestSkillCuratorRegistryBinding._write_skill(skills, "dup", "v1")
+        registry = SkillRegistry(roots=[skills], writable_root=skills)
+        curator = SkillCurator(
+            registry=registry, state_file=str(tmp_path / "state.json"), archive_root=archive
+        )
+        assert curator.archive_skill("dup")
+
+        # 归档后同名技能被重建
+        recreated = TestSkillCuratorRegistryBinding._write_skill(skills, "dup", "recreated")
+        assert not curator.restore_skill("dup")
+        assert "recreated" in (recreated / "SKILL.md").read_text(encoding="utf-8")
+        assert (archive / "dup" / "SKILL.md").is_file()
+
 
 class TestSkillCuratorDuplicates:
     """Test duplicate skill detection."""

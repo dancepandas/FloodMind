@@ -8,10 +8,11 @@ PermissionService — 统一权限检查服务
 
 优先级顺序（固定，不可覆盖）：
 1. 工具级 policy 检查 → 如果 DENY，直接 DENY
-2. 工具级 policy 检查 → 如果 ASK，进入 AskService，不允许全局 allow 覆盖
-3. 全局 deny rules
-4. 全局 allow rules（只在工具级结果是 ALLOW 时生效）
-5. 默认：按工具级 policy 的结果返回
+2. 子代理 tier 硬门 → planning 模式硬门（硬拒，任何钩子/规则不可翻越）
+3. 全局 deny rules（先于 ASK：用户批准不能翻越宿主显式拒绝规则）
+4. 工具级 ASK → AskService（host_preapproved 时自动放行，硬门除外）
+5. 全局 allow rules（只在工具级结果是 ALLOW 时生效）
+6. 默认：按工具级 policy 的结果返回
 
 设计原则：
 - ToolSpec.permission_policy 为 None 时默认 DENY（fail closed）
@@ -96,6 +97,7 @@ class PermissionService:
         request: PermissionRequest,
         *,
         journal_authority: Any,
+        host_preapproved: bool = False,
     ) -> PermissionDecision:
         if journal_authority is None:
             raise ValueError("journal_authority is required for permission checks")
@@ -117,19 +119,27 @@ class PermissionService:
             if decision is not None:
                 return decision
 
-        if tool_policy_result.behavior == PermissionBehavior.ASK:
-            return self._handle_ask(
-                request,
-                tool_policy_result.reason,
-                journal_authority=journal_authority,
-            )
-
+        # ── 全局 deny 规则：先于 ASK。用户批准不能翻越宿主显式拒绝规则 ──
         for rule in self._deny_rules:
             if rule.matches(request.tool_name, request.tool_input, request.session_id):
                 return PermissionDecision(
                     behavior=rule.behavior,
                     reason=rule.reason or f"全局拒绝规则 '{rule.name}' 命中",
                 )
+
+        if tool_policy_result.behavior == PermissionBehavior.ASK:
+            # 宿主 permission_handler 显式预授权时，ASK 自动放行——但仅限走到这里的
+            # 策略级 ASK；tier/planning/路径/deny 硬门已在前面返回，不可被预授权翻越。
+            if host_preapproved:
+                return PermissionDecision(
+                    behavior=PermissionBehavior.ALLOW,
+                    reason=f"宿主 permission_handler 预授权，跳过用户确认: {tool_policy_result.reason}",
+                )
+            return self._handle_ask(
+                request,
+                tool_policy_result.reason,
+                journal_authority=journal_authority,
+            )
 
         # 全局 allow 规则对子代理被禁工具不生效（tier 层已提前返回）
         for rule in self._allow_rules:
@@ -190,7 +200,7 @@ class PermissionService:
     # 放行 readonly/read_path/ask(=exit_plan_mode)/非破坏性 internal。
     # 仅主代理持 mode，子代理恒 execution（由 _resolve_mode 保证）。
 
-    _PLANNING_DENIED_POLICY_TYPES = frozenset({"write", "delete", "move", "patch", "exec", "state_write"})
+    _PLANNING_DENIED_POLICY_TYPES = frozenset({"write", "delete", "move", "patch", "exec", "state_write", "skill_script"})
 
     def _check_planning_mode_gate(
         self, request: PermissionRequest, policy_result: PermissionDecision
@@ -466,7 +476,10 @@ class PermissionService:
         script_name = str(normalized.get("script_name", "")).strip().strip('"').strip("'")
 
         if not skill_name or not script_name:
-            return PermissionDecision(behavior=PermissionBehavior.ALLOW)
+            return PermissionDecision(
+                behavior=PermissionBehavior.DENY,
+                reason="skill_script 缺少 skill_name 或 script_name，无法校验脚本归属（fail-closed）",
+            )
 
         if '..' in skill_name or '..' in script_name:
             return PermissionDecision(

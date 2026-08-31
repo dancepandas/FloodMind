@@ -361,7 +361,8 @@ class SkillCurator:
             archive_dir = self._archive_skill_dir(skill_name, require_source=False)
             archive_dir.parent.mkdir(parents=True, exist_ok=True)
             if archive_dir.exists():
-                shutil.rmtree(archive_dir)
+                # 同名归档已存在时拒绝覆盖：rmtree 会静默清空既有归档内容
+                raise ValueError(f"同名归档已存在: {archive_dir}")
             shutil.move(str(skill_dir), str(archive_dir))
             self.registry.refresh()
 
@@ -397,7 +398,8 @@ class SkillCurator:
         try:
             skill_dir = self._writable_skill_dir(skill_name, require_source=False)
             if skill_dir.exists():
-                shutil.rmtree(skill_dir)
+                # 同名技能目录已存在时拒绝恢复覆盖，避免误删现有技能内容
+                raise ValueError(f"同名技能目录已存在，拒绝恢复覆盖: {skill_dir}")
             shutil.move(str(archive_dir), str(skill_dir))
             self.registry.refresh()
 

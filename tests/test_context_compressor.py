@@ -1,5 +1,6 @@
 """Tests for context compression."""
 
+import json
 from unittest.mock import MagicMock
 
 import pytest
@@ -292,4 +293,110 @@ class TestToolCallAtomicGroup:
         # tail_start 不应落在 tool 组中间
         if tail_start < len(messages) and messages[tail_start].get("role") == "tool":
             assert messages[tail_start - 1].get("role") != "tool"
+
+
+# ---------------------------------------------------------------------------
+# Journal-backed Compact（P0 回归：窗口交集过滤不得静默丢组）
+# ---------------------------------------------------------------------------
+
+class TestCompressJournalWindowCoverage:
+    def test_group_straddling_head_boundary_enters_summary_source(self):
+        """head 边界落在 assistant(tool_calls) 组首时，AtomicGroups 段因 compaction
+        块连锁向前延伸越过头边界；旧的整段包含过滤会把该组排除——组内消息不进
+        head、不进摘要源、不进 tail，静默丢失。修复后按窗口交集纳入摘要源。"""
+        c = ContextCompressor(head_keep=2, tail_keep=2)
+        tool_marker = "TOOLCALL-X-UNIQUE-MARKER"
+        middle_marker = "ASSISTANT-MIDDLE-UNIQUE-MARKER"
+        messages = [
+            {"role": "system", "content": "sys"},
+            {"role": "system", "content": "[compact] 旧摘要", "compaction": True},
+            _asst_tc("x"),
+            _tool("x", content=tool_marker + "r" * 200),
+            {"role": "assistant", "content": middle_marker},
+            {"role": "user", "content": "tail question"},
+            {"role": "assistant", "content": "tail answer"},
+        ]
+        # head_end=2 恰落在 assistant(tool_calls) 组首；AtomicGroups 段为
+        # (0,5)（compaction 连锁），旧过滤下 messages[2:5] 会被整段排除
+        assert c._aligned_split_points(messages) == (2, 5)
+
+        result = c.compress_journal(messages, max_context_tokens=100000)
+
+        # 组内消息必须被覆盖：进入压缩摘要（head/tail 均不含它们）
+        assert tool_marker in result.summary, "assistant(tool_calls)+tool 组被静默丢弃"
+        assert middle_marker in result.summary, "窗口内 assistant 消息被静默丢弃"
+        # 输出结构不变：head(2) + 摘要 + tail(2)
+        assert len(result.compressed_messages) == 5
+        tail_text = json.dumps(result.compressed_messages[3:], ensure_ascii=False)
+        assert tool_marker not in tail_text  # 覆盖来自摘要而非 tail
+
+    def test_window_outside_ranges_not_duplicated_into_summary(self):
+        """与窗口无交集的段（纯 head/tail 段）不进入摘要源。"""
+        c = ContextCompressor(head_keep=2, tail_keep=2)
+        messages = [
+            {"role": "system", "content": "sys"},
+            {"role": "system", "content": "[compact] 旧摘要", "compaction": True},
+            {"role": "user", "content": "q1"},
+            {"role": "assistant", "content": "a1"},
+            {"role": "user", "content": "q2"},
+            {"role": "assistant", "content": "a2"},
+        ]
+        result = c.compress_journal(messages, max_context_tokens=100000)
+        # head 段（system/旧摘要）不出现在摘要里
+        assert "旧摘要" not in result.summary
+
+
+# ---------------------------------------------------------------------------
+# fail-closed 渐进收紧（P2：3 轮阈值 2000→1000→500 均有实际压缩效果）
+# ---------------------------------------------------------------------------
+
+class TestProgressiveTrim:
+    def test_trim_thresholds_progressively_shrink(self):
+        """同一长内容依次按 2000→1000→500 阈值裁剪，每轮都严格缩短。"""
+        c = ContextCompressor()
+        messages = [{"role": "tool", "content": "x" * 5000}]
+        lengths = []
+        for limit in (2000, 1000, 500):
+            messages = c._trim_tool_outputs(messages, max_len=limit)
+            assert "已省略" in messages[0]["content"]
+            lengths.append(len(messages[0]["content"]))
+        assert lengths[0] <= 2000
+        assert lengths[1] < lengths[0]
+        assert lengths[2] < lengths[1]
+        assert lengths[2] <= 500
+
+    def test_trim_result_not_longer_than_threshold(self):
+        """裁剪结果（含省略标记）不得长于阈值，避免渐进轮空转。"""
+        c = ContextCompressor()
+        for limit in (2000, 1000, 500):
+            out = c._trim_tool_outputs([{"role": "tool", "content": "y" * 9000}], max_len=limit)
+            assert len(out[0]["content"]) <= limit
+
+    def test_compress_journal_progressive_rounds_all_effective(self):
+        """compress_journal 的 Offload 收紧真实生效：尾部大工具组被逐轮收紧，
+        而非首轮裁到 ~2000 字符后第 2、3 轮空转（旧实现此时会 fail-closed 抛错）。"""
+        c = ContextCompressor(head_keep=1, tail_keep=2)
+        messages = [
+            {"role": "system", "content": "s"},
+            {"role": "user", "content": "u" * 200},
+            _asst_tc("a"),
+            _tool("a", content="t" * 6000),
+            _asst_tc("b"),
+            _tool("b", content="t" * 6000),
+            {"role": "assistant", "content": "wrap"},
+            _asst_tc("z"),
+            _tool("z", content="t" * 6000),
+            {"role": "assistant", "content": "done"},
+        ]
+        # 尾部保留的工具组（组 z）初始被裁到 ~2000 阈值仍超预算；
+        # 渐进收紧（1000→500）后才能通过最终校验
+        result = c.compress_journal(messages, max_context_tokens=1200)
+        est = ContextCompressor._estimate_tokens(result.compressed_messages)
+        assert est <= 1200
+        tail_tools = [
+            m for m in result.compressed_messages
+            if m.get("role") == "tool"
+        ]
+        assert tail_tools, "尾部工具组不应被丢弃"
+        assert max(len(m["content"]) for m in tail_tools) <= 500
 

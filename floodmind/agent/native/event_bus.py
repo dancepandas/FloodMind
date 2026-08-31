@@ -212,17 +212,48 @@ class EventBus:
         self.emit(event)
 
 
-class StepEventBus:
+class StepEventBus(EventBus):
     """EventBus 子通道：给所有事件附加 step_key，用于并行委派时区分不同步骤的事件。
 
     trace_session_id 非空时，给每个事件注入 _trace_session，使 TracingService 能
     区分并行子代理各自的事件（避免串台）。
+
+    继承 EventBus（D-11 重构）：此前逐字复制父类全部 emit_* 方法，父类新增方法
+    即双写漂移。现在只覆写 emit() 做事件装饰，其余方法全部复用父类实现——它们
+    构造 dict 后调用 self.emit()，自然经过 step_key/_trace_session 注入。emit 的
+    装饰结果最终交给 parent.emit 分发（queue/listeners/persist 均挂在 parent 上），
+    本实例自身的 queue/listener 槽位不会被触碰。
     """
 
     def __init__(self, parent: EventBus, step_key: str, trace_session_id: str = ""):
+        super().__init__()
         self._parent = parent
         self._step_key = step_key
         self._trace_session_id = trace_session_id
+
+    # ── 单槽位管理方法全部委托 parent（P2-5）────────────────────
+    # queue/listener/persist 都挂在 parent 上；若这些方法操作本实例自身槽位，
+    # 会"静默操作死槽位"——emit 委托 parent 后本实例槽位永不生效。
+    def set_queue(self, q) -> None:
+        self._parent.set_queue(q)
+
+    def clear_queue(self) -> None:
+        self._parent.clear_queue()
+
+    def set_persist_callback(self, cb) -> None:
+        self._parent.set_persist_callback(cb)
+
+    def get_persist_callback(self):
+        return self._parent.get_persist_callback()
+
+    def add_listener(self, listener) -> None:
+        self._parent.add_listener(listener)
+
+    def remove_listener(self, listener) -> None:
+        self._parent.remove_listener(listener)
+
+    def clear_listeners(self) -> None:
+        self._parent.clear_listeners()
 
     def emit(self, event: dict) -> None:
         # 复制事件字典，避免修改调用方持有的原对象
@@ -232,132 +263,3 @@ class StepEventBus:
         if self._trace_session_id and "_trace_session" not in event:
             event["_trace_session"] = self._trace_session_id
         self._parent.emit(event)
-
-    def emit_reasoning(self, content: str) -> None:
-        self.emit({"type": "thought_delta", "content": content})
-
-    def emit_token(self, content: str) -> None:
-        self.emit({"type": "answer_delta", "content": content})
-
-    def emit_tool_status(self, tool_name: str, status: str, tool_input: str = "", call_id: str = "") -> None:
-        event: Dict[str, Any] = {"type": "action_start", "tool_name": tool_name, "status": status}
-        if call_id:
-            event["call_id"] = call_id
-        if tool_input:
-            event["tool_input"] = tool_input
-        self.emit(event)
-
-    def emit_tool_result(self, tool_name: str, status: str, content: str, tool_input: str = "", call_id: str = "") -> None:
-        event: Dict[str, Any] = {
-            "type": "action_end",
-            "tool_name": tool_name,
-            "status": status,
-            "content": content,
-        }
-        if call_id:
-            event["call_id"] = call_id
-        if tool_input:
-            event["tool_input"] = tool_input
-        self.emit(event)
-
-    def emit_workflow_plan(self, title: str, steps: List[dict]) -> None:
-        self.emit({
-            "type": "workflow_plan",
-            "title": title,
-            "steps": steps,
-        })
-
-    def emit_workflow_step(self, step_key: str, status: str, title: str = "", detail: str = "", label: str = "", outcome: str = "", subtasks: Optional[List[dict]] = None) -> None:
-        event: Dict[str, Any] = {
-            "type": "workflow_step",
-            "step_key": step_key,
-            "status": status,
-        }
-        if title:
-            event["title"] = title
-        if detail:
-            event["detail"] = detail
-        if label:
-            event["label"] = label
-        if outcome:
-            event["outcome"] = outcome
-        if subtasks:
-            event["subtasks"] = subtasks
-        self.emit(event)
-
-    def emit_file_generated(self, file_name: str, download_url: str, size: int = 0) -> None:
-        self.emit({
-            "type": "file_generated",
-            "filename": file_name,
-            "file_name": file_name,
-            "download_url": download_url,
-            "size": size,
-        })
-
-    def emit_image_generated(self, file_name: str, download_url: str, size: int = 0) -> None:
-        self.emit({
-            "type": "image_generated",
-            "filename": file_name,
-            "file_name": file_name,
-            "download_url": download_url,
-            "image_url": download_url,
-            "size": size,
-        })
-
-    def emit_heartbeat(self) -> None:
-        self.emit({"type": "heartbeat"})
-
-    def emit_error(self, message: str, code: str = "") -> None:
-        event: Dict[str, Any] = {"type": "error", "content": message}
-        if code:
-            event["code"] = code
-        self.emit(event)
-
-    def emit_attachment_context(self, images: List[dict]) -> None:
-        self.emit({"type": "attachment_context", "images": images})
-
-    def emit_permission_ask(self, ask_id: str, tool_name: str, reason: str, tool_input: Dict[str, Any], session_id: str = "", call_id: str = "") -> None:
-        event: Dict[str, Any] = {
-            "type": "permission_ask",
-            "ask_id": ask_id,
-            "session_id": session_id,
-            "call_id": call_id,
-            "tool_name": tool_name,
-            "reason": reason,
-            "tool_input": tool_input,
-        }
-        self.emit(event)
-
-    def emit_context_compress_start(self) -> None:
-        self.emit_compaction_start(reason="auto")
-
-    def emit_context_compress_done(self, summary: str) -> None:
-        self.emit_compaction_end(summary_preview=summary)
-
-    def emit_compaction_start(self, reason: str = "auto") -> None:
-        self.emit({"type": "context_compress_start", "content": "正在压缩历史对话...", "reason": reason})
-
-    def emit_compaction_end(self, summary_preview: str = "") -> None:
-        self.emit({"type": "context_compress_done", "content": summary_preview, "summary_preview": summary_preview[:200]})
-
-    def emit_token_usage(self, prompt_tokens: int = 0, completion_tokens: int = 0, total_tokens: int = 0) -> None:
-        self.emit({
-            "type": "token_usage",
-            "prompt_tokens": prompt_tokens,
-            "completion_tokens": completion_tokens,
-            "total_tokens": total_tokens,
-        })
-
-    def emit_llm_step_start(self, model_name: str = "", iteration: int = 0) -> None:
-        event: Dict[str, Any] = {"type": "llm_step_start", "iteration": iteration}
-        if model_name:
-            event["model"] = model_name
-        self.emit(event)
-
-    def emit_llm_step_end(self, reason: str = "stop", tokens: Optional[Dict[str, int]] = None) -> None:
-        event: Dict[str, Any] = {
-            "type": "llm_step_end",
-            "finish_reason": reason,
-            "tokens": tokens or {},
-        }
-        self.emit(event)

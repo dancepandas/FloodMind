@@ -305,22 +305,36 @@ def spawn_background_review(
     model_client: ModelClient,
     memory_instance: Any = None,
     experience_tree: Any = None,
-) -> None:
+) -> bool:
     """
     在后台线程中执行会话回顾。
 
     使用方式（在 SSE 流结束后调用）：
-        threading.Thread(
-            target=spawn_background_review,
-            args=(session_id, messages, model_client, memory, exp_tree),
-            daemon=True,
-        ).start()
+        spawn_background_review(session_id, messages, model_client, memory, exp_tree)
+
+    受 settings.background_review 配置控制（enabled / min_message_count）。
+    未开启或消息数不足时不启动线程，返回 False；已启动返回 True。
     """
+    from floodmind.config.settings import settings as _settings
+
+    br_cfg = getattr(_settings, "background_review", None)
+    enabled = bool(getattr(br_cfg, "enabled", True)) if br_cfg is not None else True
+    min_messages = int(getattr(br_cfg, "min_message_count", 3)) if br_cfg is not None else 3
+    if not enabled:
+        return False
+    if len(messages) < min_messages:
+        return False
 
     def _worker():
-        reviewer = BackgroundReviewer(model_client)
-        result = reviewer.review_session(session_id, messages)
-        if result:
-            reviewer.apply_review_result(session_id, result, memory_instance, experience_tree)
+        try:
+            reviewer = BackgroundReviewer(
+                model_client, enabled=True, min_message_count=min_messages
+            )
+            result = reviewer.review_session(session_id, messages)
+            if result:
+                reviewer.apply_review_result(session_id, result, memory_instance, experience_tree)
+        except Exception as exc:
+            logger.warning("[BackgroundReview] 后台回顾异常（非致命）: %s", exc)
 
     threading.Thread(target=_worker, daemon=True, name=f"bg-review-{session_id[:8]}").start()
+    return True

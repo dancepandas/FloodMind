@@ -4,6 +4,7 @@
 工具运行期到执行、终态分类与清理的完整生命周期，返回 Typed SubagentResult。
 forward-only：不向后兼容。
 """
+import json
 import logging
 import time
 import uuid
@@ -52,6 +53,28 @@ class ChildThreadQuota:
         return None
 
 
+def _usage_total_from_event(event: Any) -> int:
+    """从 usage 事件提取 total_tokens。
+
+    ModelClient 发出的 usage 事件 raw 恒为 None，数值在 content（JSON 字符串）；
+    同时兼容测试/其他来源直接携带 raw dict 的情况。解析失败忽略（返回 0）。
+    """
+    raw = getattr(event, "raw", None)
+    if isinstance(raw, dict):
+        try:
+            return int(raw.get("total_tokens") or 0)
+        except (TypeError, ValueError):
+            pass
+    content = getattr(event, "content", "") or ""
+    try:
+        payload = json.loads(content) if isinstance(content, str) else None
+        if isinstance(payload, dict):
+            return int(payload.get("total_tokens") or 0)
+    except (json.JSONDecodeError, TypeError, ValueError):
+        pass
+    return 0
+
+
 class _TokenBudgetModelClient:
     """按次/按量计数模型客户端：每次 stream_chat = 1 turn；usage 事件累计 total_tokens。"""
 
@@ -62,8 +85,8 @@ class _TokenBudgetModelClient:
     def stream_chat(self, *args, **kwargs):
         usage_total = 0
         for event in self._inner.stream_chat(*args, **kwargs):
-            if event.type == "usage" and event.raw is not None:
-                usage_total = int(event.raw.get("total_tokens", 0))
+            if event.type == "usage":
+                usage_total = _usage_total_from_event(event)
             yield event
         self._quota.note_turn(usage_total)
 
@@ -131,7 +154,11 @@ class ChildThreadRuntime:
             f"sub-{context.session_id}-{child_thread.parent_call_id}-{uuid.uuid4().hex[:8]}"
         )
         base_bus = step_event_bus or self._event_bus
+        # 复用父 StepEventBus 时临时改写 trace_session_id 区分子代理事件；
+        # 原值保存在 bus_trace_saved，finally 中恢复，避免污染父会话后续事件的追踪归属。
+        bus_trace_saved: Optional[str] = None
         if isinstance(base_bus, StepEventBus) and not getattr(base_bus, "_trace_session_id", ""):
+            bus_trace_saved = base_bus._trace_session_id
             base_bus._trace_session_id = child_session_id
             child_event_bus = base_bus
         elif isinstance(base_bus, StepEventBus):
@@ -327,8 +354,10 @@ class ChildThreadRuntime:
             terminal_event, payload, subagent_result = self._finalize_classification(
                 terminal_event, payload, subagent_result, verified=verified,
             )
-            if child_auth is not None:
-                child_auth.emit(terminal_event, payload)
+            # 终态只经 parent_auth 记录一次：child_auth 与 parent_auth 共享同一份
+            # run journal（同 runtime_dir/run_id，仅 thread_id 作用域不同，而这里的
+            # thread_id 本就相同），双写会在 Journal 留下两条内容完全相同的终态事件。
+            # 与 child_thread.accepted/running 及异常路径（仅 parent_auth.emit）保持一致。
             parent_auth.emit(
                 terminal_event, payload, thread_id=child_thread.thread_id,
             )
@@ -357,7 +386,9 @@ class ChildThreadRuntime:
             )
             raise
         finally:
-            # 7. 清理：先确认子会话后台任务终态，再销毁沙盒。
+            # 7. 清理：先恢复父 bus 的 trace_session_id，再确认子会话后台任务终态并销毁沙盒。
+            if bus_trace_saved is not None:
+                base_bus._trace_session_id = bus_trace_saved
             self._cleanup_child(child_session_id, sandbox_ctx)
 
     def _cleanup_child(self, child_session_id: str, sandbox_ctx: Any) -> bool:

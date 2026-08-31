@@ -198,6 +198,61 @@ class TestExperienceTreePersistence:
         assert stats["leaf_cases"] >= 1
 
 
+class TestExperienceTreeCorruptIndex:
+    def test_corrupt_index_quarantined_not_overwritten(self, temp_dir):
+        """索引损坏时加载降级为空树，但损坏原件必须先改名隔离，
+        后续保存不得覆盖原文件（瞬时读取失败不应永久清空经验）。"""
+        import json as _json
+        index_file = os.path.join(temp_dir, "tree_index.json")
+        with open(index_file, "w", encoding="utf-8") as f:
+            f.write("{not valid json!!")
+
+        tree = ExperienceTree(persist_dir=temp_dir)
+        assert tree.get_stats()["leaf_cases"] == 0  # 降级为空树
+
+        # 损坏原件被隔离为 tree_index.json.corrupt-<时间戳>
+        quarantined = [
+            name for name in os.listdir(temp_dir)
+            if name.startswith("tree_index.json.corrupt-")
+        ]
+        assert len(quarantined) == 1
+        with open(os.path.join(temp_dir, quarantined[0]), "r", encoding="utf-8") as f:
+            assert "not valid json" in f.read()
+
+        # 后续保存只写新索引文件，隔离的损坏原件内容不变
+        tree.add_leaf(
+            ExperienceLeaf(node_id="n1", experience_id="e1", path=["A"], label="案例"),
+            ["A"],
+        )
+        assert _json.loads(open(index_file, encoding="utf-8").read())["nodes"]
+        with open(os.path.join(temp_dir, quarantined[0]), "r", encoding="utf-8") as f:
+            assert "not valid json" in f.read()
+
+
+class TestExperienceTreeSummaryBudget:
+    def test_render_summary_within_budget_untouched(self, temp_dir):
+        tree = ExperienceTree(persist_dir=temp_dir)
+        tree.find_or_create_node(["领域"])
+        tree.seal_branch(["领域"], "小摘要")
+        text = tree.render_summary_markdown()
+        assert "小摘要" in text
+        assert "已按预算裁剪" not in text
+
+    def test_render_summary_over_budget_trimmed_with_marker(self, temp_dir):
+        tree = ExperienceTree(persist_dir=temp_dir)
+        for i in range(4):
+            path = [f"领域{i}"]
+            tree.find_or_create_node(path)
+            tree.seal_branch(path, "摘要" + "x" * 2500)
+        text = tree.render_summary_markdown()
+        budget = tree.SUMMARY_CONTEXT_CHAR_BUDGET
+        marker = "（经验摘要已按预算裁剪）"
+        assert text.endswith(marker)
+        assert len(text) <= budget + len(marker)
+        # 高层分支摘要优先保留：排序靠前的分支摘要仍在
+        assert "## 领域0" in text
+
+
 class TestExperienceTreeFeedback:
     def test_mark_helpful(self, tree, sample_leaf):
         tree.add_leaf(sample_leaf, ["水文预报", "敖江流域"])

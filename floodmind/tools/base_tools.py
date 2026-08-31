@@ -478,6 +478,109 @@ _impl_get_skill = get_skill.func
 
 
 
+def _kill_process_tree(process: Optional[subprocess.Popen]) -> None:
+    """终止整棵进程树：Windows 用 taskkill /PID <pid> /T /F，POSIX 用 killpg。
+
+    与 BackgroundTaskService._kill_process 同策略：process.kill() 只杀直接子进程，
+    Windows 下孙进程会全部泄漏，必须用 taskkill /T 递归终止；taskkill 失败时
+    保留 process.kill() 作为兜底（至少保证直接子进程被终止）。
+    """
+    if process is None:
+        return
+    try:
+        if process.poll() is not None:
+            return
+        if os.name == "nt":
+            subprocess.run(
+                ["taskkill", "/PID", str(process.pid), "/T", "/F"],
+                capture_output=True,
+                timeout=10,
+                check=False,
+            )
+        else:
+            try:
+                os.killpg(os.getpgid(process.pid), 9)
+            except (ProcessLookupError, PermissionError):
+                process.kill()
+        try:
+            process.wait(timeout=5)
+        except Exception:
+            # taskkill/killpg 未能终止（或不可用）时兜底杀直接子进程
+            process.kill()
+    except Exception as e:
+        logger.warning("终止进程树失败 pid=%s: %s", process.pid, e)
+        try:
+            process.kill()
+        except Exception:
+            pass
+
+
+def _decode_command_output(data: bytes) -> str:
+    """把子进程输出 bytes 解码为文本：UTF-8 严格 → GBK（cp936）→ errors=replace。
+
+    中文 Windows 下 powershell 原生命令输出多为 GBK，强制 utf-8 会产生乱码；
+    因此按 bytes 读取后在读取端统一走此解码策略。
+    """
+    if not data:
+        return ""
+    try:
+        return data.decode("utf-8")
+    except UnicodeDecodeError:
+        pass
+    try:
+        return data.decode("gbk")
+    except UnicodeDecodeError:
+        pass
+    return data.decode("gbk", errors="replace")
+
+
+# 同步 exec_bash 的 stdout/stderr 总字节封顶（超限停止累积，防止无界内存增长）
+_OUTPUT_LIMIT_BYTES = 64 * 1024
+
+
+class _BoundedOutput:
+    """有界输出累积器：总字节封顶，超限后仍继续读管道（防止子进程写满管道死锁）但不再累积。"""
+
+    def __init__(self, limit: int = _OUTPUT_LIMIT_BYTES):
+        self.limit = limit
+        self.total = 0          # 实际流过的总字节数（含未累积部分，用于截断提示）
+        self._chunks: List[bytes] = []
+        self._remaining = limit
+
+    def append(self, data: bytes) -> None:
+        self.total += len(data)
+        if self._remaining <= 0:
+            return
+        take = data[: self._remaining]
+        self._remaining -= len(take)
+        self._chunks.append(take)
+
+    def decode(self) -> str:
+        return _decode_command_output(b"".join(self._chunks))
+
+
+def _truncation_notice(buffers: List[Any]) -> str:
+    """输出超限时生成截断提示（附原始输出总字节数）。"""
+    total = sum(b.total for b in buffers)
+    if total > _OUTPUT_LIMIT_BYTES:
+        return f"\n[输出已截断，原始输出共 {total} 字节]"
+    return ""
+
+
+def _clamp_exec_timeout(value: Any, default: int = 120, low: int = 1, high: int = 240) -> int:
+    """把模型传入的 exec_bash timeout 钳制到 [1, 240] 秒；非法值（非数字/负数）回退默认。"""
+    try:
+        numeric = float(value)
+    except (TypeError, ValueError):
+        return default
+    if numeric != numeric or numeric in (float("inf"), float("-inf")):
+        # NaN / 无穷大按非法处理
+        return default
+    if numeric <= 0:
+        return default
+    return int(min(max(numeric, low), high))
+
+
 def _check_dangerous_command(command: str) -> str:
     reason = dangerous_command_reason(command)
     return f"{reason}，已拦截" if reason else ""
@@ -627,6 +730,10 @@ def _impl_exec_bash(command: str = "", workdir: str = "", timeout: int = 120, en
                 timeout=timeout,
             )
 
+        # 同步路径超时钳制：模型可能传入非法值（非数字/负数/超上限），
+        # 统一钳到 [1, 240] 秒；后台路径不受此限制（用原始 timeout 作为最大存活时间）。
+        timeout = _clamp_exec_timeout(timeout)
+
         popen_kwargs = {
             # 一次性执行工具不支持交互输入：关闭 stdin，避免模型发出读标准输入的
             # 命令（裸 python / python - / 交互程序）时子进程永久挂起直到超时。
@@ -635,9 +742,9 @@ def _impl_exec_bash(command: str = "", workdir: str = "", timeout: int = 120, en
             "stderr": subprocess.PIPE,
             "env": run_env,
             "cwd": str(cwd),
-            "text": True,
-            "encoding": "utf-8",
-            "errors": "replace",
+            # 按 bytes 读取（不传 text/encoding）：中文 Windows 下 powershell 原生
+            # 命令输出多为 GBK，强制 utf-8 会乱码。由读线程累积原始 bytes，
+            # 结束后用 _decode_command_output（UTF-8 严格 → GBK → replace）解码。
         }
         if process_sandbox is not None:
             popen_kwargs = process_sandbox.wrap_popen_kwargs(popen_kwargs)
@@ -646,20 +753,22 @@ def _impl_exec_bash(command: str = "", workdir: str = "", timeout: int = 120, en
         if process_sandbox is not None:
             process_sandbox.register_process(process)
 
-        stdout_lines = []
-        stderr_lines = []
+        stdout_buf = _BoundedOutput()
+        stderr_buf = _BoundedOutput()
 
-        def read_stream(stream, lines, log_level):
-            for line in iter(stream.readline, ''):
-                if line:
-                    lines.append(line)
+        def read_stream(stream, buf, log_level):
+            for raw_line in iter(stream.readline, b''):
+                if raw_line:
+                    buf.append(raw_line)
+                    # 日志走宽松解码（仅展示用），最终结果用 buf.decode() 严格策略
+                    text = raw_line.decode("utf-8", errors="replace")
                     if log_level == 'INFO':
-                        logger.info(f"[命令输出] {line.rstrip()}")
+                        logger.info(f"[命令输出] {text.rstrip()}")
                     else:
-                        logger.warning(f"[命令错误] {line.rstrip()}")
+                        logger.warning(f"[命令错误] {text.rstrip()}")
 
-        stdout_thread = threading.Thread(target=read_stream, args=(process.stdout, stdout_lines, 'INFO'), daemon=True)
-        stderr_thread = threading.Thread(target=read_stream, args=(process.stderr, stderr_lines, 'WARNING'), daemon=True)
+        stdout_thread = threading.Thread(target=read_stream, args=(process.stdout, stdout_buf, 'INFO'), daemon=True)
+        stderr_thread = threading.Thread(target=read_stream, args=(process.stderr, stderr_buf, 'WARNING'), daemon=True)
 
         stdout_thread.start()
         stderr_thread.start()
@@ -673,27 +782,28 @@ def _impl_exec_bash(command: str = "", workdir: str = "", timeout: int = 120, en
                     process_sandbox.terminate_all()
                 except Exception as e:
                     logger.warning("process_sandbox.terminate_all 失败: %s", e)
-            process.kill()
-            process.wait(timeout=5)
+            _kill_process_tree(process)
             stdout_thread.join(timeout=5)
             stderr_thread.join(timeout=5)
-            partial = ''.join(stdout_lines)
-            if stderr_lines:
-                partial += f"\n[stderr]: {''.join(stderr_lines)}"
+            partial = stdout_buf.decode()
+            if stderr_buf.total:
+                partial += f"\n[stderr]: {stderr_buf.decode()}"
+            partial += _truncation_notice([stdout_buf, stderr_buf])
             prefix = f"命令执行超时（>{timeout}秒）\n[部分输出]:\n{partial}" if partial.strip() else f"命令执行超时（>{timeout}秒，无输出）"
             return _finalize_tool_output("exec_bash", prefix, command=command, timeout=timeout)
 
         stdout_thread.join(timeout=5)
         stderr_thread.join(timeout=5)
 
-        stdout = ''.join(stdout_lines)
-        stderr = ''.join(stderr_lines)
+        stdout = stdout_buf.decode()
+        stderr = stderr_buf.decode()
 
         output = stdout
         if stderr:
             output += f"\n[stderr]: {stderr}"
         if output:
             output = f"[shell={shell_name}]\n{output}"
+        output += _truncation_notice([stdout_buf, stderr_buf])
 
         if returncode != 0:
             return _finalize_tool_output(
@@ -1152,7 +1262,13 @@ def _impl_fetch_webpage(
     try:
         response = requests.get(url, headers=headers, timeout=30)
         response.raise_for_status()
-        response.encoding = response.encoding or response.apparent_encoding or 'utf-8'
+        # requests 会对无 charset 的 text/* 响应预置 ISO-8859-1（HTTP 默认编码），
+        # 直接 `encoding or apparent_encoding` 会保留该预置值导致中文页面乱码。
+        # encoding 为空或 ISO-8859-1 时改用 apparent_encoding（内容探测）。
+        page_encoding = response.encoding
+        if not page_encoding or page_encoding.lower() == "iso-8859-1":
+            page_encoding = response.apparent_encoding or "utf-8"
+        response.encoding = page_encoding
         html = response.text
 
         soup = BeautifulSoup(html, 'html.parser')

@@ -129,3 +129,53 @@ class TestDualMemory:
         authority.emit("thread.message.sent", {"content": "hello", "turn_index": 0})
         memory.clear_all()
         assert memory.get_user_messages() == ["hello"]
+
+    def test_bind_journal_clears_compression_caches(self, temp_dir):
+        """重绑会话必须清空压缩缓存与 history 缓存：压缩缓存 key 只含
+        turn_index:role，旧会话残留摘要若不清会在新会话按相同 key 复现（跨会话泄漏）。"""
+        memory, authority = _bound_memory(temp_dir)
+        memory._compression_cache["0:user|1:assistant"] = "旧会话摘要内容"
+        memory._history_compressed = True
+        memory._cached_history_text = "旧会话历史文本"
+        memory._last_sent_turn_index = 7
+
+        memory.bind_journal(authority, temp_dir, "conv_test")
+
+        assert memory._compression_cache == {}
+        assert memory._history_compressed is False
+        assert memory._cached_history_text == ""
+        assert memory._last_sent_turn_index == 0
+
+    def test_compression_cache_key_includes_conversation_id(self, temp_dir):
+        """cache key 掺入 conversation_id 双保险：跨会话同 turn 组合不会误命中。"""
+        memory, _ = _bound_memory(temp_dir)
+        turns = [{"turn_index": 0, "role": "user", "content": "q"}]
+
+        memory._conversation_id = "conv_a"
+        memory._compression_cache[memory._conversation_id + "|0:user"] = "会话A摘要"
+        assert memory._get_cached_or_compress_older(turns) == "会话A摘要"
+
+        memory._conversation_id = "conv_b"
+        # 同 turn 组合在会话 B 下不再命中 A 的摘要（llm 为 None → 重新规则压缩）
+        result = memory._get_cached_or_compress_older(turns)
+        assert result != "会话A摘要"
+        assert "0:user" in "|".join(memory._compression_cache)
+
+    def test_need_compress_uses_current_full_text_not_last_return(self, temp_dir):
+        """need_compress 基于本次将生成的全量文本判定（无状态），消除
+        "压缩/全量"交替震荡：同样 turns 下连续调用结果稳定。"""
+        memory, authority = _bound_memory(temp_dir)
+        for i in range(8):
+            authority.emit(
+                "thread.message.sent",
+                {"content": f"长任务描述第{i}轮" * 120, "turn_index": i},
+            )
+            _complete(authority, f"执行结果第{i}轮" * 120)
+
+        first = memory.get_chat_history_for_system_prompt(context_window=100)
+        second = memory.get_chat_history_for_system_prompt(context_window=100)
+        third = memory.get_chat_history_for_system_prompt(context_window=100)
+        assert "[早期对话摘要]" in first
+        assert "[早期对话摘要]" in second
+        assert "[早期对话摘要]" in third
+        assert first == second == third

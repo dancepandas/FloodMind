@@ -18,6 +18,15 @@ from pathlib import Path
 
 _ENV_VAR = "FLOODMIND_PROJECT_ROOT"
 
+# pip/site-packages 安装形态下包父目录不可写（或写进去会污染安装目录），
+# 数据根回退到用户目录（P2-10）
+_SITE_PACKAGE_PARENTS = {"site-packages", "dist-packages"}
+
+
+def _looks_like_site_packages(pkg_parent: Path) -> bool:
+    """判断 floodmind 包是否处于 site-packages 安装形态（纯函数，便于测试）。"""
+    return pkg_parent.name.lower() in _SITE_PACKAGE_PARENTS
+
 
 def _resolve_project_root() -> Path:
     env_root = os.environ.get(_ENV_VAR, "").strip()
@@ -32,6 +41,10 @@ def _resolve_project_root() -> Path:
         pkg_dir = pkg_dir.parent
     # pkg_dir 现在应为 floodmind 包目录
     repo_root = pkg_dir.parent
+    if _looks_like_site_packages(repo_root):
+        # pip 安装形态：数据根用 ~/.floodmind（journal/checkpoint/长期记忆等
+        # 全部落这里），避免向 site-packages 写数据
+        return (Path.home() / ".floodmind").resolve()
     return repo_root.resolve()
 
 

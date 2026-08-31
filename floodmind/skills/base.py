@@ -6,6 +6,7 @@
 """
 
 import logging
+import os
 from pathlib import Path
 from typing import List, Optional, Any, Callable
 from dataclasses import dataclass, field
@@ -193,28 +194,50 @@ def _parse_skill_md(
         return None
 
 
+def is_reparse_point(path: Path) -> bool:
+    """兼容判定 Windows junction / reparse point（Path.is_junction() 仅 3.12+）。
+
+    项目要求 3.10+，因此用 st_file_attributes 的 FILE_ATTRIBUTE_REPARSE_POINT
+    位（Windows stat 自带该字段）识别 junction；非 Windows 平台恒为 False，
+    符号链接由 Path.is_symlink() 单独覆盖。
+    """
+    if os.name != "nt":
+        return False
+    try:
+        st = path.lstat()
+    except OSError:
+        return False
+    # 0x0400 = FILE_ATTRIBUTE_REPARSE_POINT
+    return bool(getattr(st, "st_file_attributes", 0) & 0x0400)
+
+
 def discover_skills(
     skills_dir: Path,
     threat_scanner: Optional[Callable[[str], Any]] = None,
 ) -> List[Skill]:
     """
     发现目录中的所有技能
-    
+
     扫描指定目录下的所有 SKILL.md 文件，解析并返回技能列表。
-    
+    根下为符号链接或 junction（reparse point）的目录一律拒绝，避免越权来源。
+
     Args:
         skills_dir: 技能目录路径
-        
+
     Returns:
         技能列表
     """
     if not skills_dir.exists():
         logger.warning(f"技能目录不存在: {skills_dir}")
         return []
-    
+
     skills = []
-    
+
     for skill_md in skills_dir.glob("*/SKILL.md"):
+        skill_dir = skill_md.parent
+        if skill_dir.is_symlink() or is_reparse_point(skill_dir):
+            logger.warning(f"跳过符号链接/junction 技能目录: {skill_dir}")
+            continue
         skill = _parse_skill_md(skill_md, threat_scanner=threat_scanner)
         if skill:
             skills.append(skill)

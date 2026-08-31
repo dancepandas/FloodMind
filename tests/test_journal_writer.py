@@ -367,3 +367,47 @@ def test_journal_dir_override(tmp_path):
     assert (custom / "index.json").exists()
     assert not default_dir.exists()  # 默认路径未被创建
     assert len(w.read_from(0)) == 1
+
+
+# ── D04/D05/D14 回归：撕裂尾健壮性 ──────────────────────────────
+
+def _append_raw_bytes(tmp_path: Path, raw: bytes) -> Path:
+    w = JournalWriter(tmp_path, "run_1")
+    w.append(_evt(1))
+    seg = tmp_path / "runs" / "run_1" / "journal" / "events-000001.jsonl"
+    with seg.open("ab") as f:
+        f.write(raw)
+    return seg
+
+
+def test_multibyte_torn_tail_does_not_crash_reads(tmp_path: Path):
+    """多字节撕裂尾只影响坏行，journal 仍可打开、可读、可追加（D05）。"""
+    torn = '{"event_id": "evt_bad", "payload": {"text": "中文被切'.encode("utf-8")[:-2]
+    _append_raw_bytes(tmp_path, b"\n" + torn)
+    w = JournalWriter(tmp_path, "run_1")  # 构造即 reconcile
+    assert w.current_sequence() == 1
+    assert len(w.read_from(0)) == 1
+    sealed = w.append(_evt(2))  # 坏尾之后仍可正常追加
+    assert sealed.sequence == 2
+
+
+def test_mid_file_corruption_refuses_repair_truncate(tmp_path: Path):
+    """坏行之后仍有合法事件时，repair_tail 拒绝截断（D04）。"""
+    import pytest as _pytest
+    from floodmind.agent.runtime.services.journal_writer import JournalMidFileCorruption
+
+    w = JournalWriter(tmp_path, "run_1")
+    w.append(_evt(1))
+    w.append(_evt(2))
+    seg = tmp_path / "runs" / "run_1" / "journal" / "events-000001.jsonl"
+    content = seg.read_bytes()
+    lines = content.split(b"\n")
+    # 在两条合法事件中间插入坏行
+    corrupted = lines[0] + b"\n" + b"{broken json" + b"\n" + lines[1] + b"\n"
+    seg.write_bytes(corrupted)
+    w2 = JournalWriter(tmp_path, "run_1")
+    with _pytest.raises(JournalMidFileCorruption):
+        w2.repair_tail()
+    # 合法事件 1、2 在读路径仍可用（读侧坏行即段尾，本段事件 1 可见）
+    events = w2.read_from(0)
+    assert [e.sequence for e in events] == [1]

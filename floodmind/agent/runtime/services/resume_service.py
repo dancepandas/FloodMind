@@ -18,6 +18,7 @@
 import json
 import os
 import time
+import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Optional
@@ -32,6 +33,7 @@ from floodmind.agent.runtime.services.reconciliation_service import (
     ReconcileResult,
 )
 from floodmind.agent.runtime.services.runtime_layout import lease_file
+from floodmind.common.filelock import FileLock
 
 
 class ResumeBusyError(RuntimeError):
@@ -44,14 +46,23 @@ class Lease(BaseModel):
     expires_at: str = ""
 
     _path: Optional[Path] = PrivateAttr(default=None)
+    _token: str = PrivateAttr(default="")
 
     def release(self) -> None:
+        """释放 lease。带 owner token 校验：TTL 过期被新 owner 抢占后，
+        旧 owner 迟到的 release 不会误删新 owner 的 lease（D06）。"""
         path = self._path
-        if path is not None and path.exists():
-            try:
-                path.unlink()
-            except OSError:
-                pass
+        if path is None or not path.exists():
+            return
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+            if str(data.get("token", "")) != self._token:
+                return  # lease 已易主
+            path.unlink()
+        except OSError:
+            pass
+        except Exception:
+            pass
 
 
 def open_lease(runtime_dir, run_id, owner: str, ttl_seconds: int = 300,
@@ -59,29 +70,39 @@ def open_lease(runtime_dir, run_id, owner: str, ttl_seconds: int = 300,
     """CAS 获取 fencing lease。
 
     已存在且未过期的 lease → 抛 `ResumeBusyError`；过期/损坏的 lease 覆盖重写。
-    `Lease.release()` 删除 lease 文件。
+    `Lease.release()` 删除 lease 文件（token 校验防误删）。
+
+    D06 修复：exists→read→write 三步在跨进程 FileLock 内执行，消除两进程同时
+    通过检查的 TOCTOU；lease 写入 tmp+os.replace 原子发布。
+    注意：journal 写路径仍未逐条校验 lease epoch（完整 fencing 需写端配合），
+    本层保证的是"同一时刻至多一个 owner 通过 open_lease 入场"。
     """
     path = lease_file(Path(runtime_dir), conversation_id, task_id, run_id)
     path.parent.mkdir(parents=True, exist_ok=True)
     now = int(time.time())
-    if path.exists():
-        try:
-            data = json.loads(path.read_text(encoding="utf-8"))
-            if int(data.get("expires_at", 0)) > now:
-                raise ResumeBusyError(
-                    f"run {run_id} 已被 {data.get('owner')} 持有（lease 未过期）"
-                )
-        except ResumeBusyError:
-            raise
-        except Exception:
-            pass  # 损坏/过期 lease 覆盖
-    payload = {
-        "owner": owner,
-        "pid": str(os.getpid()),
-        "acquired_at": now,
-        "expires_at": now + ttl_seconds,
-    }
-    path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+    token = f"{owner}:{uuid.uuid4().hex}"
+    with FileLock(Path(str(path) + ".lock"), timeout=10.0):
+        if path.exists():
+            try:
+                data = json.loads(path.read_text(encoding="utf-8"))
+                if int(data.get("expires_at", 0)) > now:
+                    raise ResumeBusyError(
+                        f"run {run_id} 已被 {data.get('owner')} 持有（lease 未过期）"
+                    )
+            except ResumeBusyError:
+                raise
+            except Exception:
+                pass  # 损坏/过期 lease 覆盖
+        payload = {
+            "owner": owner,
+            "token": token,
+            "pid": str(os.getpid()),
+            "acquired_at": now,
+            "expires_at": now + ttl_seconds,
+        }
+        tmp_path = Path(str(path) + ".tmp")
+        tmp_path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+        os.replace(tmp_path, path)
     lease = Lease(
         acquired=True,
         owner=owner,
@@ -90,6 +111,7 @@ def open_lease(runtime_dir, run_id, owner: str, ttl_seconds: int = 300,
         ).isoformat(),
     )
     lease._path = path
+    lease._token = token
     return lease
 
 

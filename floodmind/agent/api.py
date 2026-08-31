@@ -34,6 +34,7 @@ FloodMind Agent — 轻量级 SDK 入口
     print(agent.artifacts)    # 本次调用收集到的产物事件
 """
 
+import inspect
 import logging
 import uuid
 from pathlib import Path
@@ -75,11 +76,12 @@ class Agent:
         on_event: 流式事件回调 ``Callable[[dict], None]``。run()/stream() 期间每个事件
             都会调用一次。回调内抛出的异常会被捕获并记录，不会中断执行流。
         permission_handler: 工具调用审批钩子 ``Callable[[tool_name, tool_input], Optional[bool]]``。
-            每次工具执行前同步调用，是宿主对工具调用的**最高裁决**：
-            - 返回 ``True``：宿主显式放行 → 直接 ALLOW，跳过 SDK permission_service（宿主放行最高权威）；
+            每次工具执行前同步调用，是宿主的**预授权**钩子：
+            - 返回 ``True``：宿主同意执行 → 策略级 ASK 自动放行（跳过用户交互确认，桌面
+              always-trust 模式）；但不可翻越 SDK 安全硬门——子代理 tier、planning 模式、
+              路径校验、危险命令、全局 deny 规则照常生效（钩子只能收紧不能放开）。
             - 返回 ``False``：宿主拒绝 → DENY（工具不执行，模型收到拒绝信息）；
             - 返回 ``None``（或未处理异常）：宿主无意见 → 交给 SDK 正常判断（permission_service 规则照常）。
-            此前实现只把 ``True`` 当"不拒绝"，后续 SDK 仍可能 ASK/DENY，宿主无法真正放行。
         permission_decision_hook: host-level 权限决策钩子
             ``Callable[[tool_name, tool_input, sdk_decision, permission_policy], PermissionDecision]``。
             在 SDK 完成基础权限判断后调用，宿主可基于 SDK 原始决策调整最终行为：保留 DENY/ASK、
@@ -131,14 +133,18 @@ class Agent:
         sid = validate_session_id(session_id or f"sdk-{uuid.uuid4().hex}")
         if memory is None:
             from floodmind.memory.dual_memory import DualMemory
-            from floodmind.config.model_resolver import resolve_model
-            memory = DualMemory(session_id=sid, context_window=resolve_model().context_window)
+            memory = DualMemory(session_id=sid, context_window=self._resolve_context_window(llm))
 
         if workspace is None:
             from floodmind.agent.runtime.contracts.workspace import Workspace
             workspace = Workspace.from_cwd(session_id=sid).ensure()
 
         self._on_event = on_event
+        if on_event is not None and inspect.iscoroutinefunction(on_event):
+            raise TypeError(
+                "on_event 不支持 async 函数：FloodMind 运行时是同步的，请提供同步回调"
+                "（或在线程内用 asyncio.run 桥接）。"
+            )
         self._journal_authority: Optional[Any] = None
         self._last_usage: Dict[str, int] = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
         self._artifacts: List[Dict[str, Any]] = []
@@ -161,6 +167,28 @@ class Agent:
             skill_writable_root=skill_writable_root,
             mcp_pool=mcp_pool,
         )
+
+    @staticmethod
+    def _resolve_context_window(llm: Any) -> int:
+        """记忆窗口取当前激活模型的 context_window；无全局配置时回退默认值。
+
+        显式传入 llm 的宿主不应被 settings.json 的 providers 配置缺失阻塞构造——
+        全局配置只用于提升默认记忆窗口精度，缺失时用 SDK 默认值（32768）降级。
+        """
+        from floodmind.memory.dual_memory import DEFAULT_CONTEXT_WINDOW_FALLBACK
+
+        try:
+            from floodmind.config.model_resolver import resolve_model
+            return resolve_model().context_window
+        except Exception as exc:
+            logger.warning(
+                "resolve_model 失败（%s），记忆窗口回退为 %d。"
+                "如需精确记忆窗口，请在 ~/.floodmind/settings.json 配置 providers，"
+                "或显式传入 memory=DualMemory(session_id=..., context_window=...)。",
+                exc,
+                DEFAULT_CONTEXT_WINDOW_FALLBACK,
+            )
+            return DEFAULT_CONTEXT_WINDOW_FALLBACK
 
     def bind_workspace(self, ws: Any) -> None:
         """绑定/切换工作区（透传给底层 NativeFloodAgent）。

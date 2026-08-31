@@ -395,12 +395,17 @@ class ContextCompressor:
         )
         start, end = self._aligned_split_points(messages)
 
-        # 2) 可压缩段 = 保留头与保留尾之间的完整段（不拆 Atomic Group；
-        #    不折叠保留头/保留尾——system prompt 与当前用户请求绝不进摘要源）。
+        # 2) 可压缩段 = 与 [start, end) 窗口有交集的完整段（不拆 Atomic Group）。
+        #    head/tail 边界经 _group_start 对齐到 assistant(tool_calls) 组首，但
+        #    AtomicGroups 的段边界可能因 compaction/attachment 等单消息组连锁向前
+        #    延伸越过头边界；若按整段包含（r0 >= start and r1 <= end）过滤，落在
+        #    assistant(tool_calls) 上的组会被整段排除——组内消息不进 head、不进
+        #    摘要源、不进 tail，静默丢失。因此改为对窗口求交集：与窗口有任何重叠
+        #    的段都整段纳入摘要源（AtomicGroups 语义：同一组不可拆，按整组取）。
         compressible = [
             messages[r0:r1]
             for r0, r1 in ranges
-            if r0 >= start and r1 <= end
+            if r1 > start and r0 < end
         ]
 
         # 3) 从较早低优先级来源压缩（规则/LLM 摘要引擎）
@@ -456,14 +461,15 @@ class ContextCompressor:
             messages, compressed, head_len=start, has_new_summary=bool(summary)
         )
 
-        # 7) 再次计数：有界扩大 Offload（至多 3 轮裁剪工具/函数输出），仍超限 → fail-closed
-        #    （绝不静默截断当前用户请求，也绝不返回超预算投影）。
-        for _ in range(3):
+        # 7) 再次计数：有界扩大 Offload——至多 3 轮渐进收紧工具输出阈值（2000→1000→500），
+        #    每轮保留前后缀随阈值等比缩小，保证 3 轮都确实压缩内容而非空转。
+        #    仍超限 → fail-closed（绝不静默截断当前用户请求，也绝不返回超预算投影）。
+        for trim_limit in (2000, 1000, 500):
             if self._estimate_tokens(compressed) <= limit:
                 break
-            next_compressed = self._trim_tool_outputs(compressed)
+            next_compressed = self._trim_tool_outputs(compressed, max_len=trim_limit)
             if next_compressed == compressed:
-                break  # 已无更多工具输出可裁剪
+                continue  # 本轮阈值下已无可裁剪的工具输出，进入下一轮收紧
             compressed = next_compressed
         if self._estimate_tokens(compressed) > limit:
             raise CompactionOverBudgetError(
@@ -502,10 +508,18 @@ class ContextCompressor:
             manifest=manifest,
         )
 
-    def _trim_tool_outputs(self, messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    def _trim_tool_outputs(
+        self,
+        messages: List[Dict[str, Any]],
+        max_len: int = 2000,
+    ) -> List[Dict[str, Any]]:
         """
         裁剪工具输出：删除冗长的详细输出，只保留结论。
         对于水文场景，保留关键数值和结论，删除中间过程。
+
+        max_len 为触发裁剪的长度阈值；保留的前后缀随阈值等比缩小
+        （各约 max_len/2 减去省略标记余量），保证渐进收紧（2000→1000→500）
+        时每轮都确实缩短，不会出现"裁剪后长度不再变化"的空转轮。
         """
         trimmed = []
         for msg in messages:
@@ -513,11 +527,12 @@ class ContextCompressor:
                 content = msg.get("content", "")
                 if not isinstance(content, str):
                     content = json.dumps(content, ensure_ascii=False, sort_keys=True, default=str)
-                if len(content) > 2000:
-                    # 保留前 500 字 + 后 500 字，中间用省略号
-                    prefix = content[:500]
-                    suffix = content[-500:]
-                    content = f"{prefix}\n\n... [中间 {len(content) - 1000} 字符已省略] ...\n\n{suffix}"
+                if len(content) > max_len:
+                    # 前后缀各取约阈值一半，预留省略标记长度，确保结果严格短于原内容
+                    half = max(1, (max_len - 64) // 2)
+                    prefix = content[:half]
+                    suffix = content[-half:]
+                    content = f"{prefix}\n\n... [中间 {len(content) - 2 * half} 字符已省略] ...\n\n{suffix}"
                     msg = dict(msg)
                     msg["content"] = content
             trimmed.append(msg)

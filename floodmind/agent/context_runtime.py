@@ -220,6 +220,11 @@ class ContextRuntime:
                 block_tokens = self._estimate_text_tokens(content)
                 remaining_tokens = self.context_window - used_tokens
                 if remaining_tokens <= 0:
+                    # 可观测性：预算耗尽后跳过剩余块（不改行为，仅记录）
+                    logger.info(
+                        "[ContextRuntime] 上下文块 '%s' 因预算耗尽被跳过（窗口 %d tokens，已用 %d）",
+                        block.label, self.context_window, used_tokens,
+                    )
                     break
                 if block_tokens <= remaining_tokens:
                     messages.append({"role": "system", "content": content})
@@ -229,7 +234,18 @@ class ContextRuntime:
                     truncated = self._truncate_to_budget(content, remaining_tokens)
                     if truncated.strip():
                         messages.append({"role": "system", "content": truncated})
+                    else:
+                        logger.info(
+                            "[ContextRuntime] 上下文块 '%s' 截断后为空被跳过（块 %d tokens > 剩余 %d）",
+                            block.label, block_tokens, remaining_tokens,
+                        )
                     break
+                # 可观测性：超预算块被跳过（截断仅适用于首个块），记录块名与预算
+                logger.info(
+                    "[ContextRuntime] 上下文块 '%s' 超出剩余预算被跳过: "
+                    "块 %d tokens > 剩余 %d tokens（窗口 %d）",
+                    block.label, block_tokens, remaining_tokens, self.context_window,
+                )
         return messages
 
     def estimate_tokens(self) -> int:

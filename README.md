@@ -1,6 +1,6 @@
 # FloodMind
 
-**SDK-first 的智能水文 Agent Runtime — v2.0.0**
+**SDK-first 的智能水文 Agent Runtime — v2.1.0**
 
 FloodMind 收敛为面向 Python 宿主系统的纯 SDK：以 `Agent` / `ModelClient` / `Workspace` / `build_agent_tool` 为公共入口，把水文模型、数据分析、文档生成、MCP 工具与 Skill 体系嵌入到业务平台或桌面助手中。Web / TUI 前端已随 v2.0.0 移除，FloodMind 为纯 SDK 形态。
 
@@ -157,6 +157,7 @@ floodmind config show
 | 命令 | 说明 |
 |------|------|
 | `floodmind run "任务"` | 单次 SDK/folder-first 任务执行，适合脚本/调度/桌面助手调用 |
+| `floodmind gateway` | 启动 Gateway 网关：HTTP API + Web 界面（需 `pip install 'floodmind[gateway]'`） |
 | `floodmind chat` | 纯文本终端对话（保留兼容，使用 folder-first workspace） |
 | `floodmind init` | 初始化项目配置 |
 | `floodmind config show` | 查看当前配置 |
@@ -169,6 +170,39 @@ floodmind config show
 # 脚本调用（单次任务）
 floodmind run "分析水库水位数据" -m deepseek-v4-flash
 ```
+
+---
+
+## Gateway 网关 + Web 界面
+
+`floodmind gateway` 把 SDK Runtime 一键暴露为带鉴权的本地 HTTP 服务 + Web 界面，适合桌面助手与团队内网部署：
+
+```bash
+pip install "floodmind[gateway]"
+floodmind gateway                      # 默认 127.0.0.1:8317，自动打开浏览器
+floodmind gateway --no-auth            # 本机测试免 token（仅建议 127.0.0.1 使用）
+floodmind gateway --host 0.0.0.0 --port 8317 --workspace D:/work
+```
+
+**Chainlit UI（推荐，开源 Agent WebUI）**：采用 [Chainlit](https://github.com/Chainlit/chainlit)（GitHub 50k+ star）作为前端，自带流式 markdown、工具调用折叠面板（"已使用 Bash"）、原生批准/拒绝按钮、文件上传与产物展示：
+
+```bash
+pip install "floodmind[chainlit-ui]"
+floodmind gateway --ui chainlit        # 默认 127.0.0.1:8000
+floodmind gateway --ui chainlit --port 8320 --workspace D:/work
+```
+
+- **鉴权**：所有 `/api` 路由要求 `Authorization: Bearer <token>`。token 优先级：`--token` 参数 > 环境变量 `FLOODMIND_GATEWAY_TOKEN` > `~/.floodmind/settings.json` 的 `gateway.auth_token` > 首次启动自动生成并持久化（控制台打印）。
+- **API**：`GET/POST/DELETE /api/sessions`（会话管理）、`GET /api/sessions/{id}/messages`（canonical journal 历史投影）、`POST /api/chat`（SSE 流：answer_delta / thought_delta / action_* / permission_ask / file_generated / token_usage…）、`POST /api/chat/abort`（run 级取消）、`POST /api/permission/respond`（权限批准闭环）、`GET /api/health`。
+- **权限交互**：模型发起需要确认的操作时，SSE 流推送 `permission_ask` 事件，前端弹出批准/拒绝卡片，应答经 `/api/permission/respond` 送回 AskService，executor 在 `awaiting_permission` 处续跑——与 Claude Code 的交互式审批同构。
+- **会话隔离**：每个会话一个完整 runtime Agent（内置工具 + Skill + MCP + folder-first 工作区），历史由 Journal 投影，重启后可恢复。
+- **Web UI**：自包含单文件（`floodmind/gateway/static/index.html`，无前端构建依赖），深色现代风格，挂载于 `/`。
+
+**Chainlit 历史会话**：`--ui chainlit` 模式内置会话持久化（`floodmind/gateway/chainlit_history.py`）：
+
+- SQLite 数据层落在 `<workspace>/.floodmind/chainlit/threads.db`，左侧栏自动列出历史会话（按首条消息自动命名），重启后仍在；点击即恢复完整消息与工具步骤，续聊接续同一份 Agent Journal（thread → FloodMind session 确定性映射）；
+- 文件/图片产物落盘于 `.floodmind/chainlit/files/`，经 `/floodmind-files/*` 本地路由回源，历史会话中的产物卡片重启后仍可查看；
+- 本地无感鉴权：Chainlit 的历史侧栏要求登录态，这里把鉴权补丁为固定本地用户（与 gateway 回环免鉴权同惯例），浏览器零交互、不弹登录页。
 
 ---
 
@@ -244,6 +278,8 @@ for event in agent.stream("查一下霍口水库水位"):
 | 系统 | `token_usage` / `heartbeat` / `error` / `llm_token_error` | token 用量 / 错误内容 |
 
 **构造参数**：`llm`（必填）、`tools`、`system_prompt`、`memory`、`session_id`、`enable_search`、`enable_reasoning`、`on_event`（事件回调）、`permission_handler`（工具审批钩子）、`permission_decision_hook`（host-level 权限决策钩子，见下）、`max_iterations`（默认 999）、`workspace`（嵌入式工作区注入）、`tool_loading`（工具加载策略：`None` 用配置默认，`False` 为 eager 旧行为，`True` 或 `ToolLoadingConfig` 为渐进式加载）。
+
+**Host-level 权限审批钩子**：`permission_handler(tool_name, tool_input) -> Optional[bool]` 是宿主的**预授权**钩子。返回 `True` 表示宿主同意执行——策略级 ASK 自动放行（跳过用户交互确认，桌面 always-trust 模式），但**不可翻越 SDK 安全硬门**：子代理 tier、planning 模式、路径校验、危险命令、全局 deny 规则照常生效；返回 `False` 直接 DENY；返回 `None`（或钩子异常）交给 SDK 正常判断。钩子只能收紧不能放开，与 `permission_decision_hook` 语义一致。
 
 **Host-level 权限决策钩子**：`permission_decision_hook(tool_name, tool_input, sdk_decision, permission_policy) -> PermissionDecision`。SDK 完成基础权限判断后调用，宿主可基于 SDK 原始决策调整最终行为——保留 DENY/ASK、把 ALLOW 升级为 ASK（走 `permission_ask` 事件交互确认）或 DENY。钩子只能收紧不能放开：SDK 的安全拒绝（路径越界 / 危险命令 / 子代理分层 / planning 硬门）不可被覆盖；钩子异常或返回非法值时保留 SDK 原决策。桌面端可借此实现 always-trust / trust-once / always-ask 权限模式，无需 patch 内部 registry。
 

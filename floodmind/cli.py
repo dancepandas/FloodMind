@@ -14,6 +14,7 @@ FloodMind CLI
 
 import logging
 import os
+import subprocess
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -139,6 +140,86 @@ def chat(model, reasoning, verbose):
 
     _validate_api_key()
     return _run_chat_legacy(model=model, reasoning=reasoning)
+
+
+# ── gateway (HTTP 网关 + Web UI) ────────────────────────────
+
+@main.command()
+@click.option("--host", default="127.0.0.1", show_default=True, help="监听地址")
+@click.option("--port", default=8317, show_default=True, type=int, help="监听端口")
+@click.option("--workspace", "-w", default=None, help="工作区根目录（默认当前目录）")
+@click.option("--token", default=None, help="鉴权 token（默认读取/生成持久化 token）")
+@click.option("--no-auth", is_flag=True, help="强制关闭鉴权（非回环地址下会警告）")
+@click.option("--auth", "force_auth", is_flag=True, help="本机回环地址也开启 token 鉴权")
+@click.option(
+    "--ui",
+    type=click.Choice(["builtin", "chainlit"], case_sensitive=False),
+    default="builtin",
+    show_default=True,
+    help="前端：builtin=自带轻量界面；chainlit=开源 Chainlit UI（需 pip install chainlit）",
+)
+@click.option("--no-open", is_flag=True, help="不自动打开浏览器")
+@click.option("--verbose", "-v", is_flag=True, help="显示详细日志")
+def gateway(host, port, workspace, token, no_auth, force_auth, ui, no_open, verbose):
+    """启动 Gateway 网关：HTTP API + Web 界面。"""
+    _setup_logging(verbose=verbose)
+
+    if ui.lower() == "chainlit":
+        _run_chainlit_ui(host, port, workspace, no_open)
+        return
+
+    try:
+        import fastapi  # noqa: F401
+        import uvicorn  # noqa: F401
+    except ImportError:
+        raise click.ClickException(
+            "Gateway 需要 fastapi 与 uvicorn：pip install 'floodmind[gateway]' "
+            "或 pip install fastapi uvicorn"
+        )
+    from floodmind.gateway.server import run_gateway
+
+    run_gateway(
+        host=host,
+        port=port,
+        workspace_root=workspace,
+        auth_token=token,
+        open_browser=not no_open,
+        no_auth=no_auth,
+        force_auth=force_auth,
+    )
+
+
+def _run_chainlit_ui(host, port, workspace, no_open):
+    """以开源 Chainlit UI 作为前端（floodmind/gateway/chainlit_app.py）。"""
+    import os
+    import sys
+    from pathlib import Path
+
+    try:
+        import chainlit  # noqa: F401
+    except ImportError:
+        raise click.ClickException("Chainlit UI 需要：pip install chainlit")
+
+    root = Path(workspace or Path.cwd()).resolve()
+    env = os.environ.copy()
+    env["FLOODMIND_GATEWAY_WORKSPACE"] = str(root)
+    # Chainlit 的 APP_ROOT（logo/favicon/头像 public 目录与 .chainlit）固定到工作区，
+    # 不随用户 shell 的 cwd 漂移。
+    env["CHAINLIT_APP_ROOT"] = str(root)
+    app_path = Path(__file__).resolve().parent / "gateway" / "chainlit_app.py"
+
+    print("=" * 64)
+    print("FloodMind Gateway（Chainlit UI）")
+    print(f"  工作区: {root}")
+    print(f"  地址:   http://{host}:{port}/")
+    print("=" * 64)
+
+    args = [sys.executable, "-m", "chainlit", "run", str(app_path)]
+    args += ["--host", (host if host not in ("localhost",) else "127.0.0.1")]
+    args += ["--port", str(port)]
+    if no_open:
+        args.append("--headless")
+    raise SystemExit(subprocess.call(args, env=env, cwd=str(root)))
 
 
 # ── run ─────────────────────────────────────────────────────

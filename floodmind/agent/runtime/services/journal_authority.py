@@ -147,13 +147,14 @@ class JournalAuthority:
             return events
         return self._writer.read_from(after_sequence)
 
-    def replay(self, after_sequence: int = 0, state: Optional[RunState] = None) -> RunState:
+    def replay(self, after_sequence: int = 0, state: Optional[RunState] = None,
+               events: Optional[List[EventEnvelope]] = None) -> RunState:
         current = state or initial_run_state(
             self.run_id, conversation_id=self.conversation_id,
             task_id=self.task_id, thread_id=self.thread_id,
         )
         seen: set = set()
-        for event in self._writer.read_from(after_sequence):
+        for event in (self._writer.read_from(after_sequence) if events is None else events):
             if event.event_id in seen:
                 continue  # 重复 event_id 不重复副作用
             seen.add(event.event_id)
@@ -164,3 +165,16 @@ class JournalAuthority:
                 if turn.get("thread_id", "") in ("", self.thread_id)
             ]
         return current
+
+    def checkpoint_snapshot(self) -> tuple:
+        """原子读取 (journal_cursor, replayed RunState)，供 checkpoint 保存使用。
+
+        checkpoint.save 要求两者严格相等。并行 specialist 共享同一份 run journal，
+        先调 cursor() 再调 replay() 的两次独立读取之间可能插入其他线程的 append，
+        造成 cursor 与 last_committed_sequence 错位（checkpoint 保存失败）。
+        这里单次 read_from 取同一批事件：cursor 取批内最后一条的 sequence——
+        并发写入者只会让快照偏旧（恢复时按幂等 reducer 重放补齐），不会偏新。
+        """
+        events = self._writer.read_from(0)
+        cursor = events[-1].sequence if events else 0
+        return cursor, self.replay(events=events)

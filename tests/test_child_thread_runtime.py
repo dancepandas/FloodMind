@@ -166,6 +166,56 @@ def test_runtime_child_executor_uses_trace_scoped_event_bus(tmp_path, monkeypatc
     assert captured["event_bus"]._trace_session_id == result.session_id
 
 
+def test_runtime_restores_reused_parent_bus_trace_session_id(tmp_path):
+    """复用父 StepEventBus 时临时改写 trace_session_id，run 结束后必须恢复原值。
+
+    旧实现改写父 bus 后不复原，父会话后续事件会被错误打上子会话的 _trace_session
+    （回归测试）。
+    """
+    mc = MagicMock(spec=ModelClient)
+    mc.stream_chat.return_value = [
+        ModelEvent(type="token", content="child result here"),
+        ModelEvent(type="done"),
+    ]
+    parent_auth = open_journal_authority(
+        tmp_path / "runtime", conversation_id="c", task_id="t",
+        run_id="run_1", thread_id="th_main", turn_id="tu_main",
+    )
+    rt = ChildThreadRuntime(
+        model_client=mc,
+        tool_executor=MagicMock(),
+        event_bus=EventBus(),
+        message_builder=MessageBuilder(),
+        max_iterations=5,
+        system_prompts=["test prompt"],
+        checkpoint_service=None,
+        tracing_service=None,
+        background_task_service=BackgroundTaskService(base_dir=str(tmp_path / "sessions")),
+        journal_authority=parent_auth,
+        sandbox_service=SandboxService(base_dir=str(tmp_path / "sbx")),
+        permission_service=PermissionService(),
+        path_service=PathService(),
+        artifact_store_root=tmp_path / "artifacts",
+        runtime_dir=tmp_path / "runtime",
+        tool_runtime_factory=_stub_registry_and_loader,
+    )
+    step_bus = StepEventBus(EventBus(), "step_1")  # 原 trace_session_id 为空串
+    result = rt.run(
+        ChildThread(thread_id="th_child", parent_thread_id="th_main", parent_call_id="step_1"),
+        RunContext(
+            session_id="sess_main", user_text="child task", agent_tier="main",
+            runtime_context=RuntimeContext(
+                conversation_id="c", task_id="t", run_id="run_1",
+                thread_id="th_main", turn_id="tu_main", actor_type="agent",
+                actor_id="main", agent_tier="main", runtime_mode="execution",
+            ),
+        ),
+        step_event_bus=step_bus,
+    )
+    assert result.session_id.startswith("sub-")
+    assert step_bus._trace_session_id == ""
+
+
 def _stub_registry_and_loader():
     reg = MagicMock()
     reg.tools_schema.return_value = []

@@ -16,6 +16,7 @@ group append and retry only the uncommitted remainder.
 
 import hashlib
 import json
+import logging
 import os
 from contextlib import contextmanager
 from pathlib import Path
@@ -24,15 +25,34 @@ from typing import Dict, Iterator, List, Optional
 from floodmind.agent.runtime.contracts.canonical_events import (
     EventEnvelope, canonical_json, canonical_payload_sha256,
 )
+from floodmind.common.filelock import FileLock
 
 try:
     import fcntl  # POSIX
 except ImportError:  # pragma: no cover - Windows uses msvcrt
     fcntl = None
 
+logger = logging.getLogger(__name__)
+
 
 class JournalWriteConflict(Exception):
     """expected_last_sequence did not match the on-disk tail."""
+
+
+class JournalMidFileCorruption(Exception):
+    """坏行之后仍存在完整合法行——拒绝截断（防 repair_tail 销毁合法事件）。"""
+
+
+def _iter_segment_lines(path: Path) -> Iterator[str]:
+    """按行二进制读取 segment 并逐行解码（D05）。
+
+    ``read_text(encoding="utf-8")`` 对整个文件解码，多字节字符被撕裂行切断时
+    会抛 UnicodeDecodeError 令整个 journal 不可打开。按行解码 + errors=replace
+    把损坏限制在坏行本身。
+    """
+    with path.open("rb") as f:
+        for raw in f:
+            yield raw.decode("utf-8", errors="replace")
 
 
 _SEGMENT_PREFIX = "events-"
@@ -96,6 +116,7 @@ class JournalWriter:
         )
         self._journal_dir.mkdir(parents=True, exist_ok=True)
         self._lock_path = self._journal_dir / ".lock"
+        self._file_lock = FileLock(self._lock_path, timeout=30.0)
         self._index_path = self._journal_dir / "index.json"
         self._sealed: Dict[str, EventEnvelope] = {}
         self._load_index()
@@ -104,27 +125,10 @@ class JournalWriter:
 
     @contextmanager
     def _locked(self) -> Iterator[None]:
-        with open(self._lock_path, "a+b") as f:
-            if f.seek(0, os.SEEK_END) == 0:
-                f.write(b"\x00")
-                f.flush()
-            f.seek(0)
-            if fcntl is not None:
-                fcntl.flock(f.fileno(), fcntl.LOCK_EX)
-            else:
-                import msvcrt
-                msvcrt.locking(f.fileno(), msvcrt.LK_LOCK, 1)
-            try:
-                yield
-            finally:
-                if fcntl is not None:
-                    fcntl.flock(f.fileno(), fcntl.LOCK_UN)
-                else:
-                    import msvcrt
-                    try:
-                        msvcrt.locking(f.fileno(), msvcrt.LK_UNLCK, 1)
-                    except OSError:
-                        pass
+        # 统一走跨平台 FileLock（Windows msvcrt 重试直至超时，不再 10 秒抛裸 OSError）。
+        # 复用实例：FileLock 的可重入保护是 thread-local 的，逐次新建会使重入保护失效。
+        with self._file_lock:
+            yield
 
     # ── index + authoritative reconciliation ─────────────────────
 
@@ -161,7 +165,7 @@ class JournalWriter:
             path = self._segment_path(number)
             if not path.exists():
                 continue
-            for line in path.read_text(encoding="utf-8").splitlines():
+            for line in _iter_segment_lines(path):
                 line = line.strip()
                 if not line:
                     continue
@@ -211,6 +215,36 @@ class JournalWriter:
     def sealed(self, event_id: str) -> Optional[EventEnvelope]:
         return self._sealed.get(event_id)
 
+    def _ensure_clean_tail_locked(self) -> None:
+        """P1-1：追加前确保当前 segment 尾部无撕裂坏行。
+
+        append 以 "a" 模式写在文件物理 EOF——若尾部存在撕裂坏行而未处理，新事件会
+        落在坏行之后：本次 fsync 成功且内存序列推进，但重启后 reconcile 在坏行处
+        break，新事件永久不可读，且下次 append 复用同一序列号、哈希链断链。
+        此处主动 repair_tail：D04 已保证只截断真正的撕裂尾（中部损坏会抛
+        JournalMidFileCorruption 拒绝修复，此时 append 一并失败，fail-closed）。
+        """
+        path = self._segment_path(self._current_segment)
+        if not path.exists() or path.stat().st_size == 0:
+            return
+        with path.open("rb") as f:
+            f.seek(0, os.SEEK_END)
+            size = f.tell()
+            window = min(size, 262144)
+            f.seek(size - window)
+            tail = f.read()
+        raw_lines = tail.split(b"\n")
+        last = raw_lines[-1] if raw_lines else b""
+        line = last.decode("utf-8", errors="replace").strip()
+        if not line:
+            return  # 以换行结尾 → 无撕裂尾
+        try:
+            EventEnvelope.model_validate_json(line)
+        except Exception:
+            # 末行无法解析 → 撕裂尾。repair_tail 全量扫描兜底，只在安全时截断。
+            self.repair_tail()
+            self._reconcile_from_journal()
+
     def append(
         self,
         event: EventEnvelope,
@@ -221,6 +255,7 @@ class JournalWriter:
             # Re-read the authoritative tail under the lock: a concurrent writer
             # instance may have advanced the journal since this one loaded it.
             self._reconcile_from_journal()
+            self._ensure_clean_tail_locked()
             if expected_last_sequence is not None and expected_last_sequence != self._last_sequence:
                 raise JournalWriteConflict(
                     f"expected last sequence {expected_last_sequence}, got {self._last_sequence}"
@@ -237,10 +272,19 @@ class JournalWriter:
             ).hexdigest()
 
             path = self._segment_path(self._current_segment)
-            with path.open("a", encoding="utf-8") as f:
-                f.write(canonical_json(event.model_dump()) + "\n")
-                f.flush()
-                os.fsync(f.fileno())
+            try:
+                with path.open("a", encoding="utf-8") as f:
+                    f.write(canonical_json(event.model_dump()) + "\n")
+                    f.flush()
+                    os.fsync(f.fileno())
+            except Exception:
+                # 与 append_many 相同的恢复契约：截断撕裂尾、恢复磁盘权威尾再抛出。
+                try:
+                    self.repair_tail()
+                    self._reconcile_from_journal()
+                except Exception as repair_exc:
+                    logger.error("append 失败后 repair_tail 也失败: %s", repair_exc)
+                raise
 
             self._last_sequence = event.sequence
             self._last_event_sha256 = event.integrity.event_sha256
@@ -276,6 +320,7 @@ class JournalWriter:
             return []
         with self._locked():
             self._reconcile_from_journal()
+            self._ensure_clean_tail_locked()
             # 组内 event_id 不得重复
             seen_ids = set()
             for event in events:
@@ -355,42 +400,66 @@ class JournalWriter:
         cookie that is not a byte offset, so a ``seek`` from a second file
         object is unreliable. Binary mode gives exact byte offsets. A segment
         whose only content is a half-written first line is truncated to empty.
+
+        安全截断（D04）：只允许截断"最后一个完整合法行之后、且直到 EOF 不再出现
+        任何完整合法行"的内容——即撕裂尾部。若坏行之后仍有合法事件（中部损坏），
+        抛出 JournalMidFileCorruption，绝不静默截掉合法数据。
         """
         path = self._segment_path(self._current_segment)
         if not path.exists():
             return
         last_full = 0
-        corrupt_tail = False
+        first_bad_offset: Optional[int] = None
+        valid_after_bad = False
+        offset = 0
         with path.open("rb") as f:
             for raw in f:
+                line_start = offset
+                offset += len(raw)
                 line = raw.decode("utf-8", errors="replace").strip()
                 if not line:
                     continue
                 try:
                     EventEnvelope.model_validate_json(line)
-                    last_full = f.tell()
+                    last_full = line_start + len(raw)
+                    if first_bad_offset is not None:
+                        valid_after_bad = True
                 except Exception:
-                    corrupt_tail = True
-                    break
-        if corrupt_tail:
-            with path.open("r+b") as f:
-                f.seek(last_full)
-                f.truncate()
+                    if first_bad_offset is None:
+                        first_bad_offset = line_start
+        if first_bad_offset is None:
+            return
+        if valid_after_bad:
+            # 中部损坏：后面还有合法事件，截断会销毁数据——拒绝修复并上报。
+            raise JournalMidFileCorruption(
+                f"journal segment {path} 存在中部损坏（坏行之后仍有合法事件），"
+                "已拒绝 repair_tail 截断以保护数据；请人工修复该 segment"
+            )
+        with path.open("r+b") as f:
+            f.seek(last_full)
+            f.truncate()
 
     def read_from(self, after_sequence: int = 0) -> List[EventEnvelope]:
+        """读取 after_sequence 之后的事件，按 sequence 排序。
+
+        坏行语义与 _reconcile_from_journal 一致（D14 统一）：一个 segment 内
+        遇到无法解析的行即视为该 segment 的尾部截断点（撕裂尾/损坏行之后的
+        内容不参与重放），后续 segment 仍正常读取。按行二进制解码，多字节
+        撕裂只影响坏行本身，不会让整个 segment 不可读（D05）。
+        """
         events: List[EventEnvelope] = []
         for number in self._segment_numbers_on_disk():
             path = self._segment_path(number)
             if not path.exists():
                 continue
-            for line in path.read_text(encoding="utf-8").splitlines():
+            for line in _iter_segment_lines(path):
                 line = line.strip()
                 if not line:
                     continue
                 try:
                     event = EventEnvelope.model_validate_json(line)
                 except Exception:
-                    continue  # half-written tail / corrupted line is skipped on read
+                    break  # 与 reconcile 一致：坏行即该 segment 尾部
                 if event.sequence > after_sequence:
                     events.append(event)
         events.sort(key=lambda e: e.sequence)

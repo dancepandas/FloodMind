@@ -259,6 +259,9 @@ class ExperienceTree:
             )
         except Exception as e:
             logger.error(f"经验树索引加载失败: {e}")
+            # 先把损坏原件改名隔离，避免下次 _save 用空数据覆盖原文件
+            # （瞬时读取失败不应导致既有经验被永久清空）。
+            self._quarantine_corrupt_index()
             root = ExperienceNode(
                 node_id=self.ROOT_ID,
                 path=["经验树根"],
@@ -266,6 +269,17 @@ class ExperienceTree:
                 node_type="domain",
             )
             self._nodes[self.ROOT_ID] = root
+
+    def _quarantine_corrupt_index(self) -> None:
+        """把无法解析的索引文件隔离为 <原名>.corrupt-<时间戳>，保留人工恢复可能。"""
+        try:
+            if os.path.exists(self._index_file):
+                stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+                quarantine_path = f"{self._index_file}.corrupt-{stamp}"
+                os.replace(self._index_file, quarantine_path)
+                logger.error(f"损坏的经验树索引已隔离为: {quarantine_path}")
+        except Exception as quarantine_error:
+            logger.error(f"隔离损坏的经验树索引失败: {quarantine_error}")
 
     def _save(self) -> None:
         with self._lock:
@@ -563,8 +577,15 @@ class ExperienceTree:
             return f"未找到路径: {path_str}"
         return self.render_subtree_markdown(node.node_id)
 
+    # 上下文注入的字符预算（约 1500~2000 token）：超预算时优先保留高层分支摘要
+    SUMMARY_CONTEXT_CHAR_BUDGET = 6000
+
     def render_summary_markdown(self) -> str:
-        """渲染上下文注入内容：摘要 + 未摘要分支的关键细节"""
+        """渲染上下文注入内容：摘要 + 未摘要分支的关键细节
+
+        按字符预算（SUMMARY_CONTEXT_CHAR_BUDGET，约 6000）裁剪：摘要行排在前，
+        截断时优先保留高层分支摘要，未摘要分支细节被截去，并在结尾标注。
+        """
         with self._lock:
             lines = ["[经验摘要]"]
 
@@ -602,7 +623,21 @@ class ExperienceTree:
                     lines.append("方案: " + "; ".join(unique_solutions))
                 lines.append("")
 
-            return "\n".join(lines)
+            text = "\n".join(lines)
+            budget = self.SUMMARY_CONTEXT_CHAR_BUDGET
+            if len(text) <= budget:
+                return text
+            # 超预算：截到最后一个完整行，摘要分支排在前故被优先保留
+            trimmed = text[:budget]
+            newline_pos = trimmed.rfind("\n")
+            if newline_pos > 0:
+                trimmed = trimmed[:newline_pos]
+            trimmed += "\n（经验摘要已按预算裁剪）"
+            logger.info(
+                "经验摘要超出注入预算已裁剪: %d -> %d 字符（预算 %d）",
+                len(text), len(trimmed), budget,
+            )
+            return trimmed
 
     def _render_browse_tree(self, node_id: str, indent: int) -> str:
         """渲染浏览视图：只显示结构 + 叶子数，不展开叶子详情"""
