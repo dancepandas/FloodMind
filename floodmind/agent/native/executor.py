@@ -110,6 +110,18 @@ def project_run_state_to_loop_state(
             })
     if journal_messages or not current_thread_id:
         projected.messages = system_prefix + journal_messages
+        # 本轮由附件构建的结构化 user 消息（含 image_url 块）不被 journal 纯文本
+        # 重建覆盖：journal 只存文字（thread.message.sent 不含附件），图片仅在
+        # 本轮消息列表中保留；后续轮次回放自然退化为纯文本，不重复发图。
+        for original in reversed(loop_state.messages):
+            if original.get("role") != "user":
+                continue
+            if isinstance(original.get("content"), list):
+                for target in reversed(projected.messages):
+                    if target.get("role") == "user":
+                        target["content"] = original["content"]
+                        break
+            break
     projected.pending_tool_calls = []
     projected.pending_ask_id = None
     projected.pending_tool_transaction_id = ""
@@ -563,6 +575,11 @@ class NativeAgentExecutor:
                 state.terminal_reason = None
                 step_tokens = TokenUsage()
                 time.sleep(delay)
+
+        # 图片等内容块只在本次 run 的第一次 LLM 调用可见：调用完成后立即把 user
+        # 消息退化为纯文本——剥离按 run 内首次调用计数（与会话级 projection
+        # iteration 无关，内部重试不剥离），后续迭代、checkpoint 快照均不再携带图片。
+        self._strip_media_from_user_messages(state.messages)
 
         # 中断（用户暂停）在 LLM 流式阶段生效：ModelClient 收到 abort 信号后会干净返回，
         # 这里显式拦截，丢弃本轮半截产物，**不写 memory**，直接终态 failed。
@@ -1316,8 +1333,12 @@ class NativeAgentExecutor:
                 }
             else:
                 journal_cursor = state.journal_cursor
+            # 检查点序列化剥图：快照一律存纯文本，旧图不随 resume 回流。
+            # 运行时 state 不受影响——本次 run 首次 LLM 调用仍能看到图。
+            checkpoint_state = state.model_copy(deep=True)
+            self._strip_media_from_user_messages(checkpoint_state.messages)
             record = self._checkpoint_service.save(
-                state,
+                checkpoint_state,
                 metadata={
                     "model_name": getattr(self.model_client, 'model_name', ''),
                     "status": state.status,
@@ -1395,6 +1416,23 @@ class NativeAgentExecutor:
             messages.extend(memory_messages)
         messages.append(self.message_builder.build_user_message(user_text, attachments))
         return messages
+
+    @staticmethod
+    def _strip_media_from_user_messages(messages: List[dict]) -> None:
+        """把 user 消息中的结构化内容块（image_url 等）退化为纯文本。
+
+        journal/memory 历史本来就是纯文本；这里覆盖的是本次 run 内复用
+        state.messages 的场景——图片只随第一次 LLM 调用发送。幂等。
+        """
+        for message in messages:
+            if message.get("role") != "user" or not isinstance(message.get("content"), list):
+                continue
+            text_parts = [
+                block.get("text", "")
+                for block in message["content"]
+                if isinstance(block, dict) and block.get("type") == "text"
+            ]
+            message["content"] = "\n".join(part for part in text_parts if part)
 
     @staticmethod
     def _build_input_signature(call: ToolCall) -> str:

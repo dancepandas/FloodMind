@@ -2,6 +2,14 @@
 
 All notable changes to FloodMind are documented in this file.
 
+## [2.1.11] - 2026-09-02
+
+### Fixed
+
+- **带附件消息在 journal 回放投影下丢失图片**：`stream()` 先把纯文本写入 journal（`thread.message.sent` 不含附件），`run_from_state` 回放后 `project_run_state_to_loop_state` 用纯文本重建整个消息列表，覆盖了 `_build_initial_messages` 构建的含 `image_url` 结构化块——模型看不到用户发的图。现在投影重建后，若传入 state 的最后一条 user 消息为结构化内容块（本轮带附件），用它替换重建列表中的对应消息。
+- **图片只随本次 run 的首次 LLM 调用发送**：首调完成后立即把 user 消息退化为纯文本，工具调用循环的后续迭代不再重复发送 base64 图片，避免上下文爆炸；重试不视为新调用。
+- **检查点快照一律存纯文本**：`_save_checkpoint` 序列化前对深拷贝剥图，运行时 state 不受影响，resume 不会把旧图带回上下文。
+
 ## [2.1.10] - 2026-09-02
 
 ### Fixed

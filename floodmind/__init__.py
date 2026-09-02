@@ -33,7 +33,7 @@ FloodMind — 基于大语言模型的智能 Agent 框架
     )
 """
 
-__version__ = "2.1.10"
+__version__ = "2.1.11"
 
 # ── SDK 公共 API ──
 
