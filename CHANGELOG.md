@@ -2,6 +2,12 @@
 
 All notable changes to FloodMind are documented in this file.
 
+## [2.1.10] - 2026-09-02
+
+### Fixed
+
+- **POSIX 平台导入崩溃**：`floodmind/common/filelock.py` 顶部无条件 `import msvcrt` 导致 Linux/macOS 上 `from floodmind import Agent` 直接 `ModuleNotFoundError`。改为按平台导入（`if os.name == "nt": import msvcrt`），POSIX 路径本就只使用 `fcntl.flock`，功能不变。
+
 ## [2.1.9] - 2026-08-30
 
 > 折叠栏设计 v2：默认折叠 + 下方实时显示最近 2 条过程活动摘要。

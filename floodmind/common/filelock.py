@@ -18,12 +18,14 @@ SessionManager / ScheduledTaskRuntime / 长期记忆则完全没有跨进程锁�
 from __future__ import annotations
 
 import logging
-import msvcrt
 import os
 import threading
 import time
 from pathlib import Path
 from typing import Union
+
+if os.name == "nt":
+    import msvcrt
 
 logger = logging.getLogger(__name__)
 
