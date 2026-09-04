@@ -290,3 +290,112 @@ class TestHandoffReviewFixes:
         assert result.final_output == "resumed target"
         main_mc.stream_chat.assert_not_called()
         assert target_mc.stream_chat.call_count == 1
+
+
+
+class TestHandoffReviewRound4:
+    def test_journal_completed_run_does_not_stick_handoff_to_next_turn(self):
+        """Run terminal event clears active_agent：同 session 下一轮回到主 Agent。"""
+        from floodmind.agent.runtime.reducer import initial_run_state, reduce
+        from floodmind.agent.runtime.contracts.canonical_events import EventEnvelope
+        rs = initial_run_state("run-1")
+        rs = reduce(rs, EventEnvelope(
+            event_id="h", sequence=1, event_type="agent.handoff.completed",
+            payload={"target_agent": "forecast"},
+        ))
+        assert rs.active_agent == "forecast"
+        rs = reduce(rs, EventEnvelope(
+            event_id="r", sequence=2, event_type="run.completed",
+            payload={"final_output": "done"},
+        ))
+        assert rs.active_agent == "", "handoff 只能影响当前 run，终态后必须清空"
+
+    def test_unicode_name_sanitizes_to_ascii_tool_contract(self):
+        target = Target(_mc([]), Registry())
+        handoff = HandoffTarget(target, name="水文预报")
+        import re
+        assert re.fullmatch(r"[a-zA-Z0-9_-]+", handoff.resolved_tool_name)
+
+    def test_passthrough_filter_drops_orphan_tool_messages(self):
+        history = [
+            {"role": "user", "content": "q"},
+            {"role": "assistant", "content": "", "tool_calls": [
+                {"id": "old", "type": "function", "function": {"name": "Read", "arguments": "{}"}},
+            ]},
+            {"role": "tool", "tool_call_id": "old", "content": "old result"},
+        ]
+        main_mc = _mc([
+            ModelEvent(type="tool_call_done",
+                       tool_call=ToolCall(id="h1", name="handoff_to_forecast", arguments={})),
+            ModelEvent(type="done"),
+        ])
+        captured = []
+        target_mc = _mc([])
+        target_mc.stream_chat.side_effect = lambda *a, **kw: (
+            captured.append(copy.deepcopy(kw["messages"])),
+            [ModelEvent(type="token", content="done"), ModelEvent(type="done")],
+        )[1]
+        target = Target(target_mc, Registry())
+        passthrough = lambda _msgs: copy.deepcopy(history)
+        executor = _executor(main_mc, Registry(), handoffs=[
+            HandoffTarget(target, name="forecast", history_filter=passthrough),
+        ])
+        executor.run(_ctx(), "help")
+        assert not any(m.get("role") == "tool" for m in captured[0]),             "移除 tool_calls 后必须同步移除 orphan tool messages"
+
+    def test_handoff_journal_failure_fails_atomically(self):
+        main_mc = _mc([
+            ModelEvent(type="tool_call_done",
+                       tool_call=ToolCall(id="h1", name="handoff_to_forecast", arguments={})),
+            ModelEvent(type="done"),
+        ])
+        target_mc = _mc([ModelEvent(type="token", content="target"), ModelEvent(type="done")])
+        target = Target(target_mc, Registry())
+        executor = _executor(main_mc, Registry(), handoffs=[HandoffTarget(target, name="forecast")])
+        authority = MagicMock()
+        from floodmind.agent.runtime.reducer import initial_run_state
+        authority.replay.return_value = initial_run_state("run-1")
+        authority.emit.side_effect = OSError("disk full")
+        executor._journal_authority = authority
+        try:
+            executor.run(_ctx(), "help")
+        except OSError:
+            pass
+        assert executor.model_client is main_mc, "journal requested 未提交不得切换目标控制面"
+
+    def test_target_capabilities_recomputed_on_takeover(self):
+        main_mc = _mc([
+            ModelEvent(type="tool_call_done",
+                       tool_call=ToolCall(id="h1", name="handoff_to_forecast", arguments={})),
+            ModelEvent(type="done"),
+        ])
+        main_mc.provider = "main-provider"
+        main_mc.model_name = "main-model"
+        target_mc = _mc([ModelEvent(type="token", content="target"), ModelEvent(type="done")])
+        target_mc.provider = "target-provider"
+        target_mc.model_name = "target-model"
+        target = Target(target_mc, Registry())
+        executor = _executor(main_mc, Registry(), handoffs=[HandoffTarget(target, name="forecast")])
+        executor.run(_ctx(), "help")
+        assert "target-provider" in executor._capability_snapshot_id
+        assert "target-model" in executor._capability_snapshot_id
+
+    def test_invalid_target_dependencies_rejected_before_completed_event(self):
+        class Broken:
+            session_id = "broken"
+            system_prompts = ["BROKEN"]
+            registry = Registry()
+            tool_executor = MagicMock()
+        main_mc = _mc([
+            ModelEvent(type="tool_call_done",
+                       tool_call=ToolCall(id="h1", name="handoff_to_broken", arguments={})),
+            ModelEvent(type="done"),
+        ])
+        executor = _executor(main_mc, Registry(), handoffs=[HandoffTarget(Broken(), name="broken")])
+        events = []
+        executor.event_bus.add_listener(events.append)
+        try:
+            executor.run(_ctx(), "help")
+        except (TypeError, ValueError):
+            pass
+        assert not any(e.get("type") == "handoff_completed" for e in events)

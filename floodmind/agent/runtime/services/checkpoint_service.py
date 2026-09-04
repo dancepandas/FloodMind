@@ -565,7 +565,9 @@ class CheckpointService:
             return obj.isoformat()
         if isinstance(obj, (set, frozenset)):
             return sorted(obj, key=repr)
-        return f"<unserializable:{type(obj).__name__}>"
+        marker = f"<unserializable:{type(obj).__name__}>"
+        logger.warning("CheckpointService: 不可序列化值已降级为 %s", marker)
+        return marker
 
 
 class CheckpointError(Exception):

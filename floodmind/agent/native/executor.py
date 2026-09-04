@@ -305,30 +305,49 @@ class NativeAgentExecutor:
         if filter_history:
             filtered = handoff.filter_history(state.messages)
             non_system = [m for m in filtered if m.get("role") != "system"]
+            # 保守策略：自定义 filter 保留结构化历史时，移除所有 role=tool
+            # 消息以及 assistant.tool_calls，避免任一方向产生悬空配对。默认 filter
+            # 本就压成纯文本，不受影响。
+            non_system = [m for m in non_system if m.get("role") != "tool"]
             for message in non_system:
                 if message.get("role") == "assistant" and message.get("tool_calls"):
                     message.pop("tool_calls", None)
             state.messages = [self.message_builder.build_system_message(p) for p in target_prompts] + non_system
 
-        self.model_client = (
+        target_model = (
             getattr(target_executor, "model_client", None)
             or getattr(target, "model_client", None)
             or getattr(target, "_model_client", None)
-            or self.model_client)
-        self.tool_executor = (
+        )
+        target_tool_executor = (
             getattr(target_executor, "tool_executor", None)
             or getattr(target, "tool_executor", None)
             or getattr(target, "_tool_executor", None)
-            or self.tool_executor)
-        self._tool_registry = (
+        )
+        target_registry = (
             getattr(target_executor, "_tool_registry", None)
             or getattr(target, "registry", None)
             or getattr(target, "_orchestrator_registry", None)
-            or self._tool_registry)
-        self._tools_schema = (
-            getattr(target_executor, "_tools_schema", None)
-            or getattr(target, "tools_schema", None)
-            or (self._tool_registry.tools_schema() if self._tool_registry is not None else []))
+        )
+        if target_model is None or target_tool_executor is None or target_registry is None:
+            raise ValueError(
+                f"handoff 目标 {handoff.resolved_name!r} 缺少完整 runtime 依赖"
+                "（model_client/tool_executor/registry）"
+            )
+        self.model_client = target_model
+        self.tool_executor = target_tool_executor
+        self._tool_registry = target_registry
+
+        target_schema = getattr(target_executor, "_tools_schema", None)
+        if target_schema is None:
+            target_schema = getattr(target, "tools_schema", None)
+            if callable(target_schema):
+                target_schema = target_schema()
+        if target_schema is None:
+            target_schema = self._tool_registry.tools_schema()
+        if not isinstance(target_schema, list):
+            raise TypeError("handoff 目标 tools_schema 必须是 list 或返回 list 的 callable")
+        self._tools_schema = target_schema
         self._tool_loader = getattr(target_executor, "_tool_loader", None)
         self._system_prompts = target_prompts
         target_inputs = list(getattr(target_executor, "_input_guardrails", []) or
@@ -337,6 +356,8 @@ class NativeAgentExecutor:
                               getattr(target, "output_guardrails", []) or [])
         self._input_guardrails.extend(g for g in target_inputs if g not in self._input_guardrails)
         self._output_guardrails.extend(g for g in target_outputs if g not in self._output_guardrails)
+        # 模型切换后 capability/manifest 也必须切换，不能沿用主模型快照。
+        self._capabilities = self._resolve_capabilities()
         # 链式 handoff：接管后切换到目标自身的 handoffs，而非保留主 agent 的字典。
         self._handoffs = dict(getattr(target_executor, "_handoffs", {}) or {})
 
@@ -351,12 +372,21 @@ class NativeAgentExecutor:
             "type": "handoff_started", "target_agent": name,
             "tool_name": call.name, "reason": reason,
         })
-        if self._journal_authority is not None:
-            self._journal_authority.emit("agent.handoff.requested", {
-                "target_agent": name, "tool_name": call.name, "reason": reason,
-            }, call_id=call.id)
-
-        self._apply_handoff_target_runtime(handoff, state, filter_history=True)
+        # handoff journal 是控制面事实，不能 best-effort。requested 必须先提交，
+        # 失败则完全不切换；completed 在依赖切换后提交，失败则回滚主 runtime。
+        try:
+            if self._journal_authority is not None:
+                self._journal_authority.emit("agent.handoff.requested", {
+                    "target_agent": name, "tool_name": call.name, "reason": reason,
+                }, call_id=call.id)
+            self._apply_handoff_target_runtime(handoff, state, filter_history=True)
+            if self._journal_authority is not None:
+                self._journal_authority.emit("agent.handoff.completed", {
+                    "target_agent": name, "tool_name": call.name,
+                }, call_id=call.id)
+        except Exception:
+            self._restore_base_runtime()
+            raise
 
         state.pending_tool_calls = []
         state.current_answer = ""
@@ -368,10 +398,6 @@ class NativeAgentExecutor:
             "type": "handoff_completed", "target_agent": name,
             "tool_name": call.name,
         })
-        if self._journal_authority is not None:
-            self._journal_authority.emit("agent.handoff.completed", {
-                "target_agent": name, "tool_name": call.name,
-            }, call_id=call.id)
         return state
 
     # --- 公共访问接口（保持向后兼容） ---
@@ -648,20 +674,34 @@ class NativeAgentExecutor:
         # 后台任务完成通知注入（loop 活跃时；已终态的留给宿主唤醒路径）
         self._inject_background_notifications(state)
 
-        # 输入 guardrail：每次 LLM 调用前校验（工具回流后输入已变化，需再次过闸）。
-        # tripwire → fail-closed 终止 run，不喂给模型；replaced_input 非空时替换输入。
+        # 输入 guardrail：只校验尚未验证的 user 输入消息。assistant/tool 内容属于
+        # 模型输出或工具结果，应由 output/tool policy 管；把整段历史反复送输入闸会
+        # 将工具内容误归因给用户，并在修正轮自杀。
         if self._input_guardrails:
-            gr, tripped_name = run_input_guardrails(self._input_guardrails, state.messages)
+            user_messages = [m for m in state.messages if m.get("role") == "user"]
+            pending_inputs = user_messages[state.validated_user_message_count:]
+            gr, tripped_name = run_input_guardrails(self._input_guardrails, pending_inputs)
             if gr.tripwire_triggered:
                 logger.warning("[EXEC] input guardrail %s tripped: %s", tripped_name, gr.message)
                 self._emit_guardrail_event(tripped_name, "input", gr.message, retrying=False)
                 state.final_output = gr.message or "输入被 guardrail 拦截。"
                 state.status = "failed"
                 return state
+            state.validated_user_message_count = len(user_messages)
             if gr.replaced_input is not None:
-                # 契约：宿主 guardrail 返回新鲜列表（见 guardrail.py docstring），
-                # 运行中会原地演化该列表（剥图/追加），宿主不得复用同一列表对象
-                state.messages = gr.replaced_input
+                # replacement 契约是 pending user 输入子集；按原 user 位置替换。
+                replacement = iter(gr.replaced_input)
+                start = len(user_messages) - len(pending_inputs)
+                seen = 0
+                for idx, message in enumerate(state.messages):
+                    if message.get("role") != "user":
+                        continue
+                    if seen >= start:
+                        try:
+                            state.messages[idx] = next(replacement)
+                        except StopIteration:
+                            break
+                    seen += 1
 
         # 主动上下文压缩：达到阈值时先进入 context_compress 状态。
         # 压缩已 fail-closed（同一轮消息未变，重试必再失败）→ 跳过，直接走 LLM 调用，
@@ -807,12 +847,11 @@ class NativeAgentExecutor:
         )
         # 缓冲放流统一在 llm_step_end 之前：工具轮叙述、续写轮片段、最终答案
         # 均按时序到达前端（先 delta 后 step_end），chainlit 才能正确折叠进本轮。
-        # normal completion（stop/end_turn/stop_sequence 等）且无 tool_calls = 最终答案轮：
-        # 输出 guardrail 裁决前移至此，通过即放流，tripwire 即重试/失败（缓冲丢弃），
-        # 保证「验证通过的内容先于 step_end 到达前端」。
+        # 有输出 guardrail 时所有 LLM 轮 token/reasoning 跨轮缓冲，直到完整最终
+        # 候选答案 verdict；max_tokens 中间片段不能提前泄漏。
         completed_final_round = not tool_calls and terminal.is_normal_completion
-        if buffered_output and not completed_final_round:
-            self._flush_buffered_output(attempt_output_events)
+        if buffered_output:
+            state.output_guardrail_buffered_events.extend(attempt_output_events)
         if buffered_output and completed_final_round and self._output_guardrails:
             candidate_output = state.final_output + state.current_answer
             tripped, gr, gr_name = self._check_output_guardrails(state, candidate_output)
@@ -843,14 +882,17 @@ class NativeAgentExecutor:
                     state.token_usage.total_tokens += step_tokens.total_tokens
                     state.final_output = ""
                     state.current_answer = ""
+                    state.output_guardrail_buffered_events = []
                     state.status = "awaiting_llm"
                     return state
                 state.final_output = gr.message or "输出被 guardrail 拦截。"
+                state.output_guardrail_buffered_events = []
                 state.status = "failed"
                 self._emit_guardrail_event(gr_name, "output", gr.message, retrying=False)
                 self.event_bus.emit_llm_step_end(reason=terminal.raw or terminal.code)
                 return state
-            self._flush_buffered_output(attempt_output_events)
+            self._flush_buffered_output(state.output_guardrail_buffered_events)
+            state.output_guardrail_buffered_events = []
         self.event_bus.emit_llm_step_end(
             reason=terminal.raw or terminal.code,
             tokens={

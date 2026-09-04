@@ -456,6 +456,7 @@ def _reduce_run_terminal(
     if not _is_current_thread(ns, thread_id):
         return ns
     ns.status = RunStatus.failed if event_type == "run.failed" else RunStatus.completed
+    ns.active_agent = ""  # handoff 仅作用于当前 run；终态后下一轮回主 Agent
     ns.last_committed_sequence = ns.last_committed_sequence
     return ns
 

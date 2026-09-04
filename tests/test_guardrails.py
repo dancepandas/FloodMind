@@ -606,19 +606,24 @@ class TestReviewRound3Fixes:
         result = executor.run(_context(), "hello")
         assert result.final_output == "ok"
 
-    def test_tool_round_narrative_still_streams(self):
-        """#2：有 guardrail 时工具轮叙述 token 仍放流（不再丢弃）。"""
+    def test_tool_round_narrative_buffered_until_final_verdict(self):
+        """有输出 guardrail 时工具轮叙述跨轮缓冲，最终 verdict 通过才放流。"""
         emitted = []
         from floodmind.agent.runtime.contracts.tools import ToolResult as NativeToolResult
         from floodmind.agent.native.types import ToolCall
 
+        call_count = []
+
         def make_stream(*args, **kwargs):
-            return [
-                ModelEvent(type="token", content="先说两句"),
-                ModelEvent(type="tool_call_done",
-                           tool_call=ToolCall(id="t1", name="t", arguments={})),
-                ModelEvent(type="done"),
-            ]
+            call_count.append(1)
+            if len(call_count) == 1:
+                return [
+                    ModelEvent(type="token", content="先说两句"),
+                    ModelEvent(type="tool_call_done",
+                               tool_call=ToolCall(id="t1", name="t", arguments={})),
+                    ModelEvent(type="done"),
+                ]
+            return _token_done("最终回答")
 
         mc = MagicMock(spec=ModelClient)
         mc.stream_chat.side_effect = make_stream
@@ -639,7 +644,8 @@ class TestReviewRound3Fixes:
         executor.run(_context(), "hello")
 
         assert any(e.get("content") == "先说两句" for e in emitted if e.get("type") == "token"), \
-            "工具轮叙述必须放流"
+            "工具轮叙述必须在最终 verdict 通过后放流"
+        assert any(e.get("content") == "最终回答" for e in emitted if e.get("type") == "token")
 
     def test_flush_order_before_llm_step_end(self):
         """#3：缓冲 token 在 llm_step_end 之前放流（时序正确，前端折叠不裂）。"""
@@ -845,3 +851,74 @@ class TestCrossCapabilityReviewFixes:
 
         assert projected.output_guardrail_retried is True
         assert projected.messages[-2:] == correction
+
+
+
+class TestGuardrailReviewRound4:
+    def test_max_tokens_partial_does_not_leak_before_final_verdict(self):
+        emitted = []
+        rounds = []
+        mc = MagicMock(spec=ModelClient)
+        def stream(*a, **kw):
+            rounds.append(1)
+            if len(rounds) == 1:
+                return [
+                    ModelEvent(type="token", content="违规片段"),
+                    ModelEvent(type="done", terminal_reason=TerminalReason.from_raw("max_tokens")),
+                ]
+            return [ModelEvent(type="token", content="干净续写"), ModelEvent(type="done")]
+        mc.stream_chat.side_effect = stream
+        def block(output, state=None):
+            return GuardrailResult(tripwire_triggered="违规" in output, message="blocked")
+        block.__name__ = "block"
+        executor = _make_executor(mc, output_guardrails=[block], max_iterations=10)
+        executor.event_bus = MagicMock()
+        executor.event_bus.emit = lambda e: emitted.append(e)
+        executor.event_bus.emit_token = lambda c: emitted.append({"type": "token", "content": c})
+        executor.event_bus.emit_reasoning = lambda c: None
+        executor.run(_context(), "hello")
+        assert not any("违规片段" in str(e.get("content", "")) for e in emitted),             "续写中间片段未经全量 guardrail verdict 不得放流"
+
+    def test_input_guardrail_receives_only_input_scope_not_tool_outputs(self):
+        from floodmind.agent.runtime.contracts.tools import ToolResult as NativeToolResult
+        from floodmind.agent.native.types import ToolCall
+        calls = []
+        mc = MagicMock(spec=ModelClient)
+        def stream(*a, **kw):
+            calls.append(1)
+            if len(calls) == 1:
+                return [ModelEvent(type="tool_call_done",
+                                   tool_call=ToolCall(id="t", name="t", arguments={})),
+                        ModelEvent(type="done")]
+            return _token_done("final ok")
+        mc.stream_chat.side_effect = stream
+        te = MagicMock()
+        te.execute.return_value = NativeToolResult(
+            tool_call_id="t", name="t", content="tool says API_KEY=secret", status="completed")
+        def no_secrets(messages):
+            if any("API_KEY=" in str(m.get("content", "")) for m in messages):
+                return GuardrailResult(tripwire_triggered=True, message="input blocked")
+            return GuardrailResult(tripwire_triggered=False)
+        no_secrets.__name__ = "no_secrets"
+        executor = _make_executor(mc, input_guardrails=[no_secrets], tool_executor=te)
+        result = executor.run(_context(), "clean user input")
+        assert result.final_output == "final ok"
+
+    def test_empty_answer_retry_really_runs_and_has_no_empty_assistant(self):
+        captured = []
+        mc = MagicMock(spec=ModelClient)
+        responses = iter([_token_done(""), _token_done("")])
+        def stream(*a, **kw):
+            captured.append(copy.deepcopy(kw["messages"]))
+            return next(responses)
+        mc.stream_chat.side_effect = stream
+        def check(output, state=None):
+            return GuardrailResult(tripwire_triggered=True, message="empty output not allowed")
+        check.__name__ = "check"
+        executor = _make_executor(mc, output_guardrails=[check], max_iterations=10)
+        executor.run(_context(), "hello")
+        assert len(captured) == 2, "必须实际进入 guardrail 修正重试轮"
+        for messages in captured:
+            for m in messages:
+                if m.get("role") == "assistant":
+                    assert m.get("content") != "" or m.get("tool_calls"),                         "不得注入空 assistant 消息"

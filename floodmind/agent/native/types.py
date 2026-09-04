@@ -223,6 +223,9 @@ class AgentLoopState(BaseModel):
     round_reasoning: str = ""
     # 已并入 state.messages 的用户消息数（用于检测运行中追加的排队指令）
     consumed_user_message_count: int = 0
+    # 输入 guardrail 已校验到的 user 消息序号；只校验新 user 输入，不把
+    # assistant/tool 输出误归因成用户输入。
+    validated_user_message_count: int = 0
     pending_tool_calls: List[ToolCall] = Field(default_factory=list)
     pending_ask_id: Optional[str] = None
     terminal_reason: Optional[TerminalReason] = None
@@ -233,6 +236,9 @@ class AgentLoopState(BaseModel):
     # 输出 guardrail 重试上下文：checkpoint/replay 投影时保留被拒答案+修正提示；
     # 成功/失败终态清空（仅本 run 暂存，不写 canonical turn）。
     output_guardrail_retry_messages: List[Dict[str, Any]] = Field(default_factory=list)
+    # 配置输出 guardrail 时跨 LLM 轮缓冲的 (event_type, content)，直到最终
+    # 候选答案 verdict 通过才放流；tripwire/abort 时整批丢弃。
+    output_guardrail_buffered_events: List[Tuple[str, str]] = Field(default_factory=list)
     # 当前 handoff 目标 resolved_name；checkpoint/replay 后据此重新应用接管依赖。
     active_handoff_agent: str = ""
 

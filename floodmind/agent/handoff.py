@@ -9,6 +9,10 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import Any, Callable, List, Optional
+import re
+
+
+_HANDOFF_TOOL_NAME_RE = re.compile(r"[^a-zA-Z0-9_-]+")
 
 
 def default_handoff_history_filter(messages: List[dict]) -> List[dict]:
@@ -59,7 +63,7 @@ class HandoffTarget:
     def resolved_tool_name(self) -> str:
         if self.tool_name:
             return self.tool_name
-        safe = "".join(c if c.isalnum() or c in "_-" else "_" for c in self.resolved_name)
+        safe = _HANDOFF_TOOL_NAME_RE.sub("_", self.resolved_name).strip("_") or "agent"
         return f"handoff_to_{safe}"
 
     @property
