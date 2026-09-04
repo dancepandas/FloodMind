@@ -515,19 +515,57 @@ class CheckpointService:
             except Exception as e:
                 logger.warning("CheckpointService: 清理旧 checkpoint %s 失败: %s", old.checkpoint_id, e)
 
+    @staticmethod
+    def _normalize_dynamic(value: Any, depth: int = 0) -> Any:
+        """动态挂载字段的深度归一：Pydantic 模型 → dict，容器递归，超深截断。
+
+        只处理运行时挂载字段（数量小），不触碰 messages 等已由 model_dump
+        处理的声明字段。
+        """
+        if depth > 8:
+            return "<unserializable:max_depth>"
+        if hasattr(value, "model_dump"):
+            return value.model_dump()
+        if isinstance(value, dict):
+            return {k: CheckpointService._normalize_dynamic(v, depth + 1) for k, v in value.items()}
+        if isinstance(value, (list, tuple)):
+            return [CheckpointService._normalize_dynamic(v, depth + 1) for v in value]
+        if isinstance(value, (str, int, float, bool)) or value is None:
+            return value
+        return value  # 其余交给 _json_default 降级
+
     def _serialize_state(self, state: Any) -> Dict[str, Any]:
-        """把状态对象序列化为 dict。优先使用 Pydantic model_dump，其次 __dict__。"""
+        """把状态对象序列化为 dict。优先使用 Pydantic model_dump，其次 __dict__。
+
+        运行时动态挂载的属性（round_assistant_message / _pending_* 等，
+        Pydantic extra=allow 允许 setattr 但不进 model_dump 的实例属性）显式
+        合并进结果——MiniMax 等厂商要求 assistant 快照原样回传，checkpoint
+        丢失该字段会让恢复后的下一轮请求 malformed。
+        """
         if hasattr(state, "model_dump"):
-            return state.model_dump()
+            data = state.model_dump()
+            declared = set(type(state).model_fields.keys())
+            for key, value in vars(state).items():
+                if key in declared or key.startswith("_") and key.startswith("__"):
+                    continue
+                if key.startswith("__") or key in ("_pydantic_extra__", "_pydantic_fields_set__", "_pydantic_private__"):
+                    continue
+                if key not in data:
+                    data[key] = self._normalize_dynamic(value)
+            return data
         if hasattr(state, "__dict__"):
             return dict(state.__dict__)
         raise TypeError(f"无法序列化状态对象: {type(state)}")
 
     @staticmethod
     def _json_default(obj: Any) -> Any:
+        """JSON 序列化兜底。未知类型降级为标记字符串而非抛错——整次 checkpoint
+        保存不应因单个宿主注入的不可序列化值失败（可序列化部分照常保留）。"""
         if isinstance(obj, datetime):
             return obj.isoformat()
-        raise TypeError(f"Object of type {type(obj)} is not JSON serializable")
+        if isinstance(obj, (set, frozenset)):
+            return sorted(obj, key=repr)
+        return f"<unserializable:{type(obj).__name__}>"
 
 
 class CheckpointError(Exception):
