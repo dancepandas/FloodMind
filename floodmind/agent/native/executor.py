@@ -6,6 +6,7 @@ Native Agent Runtime - NativeAgentExecutor
 状态机驱动、Checkpoint 持久化与恢复。
 """
 
+import copy
 import json
 import logging
 import os
@@ -88,6 +89,7 @@ def project_run_state_to_loop_state(
         1 for turn in scoped_turns if turn.get("role") == "assistant"
     )
     projected.journal_cursor = run_state.last_committed_sequence
+    projected.active_handoff_agent = run_state.active_agent or projected.active_handoff_agent
     system_prefix: List[Dict[str, Any]] = []
     for message in loop_state.messages:
         if message.get("role") != "system":
@@ -114,6 +116,10 @@ def project_run_state_to_loop_state(
             })
     if journal_messages or not current_thread_id:
         projected.messages = system_prefix + journal_messages
+        # guardrail 首触重试的被拒答案+修正提示只存在 checkpoint state，不进
+        # canonical turns；replay 投影时显式接回，避免 crash/resume 丢修正上下文。
+        if loop_state.output_guardrail_retried and loop_state.output_guardrail_retry_messages:
+            projected.messages.extend(copy.deepcopy(loop_state.output_guardrail_retry_messages))
         # 本轮由附件构建的结构化 user 消息（含 image_url 块）不被 journal 纯文本
         # 重建覆盖：journal 只存文字（thread.message.sent 不含附件），图片仅在
         # 本轮消息列表中保留；后续轮次回放自然退化为纯文本，不重复发图。
@@ -207,6 +213,9 @@ class NativeAgentExecutor:
         # Handoff 目标：模型可见工具；命中后目标 Agent 完整接管同一 run
         self._handoffs = {h.resolved_tool_name: h for h in (handoffs or [])}
         self._install_handoff_tools()
+        # 本 executor 是跨 run 复用的；handoff 只能影响当前 run。保存主依赖快照，
+        # run_from_state 入口恢复，避免目标 model/prompt/tools 泄漏到下一次 run。
+        self._base_runtime = self._runtime_snapshot()
         self._compressor_session_id: Optional[str] = None
         # §7.6 能力快照（一次解析，跨压缩/投影复用）；capability_snapshot_id 供 Manifest 引用
         self._capability_snapshot_id: str = ""
@@ -225,6 +234,34 @@ class NativeAgentExecutor:
         }
 
     # --- Handoff 控制权移交 ---
+
+    def _runtime_snapshot(self) -> Dict[str, Any]:
+        return {
+            "model_client": self.model_client,
+            "tool_executor": self.tool_executor,
+            "tool_registry": self._tool_registry,
+            "tools_schema": self._tools_schema,
+            "tool_loader": self._tool_loader,
+            "system_prompts": list(self._system_prompts),
+            "input_guardrails": list(self._input_guardrails),
+            "output_guardrails": list(self._output_guardrails),
+            "handoffs": dict(self._handoffs),
+        }
+
+    def _restore_base_runtime(self) -> None:
+        # object.__new__ 手工拼装的 legacy/测试实例可能没有基线快照；保持兼容。
+        base = getattr(self, "_base_runtime", None)
+        if base is None:
+            return
+        self.model_client = base["model_client"]
+        self.tool_executor = base["tool_executor"]
+        self._tool_registry = base["tool_registry"]
+        self._tools_schema = base["tools_schema"]
+        self._tool_loader = base["tool_loader"]
+        self._system_prompts = list(base["system_prompts"])
+        self._input_guardrails = list(base["input_guardrails"])
+        self._output_guardrails = list(base["output_guardrails"])
+        self._handoffs = dict(base["handoffs"])
 
     def _install_handoff_tools(self) -> None:
         """把 handoff 目标注册为模型可见 ToolSpec（不走普通 tool_executor）。"""
@@ -257,6 +294,52 @@ class NativeAgentExecutor:
         raw = getattr(target.agent, "raw", None)
         return raw if raw is not None else target.agent
 
+    def _apply_handoff_target_runtime(self, handoff: Any, state: AgentLoopState,
+                                      *, filter_history: bool = True) -> None:
+        """应用目标依赖；resume 时 filter_history=False，仅重建控制面。"""
+        target = self._unwrap_handoff_agent(handoff)
+        target_executor = getattr(target, "_orchestrator_executor", None)
+        target_prompts = list(getattr(target, "system_prompts", []) or [])
+        if not target_prompts:
+            target_prompts = list(getattr(target_executor, "system_prompts", []) or [])
+        if filter_history:
+            filtered = handoff.filter_history(state.messages)
+            non_system = [m for m in filtered if m.get("role") != "system"]
+            for message in non_system:
+                if message.get("role") == "assistant" and message.get("tool_calls"):
+                    message.pop("tool_calls", None)
+            state.messages = [self.message_builder.build_system_message(p) for p in target_prompts] + non_system
+
+        self.model_client = (
+            getattr(target_executor, "model_client", None)
+            or getattr(target, "model_client", None)
+            or getattr(target, "_model_client", None)
+            or self.model_client)
+        self.tool_executor = (
+            getattr(target_executor, "tool_executor", None)
+            or getattr(target, "tool_executor", None)
+            or getattr(target, "_tool_executor", None)
+            or self.tool_executor)
+        self._tool_registry = (
+            getattr(target_executor, "_tool_registry", None)
+            or getattr(target, "registry", None)
+            or getattr(target, "_orchestrator_registry", None)
+            or self._tool_registry)
+        self._tools_schema = (
+            getattr(target_executor, "_tools_schema", None)
+            or getattr(target, "tools_schema", None)
+            or (self._tool_registry.tools_schema() if self._tool_registry is not None else []))
+        self._tool_loader = getattr(target_executor, "_tool_loader", None)
+        self._system_prompts = target_prompts
+        target_inputs = list(getattr(target_executor, "_input_guardrails", []) or
+                             getattr(target, "input_guardrails", []) or [])
+        target_outputs = list(getattr(target_executor, "_output_guardrails", []) or
+                              getattr(target, "output_guardrails", []) or [])
+        self._input_guardrails.extend(g for g in target_inputs if g not in self._input_guardrails)
+        self._output_guardrails.extend(g for g in target_outputs if g not in self._output_guardrails)
+        # 链式 handoff：接管后切换到目标自身的 handoffs，而非保留主 agent 的字典。
+        self._handoffs = dict(getattr(target_executor, "_handoffs", {}) or {})
+
     def _apply_handoff(self, state: AgentLoopState, call: ToolCall) -> AgentLoopState:
         """目标 Agent 完整接管当前 executor 的可变依赖与后续 loop。"""
         handoff = self._handoffs[call.name]
@@ -273,53 +356,11 @@ class NativeAgentExecutor:
                 "target_agent": name, "tool_name": call.name, "reason": reason,
             }, call_id=call.id)
 
-        # 历史先过滤，再用目标 system prompts 替换 system 前缀。
-        filtered = handoff.filter_history(state.messages)
-        target_prompts = list(getattr(target, "system_prompts", []) or [])
-        if not target_prompts:
-            target_executor = getattr(target, "_orchestrator_executor", None)
-            target_prompts = list(getattr(target_executor, "system_prompts", []) or [])
-        non_system = [m for m in filtered if m.get("role") != "system"]
-        state.messages = [self.message_builder.build_system_message(p) for p in target_prompts] + non_system
-
-        # 完整依赖接管：兼容公共 Agent.raw(NativeFloodAgent) 与最小适配对象。
-        target_executor = getattr(target, "_orchestrator_executor", None)
-        self.model_client = (
-            getattr(target_executor, "model_client", None)
-            or getattr(target, "model_client", None)
-            or getattr(target, "_model_client", None)
-            or self.model_client
-        )
-        self.tool_executor = (
-            getattr(target_executor, "tool_executor", None)
-            or getattr(target, "tool_executor", None)
-            or getattr(target, "_tool_executor", None)
-            or self.tool_executor
-        )
-        self._tool_registry = (
-            getattr(target_executor, "_tool_registry", None)
-            or getattr(target, "registry", None)
-            or getattr(target, "_orchestrator_registry", None)
-            or self._tool_registry
-        )
-        self._tools_schema = (
-            getattr(target_executor, "_tools_schema", None)
-            or getattr(target, "tools_schema", None)
-            or (self._tool_registry.tools_schema() if self._tool_registry is not None else [])
-        )
-        self._tool_loader = getattr(target_executor, "_tool_loader", None)
-        self._system_prompts = target_prompts
-        # 当前 run 的安全/权威绑定不放宽：workspace/context/journal/event_bus 沿用；
-        # 若目标显式配置 guardrail，追加到当前安全链（不替换主链）。
-        target_inputs = list(getattr(target_executor, "_input_guardrails", []) or
-                             getattr(target, "input_guardrails", []) or [])
-        target_outputs = list(getattr(target_executor, "_output_guardrails", []) or
-                              getattr(target, "output_guardrails", []) or [])
-        self._input_guardrails.extend(g for g in target_inputs if g not in self._input_guardrails)
-        self._output_guardrails.extend(g for g in target_outputs if g not in self._output_guardrails)
+        self._apply_handoff_target_runtime(handoff, state, filter_history=True)
 
         state.pending_tool_calls = []
         state.current_answer = ""
+        state.active_handoff_agent = name
         state.status = "awaiting_llm"
         state.iteration += 1
 
@@ -366,6 +407,9 @@ class NativeAgentExecutor:
         abort_check: Optional[Callable[[], bool]] = None,
     ) -> AgentResult:
         """向后兼容的入口：从用户输入构建初始状态并运行。"""
+        # 初始消息也必须用主 runtime 构建；仅在 run_from_state 里恢复会太晚，
+        # 上一 run 的 handoff prompt 已进入本 run 的 state.messages。
+        self._restore_base_runtime()
         initial_state = self._build_initial_state(
             context=context,
             user_text=user_text,
@@ -386,6 +430,8 @@ class NativeAgentExecutor:
         memory 是唯一历史源：每次 stream 从 memory 起步，无需 checkpoint resume。
         用户暂停 = abort（终态 failed，未完成轮丢弃不落 history）；无单独的 paused 软状态。
         """
+        # executor 跨 run 复用；handoff 的依赖切换只属于前一个 run。
+        self._restore_base_runtime()
         # Checkpoint snapshots are projections. Replay the canonical journal before
         # driving the loop so authoritative fields come from reducer state.
         if run_state is not None:
@@ -394,6 +440,16 @@ class NativeAgentExecutor:
             replayed_state = self._journal_authority.replay()
             if replayed_state.last_committed_sequence:
                 state = project_run_state_to_loop_state(state, replayed_state)
+
+        # replay/checkpoint 指明已有 handoff：在不重复过滤历史的前提下恢复目标控制面。
+        if state.active_handoff_agent:
+            resumed = next(
+                (h for h in self._handoffs.values()
+                 if h.resolved_name == state.active_handoff_agent),
+                None,
+            )
+            if resumed is not None:
+                self._apply_handoff_target_runtime(resumed, state, filter_history=False)
 
         # 每次 run 干净的压缩失败抑制状态（executor 可跨 run/session 复用）
         self._compaction_failed = False
@@ -582,6 +638,7 @@ class NativeAgentExecutor:
                     state.status = "failed"
                     self._emit_guardrail_event(_name, "output", gr.message, retrying=False)
                     return state
+            state.output_guardrail_retry_messages = []
             state.status = "completed"
             return state
 
@@ -750,13 +807,13 @@ class NativeAgentExecutor:
         )
         # 缓冲放流统一在 llm_step_end 之前：工具轮叙述、续写轮片段、最终答案
         # 均按时序到达前端（先 delta 后 step_end），chainlit 才能正确折叠进本轮。
-        # stop 终态（raw='stop'，code='completed'）且无 tool_calls = 最终答案轮：
+        # normal completion（stop/end_turn/stop_sequence 等）且无 tool_calls = 最终答案轮：
         # 输出 guardrail 裁决前移至此，通过即放流，tripwire 即重试/失败（缓冲丢弃），
         # 保证「验证通过的内容先于 step_end 到达前端」。
-        stop_final_round = not tool_calls and terminal.raw == "stop"
-        if buffered_output and not stop_final_round:
+        completed_final_round = not tool_calls and terminal.is_normal_completion
+        if buffered_output and not completed_final_round:
             self._flush_buffered_output(attempt_output_events)
-        if buffered_output and stop_final_round and self._output_guardrails:
+        if buffered_output and completed_final_round and self._output_guardrails:
             candidate_output = state.final_output + state.current_answer
             tripped, gr, gr_name = self._check_output_guardrails(state, candidate_output)
             if tripped:
@@ -770,6 +827,20 @@ class NativeAgentExecutor:
                     state.messages.append(self.message_builder.build_user_message(
                         f"你的上一条回复未通过输出校验：{gr.message}。请修正后重新给出完整回答。"
                     ))
+                    state.output_guardrail_retry_messages = copy.deepcopy(state.messages[-2:] if state.current_answer else state.messages[-1:])
+                    # 重试轮同样闭合生命周期并计入 usage；不写 model.completed
+                    # round（答案被拒绝），修正上下文由 checkpoint state 持久化。
+                    self.event_bus.emit_llm_step_end(
+                        reason="guardrail_retry",
+                        tokens={
+                            "prompt_tokens": step_tokens.prompt_tokens,
+                            "completion_tokens": step_tokens.completion_tokens,
+                            "total_tokens": step_tokens.total_tokens,
+                        },
+                    )
+                    state.token_usage.prompt_tokens += step_tokens.prompt_tokens
+                    state.token_usage.completion_tokens += step_tokens.completion_tokens
+                    state.token_usage.total_tokens += step_tokens.total_tokens
                     state.final_output = ""
                     state.current_answer = ""
                     state.status = "awaiting_llm"
@@ -876,6 +947,7 @@ class NativeAgentExecutor:
                 state.final_output = ""
                 state.status = "awaiting_llm"
                 return state
+            state.output_guardrail_retry_messages = []
             state.status = "completed"
             return state
 

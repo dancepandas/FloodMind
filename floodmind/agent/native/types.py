@@ -230,6 +230,11 @@ class AgentLoopState(BaseModel):
     max_token_continuation_count: int = 0
     # 输出 guardrail 首触重试是否已消耗（per-run，随 checkpoint 序列化）
     output_guardrail_retried: bool = False
+    # 输出 guardrail 重试上下文：checkpoint/replay 投影时保留被拒答案+修正提示；
+    # 成功/失败终态清空（仅本 run 暂存，不写 canonical turn）。
+    output_guardrail_retry_messages: List[Dict[str, Any]] = Field(default_factory=list)
+    # 当前 handoff 目标 resolved_name；checkpoint/replay 后据此重新应用接管依赖。
+    active_handoff_agent: str = ""
 
     # 防御机制状态
     doom_loop_tracker: List[Tuple[str, str]] = Field(default_factory=list)

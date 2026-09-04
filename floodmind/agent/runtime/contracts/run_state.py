@@ -57,5 +57,7 @@ class RunState(BaseModel):
     processed_event_ids: List[str] = Field(default_factory=list)
     cancellation_state: str = ""
     resumability: str = ""
+    # 当前接管 Agent（handoff 目标 resolved_name）；空表示主 Agent。
+    active_agent: str = ""
     # 派生对话历史：扁平 user/assistant 条目，与现 DualMemory._turns 形状 wire 兼容
     turns: List[Dict[str, Any]] = Field(default_factory=list)

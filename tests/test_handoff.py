@@ -16,7 +16,7 @@ from floodmind.agent.native.executor import NativeAgentExecutor
 from floodmind.agent.native.event_bus import EventBus
 from floodmind.agent.native.message_builder import MessageBuilder
 from floodmind.agent.native.model_client import ModelClient
-from floodmind.agent.native.types import ModelEvent, RunContext, ToolCall
+from floodmind.agent.native.types import AgentLoopState, ModelEvent, RunContext, ToolCall
 from floodmind.agent.runtime.contracts.tools import ToolResult, ToolSpec
 
 
@@ -171,3 +171,122 @@ class TestHandoffContract:
         executor = _executor(_mc([]), Registry(), handoffs=[])
         names = [t["function"]["name"] for t in (executor._tools_schema or [])]
         assert not any(n.startswith("handoff_to_") for n in names)
+
+
+class TestHandoffReviewFixes:
+    def test_public_agent_accepts_handoffs(self, tmp_path):
+        """公共 Agent(handoffs=[...]) 必须把目标接到 production executor。"""
+        from floodmind import Agent
+        from floodmind.agent.runtime.contracts.workspace import Workspace
+
+        target_llm = _mc([ModelEvent(type="token", content="target"), ModelEvent(type="done")])
+        target_ws = Workspace.from_folder(str(tmp_path / "target"), session_id="target").ensure()
+        target = Agent(llm=target_llm, session_id="target", workspace=target_ws)
+
+        main_llm = _mc([
+            ModelEvent(type="tool_call_done",
+                       tool_call=ToolCall(id="h1", name="handoff_to_target", arguments={})),
+            ModelEvent(type="done"),
+        ])
+        main_ws = Workspace.from_folder(str(tmp_path / "main"), session_id="main").ensure()
+        main = Agent(
+            llm=main_llm, session_id="main", workspace=main_ws,
+            handoffs=[HandoffTarget(target, name="target")],
+        )
+
+        assert main.run("help") == "target"
+
+    def test_handoff_takeover_does_not_leak_to_next_run(self):
+        """handoff 只在本次 run 内接管；下一 run 恢复主模型/prompt/tools。"""
+        main_rounds = []
+        main_mc = _mc([])
+
+        def main_stream(*a, **kw):
+            main_rounds.append(copy.deepcopy(kw["messages"]))
+            if len(main_rounds) == 1:
+                return [
+                    ModelEvent(type="tool_call_done",
+                               tool_call=ToolCall(id="h1", name="handoff_to_forecast", arguments={})),
+                    ModelEvent(type="done"),
+                ]
+            return [ModelEvent(type="token", content="main second run"), ModelEvent(type="done")]
+        main_mc.stream_chat.side_effect = main_stream
+
+        target_mc = _mc([ModelEvent(type="token", content="target first run"), ModelEvent(type="done")])
+        target = Target(target_mc, Registry())
+        executor = _executor(main_mc, Registry(), handoffs=[HandoffTarget(target, name="forecast")])
+
+        first = executor.run(_ctx(), "first")
+        second = executor.run(_ctx(), "second")
+
+        assert first.final_output == "target first run"
+        assert second.final_output == "main second run"
+        assert main_mc.stream_chat.call_count == 2
+        assert any(m.get("content") == "MAIN PROMPT" for m in main_rounds[-1]
+                   if m.get("role") == "system")
+
+    def test_pass_through_filter_drops_dangling_tool_calls(self):
+        """自定义 pass-through filter 时，handoff/sibling tool_calls 不得悬空进目标请求。"""
+        main_mc = _mc([
+            ModelEvent(type="tool_call_done",
+                       tool_call=ToolCall(id="h1", name="handoff_to_forecast", arguments={})),
+            ModelEvent(type="tool_call_done",
+                       tool_call=ToolCall(id="t9", name="SiblingTool", arguments={})),
+            ModelEvent(type="done"),
+        ])
+        captured = []
+        target_mc = _mc([])
+        target_mc.stream_chat.side_effect = lambda *a, **kw: (
+            captured.append(copy.deepcopy(kw["messages"])),
+            [ModelEvent(type="token", content="done"), ModelEvent(type="done")],
+        )[1]
+        target = Target(target_mc, Registry())
+        passthrough = lambda messages: copy.deepcopy(messages)
+        executor = _executor(
+            main_mc, Registry(),
+            handoffs=[HandoffTarget(target, name="forecast", history_filter=passthrough)],
+        )
+
+        executor.run(_ctx(), "help")
+
+        dangling = [
+            tc for m in captured[0] if m.get("role") == "assistant"
+            for tc in m.get("tool_calls", [])
+        ]
+        assert not dangling, "目标请求不得含没有 tool response 的悬空 tool_calls"
+
+    def test_reducer_records_active_handoff_agent(self):
+        """handoff.completed 必须折叠为 RunState.active_agent，供跨进程 resume 恢复控制面。"""
+        from floodmind.agent.runtime.reducer import initial_run_state, reduce
+        from floodmind.agent.runtime.contracts.canonical_events import EventEnvelope
+
+        rs = initial_run_state("run-1")
+        rs = reduce(rs, EventEnvelope(
+            event_id="e1", sequence=1, event_type="agent.handoff.completed",
+            payload={"target_agent": "forecast", "tool_name": "handoff_to_forecast"},
+        ))
+        assert rs.active_agent == "forecast"
+
+    def test_resume_reapplies_target_control_plane(self):
+        """新 executor + replay(active_agent) 必须重新应用目标模型/工具，不靠进程内泄漏。"""
+        from floodmind.agent.runtime.reducer import initial_run_state
+
+        target_mc = _mc([ModelEvent(type="token", content="resumed target"), ModelEvent(type="done")])
+        target = Target(target_mc, Registry())
+        main_mc = _mc([ModelEvent(type="token", content="wrong main"), ModelEvent(type="done")])
+        executor = _executor(main_mc, Registry(), handoffs=[HandoffTarget(target, name="forecast")])
+
+        rs = initial_run_state("run-1")
+        rs.active_agent = "forecast"
+        rs.last_committed_sequence = 1
+        state = AgentLoopState(
+            session_id="s", run_id="run-1", status="awaiting_llm",
+            active_handoff_agent="forecast",
+            messages=[{"role": "system", "content": "FORECAST PROMPT"},
+                      {"role": "user", "content": "resume"}],
+        )
+
+        result = executor.run_from_state(_ctx(), state, run_state=rs)
+        assert result.final_output == "resumed target"
+        main_mc.stream_chat.assert_not_called()
+        assert target_mc.stream_chat.call_count == 1

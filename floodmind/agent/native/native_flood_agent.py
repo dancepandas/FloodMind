@@ -331,6 +331,7 @@ class NativeFloodAgent:
         input_guardrails: Optional[List[Any]] = None,
         output_guardrails: Optional[List[Any]] = None,
         trace_processors: Optional[List[Any]] = None,
+        handoffs: Optional[List[Any]] = None,
         **kwargs,
     ):
         self.llm_service = llm_service
@@ -341,6 +342,8 @@ class NativeFloodAgent:
         self._output_guardrails = list(output_guardrails or [])
         # trace processors：journal authority 创建时注册的只读旁路
         self._trace_processors = list(trace_processors or [])
+        # handoff targets：只向 orchestrator 暴露，specialist 不自动获得控制权移交
+        self._handoffs = list(handoffs or [])
         self._journal_authority = None
         # 宿主显式注入的 workspace（线程无关，存为实例属性）。子线程 _run_loop 据此重绑
         # floodmind_workspace contextvar，修复桌面端跨线程丢失的问题；None 时回退
@@ -650,6 +653,7 @@ class NativeFloodAgent:
             background_task_service=self._background_task_service,
             input_guardrails=self._input_guardrails,
             output_guardrails=self._output_guardrails,
+            handoffs=self._handoffs,
         )
 
         self._specialist_executor = NativeAgentExecutor(
@@ -1497,6 +1501,7 @@ class NativeFloodAgent:
             background_task_service=self._background_task_service,
             input_guardrails=self._input_guardrails,
             output_guardrails=self._output_guardrails,
+            handoffs=self._handoffs,
         )
 
         self._specialist_executor = NativeAgentExecutor(

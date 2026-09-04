@@ -758,3 +758,90 @@ class TestReviewRound3Fixes:
         gr = [e for e in events if e.get("type") == "guardrail_triggered"]
         assert len(gr) == 2, "首触(retrying=True) + 二触(retrying=False) 各一次"
         assert gr[0]["retrying"] is True and gr[1]["retrying"] is False
+
+
+class TestCrossCapabilityReviewFixes:
+    """独立 review 发现：非 stop 正常终态 + 重试轮生命周期/usage。"""
+
+    def test_end_turn_completion_still_guardrailed(self):
+        """TerminalReason(code=completed, raw=end_turn) 也必须走输出 guardrail。"""
+        emitted = []
+        mc = MagicMock(spec=ModelClient)
+        mc.stream_chat.return_value = [
+            ModelEvent(type="token", content="SECRET"),
+            ModelEvent(type="done", terminal_reason=TerminalReason.from_raw("end_turn")),
+        ]
+
+        def block(output, state=None):
+            return GuardrailResult(tripwire_triggered=True, message="blocked end_turn")
+        block.__name__ = "block"
+
+        executor = _make_executor(mc, output_guardrails=[block], max_iterations=10)
+        executor.event_bus = MagicMock()
+        executor.event_bus.emit = lambda e: emitted.append(e)
+        executor.event_bus.emit_token = lambda c: emitted.append({"type": "token", "content": c})
+        executor.event_bus.emit_reasoning = lambda c: None
+
+        result = executor.run(_context(), "hello")
+
+        assert "blocked end_turn" in result.final_output
+        assert not any("SECRET" in str(e.get("content", "")) for e in emitted), \
+            "非 stop 正常终态也不得提前泄漏"
+        assert any(e.get("type") == "guardrail_triggered" for e in emitted)
+
+    def test_retry_round_closes_llm_step_and_counts_usage(self):
+        """输出 tripwire 重试轮也必须有 step_end，且 token usage 不漏记。"""
+        events = []
+        outputs = iter(["坏答案", "好答案"])
+        mc = MagicMock(spec=ModelClient)
+        mc.stream_chat.side_effect = lambda *a, **kw: [
+            ModelEvent(type="token", content=next(outputs)),
+            ModelEvent(type="usage", raw={
+                "usage": {"prompt_tokens": 2, "completion_tokens": 3, "total_tokens": 5}
+            }),
+            ModelEvent(type="done"),
+        ]
+
+        def check(output, state=None):
+            return GuardrailResult(tripwire_triggered="坏" in output, message="修正")
+        check.__name__ = "check"
+
+        executor = _make_executor(mc, output_guardrails=[check], max_iterations=10)
+        executor.event_bus = MagicMock()
+        executor.event_bus.emit = lambda e: events.append(e)
+        executor.event_bus.emit_llm_step_start = lambda **kw: events.append({"type": "start"})
+        executor.event_bus.emit_llm_step_end = lambda **kw: events.append({"type": "end"})
+        executor.event_bus.emit_token = lambda c: None
+        executor.event_bus.emit_reasoning = lambda c: None
+
+        result = executor.run(_context(), "hello")
+
+        assert result.final_output == "好答案"
+        assert sum(e.get("type") == "start" for e in events) == 2
+        assert sum(e.get("type") == "end" for e in events) == 2, \
+            "每个 llm_step_start 必须配对一个 llm_step_end"
+        assert result is not None
+
+    def test_guardrail_retry_context_survives_projection(self):
+        """retry checkpoint replay 后保留被拒答案+修正提示，且重试预算不刷新。"""
+        from floodmind.agent.native.executor import project_run_state_to_loop_state
+        from floodmind.agent.runtime.reducer import initial_run_state
+
+        correction = [
+            {"role": "assistant", "content": "被拒答案"},
+            {"role": "user", "content": "请修正"},
+        ]
+        state = AgentLoopState(
+            session_id="s", run_id="run-1", status="awaiting_llm",
+            output_guardrail_retried=True,
+            output_guardrail_retry_messages=copy.deepcopy(correction),
+            messages=[{"role": "system", "content": "sys"}, *correction],
+        )
+        rs = initial_run_state("run-1")
+        rs.last_committed_sequence = 1
+        rs.turns = [{"role": "user", "content": "原始问题", "thread_id": ""}]
+
+        projected = project_run_state_to_loop_state(state, rs)
+
+        assert projected.output_guardrail_retried is True
+        assert projected.messages[-2:] == correction

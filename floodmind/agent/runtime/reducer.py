@@ -515,6 +515,11 @@ def reduce(state: RunState, event: EventEnvelope) -> RunState:
     ns.processed_event_ids = ns.processed_event_ids + [event.event_id]
     ns.last_committed_sequence = event.sequence
     et = event.event_type
+    if et == "agent.handoff.requested":
+        return ns
+    if et == "agent.handoff.completed":
+        ns.active_agent = str(event.payload.get("target_agent", ""))
+        return ns
     if et == "thread.message.sent":
         return _reduce_thread_message_sent(ns, event.payload, event.thread_id)
     if et == "thread.spawn.requested":

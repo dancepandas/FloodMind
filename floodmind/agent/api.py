@@ -140,6 +140,7 @@ class Agent:
         input_guardrails: Optional[Sequence[Callable]] = None,
         output_guardrails: Optional[Sequence[Callable]] = None,
         trace_processors: Optional[Sequence[Callable]] = None,
+        handoffs: Optional[Sequence[Any]] = None,
     ):
         sid = validate_session_id(session_id or f"sdk-{uuid.uuid4().hex}")
         if memory is None:
@@ -180,6 +181,7 @@ class Agent:
             input_guardrails=list(input_guardrails or []),
             output_guardrails=list(output_guardrails or []),
             trace_processors=list(trace_processors or []),
+            handoffs=list(handoffs or []),
         )
 
     @staticmethod
