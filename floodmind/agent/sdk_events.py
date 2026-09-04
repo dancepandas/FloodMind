@@ -24,6 +24,7 @@ _CANONICAL_TO_SDK = {
     "background.completed": "background_completed",
     "run.completed": "run_completed",
     "run.failed": "run_failed",
+    "safety.guardrail.triggered": "guardrail_triggered",
 }
 _SKIP_EVENT_TYPES = frozenset({
     "model.attempt.started", "model.request.committed", "model.usage.recorded",

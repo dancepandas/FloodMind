@@ -47,6 +47,10 @@ from floodmind.agent.native.context_compressor import (
 )
 from floodmind.agent.native.capabilities import ModelCapabilities, default_registry
 from floodmind.agent.native.projection import compute_input_budget
+from floodmind.agent.guardrail import (
+    run_input_guardrails,
+    run_output_guardrails,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -169,6 +173,8 @@ class NativeAgentExecutor:
         memory: Optional[Any] = None,
         background_task_service: Optional[Any] = None,
         journal_authority: Optional[JournalAuthority] = None,
+        input_guardrails: Optional[List[Any]] = None,
+        output_guardrails: Optional[List[Any]] = None,
     ):
         self.model_client = model_client
         self.tool_executor = tool_executor
@@ -193,6 +199,10 @@ class NativeAgentExecutor:
         self._journal_authority = journal_authority
         # 后台任务服务：任务完成通知注入（None 时回退全局单例 getter）
         self._background_task_service = background_task_service
+        # Guardrail：输入侧每次 LLM 调用前、输出侧最终答案产出时校验（见 guardrail.py）。
+        # 输出重试标志在 AgentLoopState（per-run，随 checkpoint 序列化）。
+        self._input_guardrails = list(input_guardrails or [])
+        self._output_guardrails = list(output_guardrails or [])
         self._compressor_session_id: Optional[str] = None
         # §7.6 能力快照（一次解析，跨压缩/投影复用）；capability_snapshot_id 供 Manifest 引用
         self._capability_snapshot_id: str = ""
@@ -450,6 +460,15 @@ class NativeAgentExecutor:
         if state.iteration >= self.max_iterations:
             logger.warning("NativeAgentExecutor reached max_iterations=%d", self.max_iterations)
             state.final_output = state.final_output or self._fallback_final_output(state)
+            # max_iterations 兜底出口（可能回退到最后一条工具结果原文）同样过输出
+            # guardrail。触发即 failed：拦截消息不是成功答案，与最终答案出口语义一致。
+            if self._output_guardrails:
+                tripped, gr, _name = self._check_output_guardrails(state, state.final_output)
+                if tripped:
+                    state.final_output = gr.message or "输出被 guardrail 拦截。"
+                    state.status = "failed"
+                    self._emit_guardrail_event(_name, "output", gr.message, retrying=False)
+                    return state
             state.status = "completed"
             return state
 
@@ -458,6 +477,21 @@ class NativeAgentExecutor:
         self._inject_queued_user_messages(state)
         # 后台任务完成通知注入（loop 活跃时；已终态的留给宿主唤醒路径）
         self._inject_background_notifications(state)
+
+        # 输入 guardrail：每次 LLM 调用前校验（工具回流后输入已变化，需再次过闸）。
+        # tripwire → fail-closed 终止 run，不喂给模型；replaced_input 非空时替换输入。
+        if self._input_guardrails:
+            gr, tripped_name = run_input_guardrails(self._input_guardrails, state.messages)
+            if gr.tripwire_triggered:
+                logger.warning("[EXEC] input guardrail %s tripped: %s", tripped_name, gr.message)
+                self._emit_guardrail_event(tripped_name, "input", gr.message, retrying=False)
+                state.final_output = gr.message or "输入被 guardrail 拦截。"
+                state.status = "failed"
+                return state
+            if gr.replaced_input is not None:
+                # 契约：宿主 guardrail 返回新鲜列表（见 guardrail.py docstring），
+                # 运行中会原地演化该列表（剥图/追加），宿主不得复用同一列表对象
+                state.messages = gr.replaced_input
 
         # 主动上下文压缩：达到阈值时先进入 context_compress 状态。
         # 压缩已 fail-closed（同一轮消息未变，重试必再失败）→ 跳过，直接走 LLM 调用，
@@ -512,6 +546,9 @@ class NativeAgentExecutor:
         # LLM 流消费（带自动重试）
         retry_policy = RetryPolicy(max_retries=3, base_delay=2.0, max_delay=30.0)
         attempt = 0
+        # 输出 guardrail 存在时缓冲本轮 token/reasoning：验证通过后再放流，
+        # 保证 fail-closed 契约在流式主路径同样成立（无 guardrail 时实时放流不变）。
+        buffered_output = self._output_guardrails is not None and len(self._output_guardrails) > 0
         while True:
             attempt_output_events: List[tuple[str, str]] = []
             try:
@@ -527,11 +564,12 @@ class NativeAgentExecutor:
                     )
                     if event.type in {"reasoning", "token"}:
                         attempt_output_events.append((event.type, event.content))
-                for event_type, content in attempt_output_events:
-                    if event_type == "reasoning":
-                        self.event_bus.emit_reasoning(content)
-                    else:
-                        self.event_bus.emit_token(content)
+                if not buffered_output:
+                    for event_type, content in attempt_output_events:
+                        if event_type == "reasoning":
+                            self.event_bus.emit_reasoning(content)
+                        else:
+                            self.event_bus.emit_token(content)
                 if attempt > 0:
                     # §10.1/§4.4：重试成功后显式上报"已恢复"，前端可据此切出"重试中"状态
                     self.event_bus.emit({"type": "recover", "attempt": attempt})
@@ -583,10 +621,11 @@ class NativeAgentExecutor:
 
         # 中断（用户暂停）在 LLM 流式阶段生效：ModelClient 收到 abort 信号后会干净返回，
         # 这里显式拦截，丢弃本轮半截产物，**不写 memory**，直接终态 failed。
+        # 缓冲的本轮 token/reasoning 一并丢弃（fail-closed：半截输出不外泄）。
         if context.abort_check and context.abort_check():
             logger.info("[EXEC] aborted during LLM stream, discarding partial round (iter=%d)", state.iteration)
             self.event_bus.emit_llm_step_end(reason="aborted")
-            state.final_output = state.final_output or "任务已被用户中断。"
+            state.final_output = "任务已被用户中断。"
             state.status = "failed"
             return state
 
@@ -596,6 +635,38 @@ class NativeAgentExecutor:
         terminal = state.terminal_reason or TerminalReason.from_raw(
             "tool_calls" if tool_calls or invalid_tool_calls else "stop"
         )
+        # 缓冲放流统一在 llm_step_end 之前：工具轮叙述、续写轮片段、最终答案
+        # 均按时序到达前端（先 delta 后 step_end），chainlit 才能正确折叠进本轮。
+        # stop 终态（raw='stop'，code='completed'）且无 tool_calls = 最终答案轮：
+        # 输出 guardrail 裁决前移至此，通过即放流，tripwire 即重试/失败（缓冲丢弃），
+        # 保证「验证通过的内容先于 step_end 到达前端」。
+        stop_final_round = not tool_calls and terminal.raw == "stop"
+        if buffered_output and not stop_final_round:
+            self._flush_buffered_output(attempt_output_events)
+        if buffered_output and stop_final_round and self._output_guardrails:
+            candidate_output = state.final_output + state.current_answer
+            tripped, gr, gr_name = self._check_output_guardrails(state, candidate_output)
+            if tripped:
+                retrying = not state.output_guardrail_retried
+                state.output_guardrail_retried = True
+                if retrying:
+                    self._emit_guardrail_event(gr_name, "output", gr.message, retrying=True)
+                    if state.current_answer:
+                        state.messages.append(self.message_builder.build_assistant_tool_calls_message(
+                            [], state.current_answer))
+                    state.messages.append(self.message_builder.build_user_message(
+                        f"你的上一条回复未通过输出校验：{gr.message}。请修正后重新给出完整回答。"
+                    ))
+                    state.final_output = ""
+                    state.current_answer = ""
+                    state.status = "awaiting_llm"
+                    return state
+                state.final_output = gr.message or "输出被 guardrail 拦截。"
+                state.status = "failed"
+                self._emit_guardrail_event(gr_name, "output", gr.message, retrying=False)
+                self.event_bus.emit_llm_step_end(reason=terminal.raw or terminal.code)
+                return state
+            self._flush_buffered_output(attempt_output_events)
         self.event_bus.emit_llm_step_end(
             reason=terminal.raw or terminal.code,
             tokens={
@@ -654,6 +725,13 @@ class NativeAgentExecutor:
                 state.final_output + state.current_answer
                 or "模型输出达到长度限制，未能完整完成。"
             )
+            # 续写预算耗尽出口同样过输出 guardrail（触发即 failed + 事件，语义
+            # 与最终答案出口一致；拦截内容不外泄）
+            if self._output_guardrails:
+                tripped, gr, _name = self._check_output_guardrails(state, state.final_output)
+                if tripped:
+                    state.final_output = gr.message or "输出被 guardrail 拦截。"
+                    self._emit_guardrail_event(_name, "output", gr.message, retrying=False)
             state.status = "failed"
             return state
 
@@ -671,6 +749,10 @@ class NativeAgentExecutor:
             return state
 
         if not tool_calls:
+            # 输出 guardrail 已在上方 step_end 前裁决（stop 终态路径）；
+            # 此处仅在无 guardrail 时补齐缓冲放流语义（缓冲只在有 guardrail 时启用，
+            # 正常情况此分支不做 guardrail 工作）。
+
             self._emit_round_events(
                 state, tool_calls_records=[], is_final=True, attempt_id=state.attempt_id
             )
@@ -1502,6 +1584,44 @@ class NativeAgentExecutor:
             caps = ModelCapabilities(context_window=self.context_window)
         self._capability_snapshot_id = f"cap_{provider}:{family}:{model}"
         return caps
+
+    def _check_output_guardrails(self, state: AgentLoopState, candidate_output: str):
+        """输出 guardrail 统一入口。返回 (tripped, result, name)。
+
+        仅判定与日志，不发事件——emit 由调用方按出口语义单点发出（避免双发）。
+        """
+        gr, tripped_name = run_output_guardrails(self._output_guardrails, candidate_output, state)
+        if gr.tripwire_triggered:
+            logger.warning("[EXEC] output guardrail %s tripped: %s", tripped_name, gr.message)
+            return True, gr, tripped_name
+        return False, gr, tripped_name
+
+    def _flush_buffered_output(self, attempt_output_events) -> None:
+        """缓冲放流：输出 guardrail 通过后统一 emit 本轮 token/reasoning。"""
+        for event_type, content in attempt_output_events:
+            if event_type == "reasoning":
+                self.event_bus.emit_reasoning(content)
+            else:
+                self.event_bus.emit_token(content)
+
+    def _emit_guardrail_event(self, name: str, phase: str, message: str, *, retrying: bool) -> None:
+        self.event_bus.emit({
+            "type": "guardrail_triggered",
+            "guardrail": name,
+            "phase": phase,
+            "message": message,
+            "retrying": retrying,
+        })
+        if self._journal_authority is not None:
+            try:
+                self._journal_authority.emit("safety.guardrail.triggered", {
+                    "guardrail": name,
+                    "phase": phase,
+                    "message": (message or "")[:500],
+                    "retrying": retrying,
+                })
+            except Exception as e:
+                logger.warning("[EXEC] guardrail journal emission failed: %s", e)
 
     def _emit_projection_committed(self, state: AgentLoopState) -> None:
         """§9.2 每次模型调用前把当前消息投影 Manifest 落 journal（context.projection.committed）。

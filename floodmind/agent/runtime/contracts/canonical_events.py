@@ -99,7 +99,8 @@ _EVENT_TYPES: Dict[str, frozenset[str]] = {
     "checkpoint": frozenset({"checkpoint.created", "resume.started",
                              "resume.reconciliation.required", "resume.completed"}),
     "security": frozenset({"security.violation", "privacy.redaction.requested",
-                           "privacy.redaction.completed"}),
+                           "privacy.redaction.completed",
+                           "safety.guardrail.triggered"}),
 }
 
 EVENT_TYPES: frozenset[str] = frozenset(

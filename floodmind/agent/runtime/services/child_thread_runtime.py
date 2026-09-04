@@ -117,12 +117,17 @@ class ChildThreadRuntime:
         runtime_dir: Path,
         tool_runtime_factory: Callable[[], tuple],  # () -> (registry, tool_loader)
         quota_factory: Optional[Callable[[ChildThread], ChildThreadQuota]] = None,
+        input_guardrails: Optional[List[Any]] = None,
+        output_guardrails: Optional[List[Any]] = None,
     ):
         self._model_client = model_client
         self._tool_executor = tool_executor
         self._event_bus = event_bus
         self._message_builder = message_builder
         self._max_iterations = max_iterations
+        # Guardrail 继承父 runtime（specialist 安全策略不放宽）
+        self._input_guardrails = list(input_guardrails or [])
+        self._output_guardrails = list(output_guardrails or [])
         self._system_prompts = list(system_prompts)
         self._checkpoint_service = checkpoint_service
         self._tracing_service = tracing_service
@@ -445,6 +450,8 @@ class ChildThreadRuntime:
             tracing_service=self._tracing_service,
             background_task_service=self._background_task_service,
             journal_authority=child_auth,
+            input_guardrails=self._input_guardrails,
+            output_guardrails=self._output_guardrails,
         )
 
     def _child_abort_check(self, parent_abort, run_state, quota):

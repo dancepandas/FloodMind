@@ -328,11 +328,16 @@ class NativeFloodAgent:
         skill_writable_root: Optional[Union[str, Path]] = None,
         skill_registry: Optional[SkillRegistry] = None,
         mcp_pool: Optional[Any] = None,
+        input_guardrails: Optional[List[Any]] = None,
+        output_guardrails: Optional[List[Any]] = None,
         **kwargs,
     ):
         self.llm_service = llm_service
         self.memory = memory
         self.session_id = session_id
+        # Guardrail：主/specialist executor 共用（安全策略不因委派而放宽）
+        self._input_guardrails = list(input_guardrails or [])
+        self._output_guardrails = list(output_guardrails or [])
         self._journal_authority = None
         # 宿主显式注入的 workspace（线程无关，存为实例属性）。子线程 _run_loop 据此重绑
         # floodmind_workspace contextvar，修复桌面端跨线程丢失的问题；None 时回退
@@ -640,6 +645,8 @@ class NativeFloodAgent:
             context_window=context_window,
             memory=self.memory,
             background_task_service=self._background_task_service,
+            input_guardrails=self._input_guardrails,
+            output_guardrails=self._output_guardrails,
         )
 
         self._specialist_executor = NativeAgentExecutor(
@@ -662,6 +669,8 @@ class NativeFloodAgent:
             context_compressor=specialist_compressor,
             context_window=context_window,
             background_task_service=self._background_task_service,
+            input_guardrails=self._input_guardrails,
+            output_guardrails=self._output_guardrails,
         )
 
     def _register_mcp_connection(self, server_name: str, conn: Any) -> List[ToolSpec]:
@@ -1483,6 +1492,8 @@ class NativeFloodAgent:
             context_window=context_window,
             memory=self.memory,
             background_task_service=self._background_task_service,
+            input_guardrails=self._input_guardrails,
+            output_guardrails=self._output_guardrails,
         )
 
         self._specialist_executor = NativeAgentExecutor(
@@ -1500,6 +1511,8 @@ class NativeFloodAgent:
             context_compressor=specialist_compressor,
             context_window=context_window,
             background_task_service=self._background_task_service,
+            input_guardrails=self._input_guardrails,
+            output_guardrails=self._output_guardrails,
         )
 
     def _rebuild_system_prompts(self) -> None:
@@ -2120,6 +2133,9 @@ class NativeFloodAgent:
             tracing_service=self._tracing_service,
             background_task_service=self._background_task_service,
             journal_authority=parent_auth,
+            # __new__ 跳过 __init__ 的实例（测试手工拼装）可能缺这两个属性
+            input_guardrails=getattr(self, "_input_guardrails", []),
+            output_guardrails=getattr(self, "_output_guardrails", []),
             sandbox_service=self._sandbox_service,
             permission_service=self._permission_service,
             path_service=self._path_service,

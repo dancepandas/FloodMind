@@ -129,6 +129,8 @@ class Agent:
         skill_roots: Optional[Sequence[Union[str, Path]]] = None,
         skill_writable_root: Optional[Union[str, Path]] = None,
         mcp_pool: Optional[Any] = None,
+        input_guardrails: Optional[Sequence[Callable]] = None,
+        output_guardrails: Optional[Sequence[Callable]] = None,
     ):
         sid = validate_session_id(session_id or f"sdk-{uuid.uuid4().hex}")
         if memory is None:
@@ -166,6 +168,8 @@ class Agent:
             skill_roots=skill_roots,
             skill_writable_root=skill_writable_root,
             mcp_pool=mcp_pool,
+            input_guardrails=list(input_guardrails or []),
+            output_guardrails=list(output_guardrails or []),
         )
 
     @staticmethod

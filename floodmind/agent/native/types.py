@@ -228,6 +228,8 @@ class AgentLoopState(BaseModel):
     terminal_reason: Optional[TerminalReason] = None
     max_token_continuations: int = 1
     max_token_continuation_count: int = 0
+    # 输出 guardrail 首触重试是否已消耗（per-run，随 checkpoint 序列化）
+    output_guardrail_retried: bool = False
 
     # 防御机制状态
     doom_loop_tracker: List[Tuple[str, str]] = Field(default_factory=list)

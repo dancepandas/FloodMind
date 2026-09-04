@@ -98,6 +98,7 @@ VALID_EVENT_TYPES = {
     "workflow_plan", "workflow_step",
     "memory_status", "artifact_warning",
     "llm_step_start", "llm_step_end", "retry_attempt",
+    "guardrail_triggered",
     "context_compress_start", "context_compress_done",
     "token_usage", "file_generated", "image_generated",
     "todo_updated", "attachment_context",
