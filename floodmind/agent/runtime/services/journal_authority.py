@@ -7,6 +7,8 @@
 
 from typing import Dict, List, Optional, Any
 
+import logging
+
 from pathlib import Path
 
 from floodmind.agent.runtime.contracts.canonical_events import (
@@ -17,6 +19,8 @@ from floodmind.agent.runtime.reducer import reduce, initial_run_state
 from floodmind.agent.runtime.services.journal_writer import JournalWriter
 from floodmind.agent.runtime.services._runtime_root import PROJECT_ROOT
 
+
+logger = logging.getLogger(__name__)
 
 DEFAULT_RUNTIME_ROOT: Path = PROJECT_ROOT / ".floodmind"
 
@@ -82,6 +86,10 @@ class JournalAuthority:
         self.thread_id = thread_id
         self.turn_id = turn_id
         self.attempt_id = attempt_id
+        # trace processors：canonical 事件只读旁路（异常隔离，不回放历史）
+        import threading
+        self._processors: List[Any] = []
+        self._processors_lock = threading.RLock()
 
     def _scope(self, scope: dict, key: str) -> str:
         """解析 scope 覆盖；显式 None 视为未提供，回落权威身份默认值。"""
@@ -117,7 +125,33 @@ class JournalAuthority:
                 self._index.index_event(envelope)
             except Exception:
                 pass
+        self._notify_processors(envelope)
         return envelope
+
+    # ── trace processors：canonical 事件的只读旁路消费 ──────────────────
+
+    def add_processor(self, processor: Any) -> None:
+        """注册旁路处理器（on_event(envelope)）。只影响注册后的事件，不回放历史。"""
+        with self._processors_lock:
+            if processor not in self._processors:
+                self._processors.append(processor)
+
+    def remove_processor(self, processor: Any) -> None:
+        with self._processors_lock:
+            try:
+                self._processors.remove(processor)
+            except ValueError:
+                pass
+
+    def _notify_processors(self, envelope: EventEnvelope) -> None:
+        """逐个回调 processor；异常隔离（宿主处理器故障不影响写入路径）。"""
+        with self._processors_lock:
+            processors = list(self._processors)
+        for processor in processors:
+            try:
+                processor.on_event(envelope)
+            except Exception as exc:
+                logger.warning("trace processor %r failed: %s", processor, exc)
 
     def append_group(self, events: List[EventEnvelope]) -> List[EventEnvelope]:
         envelopes = self._writer.append_many(events)

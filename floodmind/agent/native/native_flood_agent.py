@@ -330,6 +330,7 @@ class NativeFloodAgent:
         mcp_pool: Optional[Any] = None,
         input_guardrails: Optional[List[Any]] = None,
         output_guardrails: Optional[List[Any]] = None,
+        trace_processors: Optional[List[Any]] = None,
         **kwargs,
     ):
         self.llm_service = llm_service
@@ -338,6 +339,8 @@ class NativeFloodAgent:
         # Guardrail：主/specialist executor 共用（安全策略不因委派而放宽）
         self._input_guardrails = list(input_guardrails or [])
         self._output_guardrails = list(output_guardrails or [])
+        # trace processors：journal authority 创建时注册的只读旁路
+        self._trace_processors = list(trace_processors or [])
         self._journal_authority = None
         # 宿主显式注入的 workspace（线程无关，存为实例属性）。子线程 _run_loop 据此重绑
         # floodmind_workspace contextvar，修复桌面端跨线程丢失的问题；None 时回退
@@ -2886,6 +2889,8 @@ class NativeFloodAgent:
                         session_dir = runtime_dir / "sessions" / effective_session_id
                     ident = resolve_identity(effective_session_id, session_dir)
                     auth = open_journal_authority(runtime_dir, **ident)
+                    for _proc in getattr(self, "_trace_processors", []) or []:
+                        auth.add_processor(_proc)
                     self._journal_authority = auth
                     auth.emit("thread.message.sent", {"content": user_input, "turn_index": 0})
                     self.memory.bind_journal(auth, runtime_dir, ident["conversation_id"])

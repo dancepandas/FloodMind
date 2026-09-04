@@ -66,9 +66,6 @@ def guardrail_name(guardrail: Any) -> str:
     return getattr(fn, "__name__", "") or type(guardrail).__name__ or "guardrail"
 
 
-_ARITY_TAKES_STATE: dict = {}
-
-
 def _effective_param_count(guardrail: Any) -> Optional[int]:
     """可调用对象的「调用方可传」位置参数个数（绑定语义已解析）。
 
@@ -102,13 +99,11 @@ def _effective_param_count(guardrail: Any) -> Optional[int]:
 
 
 def _call_shape(guardrail: Any, phase: str) -> str:
-    """缓存化调用形态判定。返回 "two_pos"（位置双参）/"kw"（state 走关键字）/"one"。
+    """调用形态判定。返回 "two_pos"（位置双参）/"kw"（state 走关键字）/"one"。
 
-    绑定方法/partial 的绑定语义由 _effective_param_count 折减。
+    绑定方法/partial 的绑定语义由 _effective_param_count 折减。不做跨调用
+    缓存：id() 键在对象回收后有复用风险，introspection 开销（~μs 级）可忽略。
     """
-    key = id(guardrail)
-    if key in _ARITY_TAKES_STATE:
-        return _ARITY_TAKES_STATE[key]
     try:
         fn2 = guardrail
         if hasattr(guardrail, "__func__") and hasattr(guardrail, "__self__"):
@@ -146,7 +141,6 @@ def _call_shape(guardrail: Any, phase: str) -> str:
         else:
             shape = "two_pos" if remaining >= 2 else "one"
 
-    _ARITY_TAKES_STATE[key] = shape
     return shape
 
 
