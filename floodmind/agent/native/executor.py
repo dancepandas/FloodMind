@@ -175,6 +175,7 @@ class NativeAgentExecutor:
         journal_authority: Optional[JournalAuthority] = None,
         input_guardrails: Optional[List[Any]] = None,
         output_guardrails: Optional[List[Any]] = None,
+        handoffs: Optional[List[Any]] = None,
     ):
         self.model_client = model_client
         self.tool_executor = tool_executor
@@ -203,6 +204,9 @@ class NativeAgentExecutor:
         # 输出重试标志在 AgentLoopState（per-run，随 checkpoint 序列化）。
         self._input_guardrails = list(input_guardrails or [])
         self._output_guardrails = list(output_guardrails or [])
+        # Handoff 目标：模型可见工具；命中后目标 Agent 完整接管同一 run
+        self._handoffs = {h.resolved_tool_name: h for h in (handoffs or [])}
+        self._install_handoff_tools()
         self._compressor_session_id: Optional[str] = None
         # §7.6 能力快照（一次解析，跨压缩/投影复用）；capability_snapshot_id 供 Manifest 引用
         self._capability_snapshot_id: str = ""
@@ -219,6 +223,115 @@ class NativeAgentExecutor:
             # completed / failed 是终止状态，不需要处理器
             # paused 已废弃：暂停 = abort → failed（见 run_from_state）
         }
+
+    # --- Handoff 控制权移交 ---
+
+    def _install_handoff_tools(self) -> None:
+        """把 handoff 目标注册为模型可见 ToolSpec（不走普通 tool_executor）。"""
+        if not self._handoffs or self._tool_registry is None:
+            return
+        from floodmind.agent.runtime.contracts.tools import ToolSpec
+        for tool_name, target in self._handoffs.items():
+            # func 仅用于 ToolSpec 契约；executor 在 awaiting_tool 前拦截并接管
+            spec = ToolSpec(
+                name=tool_name,
+                description=target.resolved_description,
+                parameters={
+                    "type": "object",
+                    "properties": {
+                        "reason": {"type": "string", "description": "移交原因与目标任务摘要"},
+                    },
+                    "required": [],
+                },
+                func=lambda **_: "handoff",
+                is_readonly=True,
+                is_destructive=False,
+                is_concurrency_safe=False,
+            )
+            self._tool_registry.register(spec)
+        self._tools_schema = self._tool_registry.tools_schema()
+
+    @staticmethod
+    def _unwrap_handoff_agent(target: Any) -> Any:
+        """HandoffTarget.agent 可为公共 Agent（.raw）或最小适配对象。"""
+        raw = getattr(target.agent, "raw", None)
+        return raw if raw is not None else target.agent
+
+    def _apply_handoff(self, state: AgentLoopState, call: ToolCall) -> AgentLoopState:
+        """目标 Agent 完整接管当前 executor 的可变依赖与后续 loop。"""
+        handoff = self._handoffs[call.name]
+        target = self._unwrap_handoff_agent(handoff)
+        name = handoff.resolved_name
+        reason = str((call.arguments or {}).get("reason", ""))
+
+        self.event_bus.emit({
+            "type": "handoff_started", "target_agent": name,
+            "tool_name": call.name, "reason": reason,
+        })
+        if self._journal_authority is not None:
+            self._journal_authority.emit("agent.handoff.requested", {
+                "target_agent": name, "tool_name": call.name, "reason": reason,
+            }, call_id=call.id)
+
+        # 历史先过滤，再用目标 system prompts 替换 system 前缀。
+        filtered = handoff.filter_history(state.messages)
+        target_prompts = list(getattr(target, "system_prompts", []) or [])
+        if not target_prompts:
+            target_executor = getattr(target, "_orchestrator_executor", None)
+            target_prompts = list(getattr(target_executor, "system_prompts", []) or [])
+        non_system = [m for m in filtered if m.get("role") != "system"]
+        state.messages = [self.message_builder.build_system_message(p) for p in target_prompts] + non_system
+
+        # 完整依赖接管：兼容公共 Agent.raw(NativeFloodAgent) 与最小适配对象。
+        target_executor = getattr(target, "_orchestrator_executor", None)
+        self.model_client = (
+            getattr(target_executor, "model_client", None)
+            or getattr(target, "model_client", None)
+            or getattr(target, "_model_client", None)
+            or self.model_client
+        )
+        self.tool_executor = (
+            getattr(target_executor, "tool_executor", None)
+            or getattr(target, "tool_executor", None)
+            or getattr(target, "_tool_executor", None)
+            or self.tool_executor
+        )
+        self._tool_registry = (
+            getattr(target_executor, "_tool_registry", None)
+            or getattr(target, "registry", None)
+            or getattr(target, "_orchestrator_registry", None)
+            or self._tool_registry
+        )
+        self._tools_schema = (
+            getattr(target_executor, "_tools_schema", None)
+            or getattr(target, "tools_schema", None)
+            or (self._tool_registry.tools_schema() if self._tool_registry is not None else [])
+        )
+        self._tool_loader = getattr(target_executor, "_tool_loader", None)
+        self._system_prompts = target_prompts
+        # 当前 run 的安全/权威绑定不放宽：workspace/context/journal/event_bus 沿用；
+        # 若目标显式配置 guardrail，追加到当前安全链（不替换主链）。
+        target_inputs = list(getattr(target_executor, "_input_guardrails", []) or
+                             getattr(target, "input_guardrails", []) or [])
+        target_outputs = list(getattr(target_executor, "_output_guardrails", []) or
+                              getattr(target, "output_guardrails", []) or [])
+        self._input_guardrails.extend(g for g in target_inputs if g not in self._input_guardrails)
+        self._output_guardrails.extend(g for g in target_outputs if g not in self._output_guardrails)
+
+        state.pending_tool_calls = []
+        state.current_answer = ""
+        state.status = "awaiting_llm"
+        state.iteration += 1
+
+        self.event_bus.emit({
+            "type": "handoff_completed", "target_agent": name,
+            "tool_name": call.name,
+        })
+        if self._journal_authority is not None:
+            self._journal_authority.emit("agent.handoff.completed", {
+                "target_agent": name, "tool_name": call.name,
+            }, call_id=call.id)
+        return state
 
     # --- 公共访问接口（保持向后兼容） ---
     @property
@@ -782,6 +895,11 @@ class NativeAgentExecutor:
     def _on_awaiting_tool(self, state: AgentLoopState, context: RunContext) -> AgentLoopState:
         """顺序执行 pending_tool_calls，检测 DOOM LOOP / 连续失败。"""
         tool_calls = state.pending_tool_calls
+        # Handoff 不是普通工具调用：目标 Agent 接管 loop，不经 tool_executor。
+        # 一轮只能移交一个目标；若模型同时发 handoff + 其他工具，以 handoff 为准。
+        handoff_call = next((c for c in tool_calls if c.name in self._handoffs), None)
+        if handoff_call is not None:
+            return self._apply_handoff(state, handoff_call)
         completed_ask_calls = list(getattr(state, "_pending_completed_ask_calls", []) or [])
         state._pending_completed_ask_calls = []
 
