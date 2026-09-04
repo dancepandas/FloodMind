@@ -98,6 +98,14 @@ class Agent:
         skill_roots: 宿主额外提供的只读 Skill 发现根；每个 Agent 使用独立 Registry。
         skill_writable_root: Skill CRUD 与自动生成的唯一写入根，同时只加入 Skill 读取授权，
             不会自动加入 Workspace 的普通写入根。
+        input_guardrails: 输入 Guardrail 序列。每次 LLM 调用前接收完整 messages；
+            返回 ``GuardrailResult(tripwire_triggered=True)`` 时 fail-closed 终止。
+        output_guardrails: 输出 Guardrail 序列。最终答案在放流前校验；首次 tripwire
+            自动注入修正提示重试一次，第二次触发终止。
+        handoffs: ``HandoffTarget`` 序列。模型选择 handoff 工具后，目标 Agent 的
+            ModelClient、提示词与工具运行时接管同一 run。
+        trace_processors: 实现 ``on_event(EventEnvelope)`` 的处理器序列。旁路消费
+            committed canonical 事件，异常不会影响 journal 写入。
         bare: 是否为 bare 嵌入模式（默认 True）。``True`` 仅注册自定义工具；``False`` 走
             NativeFloodAgent 完整 runtime（内置工具、MCP、Skill、权限 ASK 事件、workspace 绑定）。
             完整 runtime 下 ``tools=None`` 保留原生默认工具集。
