@@ -33,7 +33,7 @@ FloodMind — 基于大语言模型的智能 Agent 框架
     )
 """
 
-__version__ = "2.1.11"
+__version__ = "2.2.0"
 
 # ── SDK 公共 API ──
 
@@ -73,6 +73,11 @@ def __getattr__(name):
         "create_flood_agent": "floodmind.agent",
         "get_mcp_client_pool": "floodmind.agent.mcp_client",
         "build_mcp_tool_specs": "floodmind.agent.mcp_client",
+        "GuardrailResult": "floodmind.agent.guardrail",
+        "InputGuardrail": "floodmind.agent.guardrail",
+        "OutputGuardrail": "floodmind.agent.guardrail",
+        "HandoffTarget": "floodmind.agent.handoff",
+        "default_handoff_history_filter": "floodmind.agent.handoff",
     }
     if name in _exports:
         import importlib

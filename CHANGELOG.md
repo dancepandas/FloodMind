@@ -2,6 +2,20 @@
 
 All notable changes to FloodMind are documented in this file.
 
+## [2.2.0] - 2026-09-04
+
+### Added
+
+- **Guardrail 输入/输出安全闸**：新增 `GuardrailResult`、`InputGuardrail`、`OutputGuardrail` 和 `Agent(input_guardrails=[...], output_guardrails=[...])`。输入侧每次 LLM 调用前 fail-closed；输出侧验证通过后才放流，首次 tripwire 自动注入修正提示重试一次。主 agent、specialist 和 child-thread 继承安全链；异常、非法返回值与多种 callable 签名均有防御处理。
+- **Handoff 控制权移交**：新增 `HandoffTarget`。模型通过 `handoff_to_<name>` 工具把同一 run 的控制权交给目标 Agent，目标的 ModelClient、system prompts、tool registry 与 tool executor 完整接管；区别于执行完把结果交回主 Agent 的 `SubAgent`。默认历史过滤压缩对话并剥离图片结构化块。
+- **Tracing Processor**：`JournalAuthority.add_processor/remove_processor` 和 `Agent(trace_processors=[...])`。处理器收到带 canonical sequence 的 committed `EventEnvelope`，异常隔离，不影响 journal 写入或 replay。
+- **Guardrail/Handoff canonical 事件**：新增 `safety.guardrail.triggered`、`agent.handoff.requested/completed` 以及对应 SDK 流事件投影。
+
+### Changed
+
+- **Checkpoint 序列化加固**：运行时动态挂载字段（assistant 快照、挂起工具记录/ask 调用）显式持久化；Pydantic 动态值归一为 JSON；单个未知宿主值降级为 `<unserializable:Type>`，不再导致整次 checkpoint 保存失败。
+- **输出安全与前端时序**：配置输出 guardrail 时，token/reasoning 缓冲到校验通过后、`llm_step_end` 前统一放流；拦截内容不会提前以 delta 泄漏。max-token 续写、续写耗尽、max-iterations 与 abort 出口统一 fail-closed。
+
 ## [2.1.11] - 2026-09-02
 
 ### Fixed

@@ -1,6 +1,6 @@
 # FloodMind
 
-**SDK-first 的智能水文 Agent Runtime — v2.1.0**
+**SDK-first 的智能水文 Agent Runtime — v2.2.0**
 
 FloodMind 收敛为面向 Python 宿主系统的纯 SDK：以 `Agent` / `ModelClient` / `Workspace` / `build_agent_tool` 为公共入口，把水文模型、数据分析、文档生成、MCP 工具与 Skill 体系嵌入到业务平台或桌面助手中。Web / TUI 前端已随 v2.0.0 移除，FloodMind 为纯 SDK 形态。
 
@@ -12,7 +12,11 @@ FloodMind 收敛为面向 Python 宿主系统的纯 SDK：以 `Agent` / `ModelCl
 
 ## 核心功能
 
-- **Python SDK 公共入口** — `Agent`、`ModelClient`、`Workspace`、`build_folder_workspace`、`build_agent_tool`、`ToolLoadingConfig`、Provider Pipeline 等可直接顶层导入
+- **Python SDK 公共入口** — `Agent`、`ModelClient`、`Workspace`、`build_folder_workspace`、`build_agent_tool`、`ToolLoadingConfig`、`GuardrailResult`、`HandoffTarget`、Provider Pipeline 等可直接顶层导入
+- **Guardrail 输入/输出校验** — `Agent(input_guardrails=[...], output_guardrails=[...])`；输入侧每次模型调用前 fail-closed，输出侧验证通过才放流，首次拦截自动修正重试一次；主/子代理安全链不放宽
+- **Agent Handoff 控制权移交** — `HandoffTarget` 把目标 Agent 暴露为模型工具；触发后目标的 ModelClient、提示词、工具 registry/executor 完整接管同一 run，区别于结果回流的 `SubAgent`
+- **Tracing Processor** — `Agent(trace_processors=[...])` / `JournalAuthority.add_processor()` 旁路消费带 canonical sequence 的 committed 事件，处理器故障不影响 journal 写入与 replay
+- **Checkpoint 序列化加固** — 运行时动态字段（assistant 快照、挂起工具记录）随 checkpoint 持久化；单个未知宿主对象降级标记，不再炸掉整次保存
 - **Native Agent Runtime** — 自研 Agent 执行引擎，支持工具调用循环、流式输出、规划与委派
 - **Skill 系统** — 每个 `Agent` 持有独立 `SkillRegistry` + `SkillCurator`，支持宿主显式 Skill roots、按优先级发现、渐进式目录与 `GetSkill` 加载；全局注册 API 仅作兼容
 - **MCP 协议接入** — 标准 FastMCP Server（知识库检索 / 文档入库），作为 MCP 客户端通过 stdio/SSE 连接外部工具，支持运行时动态接入（LoadMcpServer）
@@ -277,13 +281,45 @@ for event in agent.stream("查一下霍口水库水位"):
 | 产物 | `file_generated` / `image_generated` | `filename`, `download_url?`, `filepath?`, `image_url?`, `size?` |
 | 系统 | `token_usage` / `heartbeat` / `error` / `llm_token_error` | token 用量 / 错误内容 |
 
-**构造参数**：`llm`（必填）、`tools`、`system_prompt`、`memory`、`session_id`、`enable_search`、`enable_reasoning`、`on_event`（事件回调）、`permission_handler`（工具审批钩子）、`permission_decision_hook`（host-level 权限决策钩子，见下）、`max_iterations`（默认 999）、`workspace`（嵌入式工作区注入）、`tool_loading`（工具加载策略：`None` 用配置默认，`False` 为 eager 旧行为，`True` 或 `ToolLoadingConfig` 为渐进式加载）。
+**构造参数**：`llm`（必填）、`tools`、`system_prompt`、`memory`、`session_id`、`enable_search`、`enable_reasoning`、`on_event`（事件回调）、`permission_handler`（工具审批钩子）、`permission_decision_hook`（host-level 权限决策钩子，见下）、`input_guardrails` / `output_guardrails`（模型输入/输出安全闸）、`handoffs`（控制权移交目标）、`trace_processors`（canonical 事件旁路处理器）、`max_iterations`（默认 999）、`workspace`（嵌入式工作区注入）、`tool_loading`（工具加载策略：`None` 用配置默认，`False` 为 eager 旧行为，`True` 或 `ToolLoadingConfig` 为渐进式加载）。
 
 **Host-level 权限审批钩子**：`permission_handler(tool_name, tool_input) -> Optional[bool]` 是宿主的**预授权**钩子。返回 `True` 表示宿主同意执行——策略级 ASK 自动放行（跳过用户交互确认，桌面 always-trust 模式），但**不可翻越 SDK 安全硬门**：子代理 tier、planning 模式、路径校验、危险命令、全局 deny 规则照常生效；返回 `False` 直接 DENY；返回 `None`（或钩子异常）交给 SDK 正常判断。钩子只能收紧不能放开，与 `permission_decision_hook` 语义一致。
 
 **Host-level 权限决策钩子**：`permission_decision_hook(tool_name, tool_input, sdk_decision, permission_policy) -> PermissionDecision`。SDK 完成基础权限判断后调用，宿主可基于 SDK 原始决策调整最终行为——保留 DENY/ASK、把 ALLOW 升级为 ASK（走 `permission_ask` 事件交互确认）或 DENY。钩子只能收紧不能放开：SDK 的安全拒绝（路径越界 / 危险命令 / 子代理分层 / planning 硬门）不可被覆盖；钩子异常或返回非法值时保留 SDK 原决策。桌面端可借此实现 always-trust / trust-once / always-ask 权限模式，无需 patch 内部 registry。
 
 **公共 Agent 完整 runtime**：`Agent(..., bare=False)` 走 NativeFloodAgent 完整 runtime（内置工具、MCP、Skill、权限 ASK、workspace 绑定），`bare` 默认 `True` 保持裸嵌入行为不变。公共入口还提供 `agent.memory` / `agent.session_id` / `agent.clear_memory()` 代理，以及 `agent.stream(msg, abort_check=..., attachments=...)` 透传，宿主无需访问 `raw` 内部。
+
+### Guardrail、Handoff 与 Trace Processor（v2.2.0）
+
+```python
+from floodmind import Agent, GuardrailResult, HandoffTarget
+
+# 输入 guardrail 接收完整 messages；输出 guardrail 可接收 output 或 (output, state)
+def no_secrets(messages):
+    blocked = any("API_KEY=" in str(m.get("content", "")) for m in messages)
+    return GuardrailResult(tripwire_triggered=blocked, message="输入包含密钥")
+
+def report_format(output, state=None):
+    return GuardrailResult(
+        tripwire_triggered=not output.startswith("#"),
+        message="报告必须以 Markdown 标题开头",
+    )
+
+forecast_agent = Agent(llm=forecast_llm, system_prompt="你是水文预报专家")
+triage_agent = Agent(
+    llm=triage_llm,
+    system_prompt="你是任务分流台",
+    input_guardrails=[no_secrets],
+    output_guardrails=[report_format],
+    handoffs=[HandoffTarget(forecast_agent, name="forecast")],
+    trace_processors=[my_trace_processor],  # 实现 on_event(envelope)
+)
+```
+
+- **输入 guardrail** 在每次模型调用前执行（包括工具结果回流后的下一次调用），多个 guardrail 顺序短路，`replaced_input` 可链式脱敏；异常/非法返回值按 fail-closed 处理。
+- **输出 guardrail** 在最终答案放流前检查；不合规内容不会以 `answer_delta` 外泄，首次触发注入修正提示重试一次，第二次触发终止。配置输出 guardrail 会把该轮输出缓冲到校验完成，因此失去逐 token 的实时展示；未配置时流式行为不变。
+- **Handoff** 与 `SubAgent` 不同：`SubAgent` 把子任务结果返回主 Agent，Handoff 则让目标 Agent 完整接管同一 run 的模型、提示词与工具集。默认历史过滤只复制可见文本，不重复传图片。
+- **Trace Processor** 是 journal 的只读旁路。处理器实现 `on_event(EventEnvelope)`；回调在事件 committed 后发生，异常只记 warning，不影响权威 journal。
 
 **MCP 运行时能力**：`build_mcp_tool_specs` 对 model-visible 工具名统一 sanitize（`mcp:<server>:<tool>` → `mcp_<server>_<tool>`，满足 OpenAI 兼容端点 `^[a-zA-Z0-9_-]+$`），实际调用仍用原始冒号全名；`McpClientConnection.is_connected` 对 stdio 做进程存活探测；`McpClientPool.call_health()` 记录最近一次每 server 调用结果；`add_server_connected_listener()` 感知运行时 MCP 连接成功事件。
 
