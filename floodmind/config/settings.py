@@ -172,6 +172,22 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         "enabled": True,
         "min_message_count": 3,
     },
+    "memory_recall": {
+        "enabled": True,
+        "top_k": 5,
+        "min_score": 0.05,
+        "decay_scale_days": 30,
+        "max_chars": 1500,
+    },
+    "memory_consolidation": {
+        "enabled": True,
+        "conflict_candidate_top_k": 3,
+    },
+    "core_memory": {
+        "enabled": True,
+        "max_chars": 800,
+        "migrate_legacy": True,
+    },
     "tool_loading": {
         "mode": "progressive",
         "core_tools": ["GetTool", "GetSkill"],
@@ -574,6 +590,38 @@ class BackgroundReviewConfig:
         self.min_message_count = int(raw.get("min_message_count", 3))
 
 
+def _env_bool(v: Any) -> bool:
+    return str(v).strip().lower() in ("1", "true", "yes", "on")
+
+
+class MemoryRecallConfig:
+    """语义事实主动注入（P0-1）。"""
+
+    def __init__(self, cfg: dict):
+        self.enabled = _env_bool(_cfg(cfg, "memory_recall.enabled", "MEMORY_RECALL_ENABLED", True))
+        self.top_k = int(_cfg(cfg, "memory_recall.top_k", "MEMORY_RECALL_TOP_K", 5))
+        self.min_score = float(_cfg(cfg, "memory_recall.min_score", "MEMORY_RECALL_MIN_SCORE", 0.05))
+        self.decay_scale_days = float(_cfg(cfg, "memory_recall.decay_scale_days", "MEMORY_RECALL_DECAY_DAYS", 30))
+        self.max_chars = int(_cfg(cfg, "memory_recall.max_chars", "MEMORY_RECALL_MAX_CHARS", 1500))
+
+
+class MemoryConsolidationConfig:
+    """四类操作固化管线（P0-2）。"""
+
+    def __init__(self, cfg: dict):
+        self.enabled = _env_bool(_cfg(cfg, "memory_consolidation.enabled", "MEMORY_CONSOLIDATION_ENABLED", True))
+        self.conflict_candidate_top_k = int(_cfg(cfg, "memory_consolidation.conflict_candidate_top_k", "MEMORY_CONSOLIDATION_CANDIDATE_TOP_K", 3))
+
+
+class CoreMemoryConfig:
+    """项目级 core memory（P0-3）。"""
+
+    def __init__(self, cfg: dict):
+        self.enabled = _env_bool(_cfg(cfg, "core_memory.enabled", "CORE_MEMORY_ENABLED", True))
+        self.max_chars = int(_cfg(cfg, "core_memory.max_chars", "CORE_MEMORY_MAX_CHARS", 800))
+        self.migrate_legacy = _env_bool(_cfg(cfg, "core_memory.migrate_legacy", "CORE_MEMORY_MIGRATE_LEGACY", True))
+
+
 class ToolLoadingConfig:
     def __init__(self, cfg: dict):
         raw = cfg.get("tool_loading", {})
@@ -670,6 +718,9 @@ class Settings:
         self.agent = AgentConfig(cfg)
         self.task_experience = TaskExperienceConfig(cfg)
         self.background_review = BackgroundReviewConfig(cfg)
+        self.memory_recall = MemoryRecallConfig(cfg)
+        self.memory_consolidation = MemoryConsolidationConfig(cfg)
+        self.core_memory = CoreMemoryConfig(cfg)
         self.tool_loading = ToolLoadingConfig(cfg)
         self.mcp = McpServerConfig()
         self.workspace = WorkspaceConfig(cfg)
