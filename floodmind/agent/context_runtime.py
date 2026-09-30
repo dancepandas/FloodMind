@@ -24,6 +24,7 @@ logger = logging.getLogger(__name__)
 class ContextPriority(IntEnum):
     SYSTEM_PROMPT = 0
     PROJECT_RULES = 10
+    CORE_MEMORY = 15      # 项目级核心记忆：native agent 经 memory_messages 注入顺序与此一致
     SKILL_CATALOG = 20
     TASK_EXPERIENCE = 25
     LONG_TERM_MEMORY = 30
