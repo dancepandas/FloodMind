@@ -70,6 +70,15 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+
+def _get_mem_services_for_review():
+    """门面单例；不可用（配置禁用/构造失败）时返回 None，review 走旧直写路径。"""
+    try:
+        from floodmind.memory.services import get_memory_services
+        return get_memory_services()
+    except Exception:
+        return None
+
 # 子任务 JSON Schema（create_plan / update_plan 共享）
 _SUBTASK_SCHEMA = {
     "type": "array",
@@ -3001,8 +3010,21 @@ class NativeFloodAgent:
                     )
                     state = self._last_loop_state
 
-                    # 构建 memory messages：经验上下文 + 精简对话历史（不含全量，控 token / 防长文本幻觉）
+                    # 构建 memory messages：core memory（常驻）+ 经验上下文 + 语义事实召回 + 精简对话历史
+                    # 注入顺序对应 ContextPriority：CORE_MEMORY(15) → TASK_EXPERIENCE(25) → LONG_TERM_MEMORY(30)
                     experience_context = self._build_experience_context()
+                    _core_block = ""
+                    _recall_block = ""
+                    try:
+                        # 门面唯一重绑点（dsh 迁移边界）：core 常驻块 + 召回块一起取
+                        from floodmind.memory.services import get_memory_services
+                        _ms = get_memory_services()
+                        if _ms.core is not None:
+                            _core_block = _ms.core.render() or ""
+                        if _ms.recall is not None:
+                            _recall_block = _ms.recall.build_block(user_input) or ""
+                    except Exception as _e:
+                        logger.debug("记忆服务注入跳过（非致命）: %s", _e)
                     history_text = ""
                     if hasattr(self.memory, "get_chat_history_for_system_prompt"):
                         _sp = getattr(self._orchestrator_executor, "system_prompts", None)
@@ -3015,8 +3037,12 @@ class NativeFloodAgent:
                         ) or ""
 
                     memory_messages = []
+                    if _core_block:
+                        memory_messages.append({"role": "system", "content": _core_block})
                     if experience_context:
                         memory_messages.append({"role": "system", "content": experience_context})
+                    if _recall_block:
+                        memory_messages.append({"role": "system", "content": _recall_block})
                     if history_text:
                         memory_messages.append({"role": "system", "content": history_text})
 
@@ -3203,6 +3229,8 @@ class NativeFloodAgent:
                         if self._task_experience_capture is not None
                         else None
                     ),
+                    # 门面注入：review 完成后走四类操作固化管线（无门面则回退旧直写）
+                    memory_services=_get_mem_services_for_review(),
                 )
             except Exception as e:
                 logger.debug("background_review 启动失败（非致命）: %s", e)
@@ -3211,6 +3239,13 @@ class NativeFloodAgent:
                 logger.warning("NativeFloodAgent 流式执行超时")
             else:
                 logger.info("NativeFloodAgent 流式执行成功")
+                # P1 沉淀钩子：会话 run 成功结束（当前空实现，失败不影响主流程）
+                try:
+                    _ms_done = _get_mem_services_for_review()
+                    if _ms_done is not None:
+                        _ms_done.on_run_completed(agent_result)  # P1 沉淀预留，当前空实现
+                except Exception as _e:
+                    logger.debug("on_run_completed 钩子跳过（非致命）: %s", _e)
 
             self._event_bus.clear_queue()
 

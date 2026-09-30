@@ -2,6 +2,15 @@
 
 All notable changes to FloodMind are documented in this file.
 
+## Unreleased
+
+### Added
+
+- 记忆增强 P0：语义事实三因子召回注入（MemoryRecallService）
+- 四类操作固化管线：ADD/UPDATE/DELETE/NOOP 判定，UPDATE 失效不覆盖、DELETE 软删（MemoryConsolidationService + SemanticMemoryStore）
+- 项目级 core memory：持久化 + 启动注入 + 旧会话文件聚合迁移（CoreMemoryStore）
+- MemoryServices 门面统一装配，on_run_completed/on_checkpoint 为 P1/P2 预留钩子
+
 ## [2.2.0] - 2026-09-04
 
 ### Added

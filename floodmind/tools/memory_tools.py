@@ -23,6 +23,7 @@ from pydantic import BaseModel, Field
 from floodmind.agent.runtime.contracts.permissions import ToolPermissionPolicy
 from floodmind.agent.runtime.services.history_projection import project_current
 from floodmind.memory.task_experience import get_task_experience_store
+from floodmind.memory.services import get_memory_services
 from floodmind.tools.agent_tool import (
     ToolRegistry,
     build_agent_tool,
@@ -171,14 +172,14 @@ def _impl_core_memory_append(category: str = "", fact: str = "") -> str:
     if not fact:
         return _finalize_tool_output("core_memory_append", "错误：fact 不能为空", category=category, fact=fact)
 
-    session_id = _get_session_id()
-    data = _load_core_memory(session_id)
-    facts = data.setdefault("facts", {})
-    category_facts = facts.setdefault(category, [])
-
-    if fact not in category_facts:
-        category_facts.append(fact)
-        _save_core_memory(session_id, data)
+    # 重定向到项目级 CoreMemoryStore（门面装配）；会话级旧文件读写保留在下方不删（P1 清理）
+    try:
+        store = get_memory_services().core
+    except Exception as e:
+        return _finalize_tool_output("core_memory_append", f"core memory 不可用: {e}", category=category, fact=fact)
+    if store is None:
+        return _finalize_tool_output("core_memory_append", "core memory 未启用", category=category, fact=fact)
+    if store.append(category, fact):
         return _finalize_tool_output("core_memory_append", f"已记录到 core memory [{category}]: {fact}", category=category, fact=fact)
     return _finalize_tool_output("core_memory_append", f"该事实已存在于 [{category}]，未重复追加", category=category, fact=fact)
 
@@ -197,26 +198,29 @@ core_memory_append = build_agent_tool(
 
 
 def _impl_core_memory_read(category: Optional[str] = None) -> str:
-    session_id = _get_session_id()
-    data = _load_core_memory(session_id)
+    # 重定向到项目级 CoreMemoryStore；条目为 dict 结构（含 fact/scope/created_at 等）
+    try:
+        store = get_memory_services().core
+    except Exception as e:
+        return _finalize_tool_output("core_memory_read", f"core memory 不可用: {e}", category=category)
+    if store is None:
+        return _finalize_tool_output("core_memory_read", "core memory 未启用", category=category)
+    data = store.load()
     facts = data.get("facts", {})
-
     if category:
         category = str(category).strip().strip('"').strip("'")
-        items = facts.get(category, [])
+        items = [i["fact"] for i in facts.get(category, [])]
         if not items:
             return _finalize_tool_output("core_memory_read", f"[{category}] 下没有记录", category=category)
         content = f"## Core Memory: {category}\n" + "\n".join(f"- {item}" for item in items)
         return _finalize_tool_output("core_memory_read", content, category=category)
-
     if not facts:
         return _finalize_tool_output("core_memory_read", "core memory 为空")
-
     parts = ["# Core Memory"]
     for cat, items in facts.items():
         parts.append(f"\n## {cat}")
         for item in items:
-            parts.append(f"- {item}")
+            parts.append(f"- {item['fact']}")
     return _finalize_tool_output("core_memory_read", "\n".join(parts))
 
 

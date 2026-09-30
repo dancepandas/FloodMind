@@ -6,6 +6,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
+import floodmind.memory.core_memory
 from floodmind.agent.runtime.contracts.runtime_context import RuntimeContext
 from floodmind.agent.runtime.services.journal_authority import open_journal_authority
 from floodmind.tools.base_tools import set_memory_instance
@@ -30,8 +31,25 @@ class TestMemoryTools:
         cp = _core_memory_path("test-session")
         if cp.exists():
             cp.unlink()
+        # CoreMemoryAppend/Read 已重定向到项目级 CoreMemoryStore（门面单例）：
+        # 重置门面单例并把默认存储文件重定向到临时目录，避免测试污染真实数据。
+        from floodmind.memory import services as _svc_mod
+        self._saved_default = floodmind.memory.core_memory._DEFAULT_STORE_FILE
+        floodmind.memory.core_memory._DEFAULT_STORE_FILE = str(Path(self.tmp) / "core.json")
+        self._saved_instance = _svc_mod._instance
+        _svc_mod._instance = None
+        # 关闭旧会话文件聚合迁移：测试不依赖磁盘上的历史会话文件，避免环境泄漏进断言
+        from floodmind.config.settings import settings
+        self._saved_migrate = settings.core_memory.migrate_legacy
+        settings.core_memory.migrate_legacy = False
 
     def teardown_method(self):
+        # 还原门面单例与默认存储文件，避免跨测试泄漏
+        from floodmind.memory import services as _svc_mod
+        from floodmind.config.settings import settings
+        settings.core_memory.migrate_legacy = self._saved_migrate
+        _svc_mod._instance = self._saved_instance
+        floodmind.memory.core_memory._DEFAULT_STORE_FILE = self._saved_default
         set_session_context("", output_dir="")
 
     def test_core_memory_append_and_read(self):
