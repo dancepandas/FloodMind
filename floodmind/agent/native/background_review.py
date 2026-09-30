@@ -17,7 +17,7 @@ from __future__ import annotations
 import json
 import logging
 import threading
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
 from floodmind.agent.native.model_client import ModelClient
@@ -54,6 +54,10 @@ _REVIEW_PROMPT = """你是一个对话回顾助手。请分析以下对话记录
    - 只针对明确使用过或提及的 skill 提出建议
    - 不直接修改 skill，只记录建议供后续审核
 
+4. `facts`: 本轮出现的事实性陈述列表（参数取值、方案选择、决策结论）
+   - 每个元素包含 `content`(事实内容) 和 `type`(类型: fact/decision/parameter)
+   - 只提取明确陈述的事实，不要推测
+
 ## 规则
 - 泛化：去除具体文件路径、session_id、时间戳
 - 保守：不确定的信息不要提取
@@ -63,7 +67,7 @@ _REVIEW_PROMPT = """你是一个对话回顾助手。请分析以下对话记录
 ## 输出格式
 严格输出 JSON，不要添加任何其他文字：
 ```json
-{"user_preferences": [], "experience": null, "skill_suggestions": []}
+{"user_preferences": [], "experience": null, "skill_suggestions": [], "facts": []}
 ```
 """
 
@@ -75,6 +79,7 @@ class ReviewResult:
     user_preferences: List[Dict[str, str]]
     experience: Optional[Dict[str, Any]]
     skill_suggestions: List[Dict[str, str]]
+    facts: List[Dict[str, str]] = field(default_factory=list)
     raw_json: str = ""
 
 
@@ -145,25 +150,38 @@ class BackgroundReviewer:
         result: ReviewResult,
         memory_instance: Any = None,
         experience_tree: Any = None,
+        memory_services: Any = None,
     ) -> Dict[str, Any]:
         """
         应用回顾结果到存储。
         返回应用统计。
+
+        memory_services 提供时：偏好 + facts 交给其 on_turn_completed（四类操作
+        固化管线，带判定与失效语义），不再直写 LTM；为 None 时保持旧行为，
+        兼容未接线的调用方。
         """
         applied = {"preferences": 0, "experiences": 0, "suggestions": 0}
 
-        # 1. 写入长期记忆
-        for pref in result.user_preferences:
-            content = pref.get("content", "").strip()
-            entry_type = pref.get("type", "preference")
-            if not content:
-                continue
+        # 1. 语义事实固化：提供 memory_services 时走四类操作管线（判定+失效语义），
+        #    否则保持旧行为直写 DualMemory LTM（兼容未接线的调用方）。
+        if memory_services is not None:
             try:
-                if memory_instance and hasattr(memory_instance, "add_long_term_memory"):
-                    memory_instance.add_long_term_memory(content, entry_type)
-                    applied["preferences"] += 1
+                memory_services.on_turn_completed(result)
+                applied["preferences"] = len(result.user_preferences) + len(result.facts)
             except Exception as e:
-                logger.debug("[BackgroundReview] memory write failed: %s", e)
+                logger.debug("[BackgroundReview] consolidation failed: %s", e)
+        else:
+            for pref in result.user_preferences:
+                content = pref.get("content", "").strip()
+                entry_type = pref.get("type", "preference")
+                if not content:
+                    continue
+                try:
+                    if memory_instance and hasattr(memory_instance, "add_long_term_memory"):
+                        memory_instance.add_long_term_memory(content, entry_type)
+                        applied["preferences"] += 1
+                except Exception as e:
+                    logger.debug("[BackgroundReview] memory write failed: %s", e)
 
         # 2. 写入经验树
         if result.experience and experience_tree:
@@ -255,11 +273,13 @@ class BackgroundReviewer:
             if exp and not isinstance(exp, dict):
                 exp = None
             suggestions = data.get("skill_suggestions") or []
+            facts = data.get("facts") or []
 
             return ReviewResult(
                 user_preferences=prefs if isinstance(prefs, list) else [],
                 experience=exp,
                 skill_suggestions=suggestions if isinstance(suggestions, list) else [],
+                facts=facts if isinstance(facts, list) else [],
                 raw_json=text,
             )
         except json.JSONDecodeError:
@@ -305,6 +325,7 @@ def spawn_background_review(
     model_client: ModelClient,
     memory_instance: Any = None,
     experience_tree: Any = None,
+    memory_services: Any = None,
 ) -> bool:
     """
     在后台线程中执行会话回顾。
@@ -332,7 +353,7 @@ def spawn_background_review(
             )
             result = reviewer.review_session(session_id, messages)
             if result:
-                reviewer.apply_review_result(session_id, result, memory_instance, experience_tree)
+                reviewer.apply_review_result(session_id, result, memory_instance, experience_tree, memory_services=memory_services)
         except Exception as exc:
             logger.warning("[BackgroundReview] 后台回顾异常（非致命）: %s", exc)
 
