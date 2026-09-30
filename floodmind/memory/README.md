@@ -10,7 +10,7 @@
 | `semantic_store.py` | 语义事实存储（`SemanticMemoryStore`）。Graphiti 式失效语义：UPDATE 不覆盖，旧条目打 `invalid_at`/`superseded_by` 保留时点回溯；DELETE 为软删除。提供 `extract_terms`、候选检索 `find_candidates` 等。 |
 | `recall.py` | 三因子召回服务（`MemoryRecallService`）：相关度 × 新鲜度衰减 × 多样性，按用户输入构建召回块 `build_block()`，注入 system 上下文。 |
 | `consolidation.py` | 四类操作固化管线（`MemoryConsolidationService`）：ADD / UPDATE / DELETE / NOOP 判定。判定失败全部丢弃（不回退直写），UPDATE 失效不覆盖、DELETE 软删。模型客户端由 background_review 运行时注入（`set_model_client`）。 |
-| `core_memory.py` | 项目级 core memory（`CoreMemoryStore`）：持久化 JSON + 启动注入（`render()`）+ 旧会话文件聚合迁移（`migrate_legacy`）。条目为 dict 结构（`fact`/`scope`/`created_at`）。 |
+| `core_memory.py` | 项目级 core memory（`CoreMemoryStore`）：持久化 JSON + 启动注入（`render()`）+ 旧会话文件聚合迁移（`migrate_legacy`）。条目为 dict 结构（实际落盘仅 `{fact, scope}` 两键）。 |
 | `background_review.py`（在 `agent/native/`） | 每轮流结束后 daemon 线程回顾对话，产出 `ReviewResult`（user_preferences + facts），经门面 `on_turn_completed` 走固化管线；无门面时回退旧直写路径。 |
 | `dual_memory.py` | **旧 DualMemory（会话级）**：对话历史唯一历史源（`_turns`），仍由 `self.memory` 使用。新语义事实存储与其分离、并存。 |
 | `task_experience.py` / `experience_tree.py` | 任务经验树（TASK_EXPERIENCE 上下文段），与本目录其余组件并列注入。 |
@@ -52,7 +52,7 @@ NativeFloodAgent.stream 每次 LLM 调用前
 | 文件 | 位置 | 格式 |
 | --- | --- | --- |
 | `semantic_memory.json` | `data/memory/semantic_memory.json` | `{"version": 1, "entries": [{id, content, type, terms, valid_at, invalid_at, superseded_by, deleted_at, ...}]}` |
-| `core_memory.json` | `data/memory/core_memory.json` | `{"version": 2, "facts": {category: [{fact, scope, created_at, ...}]}}` |
+| `core_memory.json` | `data/memory/core_memory.json` | `{"version": 2, "facts": {category: [{fact, scope}]}}` |
 | 旧 `long_term_memory.json` | `floodmind/memory/long_term_memory.json` | 旧 DualMemory 长期记忆（**冻结只读**）；门面初始化时 `import_legacy()` 一次性幂等导入语义存储 |
 
 默认路径由 `semantic_store._DEFAULT_STORE_FILE` / `core_memory._DEFAULT_STORE_FILE` 定义（优先 `_RUNTIME_ROOT/data/memory/`，回退 `~/.floodmind/`）；测试通过 monkeypatch 这两个模块级常量重定向到临时目录。

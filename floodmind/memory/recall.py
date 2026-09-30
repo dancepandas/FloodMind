@@ -25,14 +25,14 @@
   截出语义残句注入 prompt）。
 """
 
-import logging
 import math
 from datetime import datetime
 from typing import List, Optional, Set, Tuple
 
 from floodmind.memory.semantic_store import LTMEntryV2, SemanticMemoryStore, extract_terms
 
-logger = logging.getLogger(__name__)
+# 注：本模块刻意不持有 logger——召回是每轮打分的热路径，全程无日志输出点，
+# 保留未使用的 logger 属死代码（终审清理项）。
 
 
 class MemoryRecallService:

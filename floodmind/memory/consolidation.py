@@ -174,5 +174,12 @@ class MemoryConsolidationService:
             # UPDATE/DELETE 必须指向真实存在的条目，否则应用阶段会静默失败或指向脏数据
             if d["action"] in ("UPDATE", "DELETE"):
                 target = d.get("target_id")
-                if not target or self._store.get(target) is None:
+                target_entry = self._store.get(target) if target else None
+                if target_entry is None:
                     raise ValueError(f"target 不存在: {target}")
+                # 终审加固：防 LLM 幻觉指向已失效 id——对 superseded/deleted 条目
+                # 再失效一次会产生孤儿回溯链，与"失效语义完整"的铁律相悖，故判非法
+                if target_entry.status != "active":
+                    raise ValueError(
+                        f"target 已失效（status={target_entry.status}）: {target}"
+                    )

@@ -37,7 +37,7 @@ class MemoryServices:
 
         # ── 数据底座：语义事实存储（所有服务共享）──────────────────────────
         self.store = SemanticMemoryStore()
-        # 一次性导入旧长期记忆（幂等：已带 legacy_id 的条目跳过），此后旧 store 冻结只读
+        # 一次性导入旧长期记忆（幂等：按 content 去重），此后旧 store 冻结只读
         try:
             self.store.import_legacy()
         except Exception as e:

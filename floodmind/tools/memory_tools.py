@@ -198,7 +198,7 @@ core_memory_append = build_agent_tool(
 
 
 def _impl_core_memory_read(category: Optional[str] = None) -> str:
-    # 重定向到项目级 CoreMemoryStore；条目为 dict 结构（含 fact/scope/created_at 等）
+    # 重定向到项目级 CoreMemoryStore；条目为 dict 结构（实际落盘仅 {fact, scope} 两键）
     try:
         store = get_memory_services().core
     except Exception as e:

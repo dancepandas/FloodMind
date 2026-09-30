@@ -67,9 +67,14 @@ _REVIEW_PROMPT = """你是一个对话回顾助手。请分析以下对话记录
 ## 输出格式
 严格输出 JSON，不要添加任何其他文字：
 ```json
-{"user_preferences": [], "experience": null, "skill_suggestions": [], "facts": []}
+{{"user_preferences": [], "experience": null, "skill_suggestions": [], "facts": []}}
 ```
 """
+
+# 注意：上方示例 JSON 的花括号必须写成 {{ }}——本字符串经 str.format(
+# conversation_text=...) 渲染，单花括号会被当占位符解析抛 KeyError。
+# 该隐患此前被 worker 的 try/except 吞掉（每轮回顾静默失败），终审 C1
+# 接线回归测试走到长对话路径才暴露，修复后回顾链路才真正可达 LLM。
 
 
 @dataclass
@@ -319,6 +324,41 @@ class BackgroundReviewer:
         queue_file.write_text(json.dumps(entries, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
+def run_review_and_apply(
+    session_id: str,
+    messages: List[Dict[str, Any]],
+    model_client: ModelClient,
+    memory_instance: Any = None,
+    experience_tree: Any = None,
+    memory_services: Any = None,
+    min_message_count: int = 3,
+) -> None:
+    """同步执行「回顾 → 注入 client → 应用」三步（spawn 的 _worker 本体）。
+
+    独立成函数而非内联在 _worker 闭包里，原因有二：
+    1. 终审 C1 的接线契约（consolidation 必须注入 model_client）需要可测——
+       spawn 是 fire-and-forget 线程，测试只能直接调本函数锁死该契约；
+    2. 模块化原则：线程壳（spawn）与业务体（本函数）分离。
+    """
+    reviewer = BackgroundReviewer(
+        model_client, enabled=True, min_message_count=min_message_count
+    )
+    result = reviewer.review_session(session_id, messages)
+    if result:
+        # 终审 C1 修复：门面构造 consolidation 时未传 model_client，_judge 会因
+        # RuntimeError("model_client 未注入") 使整轮候选 discarded（P0-2 写路径
+        # 生产事故）。此处复用 BackgroundReviewer 的 model_client 注入固化管线
+        # （spec §6 决策：回顾与判定共用同一轻量 LLM 客户端，不单独建连接）。
+        if memory_services is not None and getattr(
+            memory_services, "consolidation", None
+        ) is not None:
+            memory_services.consolidation.set_model_client(model_client)
+        reviewer.apply_review_result(
+            session_id, result, memory_instance, experience_tree,
+            memory_services=memory_services,
+        )
+
+
 def spawn_background_review(
     session_id: str,
     messages: List[Dict[str, Any]],
@@ -348,12 +388,13 @@ def spawn_background_review(
 
     def _worker():
         try:
-            reviewer = BackgroundReviewer(
-                model_client, enabled=True, min_message_count=min_messages
+            # 业务体抽为 run_review_and_apply，见该函数 docstring（可测性 + 模块化）
+            run_review_and_apply(
+                session_id, messages, model_client,
+                memory_instance, experience_tree,
+                memory_services=memory_services,
+                min_message_count=min_messages,
             )
-            result = reviewer.review_session(session_id, messages)
-            if result:
-                reviewer.apply_review_result(session_id, result, memory_instance, experience_tree, memory_services=memory_services)
         except Exception as exc:
             logger.warning("[BackgroundReview] 后台回顾异常（非致命）: %s", exc)
 

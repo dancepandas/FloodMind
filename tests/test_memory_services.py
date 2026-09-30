@@ -53,3 +53,65 @@ def test_on_run_completed_and_checkpoint_noop():
     ms = svc_mod.get_memory_services()
     assert ms.on_run_completed(object()) is None
     assert ms.on_checkpoint(object()) is None
+
+
+def test_review_wiring_injects_model_client_into_consolidation():
+    """终审 C1 接线回归：worker 路径必须把 model_client 注入 consolidation。
+
+    生产事故背景：门面构造 consolidation 时未传 client，apply_review_result
+    直接调 on_turn_completed → _judge 抛 RuntimeError → 每轮候选全 discarded，
+    P0-2 写路径整体失效。本测试锁死「生产接线必须注入 client」契约：
+    走 spawn_background_review 的同步业务体 run_review_and_apply（spawn 本身是
+    fire-and-forget 线程不可直接断言），断言固化管线收到非 None client、
+    假 client 被真实调用（回顾 1 次 + 判定 1 次）、候选真正落盘。
+    """
+    import json as _json
+
+    from floodmind.agent.native.background_review import run_review_and_apply
+
+    ms = svc_mod.get_memory_services()
+    assert ms.consolidation is not None
+
+    class _FakeClient:
+        """顺序弹出预设响应的假模型客户端：第 1 次=回顾 JSON，第 2 次=判定 JSON。"""
+
+        def __init__(self, payloads):
+            self._payloads = list(payloads)
+            self.calls = 0
+
+        def invoke(self, prompt, system_prompt=None, temperature=None, max_tokens=None):
+            self.calls += 1
+            payload = self._payloads.pop(0)
+            return type("R", (), {"content": payload})()
+
+    long_text = "水文预报参数校准与方案比选讨论。" * 30  # 保证格式化后 >= 200 字符
+    messages = [
+        {"role": "user", "content": long_text},
+        {"role": "assistant", "content": long_text},
+        {"role": "user", "content": long_text},
+    ]
+    review_payload = _json.dumps(
+        {
+            "user_preferences": [{"content": "偏好输出包含置信区间", "type": "preference"}],
+            "experience": None,
+            "skill_suggestions": [],
+            "facts": [],
+        },
+        ensure_ascii=False,
+    )
+    judge_payload = _json.dumps(
+        [{"index": 0, "action": "ADD", "reason": "新偏好"}], ensure_ascii=False
+    )
+    fake = _FakeClient([review_payload, judge_payload])
+
+    # 等价于 spawn_background_review 的 _worker 执行体（含 C1 注入逻辑）
+    run_review_and_apply(
+        "s1", messages, fake,
+        memory_instance=None, experience_tree=None, memory_services=ms,
+        min_message_count=3,
+    )
+
+    # 契约断言：consolidation 收到的是注入的 client 本身，且被真实调用
+    assert ms.consolidation._model_client is fake
+    assert fake.calls == 2  # 回顾 1 次 + 判定 1 次；若为 1 则说明注入缺失、判定被跳过
+    assert ms.store.count_active() == 1  # ADD 真正落盘，写路径端到端打通

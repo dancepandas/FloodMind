@@ -240,7 +240,9 @@ class CoreMemoryStore:
     def _normalize(facts: Dict[str, Any]) -> Dict[str, List[Dict[str, str]]]:
         """兼容两种落盘形态：纯字符串列表（旧）或 dict 列表（新）。
 
-        空串/空白 fact 丢弃；dict 缺 scope 或 scope 为空时归一 "project"。
+        空串/空白 fact 丢弃；dict 缺 scope 键时默认 "project"（实现用
+        item.get("scope", "project")，只兜缺键；scope 显式传空串时此处
+        不归一，由 append 的 `scope or "project"` 负责）。
         """
         out: Dict[str, List[Dict[str, str]]] = {}
         for cat, items in (facts or {}).items():
