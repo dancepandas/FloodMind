@@ -6,7 +6,7 @@
 
 | 文件 | 职责 |
 | --- | --- |
-| `services.py` | **门面（唯一装配入口）**。懒加载单例 `get_memory_services()` 装配 store/recall/consolidation/core 四服务，暴露 `on_turn_completed` / `on_run_completed` / `on_checkpoint` 生命周期钩子。**dsh 迁移边界：门面是唯一重绑点**，迁移时只改本文件，所有接线方零改动。 |
+| `services.py` | **门面（唯一装配入口）**。懒加载单例 `get_memory_services()` 装配 store/recall/consolidation/core 四服务，暴露 `on_turn_completed` / `on_run_completed` / `on_checkpoint` 生命周期钩子。**装配边界：门面是唯一装配入口**，替换任一服务实现只改本文件，所有接线方零改动。 |
 | `semantic_store.py` | 语义事实存储（`SemanticMemoryStore`）。Graphiti 式失效语义：UPDATE 不覆盖，旧条目打 `invalid_at`/`superseded_by` 保留时点回溯；DELETE 为软删除。提供 `extract_terms`、候选检索 `find_candidates` 等。 |
 | `recall.py` | 三因子召回服务（`MemoryRecallService`）：相关度 × 新鲜度衰减 × 多样性，按用户输入构建召回块 `build_block()`，注入 system 上下文。 |
 | `consolidation.py` | 四类操作固化管线（`MemoryConsolidationService`）：ADD / UPDATE / DELETE / NOOP 判定。判定失败全部丢弃（不回退直写），UPDATE 失效不覆盖、DELETE 软删。模型客户端由 background_review 运行时注入（`set_model_client`）。 |

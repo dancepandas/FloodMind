@@ -1,8 +1,9 @@
 """记忆服务门面（P0）：装配与生命周期的唯一入口。
 
-三服务（recall/consolidation/core）由本门面懒加载单例装配；
-dsh 迁移时门面是唯一重绑点——所有接线方（native_flood_agent 注入、
-background_review 回顾、memory_tools 工具）只依赖本模块，迁移时只改这里。
+三服务（recall/consolidation/core）由本门面懒加载单例装配。
+门面是记忆子系统的唯一装配点——所有接线方（native_flood_agent 注入、
+background_review 回顾、memory_tools 工具）只依赖本模块；
+未来要替换任一服务的构造方式（换存储后端、换检索实现）只改这里。
 on_run_completed / on_checkpoint 为 P1/P2 预留钩子，本次空实现。
 """
 
@@ -24,8 +25,8 @@ class MemoryServices:
         consolidation: 四类操作固化管线（ADD/UPDATE/DELETE/NOOP 判定）；
         core:          项目级 core memory（常驻 system 注入）。
 
-    dsh 迁移边界：本类是唯一装配点；迁移时仅重写 __init__ 内的构造过程，
-    对外属性与钩子签名保持不变，接线方零改动。
+    装配边界：本类是唯一装配点；要替换任一服务的实现（存储后端、检索
+    策略）仅重写 __init__ 内的构造过程，对外属性与钩子签名保持不变。
     """
 
     def __init__(self):
@@ -112,7 +113,7 @@ def get_memory_services() -> MemoryServices:
     """获取门面单例；首次调用时加锁构造，后续直接返回。
 
     接线方（native_flood_agent / memory_tools / background_review 传递路径）
-    一律通过本函数访问门面，dsh 迁移时门面实现可整体替换而不影响调用方。
+    一律通过本函数访问门面；门面实现可整体替换而不影响调用方。
     """
     global _instance
     with _lock:
