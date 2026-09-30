@@ -172,7 +172,9 @@ class CoreMemoryStore:
         更新后的内存索引，丢失的是本次持久化而非内存状态。
         """
         try:
-            os.makedirs(os.path.dirname(self.store_file), exist_ok=True)
+            # dirname 可能为空串（store_file 为裸文件名），空串 makedirs
+            # 会抛 FileNotFoundError，回退当前目录。
+            os.makedirs(os.path.dirname(self.store_file) or ".", exist_ok=True)
             tmp_path = self.store_file + ".tmp"
             with open(tmp_path, "w", encoding="utf-8") as f:
                 json.dump(
@@ -241,19 +243,24 @@ class CoreMemoryStore:
         """兼容两种落盘形态：纯字符串列表（旧）或 dict 列表（新）。
 
         空串/空白 fact 丢弃；dict 缺 scope 键时默认 "project"（实现用
-        item.get("scope", "project")，只兜缺键；scope 显式传空串时此处
-        不归一，由 append 的 `scope or "project"` 负责）。
+        item.get("scope") or "project"：既兜缺键，也兜显式 null——
+        str(None) 会得到字符串 "None"，既非三层 scope 之一，还会被
+        render 进注入块，必须归一）。逐条 try/except：单条脏数据只跳过
+        该条，避免一条坏数据经 _load 的整体 try/except 清空整类事实。
         """
         out: Dict[str, List[Dict[str, str]]] = {}
         for cat, items in (facts or {}).items():
             norm: List[Dict[str, str]] = []
             for item in items or []:
-                if isinstance(item, str) and item.strip():
-                    norm.append({"fact": item.strip(), "scope": "project"})
-                elif isinstance(item, dict) and str(item.get("fact", "")).strip():
-                    norm.append({
-                        "fact": str(item["fact"]).strip(),
-                        "scope": str(item.get("scope", "project")),
-                    })
+                try:
+                    if isinstance(item, str) and item.strip():
+                        norm.append({"fact": item.strip(), "scope": "project"})
+                    elif isinstance(item, dict) and str(item.get("fact", "")).strip():
+                        norm.append({
+                            "fact": str(item["fact"]).strip(),
+                            "scope": str(item.get("scope") or "project"),
+                        })
+                except Exception as e:
+                    logger.warning("[核心记忆] 跳过损坏条目（%s）: %r", e, item)
             out[str(cat)] = norm
         return out

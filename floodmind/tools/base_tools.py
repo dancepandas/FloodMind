@@ -1396,6 +1396,24 @@ def _impl_add_memory(content: str = "", entry_type: str = "note") -> str:
         entry_type = "note"
     
     memory_instance = get_memory_instance()
+
+    # P0 记忆增强（MemoryAdd 重定向）：优先写门面语义事实存储——与回顾/固化
+    # 管线共用同一数据底座，工具写入的事实才能被召回/失效语义覆盖；旧
+    # DualMemory LTM 已冻结只读，不再追加。门面不可用（未装配/构造异常）时
+    # 回退下方旧直写路径，行为降级而非工具整体失效。
+    try:
+        from floodmind.memory.services import get_memory_services
+
+        store = get_memory_services().store
+        # 语义存储 add 不自带去重，先按 content 查 active 条目：重复写入会产生
+        # 内容完全相同的多条 active 事实，召回时互相干扰（与旧 store 返回文案一致）
+        if any(e.content == content for e in store.active_entries()):
+            return _finalize_tool_output("add_memory", "该内容已存在于长期记忆中", content=content, entry_type=entry_type)
+        store.add(content, category=entry_type)
+        return _finalize_tool_output("add_memory", f"已记录到长期记忆：{content}", content=content, entry_type=entry_type)
+    except Exception as e:
+        logger.debug("[MemoryAdd] 门面语义存储不可用，回退旧直写路径: %s", e)
+
     if memory_instance is None:
         return _finalize_tool_output("add_memory", "错误：记忆系统未初始化", content=content, entry_type=entry_type)
     

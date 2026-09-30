@@ -184,3 +184,57 @@ def test_webfetch_prefers_apparent_encoding_over_iso_8859_1(monkeypatch):
     result = _impl_fetch_webpage(url="https://example.com")
     payload = json.loads(result)
     assert "中文内容测试" in payload["content"]
+
+
+# ── MemoryAdd 重定向（P0 记忆增强）───────────────────────────────────────
+
+
+def test_add_memory_redirects_to_facade_store(tmp_path, monkeypatch):
+    """MemoryAdd 写门面语义存储（而非旧 DualMemory LTM）：落盘到 facade store、
+    同 content 查重返回"已存在"，且门面路径下不触碰旧 memory_instance。"""
+    from floodmind.memory import services as svc_mod
+    from floodmind.memory.semantic_store import SemanticMemoryStore
+    from floodmind.tools import base_tools
+
+    store = SemanticMemoryStore(store_file=str(tmp_path / "sem.json"))
+    fake_services = type("MS", (), {"store": store})()
+    monkeypatch.setattr(svc_mod, "_instance", fake_services)  # 门面单例注入点
+    # 门面可用时旧路径不应被触碰
+    monkeypatch.setattr(base_tools, "get_memory_instance", lambda: None)
+
+    result = base_tools._impl_add_memory("用户要求输出包含置信区间", "preference")
+    assert "已记录到长期记忆" in result
+    assert store.count_active() == 1
+    assert store.active_entries()[0].category == "preference"
+
+    # 查重：同 content 二次写入被拒绝
+    result2 = base_tools._impl_add_memory("用户要求输出包含置信区间", "preference")
+    assert "已存在" in result2
+    assert store.count_active() == 1
+
+
+def test_add_memory_fallback_when_facade_unavailable(monkeypatch):
+    """门面不可用（构造异常）时回退旧直写路径，写 memory_instance 且返回文案不变。"""
+    from floodmind.memory import services as svc_mod
+    from floodmind.tools import base_tools
+
+    def _boom():
+        raise RuntimeError("门面构造失败")
+
+    monkeypatch.setattr(svc_mod, "get_memory_services", _boom)
+    monkeypatch.setattr(svc_mod, "_instance", None)  # 防 get_memory_services 被旁路
+
+    class _Mem:
+        def __init__(self):
+            self.written = []
+
+        def add_long_term_memory(self, content, entry_type):
+            self.written.append((content, entry_type))
+            return True
+
+    mem = _Mem()
+    monkeypatch.setattr(base_tools, "get_memory_instance", lambda: mem)
+
+    result = base_tools._impl_add_memory("旧路径事实", "note")
+    assert "已记录到长期记忆" in result
+    assert mem.written == [("旧路径事实", "note")]

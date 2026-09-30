@@ -74,6 +74,25 @@ def test_import_legacy(tmp_path):
     assert store.count_active() == 2
 
 
+def test_load_skips_corrupt_entries_keeps_good_ones(tmp_path):
+    """_load 逐条容错：一条缺 entry_id 的坏条目被跳过并记 warning，
+    其余好条目全部保留（此前一条校验失败即整体 _entries=[]，全量丢失）。"""
+    f = tmp_path / "semantic_memory.json"
+    f.write_text(json.dumps({
+        "version": 2,
+        "entries": [
+            {"entry_id": "mem_good1", "content": "好条目一", "category": "note"},
+            {"content": "缺 entry_id 的坏条目"},   # LTMEntryV2 校验失败
+            {"entry_id": "mem_good2", "content": "好条目二", "category": "preference"},
+        ],
+    }, ensure_ascii=False), encoding="utf-8")
+    store = SemanticMemoryStore(store_file=str(f))
+    assert store.count_active() == 2
+    contents = {e.content for e in store.active_entries()}
+    assert contents == {"好条目一", "好条目二"}
+    assert store.get("mem_bad") is None
+
+
 def test_persistence_roundtrip(tmp_path):
     f = str(tmp_path / "semantic_memory.json")
     s1 = SemanticMemoryStore(store_file=f)

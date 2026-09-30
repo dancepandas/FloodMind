@@ -108,6 +108,16 @@ class MemoryConsolidationService:
                                             category=candidates[d["index"]].get("type", "note"))
                 if self._store.mark_superseded(d["target_id"], new_entry.entry_id):
                     stats["updated"] += 1
+                else:
+                    # 并发竞争窗口：_validate 通过后、应用前目标被其他写入置为
+                    # 非 active（两阶段之间无锁）。不回收的话刚 add 的新条目成了
+                    # 孤儿 active，与旧事实语义并存互相矛盾——回收并记 warning，
+                    # 不计入 updated，宁可本轮少一条也不污染语义存储。
+                    logger.warning(
+                        "[记忆固化] UPDATE 目标已失效，回收新条目 %s（target=%s）",
+                        new_entry.entry_id, d["target_id"],
+                    )
+                    self._store.mark_deleted(new_entry.entry_id)
             elif action == "DELETE":
                 if self._store.mark_deleted(d["target_id"]):
                     stats["deleted"] += 1
@@ -163,6 +173,22 @@ class MemoryConsolidationService:
         """
         if len(decisions) != len(candidates):
             raise ValueError(f"判定数量 {len(decisions)} != 候选数 {len(candidates)}")
+        # index 唯一性：同轮两条判定指向同一候选语义自相矛盾——典型如 DELETE+ADD
+        # 同 index，"已删事实复活"为一条新 active，与软删语义相悖。判非法即整轮
+        # 丢弃，符合"判定失败全丢弃"铁律（宁可等下一轮重判，不污染语义存储）。
+        indices = [d.get("index") if isinstance(d, dict) else None for d in decisions]
+        if len(set(indices)) != len(indices):
+            raise ValueError("判定 index 重复（同轮同一候选被判了两次）")
+        # UPDATE/DELETE 的 target_id 唯一性：同一旧条目被两条操作指向时，先到者
+        # 把目标置为 superseded/deleted，后到者 mark_* 静默失败，而其后 add 的
+        # 新条目已成孤儿 active（孤儿重复事实）。判非法即整轮丢弃，把竞争挡在
+        # 应用阶段之前。
+        targets = [
+            d.get("target_id") for d in decisions
+            if isinstance(d, dict) and d.get("action") in ("UPDATE", "DELETE")
+        ]
+        if len(set(targets)) != len(targets):
+            raise ValueError("UPDATE/DELETE 的 target_id 在一轮内重复")
         for d in decisions:
             if not isinstance(d, dict):
                 raise ValueError("判定元素不是对象")

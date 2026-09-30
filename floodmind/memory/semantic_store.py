@@ -34,7 +34,8 @@ TERM_RE = re.compile(r"[一-龥]+|[A-Za-z0-9]{2,}")
 
 
 def extract_terms(text: str) -> Set[str]:
-    """抽取检索词（与 LongTermMemory.search 同口径，抽为纯函数共享）。
+    """抽取检索词（语义事实存储专属口径；与旧 LongTermMemory.search 并不同
+    口径——旧 store 已冻结只读，切分逻辑未共享，不要按旧实现假设行为）。
 
     中文连续段按非重叠二字切分（单字 remainder 不抽取，同 {2,} 口径），
     ASCII 连续段（长度≥2）整体作为词。例如 "敖江预报" -> {"敖江", "预报"}，
@@ -146,15 +147,34 @@ class SemanticMemoryStore:
             try:
                 with open(self.store_file, "r", encoding="utf-8") as f:
                     raw = json.load(f)
-                items = raw.get("entries", []) if isinstance(raw, dict) else raw
-                self._entries = [LTMEntryV2(**e) for e in items if isinstance(e, dict)]
             except Exception as e:
                 logger.error("[语义记忆] 加载失败: %s", e)
                 self._entries = []
+                return
+            items = raw.get("entries", []) if isinstance(raw, dict) else raw
+            # 逐条构建而非列表推导整体校验：单条坏数据（缺字段/类型错）只跳过
+            # 该条并记 warning，其余好条目全部保留。语义记忆是增强能力，一条脏
+            # 数据不应清空整个项目的历史事实——此前一条 LTMEntryV2 校验失败
+            # 就整体 _entries=[]，等于一次轻微落盘损坏导致全量数据丢失。
+            entries: List[LTMEntryV2] = []
+            for e in items if isinstance(items, list) else []:
+                if not isinstance(e, dict):
+                    logger.warning("[语义记忆] 跳过非对象条目: %r", e)
+                    continue
+                try:
+                    entries.append(LTMEntryV2(**e))
+                except Exception as ex:
+                    logger.warning(
+                        "[语义记忆] 跳过损坏条目（%s），content 前50字: %s",
+                        ex, str(e.get("content", ""))[:50],
+                    )
+            self._entries = entries
 
     def _save(self):
         try:
-            os.makedirs(os.path.dirname(self.store_file), exist_ok=True)
+            # dirname 可能为空串（store_file 为裸文件名，如测试传 "sem.json"），
+            # 空串 makedirs 会抛 FileNotFoundError，回退当前目录。
+            os.makedirs(os.path.dirname(self.store_file) or ".", exist_ok=True)
             tmp_path = self.store_file + ".tmp"
             with open(tmp_path, "w", encoding="utf-8") as f:
                 json.dump(

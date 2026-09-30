@@ -161,32 +161,30 @@ class BackgroundReviewer:
         应用回顾结果到存储。
         返回应用统计。
 
-        memory_services 提供时：偏好 + facts 交给其 on_turn_completed（四类操作
-        固化管线，带判定与失效语义），不再直写 LTM；为 None 时保持旧行为，
-        兼容未接线的调用方。
+        memory_services 提供且其 consolidation 装配时：偏好 + facts 交给其
+        on_turn_completed（四类操作固化管线，带判定与失效语义），不再直写 LTM；
+        memory_services 为 None 或 consolidation 被配置禁用（为 None）时，
+        保持旧行为直写 DualMemory LTM，兼容未接线的调用方与禁用固化的部署。
         """
         applied = {"preferences": 0, "experiences": 0, "suggestions": 0}
 
-        # 1. 语义事实固化：提供 memory_services 时走四类操作管线（判定+失效语义），
-        #    否则保持旧行为直写 DualMemory LTM（兼容未接线的调用方）。
-        if memory_services is not None:
+        # 1. 语义事实固化：提供 memory_services 且 consolidation 装配时走四类
+        #    操作管线（判定+失效语义）；consolidation 为 None（memory_consolidation
+        #    配置禁用）时若仍只看 memory_services 是否提供，偏好会落地 nowhere
+        #    （配置旋钮回归）——此时回退旧直写路径，与 memory_services=None 的
+        #    未接线调用方保持同一行为。
+        consolidation = (
+            getattr(memory_services, "consolidation", None)
+            if memory_services is not None else None
+        )
+        if memory_services is not None and consolidation is not None:
             try:
                 memory_services.on_turn_completed(result)
                 applied["preferences"] = len(result.user_preferences) + len(result.facts)
             except Exception as e:
                 logger.debug("[BackgroundReview] consolidation failed: %s", e)
         else:
-            for pref in result.user_preferences:
-                content = pref.get("content", "").strip()
-                entry_type = pref.get("type", "preference")
-                if not content:
-                    continue
-                try:
-                    if memory_instance and hasattr(memory_instance, "add_long_term_memory"):
-                        memory_instance.add_long_term_memory(content, entry_type)
-                        applied["preferences"] += 1
-                except Exception as e:
-                    logger.debug("[BackgroundReview] memory write failed: %s", e)
+            self._apply_preferences_legacy(result, memory_instance, applied)
 
         # 2. 写入经验树
         if result.experience and experience_tree:
@@ -233,6 +231,24 @@ class BackgroundReviewer:
             applied["suggestions"],
         )
         return applied
+
+    @staticmethod
+    def _apply_preferences_legacy(
+        result: ReviewResult, memory_instance: Any, applied: Dict[str, Any]
+    ) -> None:
+        """旧直写路径：偏好逐条写 DualMemory LTM（兼容未接线调用方与
+        consolidation 被配置禁用的场景）。抽为内部函数避免条件分支重复三段。"""
+        for pref in result.user_preferences:
+            content = pref.get("content", "").strip()
+            entry_type = pref.get("type", "preference")
+            if not content:
+                continue
+            try:
+                if memory_instance and hasattr(memory_instance, "add_long_term_memory"):
+                    memory_instance.add_long_term_memory(content, entry_type)
+                    applied["preferences"] += 1
+            except Exception as e:
+                logger.debug("[BackgroundReview] memory write failed: %s", e)
 
     @staticmethod
     def _format_messages(messages: List[Dict[str, Any]]) -> str:

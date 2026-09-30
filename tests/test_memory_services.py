@@ -115,3 +115,36 @@ def test_review_wiring_injects_model_client_into_consolidation():
     assert ms.consolidation._model_client is fake
     assert fake.calls == 2  # 回顾 1 次 + 判定 1 次；若为 1 则说明注入缺失、判定被跳过
     assert ms.store.count_active() == 1  # ADD 真正落盘，写路径端到端打通
+
+
+def test_apply_review_fallback_when_consolidation_disabled(monkeypatch):
+    """配置旋钮回归：memory_services 提供但 consolidation 为 None
+    （memory_consolidation.enabled=false）时，回顾偏好不得落地 nowhere——
+    必须回退旧直写路径写 memory_instance.add_long_term_memory。
+    （存储默认路径已由 autouse fixture _reset_singleton 重定向到 tmp。）"""
+    from floodmind.agent.native.background_review import BackgroundReviewer, ReviewResult
+
+    ms = svc_mod.get_memory_services()
+    monkeypatch.setattr(ms, "consolidation", None)  # 模拟 consolidation 被配置禁用
+
+    class _Mem:
+        def __init__(self):
+            self.written = []
+
+        def add_long_term_memory(self, content, entry_type):
+            self.written.append((content, entry_type))
+            return True
+
+    mem = _Mem()
+    result = ReviewResult(
+        user_preferences=[{"content": "偏好输出包含置信区间", "type": "preference"}],
+        experience=None,
+        skill_suggestions=[],
+        facts=[],
+    )
+    applied = BackgroundReviewer(model_client=None).apply_review_result(
+        "s1", result,
+        memory_instance=mem, experience_tree=None, memory_services=ms,
+    )
+    assert applied["preferences"] == 1
+    assert mem.written == [("偏好输出包含置信区间", "preference")]
