@@ -705,7 +705,9 @@ FloodMind/
 │   │   └── memory_tools.py        #   记忆工具
 │   └── cli.py                     # CLI 入口
 ├── contrib/                       # 已外置为 MCP 服务的脚本（chronos/hydro_case_client）
-├── tests/                         # v2.0.0 完整回归 1154 passed / 1 skipped
+├── tests/                         # v2.0.0 完整回归 1565 passed / 1 skipped
+├── evals/                         # 内部评测集（smoke/tool/regression，CI 门禁）
+├── benchmarks/multi_agent/        # 多代理收益基线（默认离线）
 ├── main.py                        # CLI 交互入口
 ├── Dockerfile                     # Docker 构建
 ├── docs/                          # 文档
@@ -738,8 +740,14 @@ FloodMind 面向宿主暴露的标准 SDK 契约（desktop / 业务平台据此�
 ```bash
 # 运行测试
 python -m pytest tests/ -q
-# v2.0.0 完整回归：1154 passed, 1 skipped
+# v2.0.0 完整回归：1565 passed, 1 skipped
 # 唯一 skipped = Linux Landlock 平台测试，Windows 环境跳过
+
+# 内部评测集（确定性轨迹，CI 门禁）
+python -m evals.runner
+
+# 多代理收益基线（默认只列任务；--live 才调用真实模型）
+python -m benchmarks.multi_agent.runner --live
 
 # 新增 Skill（无需改代码）
 mkdir skills/my-skill

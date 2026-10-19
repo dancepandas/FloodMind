@@ -56,6 +56,7 @@ from floodmind.config.settings import settings
 from floodmind.agent.runtime.services.checkpoint_service import CheckpointService
 from floodmind.agent.runtime.services.child_thread_runtime import ChildThreadRuntime
 from floodmind.agent.runtime.services.path_service import PathService
+from floodmind.agent.runtime.services.plan_store import PlanStore
 from floodmind.agent.runtime.services.sandbox_service import SandboxService
 from floodmind.agent.runtime.services.tracing_service import TracingService
 from floodmind.agent.runtime.services.workspace_service import (
@@ -329,6 +330,7 @@ class NativeFloodAgent:
         system_prompt: Optional[str] = None,
         tracing_service: Optional[TracingService] = None,
         max_iterations: int = 10000,
+        max_total_tokens: int = 0,
         permission_handler: Optional[Callable[[str, Dict[str, Any]], bool]] = None,
         permission_decision_hook: Optional[Callable] = None,
         workspace: Optional["Workspace"] = None,
@@ -461,11 +463,13 @@ class NativeFloodAgent:
 
         self._cached_experience_context: str = ""
         self._cached_experience_version: int = -1
-        self._tracing_service = tracing_service or TracingService()
+        self._tracing_service = tracing_service or TracingService.from_settings()
         # 单 run 串行契约：并发 stream() 会互相覆盖 queue/journal/memory 绑定（D-02）
         self._stream_lock = threading.Lock()
         # SDK 可配置项（bare 模式由 _init_bare 消费）
         self._max_iterations = max_iterations
+        # G-18：单 run 累计 token 预算，0 表示不限制；由 _run_loop 注入 RunContext。
+        self._max_total_tokens = max(0, int(max_total_tokens or 0))
         self._permission_handler = _require_sync_callback(
             "permission_handler", permission_handler
         )
@@ -725,10 +729,14 @@ class NativeFloodAgent:
         统一接入路径：connect_all → build_mcp_tool_specs → 注册到 orchestrator + specialist。
         MCP 工具不经 AgentTool 编写层（业界标准协议运行时接入），直造 ToolSpec。
         注册进 mcp.json（``get_floodmind_home()/mcp.json``，或 FLOODMIND_HOME / 活跃 profile）
-        的 server 会在两种模式下自动接入；失败不阻塞初始化（log warning）。
+        的 server 会在两种模式下自动接入。配置本身非法（字段名/传输类型/必填项）
+        在初始化时显式抛 ``McpConfigError``；单个 server 连接失败仍只记 warning。
         """
-        from floodmind.config.settings import settings as _settings
-        _mcp_servers = _settings.mcp.servers if hasattr(_settings, 'mcp') else []
+        from floodmind.config.settings import McpConfigError, settings as _settings
+        mcp_config = _settings.mcp
+        if getattr(mcp_config, "error", ""):
+            raise McpConfigError(f"MCP 配置无效，拒绝初始化: {mcp_config.error}")
+        _mcp_servers = mcp_config.servers if hasattr(mcp_config, 'servers') else []
         if not _mcp_servers:
             return
         try:
@@ -878,7 +886,7 @@ class NativeFloodAgent:
         all_tools = [
             Glob_tool, Grep_tool, Read_tool, Write_tool, Edit_tool,
             self._bound_get_skill_tool, exec_bash,
-            search_memory, update_project_instructions,
+            add_memory, search_memory, update_project_instructions,
             create_scheduled_task, list_scheduled_tasks, cancel_scheduled_task,
             conversation_search,
             experience_search,
@@ -1342,25 +1350,18 @@ class NativeFloodAgent:
             logger.warning("Plugin loading failed (non-fatal): %s", e)
 
     def _resolve_context_window(self) -> int:
-        """解析压缩触发的上下文窗口，跟随注入模型的 preset，而非全局默认模型。
+        """解析压缩触发的上下文窗口，跟随注入模型的 catalog 配置。
 
-        此前硬编码 settings.model.context_window（catalog 第一个模型的窗口），
-        与宿主注入的 ModelClient 实际模型不一致——例如默认是 deepseek-v4-pro(131072)
-        而注入 MiniMax-M3(1M) 时，压缩在本不该发生的体量就触发，放大结构破坏风险。
+        统一委托 model_resolver.resolve_context_window()：不再自行读取
+        model_presets / settings.model.context_window。此前硬编码全局默认模型窗口
+        （catalog 第一个），与宿主注入的 ModelClient 实际模型不一致——例如默认是
+        deepseek-v4-pro(131072) 而注入 MiniMax-M3(1M) 时，压缩在本不该发生的体量
+        就触发，放大结构破坏风险。
         """
-        model_name = getattr(self._model_client, "model_name", None) if self._model_client else None
-        if model_name:
-            try:
-                from floodmind.config.model_presets import get_preset
+        from floodmind.config.model_resolver import resolve_context_window
 
-                preset = get_preset(model_name)
-                if preset:
-                    cw = preset.get("max_context_tokens")
-                    if cw:
-                        return int(cw)
-            except Exception as e:
-                logger.debug("resolve context_window for %s failed: %s", model_name, e)
-        return settings.model.context_window
+        model_name = getattr(self._model_client, "model_name", None) if self._model_client else None
+        return resolve_context_window(model_key=model_name)
 
     def _make_context_compressor(self) -> Optional[ContextCompressor]:
         """创建上下文压缩器，供 orchestrator executor 使用。"""
@@ -1389,22 +1390,37 @@ class NativeFloodAgent:
                 enable_thinking=thinking,
                 provider=getattr(self.llm_service, "provider", ""),
             )
-            return
+        else:
+            # 默认路径：从 settings.json 读取
+            from floodmind.config.model_presets import get_default_model_key, get_preset
 
-        # 默认路径：从 settings.json 读取
-        from floodmind.config.model_presets import get_default_model_key, get_preset
+            model_key = get_default_model_key()
+            preset = get_preset(model_key)
+            if not preset:
+                raise ValueError(f"未知的模型预设: {model_key}")
 
-        model_key = get_default_model_key()
-        preset = get_preset(model_key)
-        if not preset:
-            raise ValueError(f"未知的模型预设: {model_key}")
+            enable_thinking = bool(self._enable_reasoning and preset.get("supports_reasoning"))
 
-        enable_thinking = bool(self._enable_reasoning and preset.get("supports_reasoning"))
+            self._model_client = ModelClient.from_settings_with_preset(
+                model_key=model_key,
+                enable_reasoning=enable_thinking,
+            )
 
-        self._model_client = ModelClient.from_settings_with_preset(
-            model_key=model_key,
-            enable_reasoning=enable_thinking,
+        # G-19：显式回退链；未配置时原样返回，不引入额外包装。
+        from floodmind.agent.native.model_gateway import build_fallback_client
+
+        self._model_client = build_fallback_client(
+            self._model_client,
+            on_fallback=self._on_model_fallback,
         )
+
+    def _on_model_fallback(self, from_model: str, to_model: str, error: str) -> None:
+        self._event_bus.emit({
+            "type": "model_fallback",
+            "from_model": from_model,
+            "to_model": to_model,
+            "error": error,
+        })
 
     def _init_executors(self) -> None:
         from floodmind.agent.context_runtime import ContextRuntime
@@ -1745,6 +1761,39 @@ class NativeFloodAgent:
             out.append(f"## {section_title}\n{content.strip()}\n")  # 不存在则新建
         return ("\n".join(out)).rstrip() + "\n"
 
+    def _write_skill_md_verified(
+        self, path: Path, content: str, name: str, *, original: Optional[str]
+    ) -> Optional[str]:
+        """写入 SKILL.md 并回读校验；失败时回滚。
+
+        校验项：落盘内容与写入内容逐字节一致、frontmatter 可解析、name 未变。
+        ``original`` 为 None 表示新建（回滚 = 删除文件），否则恢复原始全文。
+        返回 None 表示成功，否则返回错误文案。
+        """
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(content, encoding="utf-8")
+        try:
+            written = path.read_text(encoding="utf-8")
+            if written != content:
+                raise ValueError("回读内容与写入不一致")
+            fm_text, _ = self._split_skill_md(written)
+            parsed = yaml.safe_load(fm_text) or {}
+            if not isinstance(parsed, dict) or parsed.get("name") != name:
+                raise ValueError("frontmatter name 与输入不一致")
+        except (yaml.YAMLError, ValueError, OSError) as exc:
+            try:
+                if original is None:
+                    path.unlink(missing_ok=True)
+                else:
+                    path.write_text(original, encoding="utf-8")
+            except OSError as rollback_exc:
+                return (
+                    f"错误：SKILL.md 写入校验失败且回滚失败：{exc}；"
+                    f"请人工检查 {path}：{rollback_exc}"
+                )
+            return f"错误：SKILL.md 写入校验失败，已回滚：{exc}"
+        return None
+
     def _resolve_skill_md_path(self, name: str) -> Path:
         """Resolve and validate an existing writable on-disk Skill path."""
         return self._skill_registry.validate_writable_skill_path(
@@ -1792,17 +1841,9 @@ class NativeFloodAgent:
         except yaml.YAMLError as exc:
             return f"错误：frontmatter 序列化失败：{exc}"
         content = f"---\n{frontmatter}\n---\n\n{body.strip()}\n"
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(content, encoding="utf-8")
-        # 写后回读校验：frontmatter 必须能解析且 name 与输入一致，否则回滚
-        try:
-            fm_text, _ = self._split_skill_md(path.read_text(encoding="utf-8"))
-            parsed = yaml.safe_load(fm_text) or {}
-            if not isinstance(parsed, dict) or parsed.get("name") != name:
-                raise ValueError("name 与输入不一致")
-        except (yaml.YAMLError, ValueError, OSError) as exc:
-            path.unlink(missing_ok=True)
-            return f"错误：SKILL.md 写出校验失败，已回滚：{exc}"
+        err = self._write_skill_md_verified(path, content, name, original=None)
+        if err:
+            return err
         self.refresh_skills()
         return f"技能 '{name}' 已创建并加载（{path}）。"
 
@@ -1829,9 +1870,14 @@ class NativeFloodAgent:
             return f"错误：技能 '{name}' 不可写（只读或编程式/ephemeral）：{exc}"
         if not path.exists():
             return f"错误：技能 '{name}' 无 SKILL.md 可改（{path}）。"
-        fm, body = self._split_skill_md(path.read_text(encoding="utf-8"))
+        original = path.read_text(encoding="utf-8")
+        fm, body = self._split_skill_md(original)
         new_body = self._apply_skill_body_action(body, action, content, section_title)
-        path.write_text(f"---\n{fm}\n---\n\n{new_body}", encoding="utf-8")
+        err = self._write_skill_md_verified(
+            path, f"---\n{fm}\n---\n\n{new_body}", name, original=original
+        )
+        if err:
+            return err
         self.refresh_skills()
         return f"技能 '{name}' 已更新（{action}）并重新加载。"
 
@@ -1920,6 +1966,61 @@ class NativeFloodAgent:
             return [str(art)]
         return []
 
+    def _plan_session_dir(self, context: Optional[RunContext]) -> Optional[Path]:
+        """计算计划持久化目录；仅当 state_dir 非空时返回，不向其他目录兜底。"""
+        if context is None:
+            return None
+        session_id = getattr(context, "session_id", "") or ""
+        if not context.state_dir or not session_id:
+            return None
+        return Path(context.state_dir) / "sessions" / session_id
+
+    def _persist_plan(self, plan: ExecutionPlan) -> None:
+        """把计划原子落盘到会话目录；失败只记 warning，不影响主流程。"""
+        session_dir = self._plan_session_dir(self._current_run_context)
+        if session_dir is None:
+            return
+        try:
+            PlanStore(session_dir).save(plan)
+        except Exception as exc:  # noqa: BLE001 —— 持久化失败不得中断 agent
+            logger.warning("执行计划落盘失败（session_dir=%s）: %s", session_dir, exc)
+
+    def _persist_plan_state(self, state: Optional[AgentLoopState]) -> None:
+        """run 收尾时把 state.plan 的最新状态落盘。
+
+        ``_auto_advance_plan`` 的乐观推进不经过 create/update 工具，不会触发
+        ``_emit_plan_full``；若只在工具调用时落盘，plan.json 会保留过期的
+        pending 状态，下一次 run 恢复出错误上下文。因此在 run 收尾统一落盘。
+        """
+        plan = getattr(state, "plan", None)
+        if plan is None:
+            return
+        self._persist_plan(plan)
+
+    def _inject_restored_plan_context(self, state: AgentLoopState, plan: ExecutionPlan) -> None:
+        """把恢复的执行计划注入模型上下文（不落 memory，只影响本次 run 输入）。
+
+        在当前最后一条 user 消息之前插入一条 user 角色消息；
+        若没有 user 消息则追加到末尾。
+        """
+        open_steps = [
+            s for s in plan.steps if s.get("status") in ("pending", "running")
+        ]
+        step_list = ", ".join(
+            f"{s.get('step_id')} {s.get('title', '')} ({s.get('status')})" for s in open_steps
+        )
+        content = (
+            f"[恢复的执行计划] 目标: {plan.user_message}；未完成步骤: {step_list}\n"
+            "继续任务时请用 update_plan 更新步骤状态；若当前请求与该计划无关，请忽略本段。"
+        )
+        message = {"role": "user", "content": content}
+        insert_at = len(state.messages)
+        for i in range(len(state.messages) - 1, -1, -1):
+            if state.messages[i].get("role") == "user":
+                insert_at = i
+                break
+        state.messages.insert(insert_at, message)
+
     def _emit_plan_full(self, plan: ExecutionPlan, title: str = "") -> None:
         """全量下发执行计划到前端 + 记录 trace。"""
         self._event_bus.emit_workflow_plan(
@@ -1947,6 +2048,7 @@ class NativeFloodAgent:
                 "workflow_plan",
                 input={"title": title or plan.user_message, "steps": plan.steps},
             )
+        self._persist_plan(plan)
 
     def _handle_create_plan(self, user_goal: str = "", deliverables: str = "", steps: Any = "", **kwargs) -> str:
         steps_str = json.dumps(steps, ensure_ascii=False) if isinstance(steps, (list, dict)) else str(steps)
@@ -2170,10 +2272,22 @@ class NativeFloodAgent:
         step_event_bus=None,
         delegate_cwd: Optional[str] = None,
     ) -> SubagentResult:
-        """P7：ChildThreadRuntime 替身 ad-hoc Specialist。返回 Typed SubagentResult。"""
+        """P7：ChildThreadRuntime 替身 ad-hoc Specialist。返回 Typed SubagentResult。
+
+        G-16 输入契约：父上下文只提供身份/目录，子代理的 user_text 一律由
+        ``_build_specialist_user_input`` 生成的显式任务包覆盖——否则子代理会
+        收到父代理的原始用户消息而不是被委派的子任务。
+        """
         parent_runtime_context = parent_context.runtime_context
         if parent_runtime_context is None:
             raise ValueError("specialist requires parent RuntimeContext identity")
+        specialist_input = self._build_specialist_user_input(
+            task_text, skill_name, delegate_cwd or ""
+        )
+        child_context = (
+            replace(parent_context, user_text=specialist_input)
+            if specialist_input else parent_context
+        )
         runtime = self._ensure_child_thread_runtime(parent_runtime_context)
         child_thread = ChildThread(
             thread_id=new_id("thread"),
@@ -2188,7 +2302,7 @@ class NativeFloodAgent:
         )
         return runtime.run(
             child_thread,
-            parent_context,
+            child_context,
             step_event_bus=step_event_bus,
             delegate_cwd=delegate_cwd,
         )
@@ -2200,17 +2314,9 @@ class NativeFloodAgent:
         if not task:
             return "错误：委派给 execution_specialist 的 task 不能为空"
 
-        specialist_input = self._build_specialist_user_input(task, skill_name)
-
         context = self._current_run_context
         if context is None:
-            context = RunContext(
-                session_id=self.session_id,
-                user_text=specialist_input,
-                attachments=[],
-                output_dir=self._get_output_dir(),
-                upload_dir=self._get_upload_dir(),
-            )
+            return "错误：委派需要运行中的父上下文（runtime_context 缺失），无法启动子代理"
 
         step_key = f"delegate-{int(time.time_ns())}"
         if self._last_loop_state is not None and self._last_loop_state.plan is not None:
@@ -2282,13 +2388,7 @@ class NativeFloodAgent:
 
         context = self._current_run_context
         if context is None:
-            context = RunContext(
-                session_id=self.session_id,
-                user_text="[并行委派]",
-                attachments=[],
-                output_dir=self._get_output_dir(),
-                upload_dir=self._get_upload_dir(),
-            )
+            return "错误：并行委派需要运行中的父上下文（runtime_context 缺失），无法启动子代理"
 
         specialist_prompts = list(self._specialist_executor.system_prompts) if self._specialist_executor else []
 
@@ -2621,9 +2721,11 @@ class NativeFloodAgent:
         )
 
     @staticmethod
-    def _build_specialist_user_input(task: str, skill_name: str = "") -> str:
+    def _build_specialist_user_input(task: str, skill_name: str = "", workdir: str = "") -> str:
+        """G-16：子代理结构化任务包（目标/技能/工作区/边界/返回格式）。"""
         normalized_task = (task or "").strip()
         normalized_skill_name = (skill_name or "").strip()
+        normalized_workdir = (workdir or "").strip()
         if not normalized_task:
             return ""
 
@@ -2635,6 +2737,9 @@ class NativeFloodAgent:
             normalized_task,
         ]
 
+        if normalized_workdir:
+            lines.extend(["", "[工作目录]", normalized_workdir])
+
         if normalized_skill_name:
             lines.extend([
                 "",
@@ -2643,6 +2748,20 @@ class NativeFloodAgent:
                 "",
                 "如果当前任务明确要求复用该 skill，遵循 skill 正文指定的执行方式：正文明确要求用 Edit 直接编辑的（如 docx/pptx/xlsx），用 Edit 直接编辑、不要写脚本；正文提供脚本的，按说明用 Bash 执行。遇到参数或方式不确定时，调用 `GetSkill` 查看详情再执行。",
             ])
+
+        lines.extend([
+            "",
+            "[边界]",
+            "- 只完成核心任务，不扩展范围，不替主代理做计划或决策。",
+            "- 文件写入必须落在工作目录或允许的产物目录内。",
+            "- 除完全没有可行路径，否则不要向用户提问。",
+            "",
+            "[返回格式]",
+            "最终回答只包含下面三段，不要附加寒暄或过程叙述：",
+            "[结论] 一句话说明任务是否完成及关键结果。",
+            "[产出] 逐个列出写入或修改的文件绝对路径；没有则写“无”。",
+            "[未完成/风险] 列出遗留问题、失败原因或需要主代理决策的事项；没有则写“无”。",
+        ])
 
         return "\n".join(lines).strip()
 
@@ -2871,6 +2990,9 @@ class NativeFloodAgent:
                 saved_thinking = self._model_client.enable_thinking
                 effective_session_id = resume_session_id or self.session_id
                 auth = None
+                lease = None
+                context: Optional[RunContext] = None
+                state: Optional[AgentLoopState] = None
                 try:
                     logger.info("[RUN_LOOP] === _run_loop started, session=%s ===", self.session_id)
 
@@ -2902,7 +3024,20 @@ class NativeFloodAgent:
                         runtime_dir = Path(output_dir).parent.parent
                         session_dir = runtime_dir / "sessions" / effective_session_id
                     ident = resolve_identity(effective_session_id, session_dir)
-                    auth = open_journal_authority(runtime_dir, **ident)
+                    # 每个 run 持有 fencing lease：resume 只有在 lease 过期后才能
+                    # 接管；接管后旧 owner 的追加会被 JournalFencedError 拒绝。
+                    from floodmind.agent.runtime.services.resume_service import open_lease
+
+                    lease = open_lease(
+                        runtime_dir,
+                        ident["run_id"],
+                        owner="run",
+                        conversation_id=ident["conversation_id"],
+                        task_id=ident["task_id"],
+                    )
+                    auth = open_journal_authority(
+                        runtime_dir, **ident, fence_check=lease.fence_check
+                    )
                     for _proc in getattr(self, "_trace_processors", []) or []:
                         auth.add_processor(_proc)
                     self._journal_authority = auth
@@ -2966,6 +3101,7 @@ class NativeFloodAgent:
                         runtime_context=runtime_context,
                         enable_reasoning=enable_reasoning,
                         abort_check=None,
+                        max_total_tokens=self._max_total_tokens,
                     )
                     self._current_run_context = context
 
@@ -3067,6 +3203,26 @@ class NativeFloodAgent:
                         memory_messages=memory_messages,
                     )
 
+                    # D5：恢复上个 run 未完成的执行计划（仅主代理）。
+                    # create_plan/update_plan 已把计划落盘到会话目录，
+                    # 新 run 重建 AgentLoopState 并从 plan.json 恢复，
+                    # 让计划跨用户回合/窗口延续。注意必须放在
+                    # _build_initial_messages 之后，否则注入的上下文会被覆盖。
+                    if context.agent_tier == "main":
+                        plan_session_dir = self._plan_session_dir(context)
+                        if plan_session_dir is not None:
+                            try:
+                                restored_plan = PlanStore(plan_session_dir).load_open()
+                            except Exception as exc:  # noqa: BLE001 —— 恢复失败不得阻断 run
+                                logger.warning("恢复执行计划失败（%s）: %s", plan_session_dir, exc)
+                                restored_plan = None
+                            if restored_plan is not None:
+                                state.plan = restored_plan
+                                self._inject_restored_plan_context(state, restored_plan)
+                                # 全量下发让前端看到恢复的计划；
+                                # _emit_plan_full 会再次落盘，属于幂等写入。
+                                self._emit_plan_full(restored_plan)
+
                     # 思考开关只翻语义位——厂商方言由 model_client.pipeline 翻译。
                     # enable_reasoning 未显式提供（None）时尊重 ModelClient 自身 enable_thinking，
                     # 不再默认强制关掉宿主注入的 thinking（desktop 修复：模型思考 tag）。
@@ -3100,8 +3256,18 @@ class NativeFloodAgent:
                     else:
                         q.put({"type": "error", "content": error_str})
                 finally:
+                    # D5：落盘 run 收尾时的计划最新状态（含 auto-advance）。
+                    # 必须在复位 _current_run_context 之前，_persist_plan 依赖它定位会话目录。
+                    if (
+                        state is not None
+                        and context is not None
+                        and self._current_run_context is context
+                    ):
+                        self._persist_plan_state(state)
                     if auth is not None:
                         self._deactivate_run_authority(auth)
+                    if lease is not None:
+                        lease.release()
                     # 归属守卫：仅当仍是本 run 的上下文时才复位，避免并发/迟到
                     # 收尾清掉新 run 的绑定（P1-3）
                     if self._current_run_context is context:

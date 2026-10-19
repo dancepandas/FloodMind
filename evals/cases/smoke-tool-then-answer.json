@@ -1,0 +1,45 @@
+{
+  "id": "smoke-tool-then-answer",
+  "tier": "smoke",
+  "description": "一次工具往返：工具被真实调度一次，结果回填进下一次模型上下文，随后产出最终答案。",
+  "user_text": "查询敖江站当前水位。",
+  "max_iterations": 5,
+  "system_prompt": "FloodMind internal eval",
+  "tools": {
+    "ReadGauge": {
+      "description": "读取指定测站的当前水位。",
+      "parameters": {
+        "type": "object",
+        "properties": {"station": {"type": "string"}},
+        "required": ["station"]
+      },
+      "result": {"content": "敖江站当前水位 12.3 m（警戒 13.0 m）", "status": "completed"}
+    }
+  },
+  "rounds": [
+    {
+      "events": [
+        {
+          "type": "tool_call_done",
+          "tool_call": {"id": "call_1", "name": "ReadGauge", "arguments": {"station": "敖江"}}
+        },
+        {"type": "done", "terminal_reason": "tool_calls"}
+      ]
+    },
+    {
+      "events": [
+        {"type": "token", "content": "敖江站当前水位 12.3 m，低于警戒水位。"},
+        {"type": "done", "terminal_reason": "stop"}
+      ]
+    }
+  ],
+  "expect": {
+    "final_output_contains": ["12.3"],
+    "model_calls": 2,
+    "tool_calls": ["ReadGauge"],
+    "tool_statuses": ["completed"],
+    "prompt_contains": [
+      {"call_index": 1, "contains": "敖江站当前水位 12.3 m"}
+    ]
+  }
+}

@@ -43,6 +43,11 @@ class MemoryServices:
             self.store.import_legacy()
         except Exception as e:
             logger.warning("[记忆门面] 旧长期记忆导入失败（非致命）: %s", e)
+        # G-15：启动时清理已过 valid_to 的事实（幂等，无过期条目时不写盘）。
+        try:
+            self.store.expire_due()
+        except Exception as e:
+            logger.warning("[记忆门面] 过期记忆清理失败（非致命）: %s", e)
 
         # ── 召回服务：配置启用时装配，disabled 时属性为 None（调用方需判空）──
         rc = settings.memory_recall
@@ -99,8 +104,11 @@ class MemoryServices:
         return None
 
     def on_checkpoint(self, checkpoint_ref: Any = None) -> None:
-        """P2 记忆演化维护预留——本次空实现。"""
-        return None
+        """checkpoint 维护：把已过 valid_to 的事实标记为 expired（G-15）。"""
+        try:
+            self.store.expire_due()
+        except Exception as e:
+            logger.warning("[记忆门面] checkpoint 过期清理失败（非致命）: %s", e)
 
 
 # ── 线程安全懒加载单例 ───────────────────────────────────────────────────────

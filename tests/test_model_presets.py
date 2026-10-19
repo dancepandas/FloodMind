@@ -51,4 +51,5 @@ def test_preset_carries_connection_and_params():
     assert p["provider"] == "dashscope"
     assert p["api_key"] == "sk"
     assert p["default_base_url"] == "https://x/v1"
-    assert p["max_context_tokens"] == 65536
+    # 上下文窗口不再由 preset 承载（唯一入口 model_resolver.resolve_context_window）
+    assert "max_context_tokens" not in p

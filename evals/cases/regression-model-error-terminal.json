@@ -1,0 +1,20 @@
+{
+  "id": "regression-model-error-terminal",
+  "tier": "regression",
+  "description": "不可重试的模型错误：直接进入 failed 终态并给出明确文案，不静默吞掉或无限重试。",
+  "user_text": "回答一个问题。",
+  "max_iterations": 5,
+  "tools": {},
+  "rounds": [
+    {
+      "events": [
+        {"type": "error", "content": "401 invalid api key"}
+      ]
+    }
+  ],
+  "expect": {
+    "model_calls": 1,
+    "tool_calls": [],
+    "final_output_contains": ["模型调用失败", "401 invalid api key"]
+  }
+}

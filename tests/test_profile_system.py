@@ -13,6 +13,9 @@ from pathlib import Path
 
 PASS = 0
 FAIL = 0
+# pytest 直接调用 test_1..test_9 时必须让失败可见；手工运行 __main__ 时
+# 关闭该开关，继续累积 PASS/FAIL 并在末尾汇总。
+_RAISE_ON_FAILURE = True
 
 
 def check(name, condition, detail=""):
@@ -23,6 +26,8 @@ def check(name, condition, detail=""):
     else:
         FAIL += 1
         print(f"  [FAIL] {name}  -- {detail}")
+        if _RAISE_ON_FAILURE:
+            raise AssertionError(f"{name}: {detail}")
 
 
 def run_test_suite(name, fn):
@@ -163,7 +168,7 @@ def test_4_prompt_assembly():
     check("minimal: has skill catalog", "test" in p)
     check("minimal: has tool descriptions", "Bash" in p)
     check("minimal: NO scheduled", "定时任务" not in p)
-    check("minimal: NO preference", "用户偏好" not in p)
+    check("minimal: NO preference", "## 用户偏好" not in p)
 
     # Case B: Full tools (all conditionals)
     reg_full = FakeReg([
@@ -175,15 +180,15 @@ def test_4_prompt_assembly():
         tool_registry=reg_full,
     )
     check("full: has scheduled", "定时任务" in p2)
-    check("full: has preference", "用户偏好" in p2)
+    check("full: has preference", "## 用户偏好" in p2)
     check("full: has workflow", "工作流" in p2)
     check("full: has output spec", "输出规范" in p2)
 
-    # Verify ordering: todo < method < sched < pref < tool < workflow < artifact < output
+    # Verify ordering: method < sched < pref < tool < memory < workflow < artifact < output
     pos = {}
-    for label, kw in [("todo", "任务规划"), ("method", "工作方式"),
-                       ("sched", "定时任务"), ("pref", "用户偏好"),
-                       ("tool", "工具使用"), ("wf", "工作流"),
+    for label, kw in [("method", "## 工作方式"), ("sched", "定时任务"),
+                       ("pref", "## 用户偏好"), ("tool", "## 工具使用"),
+                       ("memory", "## 记忆工具使用原则"), ("wf", "## 任务规划与工作流"),
                        ("artifact", "产物判定"), ("output", "输出规范")]:
         try:
             pos[label] = p2.index(kw)
@@ -191,8 +196,8 @@ def test_4_prompt_assembly():
             pos[label] = -1
 
     order_ok = (
-        pos["todo"] < pos["method"] < pos["sched"] < pos["pref"]
-        < pos["tool"] < pos["wf"] < pos["artifact"] < pos["output"]
+        pos["method"] < pos["sched"] < pos["pref"] < pos["tool"]
+        < pos["memory"] < pos["wf"] < pos["artifact"] < pos["output"]
     )
     check("full: guidance order correct", order_ok)
 
@@ -366,6 +371,7 @@ def run_full_pytest_suite():
 # Main
 # ============================================================
 if __name__ == "__main__":
+    _RAISE_ON_FAILURE = False
     os.chdir(Path(__file__).parent)
 
     run_test_suite("1. Module Import Chain", test_1_imports)

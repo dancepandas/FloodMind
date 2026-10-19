@@ -168,6 +168,12 @@ MCP Server 配置独立存储在 `~/.floodmind/mcp.json`：
 }
 ```
 
+**凭证处理（G-06）**：
+
+- `api_key`、`auth_token`、`search.json` 的 `api_key`、`mcp.json` 的鉴权 header 与敏感 `env` 在落盘时自动加密。Windows 使用 DPAPI（绑定当前用户/机器）；其他平台使用 Fernet，密钥位于 `~/.floodmind/.secret_key`（0600）。通过 `get_config()` / `save_config()`、MCP 配置 API、搜索配置 API 读取时透明解密，业务代码始终看到明文。
+- 解密失败（换机器、密文损坏）按空值处理并记录告警（fail-closed），不会把密文当凭证使用。已有明文配置可以继续读取，下一次保存时自动转为密文。
+- 子进程默认不继承宿主凭证：`exec_bash`、后台任务、MCP stdio server 与沙箱后端启动前都会剔除名字属于凭证类的环境变量（`*_API_KEY`、`*_TOKEN`、`*_SECRET`、`*_PASSWORD`、`*_AUTH` 等）。需要凭证的子进程必须显式授权：MCP 在 `mcp.json` 的 `env` 中声明，命令可通过 `exec_bash` 的 `env` 参数声明。
+
 ---
 
 ## 3. Python API 集成
@@ -653,6 +659,12 @@ FloodMind 的 MCP 集成遵循**运行时热插拔**准则：系统运行状态�
 
 Agent 启动时自动连接所有 `enabled: true` 的 server。
 
+只读取 `~/.floodmind/mcp.json`（或 `FLOODMIND_HOME` / 活跃 profile 指向的 `mcp.json`）。
+项目目录下的 `.floodmind/mcp.json` 不是运行配置，不会被加载（存在时启动日志会显式告警）。
+`servers` 条目按唯一契约严格校验：`transport` 必须是 `sse`/`stdio`，`sse` 需要 `url`，
+`stdio` 需要 `command`，`name` 不得重复；任何违规（包括旧字段名 `type`）都会在
+agent 初始化时抛 `McpConfigError`，不会静默跳过。
+
 ### 5.2 运行时 MCP 管理
 
 Agent 自身可调用以下管理工具（仅 orchestrator 可用）：
@@ -1010,6 +1022,53 @@ class MyProviderPipeline(ProviderPipeline):
 
 思考开关对上层只是一个语义位 `ModelClient.enable_thinking`——`prepare_request` 负责把它翻译成厂商参数；调用方显式传的 `extra_body` 永远优先（pipeline 用 `setdefault` 注入）。
 
+### 8.2 模型路由与回退（G-19）
+
+路由与回退由 `floodmind/agent/native/model_gateway.py` 统一实现，配置写在 `~/.floodmind/settings.json`：
+
+```json
+{
+  "model_routing": {
+    "subagent_model": "my-cheap-model",
+    "fallbacks": ["my-backup-model"],
+    "max_fallbacks": 2
+  }
+}
+```
+
+- `subagent_model`：子代理使用的模型；留空则继承主代理模型。
+- `fallbacks`：主代理与子代理共用的回退链，必须是 providers 目录中可解析的模型 id；未知 id 在启动时直接报错，不静默跳过。
+- `max_fallbacks`：回退上限（默认 2），防止连锁降级。
+
+回退语义：
+
+- 仅在本轮**尚未输出任何事件**时切换模型；已输出后失败不切换，交由 executor 的重试策略处理，避免同一响应混入两个模型的片段。
+- 回退成功后在本次 run 内保持该模型；每次 run 开始时由 executor `reset_fallbacks()` 回到主模型。
+- 每次切换都发出 `model_fallback` 事件（`from_model` / `to_model` / `error`）并记 warning 日志，可被前端与追踪消费。
+- 回退模型的 token 消耗同样计入子线程配额（配额包装在回退链内部）。
+
+边界：宿主通过 `Agent(llm=...)` 注入 `ModelClient` 时，主代理直接使用该客户端，不叠加配置回退链（模型与凭据由宿主负责）；子代理仍按 `subagent_model` 路由。运行时自行创建的客户端（默认预设、`floodmind run`）按上述规则套用回退链。
+
+### 8.3 成本归因与 OTLP 导出
+
+```json
+{
+  "model_pricing": {
+    "my-model": {"input_per_1k": 0.1, "output_per_1k": 0.3, "currency": "USD"}
+  },
+  "observability": {
+    "otlp_endpoint": "http://collector:4318",
+    "otlp_headers": {"Authorization": "Bearer token"},
+    "otlp_timeout_seconds": 5.0
+  }
+}
+```
+
+- `model_pricing` 为空或模型未定价时，成本为 `None`，报告中列出未定价模型，不伪造 0。
+- `TracingService.flush()` 每次写入 `metrics.jsonl` 快照，`breakdown` 按 run / model / step / tool 下钻。
+- 配置 `otlp_endpoint` 后，已完成的 span 会转成 OTLP/HTTP JSON 发往 `/v1/traces`；导出失败只记 warning，不影响本地 trace。
+- 离线查看：`python scripts/metrics_report.py --session-id <sid> [--pricing-json prices.json] [--json]`。
+
 ---
 
 ## 9. Web/TUI 移除说明
@@ -1140,12 +1199,38 @@ assert len(reg.list_skills()) == 0
 ### 11.4 运行全部测试
 
 ```bash
-pytest tests/ -q          # v2.0.0 完整回归：1154 passed, 1 skipped
+pytest tests/ -q          # v2.0.0 完整回归：1565 passed, 1 skipped
 # skipped = Linux Landlock 平台测试，Windows 环境跳过
 pytest tests/test_sdk_agent.py -v   # SDK 相关
 pytest tests/test_skill_registry.py tests/test_skill_curator.py -v  # Skill 系统
 pytest tests/test_sdk_purity.py -q  # SDK import/package purity
 ```
+
+### 11.5 内部评测集（G-14 / G-17）
+
+`evals/` 用脚本化模型轨迹驱动真实 `NativeAgentExecutor`，分四层验证：冒烟行为、真实工具链路（生产 `ToolExecutionService` + 真实文件工具 + workspace 状态断言）、安全/契约回归（工具失败恢复、token 预算、用户中断、迭代上界）、安全边界（路径越界与 planning 只读硬门）。常规集 243 例，另有 10 例 held-out 仅定时/手动运行。用例来自声明式 JSON 与 `evals/case_packs.py` 参数化家族；报告包含工具调用轨迹与准确率指标。
+
+```bash
+python -m evals.runner                 # 全量（CI 门禁，失败退出码 1）
+python -m evals.runner --tier smoke    # 只跑冒烟集
+python -m evals.runner --tier tool     # 只跑真实工具集
+python -m evals.runner --heldout       # 常规集 + held-out 校准集（定时/手动）
+python -m evals.runner --json report.json
+```
+
+单元测试负责函数级正确性；评测集负责“模型轨迹 → 执行器 → 工具 → 下一轮上下文”的跨组件行为。用例格式与新增方式见 `evals/README.md`。CI 在 `pytest` 之后运行评测门禁，并上传报告工件。
+
+### 11.6 多代理收益基线（G-22）
+
+`benchmarks/multi_agent/` 用固定任务集对比 single-agent 与 delegated 两种策略，回答“某类任务是否值得拆给子代理”。默认入口只列出任务，不构造模型、不发网络请求；只有显式 `--live` 才读取模型配置并真实执行：
+
+```bash
+python -m benchmarks.multi_agent.runner --list      # 列出任务（默认行为）
+python -m benchmarks.multi_agent.runner --live      # 真实对比，会产生模型费用
+python -m benchmarks.multi_agent.runner --live --task log-triage --json report.json
+```
+
+判定规则：delegated 成功率不得低于 single，token 或耗时至少一项降低 10%，且 delegated 实际发生委派；分类汇总还会统计逐任务退化。任务集、指标与阈值说明见 `benchmarks/multi_agent/README.md`，决策记录见 `docs/adr/ADR-007-multi-agent-introduction.md`。
 
 ---
 
@@ -1161,7 +1246,7 @@ FloodMind/
 │   │   │   ├── model_client.py       #     统一 LLM 服务
 │   │   │   ├── providers/            #     厂商 Pipeline（base/dashscope/deepseek/kimi/minimax/openai_compatible + route_pipeline）
 │   │   │   ├── tool_loading.py       #     渐进式工具目录与按需 schema 加载
-│   │   │   ├── model_router.py       #     模型路由/降级
+│   │   │   ├── model_gateway.py      #     模型路由/回退链
 │   │   │   ├── event_bus.py          #     EventBus + StepEventBus
 │   │   │   ├── message_builder.py    #     消息组装
 │   │   │   ├── tool_runtime.py       #     AgentTool→ToolSpec 桥接
@@ -1178,8 +1263,7 @@ FloodMind/
 │   │   │   └── adapters/             #     中性 runtime API 适配器
 │   │   ├── mcp_client.py             #   MCP 客户端池 + build_mcp_tool_specs
 │   │   ├── agent_registry.py         #   Agent 类型注册（build/plan/general/explore）
-│   │   ├── api.py                    #   Agent SDK 类
-│   │   └── task_runtime.py           #   任务运行时
+│   │   └── api.py                    #   Agent SDK 类
 │   ├── config/                       # 配置
 │   ├── profile/                      # 身份与提示词
 │   ├── memory/                       # 记忆与经验
@@ -1201,9 +1285,12 @@ FloodMind/
 │   ├── cli.py                        # CLI 入口（floodmind 命令）
 │   └── __init__.py                   # top-level SDK 导出
 ├── contrib/                           # 已外置为 MCP 服务的脚本（chronos 等）
-├── tests/                            # 测试（v2.0.0：1154 passed, 1 skipped）
+├── tests/                            # 测试（v2.0.0：1565 passed, 1 skipped）
+├── evals/                            # 内部评测集（smoke/tool/regression，CI 门禁）
+├── benchmarks/multi_agent/           # 多代理收益基线（默认离线，--live 才调用模型）
 ├── docs/                             # 文档
 │   ├── DEVELOPER_GUIDE.md            #   本文档
+│   ├── adr/                          #   架构决策记录（ADR-007/008）
 │   └── architecture/                 #   架构 Wiki
 │       ├── OVERVIEW.md               #     架构知识图谱
 │       ├── ASSESSMENT.md             #     系统评估（已完成 vs 待处理）

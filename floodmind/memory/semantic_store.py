@@ -13,7 +13,7 @@ import os
 import re
 import threading
 import uuid
-from datetime import datetime
+from datetime import date, datetime, time
 from typing import List, Optional, Set
 
 from pydantic import BaseModel
@@ -50,6 +50,26 @@ def extract_terms(text: str) -> Set[str]:
     return terms
 
 
+def parse_valid_to(value: Optional[str]) -> Optional[datetime]:
+    """解析有效期截止时间；无法解析时返回 None（视为无期限）。
+
+    纯日期（``2026-12-31``）按当天结束时刻解释，避免"当天上午就失效"。
+    """
+    if not value:
+        return None
+    text = str(value).strip()
+    if not text:
+        return None
+    try:
+        if len(text) == 10:
+            day = date.fromisoformat(text)
+            return datetime.combine(day, time(23, 59, 59))
+        return datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except (ValueError, TypeError):
+        logger.warning("[语义记忆] 无法解析 valid_to=%r，按无期限处理", value)
+        return None
+
+
 class LTMEntryV2(BaseModel):
     entry_id: str
     content: str
@@ -57,9 +77,25 @@ class LTMEntryV2(BaseModel):
     importance: float = 0.5
     valid_at: str = ""                       # ISO datetime
     invalid_at: Optional[str] = None
+    # G-15：事实的有效截止时间（ISO datetime）。到期后不再参与召回，
+    # 由 expire_due 标记为 expired；保留内容与时点，供回溯审计。
+    valid_to: Optional[str] = None
     superseded_by: Optional[str] = None      # 指向新条目 entry_id
-    status: str = "active"                   # active | superseded | deleted
+    status: str = "active"                   # active | superseded | deleted | expired
     access_count: int = 0
+
+    def is_expired(self, now: Optional[datetime] = None) -> bool:
+        """当前时间是否已过 valid_to；无期限或时间不可解析时为 False。"""
+        deadline = parse_valid_to(self.valid_to)
+        if deadline is None:
+            return False
+        if now is None:
+            now = datetime.now(deadline.tzinfo) if deadline.tzinfo else datetime.now()
+        elif deadline.tzinfo and now.tzinfo is None:
+            deadline = deadline.astimezone().replace(tzinfo=None)
+        elif now.tzinfo and not deadline.tzinfo:
+            now = now.astimezone().replace(tzinfo=None)
+        return now >= deadline
 
 
 class SemanticMemoryStore:
@@ -80,13 +116,38 @@ class SemanticMemoryStore:
                     return e
         return None
 
-    def active_entries(self) -> List[LTMEntryV2]:
+    def active_entries(self, now: Optional[datetime] = None) -> List[LTMEntryV2]:
+        """当前有效条目：status=active 且未过 valid_to（到期即不再召回）。"""
         with self._lock:
-            return [e for e in self._entries if e.status == "active"]
+            return [
+                e for e in self._entries
+                if e.status == "active" and not e.is_expired(now)
+            ]
 
-    def count_active(self) -> int:
+    def count_active(self, now: Optional[datetime] = None) -> int:
         with self._lock:
-            return sum(1 for e in self._entries if e.status == "active")
+            return sum(
+                1 for e in self._entries
+                if e.status == "active" and not e.is_expired(now)
+            )
+
+    def expire_due(self, now: Optional[datetime] = None) -> int:
+        """把已过 valid_to 的 active 条目标记为 expired（幂等维护操作）。
+
+        保留内容与原 valid_to/invalid_at，供回溯；返回本次失效条数。
+        """
+        stamp = (now or datetime.now()).isoformat()
+        with self._lock:
+            expired = 0
+            for entry in self._entries:
+                if entry.status == "active" and entry.is_expired(now):
+                    entry.status = "expired"
+                    entry.invalid_at = entry.invalid_at or stamp
+                    expired += 1
+            if expired:
+                self._save()
+                logger.info("[语义记忆] %d 条过期事实已失效", expired)
+            return expired
 
     def find_candidates(self, query_terms: Set[str], top_k: int = 3) -> List[LTMEntryV2]:
         """按关键词重叠取冲突候选（仅 active），供 consolidation LLM 判定前过滤。"""
@@ -102,13 +163,20 @@ class SemanticMemoryStore:
 
     # ── 写 ──────────────────────────────────────────────
 
-    def add(self, content: str, category: str = "note", importance: float = 0.7) -> LTMEntryV2:
+    def add(
+        self,
+        content: str,
+        category: str = "note",
+        importance: float = 0.7,
+        valid_to: Optional[str] = None,
+    ) -> LTMEntryV2:
         entry = LTMEntryV2(
             entry_id=f"mem_{uuid.uuid4().hex[:8]}",
             content=str(content).strip(),
             category=category or "note",
             importance=float(importance),
             valid_at=datetime.now().isoformat(),
+            valid_to=(str(valid_to).strip() or None) if valid_to else None,
         )
         with self._lock:
             self._entries.append(entry)

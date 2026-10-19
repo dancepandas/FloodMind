@@ -34,6 +34,14 @@ class CompactionOverBudgetError(RuntimeError):
     """
 
 
+class CompactionSummaryError(RuntimeError):
+    """Fail-closed：可压缩区存在但摘要为空。
+
+    此时继续组装会静默丢弃中间区（messages[start:end]），因此必须中止压缩并
+    保留原文，由 executor 记录错误并抑制重复触发；绝不静默丢弃会话语义。
+    """
+
+
 # §9.6 摘要来源切到 Canonical Events：产生对话轮次的 journal 事件类型。
 # 用于把被压缩中间区映射到 journal 事件（source_event_ids / covered_sequence_* /
 # source_sha256 可被 replay 复现）。
@@ -256,6 +264,18 @@ class ContextCompressor:
         else:
             summary = self._generate_summary(trimmed_middle)
 
+        # fail-closed：中间区非空但摘要为空时不得丢弃中间区——直接返回未压缩结果。
+        if not summary.strip():
+            logger.warning(
+                "[Compressor] middle region non-empty but summary empty, keeping original messages"
+            )
+            return CompressionResult(
+                original_messages=messages,
+                compressed_messages=messages,
+                summary="",
+                saved_tokens=0,
+            )
+
         self._last_summary = summary
         self._summary_coverage = (
             head_end,
@@ -413,6 +433,15 @@ class ContextCompressor:
             self._generate_summary([m for seg in compressible for m in seg])
             if compressible else ""
         )
+
+        # G-04 fail-closed：中间区存在但摘要为空时，继续组装会静默丢弃
+        # messages[start:end]。此处必须中止压缩并保留原文，由 executor 抑制再触发。
+        if start < end and not summary.strip():
+            raise CompactionSummaryError(
+                f"summary is empty for compressible messages[{start}:{end}] "
+                f"({end - start} messages); refusing to drop the region; "
+                "keeping original messages"
+            )
 
         # 4) 大工具结果 Artifact Offload
         trimmed = self._trim_tool_outputs(messages)

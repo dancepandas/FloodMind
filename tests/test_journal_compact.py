@@ -1,11 +1,13 @@
 """Journal-backed Compact tests (P5 Task 3, §9.5/§9.6)."""
 
 import hashlib
+from unittest.mock import patch
 
 import pytest
 
 from floodmind.agent.native.context_compressor import (
     CompactionOverBudgetError,
+    CompactionSummaryError,
     ContextCompressor,
 )
 from floodmind.agent.runtime.contracts.canonical_events import canonical_json
@@ -193,3 +195,41 @@ def test_compress_over_budget_fails_closed(tmp_path):
     # fail-closed：不产生 compaction.completed（未发生有效压缩）
     types = [e.event_type for e in auth.read_after(0)]
     assert "context.compaction.completed" not in types
+
+
+def test_empty_summary_aborts_compaction_and_keeps_original(tmp_path):
+    """G-04：中间区存在但摘要为空时必须中止压缩，绝不静默丢弃中间区。"""
+    auth = open_journal_authority(tmp_path, conversation_id="c", task_id="t",
+                                  run_id="run_1", thread_id="th", turn_id="tu")
+    messages = [
+        {"role": "system", "content": "SYSTEM"},              # 保留头
+        {"role": "user", "content": "user one"},               # 保留头
+        {"role": "assistant", "content": "assistant one"},     # 可压缩区
+        {"role": "user", "content": "user two"},               # 可压缩区
+        {"role": "assistant", "content": "assistant two"},     # 保留尾
+        {"role": "user", "content": "current request"},        # 保留尾
+    ]
+    cc = ContextCompressor(head_keep=2, tail_keep=2)
+    with patch.object(cc, "_generate_summary", return_value=""):
+        with pytest.raises(CompactionSummaryError) as excinfo:
+            cc.compress_journal(messages, auth, max_context_tokens=1200)
+
+    # 错误可见：指出被覆盖区间，便于宿主判断
+    assert "messages[2:4]" in str(excinfo.value)
+    # 未发生有效压缩 → 不落 compaction.completed
+    types = [e.event_type for e in auth.read_after(0)]
+    assert "context.compaction.completed" not in types
+
+
+def test_no_compressible_region_does_not_raise(tmp_path):
+    """G-04：start == end（无实际被丢弃内容）时摘要为空不抛错。"""
+    auth = open_journal_authority(tmp_path, conversation_id="c", task_id="t",
+                                  run_id="run_1", thread_id="th", turn_id="tu")
+    messages = [
+        {"role": "system", "content": "SYSTEM"},
+        {"role": "user", "content": "current request"},
+    ]
+    cc = ContextCompressor(head_keep=1, tail_keep=1)
+    result = cc.compress_journal(messages, auth, max_context_tokens=1200)
+    assert result.compressed_messages == messages
+    assert result.saved_tokens == 0

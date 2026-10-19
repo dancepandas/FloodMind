@@ -100,6 +100,10 @@ MCP 工具同时注册到两个 registry：
 
 Agent 启动时自动连接所有 `enabled: true` 的 server。
 
+只读取 `~/.floodmind/mcp.json`（或 `FLOODMIND_HOME` / 活跃 profile 指向的 `mcp.json`）。
+项目目录下的 `.floodmind/mcp.json` **不是运行配置**，不会被加载；字段名必须是
+`transport`（写成 `type` 会在启动时报 `McpConfigError`）。
+
 ---
 
 ## 二、Agent MCP 管理工具

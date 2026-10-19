@@ -268,7 +268,6 @@ def run(task, model, resume_session_id, resume_checkpoint_id, verbose):
         from floodmind.agent.native.executor import project_run_state_to_loop_state
         from floodmind.agent.native.types import AgentLoopState
         from floodmind.agent.runtime.services.checkpoint_service import CheckpointService
-        from floodmind.agent.runtime.services.journal_authority import open_journal_authority
         from floodmind.agent.runtime.services.resume_service import ResumeService
 
         svc = CheckpointService(base_dir=str(workspace.session_root))
@@ -297,14 +296,11 @@ def run(task, model, resume_session_id, resume_checkpoint_id, verbose):
                 checkpoint_service=svc,
             )
             run_state = outcome.run_state
-            authority = open_journal_authority(
-                Path(identity["runtime_dir"]),
-                conversation_id=identity["conversation_id"],
-                task_id=identity["task_id"],
-                run_id=identity["run_id"],
-                thread_id=identity["thread_id"],
-                turn_id=identity["turn_id"],
-            )
+            # 必须复用 resume 打开的权威门面：它携带 lease fence，旧 owner
+            # 的迟到写入会被拒绝；重新 open 会得到无 fencing 的第二个写者。
+            authority = outcome.authority
+            if authority is None:
+                raise RuntimeError("ResumeService returned no JournalAuthority")
             state = project_run_state_to_loop_state(state, run_state)
             state.user_message = task
             state.original_input = state.original_input or task

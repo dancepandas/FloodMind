@@ -1,0 +1,3780 @@
+{
+  "summary": {
+    "files": 380,
+    "symbols": 4608,
+    "edges": 8677,
+    "import_edges": 1080,
+    "call_edges": 2963,
+    "inherit_edges": 26,
+    "layers": 21,
+    "cycles": 4,
+    "unresolved_imports": 1,
+    "orphan_files": 213
+  },
+  "layers": [
+    {
+      "layer": "tests",
+      "title": "测试",
+      "files": 137,
+      "loc": 26021,
+      "symbols": 2184
+    },
+    {
+      "layer": "skills",
+      "title": "技能",
+      "files": 65,
+      "loc": 13322,
+      "symbols": 455
+    },
+    {
+      "layer": "agent-core",
+      "title": "Agent 执行核心",
+      "files": 23,
+      "loc": 9373,
+      "symbols": 372
+    },
+    {
+      "layer": "runtime-services",
+      "title": "运行时服务",
+      "files": 35,
+      "loc": 8787,
+      "symbols": 408
+    },
+    {
+      "layer": "memory",
+      "title": "记忆与会话",
+      "files": 11,
+      "loc": 4604,
+      "symbols": 241
+    },
+    {
+      "layer": "evals",
+      "title": "内部评测集",
+      "files": 5,
+      "loc": 4349,
+      "symbols": 65
+    },
+    {
+      "layer": "tools",
+      "title": "工具",
+      "files": 6,
+      "loc": 4116,
+      "symbols": 164
+    },
+    {
+      "layer": "tooling",
+      "title": "工程脚本",
+      "files": 14,
+      "loc": 3450,
+      "symbols": 66
+    },
+    {
+      "layer": "model-config",
+      "title": "模型与配置",
+      "files": 13,
+      "loc": 2767,
+      "symbols": 161
+    },
+    {
+      "layer": "gateway",
+      "title": "Gateway（HTTP/SSE 适配）",
+      "files": 7,
+      "loc": 1725,
+      "symbols": 67
+    },
+    {
+      "layer": "runtime-contracts",
+      "title": "运行时契约",
+      "files": 20,
+      "loc": 1389,
+      "symbols": 110
+    },
+    {
+      "layer": "agent-services",
+      "title": "Agent 辅助服务",
+      "files": 5,
+      "loc": 1092,
+      "symbols": 70
+    },
+    {
+      "layer": "sdk",
+      "title": "SDK 公共入口",
+      "files": 4,
+      "loc": 991,
+      "symbols": 42
+    },
+    {
+      "layer": "cli",
+      "title": "CLI/宿主入口",
+      "files": 5,
+      "loc": 977,
+      "symbols": 26
+    },
+    {
+      "layer": "benchmarks",
+      "title": "收益基线",
+      "files": 6,
+      "loc": 953,
+      "symbols": 45
+    },
+    {
+      "layer": "mcp",
+      "title": "MCP 集成",
+      "files": 1,
+      "loc": 677,
+      "symbols": 42
+    },
+    {
+      "layer": "runtime-kernel",
+      "title": "Reducer/运行时内核",
+      "files": 2,
+      "loc": 586,
+      "symbols": 36
+    },
+    {
+      "layer": "extension",
+      "title": "扩展点",
+      "files": 6,
+      "loc": 363,
+      "symbols": 20
+    },
+    {
+      "layer": "runtime-adapters",
+      "title": "运行时适配器",
+      "files": 9,
+      "loc": 319,
+      "symbols": 18
+    },
+    {
+      "layer": "other",
+      "title": "其它",
+      "files": 4,
+      "loc": 254,
+      "symbols": 3
+    },
+    {
+      "layer": "common",
+      "title": "通用工具",
+      "files": 2,
+      "loc": 135,
+      "symbols": 13
+    }
+  ],
+  "layer_edges": [
+    {
+      "src": "tests",
+      "dst": "runtime-services",
+      "count": 172
+    },
+    {
+      "src": "tests",
+      "dst": "runtime-contracts",
+      "count": 125
+    },
+    {
+      "src": "tests",
+      "dst": "agent-core",
+      "count": 121
+    },
+    {
+      "src": "tests",
+      "dst": "model-config",
+      "count": 50
+    },
+    {
+      "src": "runtime-services",
+      "dst": "runtime-contracts",
+      "count": 36
+    },
+    {
+      "src": "tests",
+      "dst": "tools",
+      "count": 34
+    },
+    {
+      "src": "tests",
+      "dst": "memory",
+      "count": 30
+    },
+    {
+      "src": "agent-core",
+      "dst": "runtime-contracts",
+      "count": 22
+    },
+    {
+      "src": "agent-core",
+      "dst": "runtime-services",
+      "count": 20
+    },
+    {
+      "src": "tests",
+      "dst": "runtime-kernel",
+      "count": 18
+    },
+    {
+      "src": "agent-core",
+      "dst": "model-config",
+      "count": 14
+    },
+    {
+      "src": "tests",
+      "dst": "sdk",
+      "count": 14
+    },
+    {
+      "src": "tests",
+      "dst": "skills",
+      "count": 12
+    },
+    {
+      "src": "tools",
+      "dst": "runtime-services",
+      "count": 10
+    },
+    {
+      "src": "agent-core",
+      "dst": "tools",
+      "count": 8
+    },
+    {
+      "src": "runtime-services",
+      "dst": "agent-core",
+      "count": 7
+    },
+    {
+      "src": "cli",
+      "dst": "model-config",
+      "count": 6
+    },
+    {
+      "src": "tools",
+      "dst": "runtime-contracts",
+      "count": 6
+    },
+    {
+      "src": "memory",
+      "dst": "runtime-services",
+      "count": 5
+    },
+    {
+      "src": "tools",
+      "dst": "memory",
+      "count": 5
+    },
+    {
+      "src": "tests",
+      "dst": "agent-services",
+      "count": 5
+    },
+    {
+      "src": "evals",
+      "dst": "tools",
+      "count": 4
+    },
+    {
+      "src": "evals",
+      "dst": "agent-core",
+      "count": 4
+    },
+    {
+      "src": "cli",
+      "dst": "runtime-services",
+      "count": 4
+    },
+    {
+      "src": "runtime-services",
+      "dst": "runtime-kernel",
+      "count": 4
+    },
+    {
+      "src": "gateway",
+      "dst": "runtime-services",
+      "count": 4
+    },
+    {
+      "src": "gateway",
+      "dst": "runtime-contracts",
+      "count": 4
+    },
+    {
+      "src": "tests",
+      "dst": "evals",
+      "count": 4
+    },
+    {
+      "src": "tests",
+      "dst": "benchmarks",
+      "count": 4
+    },
+    {
+      "src": "tests",
+      "dst": "extension",
+      "count": 4
+    },
+    {
+      "src": "sdk",
+      "dst": "model-config",
+      "count": 3
+    },
+    {
+      "src": "sdk",
+      "dst": "agent-core",
+      "count": 3
+    },
+    {
+      "src": "sdk",
+      "dst": "runtime-services",
+      "count": 3
+    },
+    {
+      "src": "agent-core",
+      "dst": "memory",
+      "count": 3
+    },
+    {
+      "src": "model-config",
+      "dst": "agent-core",
+      "count": 3
+    },
+    {
+      "src": "model-config",
+      "dst": "runtime-contracts",
+      "count": 3
+    },
+    {
+      "src": "agent-core",
+      "dst": "extension",
+      "count": 3
+    },
+    {
+      "src": "runtime-kernel",
+      "dst": "runtime-contracts",
+      "count": 3
+    },
+    {
+      "src": "runtime-adapters",
+      "dst": "runtime-contracts",
+      "count": 3
+    },
+    {
+      "src": "runtime-adapters",
+      "dst": "runtime-services",
+      "count": 3
+    },
+    {
+      "src": "runtime-services",
+      "dst": "model-config",
+      "count": 3
+    },
+    {
+      "src": "gateway",
+      "dst": "model-config",
+      "count": 3
+    },
+    {
+      "src": "tooling",
+      "dst": "model-config",
+      "count": 3
+    },
+    {
+      "src": "tests",
+      "dst": "tooling",
+      "count": 3
+    },
+    {
+      "src": "tests",
+      "dst": "mcp",
+      "count": 3
+    },
+    {
+      "src": "cli",
+      "dst": "memory",
+      "count": 2
+    },
+    {
+      "src": "cli",
+      "dst": "agent-services",
+      "count": 2
+    },
+    {
+      "src": "evals",
+      "dst": "runtime-contracts",
+      "count": 2
+    },
+    {
+      "src": "evals",
+      "dst": "runtime-services",
+      "count": 2
+    },
+    {
+      "src": "cli",
+      "dst": "agent-core",
+      "count": 2
+    },
+    {
+      "src": "sdk",
+      "dst": "memory",
+      "count": 2
+    },
+    {
+      "src": "sdk",
+      "dst": "runtime-contracts",
+      "count": 2
+    },
+    {
+      "src": "mcp",
+      "dst": "runtime-contracts",
+      "count": 2
+    },
+    {
+      "src": "agent-core",
+      "dst": "agent-services",
+      "count": 2
+    },
+    {
+      "src": "agent-core",
+      "dst": "skills",
+      "count": 2
+    },
+    {
+      "src": "runtime-services",
+      "dst": "tools",
+      "count": 2
+    },
+    {
+      "src": "runtime-services",
+      "dst": "common",
+      "count": 2
+    },
+    {
+      "src": "gateway",
+      "dst": "sdk",
+      "count": 2
+    },
+    {
+      "src": "memory",
+      "dst": "model-config",
+      "count": 2
+    },
+    {
+      "src": "tools",
+      "dst": "skills",
+      "count": 2
+    },
+    {
+      "src": "tools",
+      "dst": "model-config",
+      "count": 2
+    },
+    {
+      "src": "tests",
+      "dst": "cli",
+      "count": 2
+    },
+    {
+      "src": "tests",
+      "dst": "gateway",
+      "count": 2
+    },
+    {
+      "src": "benchmarks",
+      "dst": "sdk",
+      "count": 1
+    },
+    {
+      "src": "benchmarks",
+      "dst": "runtime-contracts",
+      "count": 1
+    },
+    {
+      "src": "benchmarks",
+      "dst": "memory",
+      "count": 1
+    },
+    {
+      "src": "evals",
+      "dst": "model-config",
+      "count": 1
+    },
+    {
+      "src": "cli",
+      "dst": "sdk",
+      "count": 1
+    },
+    {
+      "src": "cli",
+      "dst": "gateway",
+      "count": 1
+    },
+    {
+      "src": "cli",
+      "dst": "skills",
+      "count": 1
+    },
+    {
+      "src": "agent-services",
+      "dst": "agent-core",
+      "count": 1
+    },
+    {
+      "src": "agent-services",
+      "dst": "sdk",
+      "count": 1
+    },
+    {
+      "src": "agent-services",
+      "dst": "runtime-contracts",
+      "count": 1
+    },
+    {
+      "src": "agent-services",
+      "dst": "model-config",
+      "count": 1
+    },
+    {
+      "src": "mcp",
+      "dst": "runtime-services",
+      "count": 1
+    },
+    {
+      "src": "agent-services",
+      "dst": "common",
+      "count": 1
+    },
+    {
+      "src": "agent-core",
+      "dst": "runtime-kernel",
+      "count": 1
+    },
+    {
+      "src": "agent-core",
+      "dst": "sdk",
+      "count": 1
+    },
+    {
+      "src": "agent-core",
+      "dst": "mcp",
+      "count": 1
+    },
+    {
+      "src": "runtime-contracts",
+      "dst": "tools",
+      "count": 1
+    },
+    {
+      "src": "runtime-services",
+      "dst": "memory",
+      "count": 1
+    },
+    {
+      "src": "runtime-services",
+      "dst": "sdk",
+      "count": 1
+    },
+    {
+      "src": "runtime-services",
+      "dst": "skills",
+      "count": 1
+    },
+    {
+      "src": "gateway",
+      "dst": "memory",
+      "count": 1
+    },
+    {
+      "src": "gateway",
+      "dst": "common",
+      "count": 1
+    },
+    {
+      "src": "memory",
+      "dst": "skills",
+      "count": 1
+    },
+    {
+      "src": "extension",
+      "dst": "tools",
+      "count": 1
+    },
+    {
+      "src": "extension",
+      "dst": "model-config",
+      "count": 1
+    },
+    {
+      "src": "tools",
+      "dst": "agent-services",
+      "count": 1
+    },
+    {
+      "src": "tooling",
+      "dst": "evals",
+      "count": 1
+    },
+    {
+      "src": "tooling",
+      "dst": "runtime-contracts",
+      "count": 1
+    },
+    {
+      "src": "tooling",
+      "dst": "runtime-services",
+      "count": 1
+    },
+    {
+      "src": "tests",
+      "dst": "runtime-adapters",
+      "count": 1
+    }
+  ],
+  "package_edges": [
+    {
+      "src": "floodmind.agent.native",
+      "dst": "floodmind.agent.runtime",
+      "count": 46
+    },
+    {
+      "src": "tests.test_p7_acceptance",
+      "dst": "floodmind.agent.runtime",
+      "count": 12
+    },
+    {
+      "src": "tests.test_child_thread_runtime",
+      "dst": "floodmind.agent.runtime",
+      "count": 10
+    },
+    {
+      "src": "tests.test_execution_events",
+      "dst": "floodmind.agent.runtime",
+      "count": 10
+    },
+    {
+      "src": "tests.test_executor",
+      "dst": "floodmind.agent.native",
+      "count": 10
+    },
+    {
+      "src": "tests.test_p6_acceptance",
+      "dst": "floodmind.agent.runtime",
+      "count": 9
+    },
+    {
+      "src": "tests.test_permission_host_fixes",
+      "dst": "floodmind.agent.runtime",
+      "count": 9
+    },
+    {
+      "src": "tests.test_tool_execution_service",
+      "dst": "floodmind.agent.runtime",
+      "count": 9
+    },
+    {
+      "src": "tests.test_child_thread_cancellation",
+      "dst": "floodmind.agent.runtime",
+      "count": 8
+    },
+    {
+      "src": "tests.test_child_thread_quota",
+      "dst": "floodmind.agent.runtime",
+      "count": 8
+    },
+    {
+      "src": "tests.test_model_routing",
+      "dst": "floodmind.agent.native",
+      "count": 8
+    },
+    {
+      "src": "tests.test_sandbox_service",
+      "dst": "floodmind.agent.runtime",
+      "count": 8
+    },
+    {
+      "src": "floodmind.agent.runtime",
+      "dst": "floodmind.agent.native",
+      "count": 7
+    },
+    {
+      "src": "tests.test_artifact_service",
+      "dst": "floodmind.agent.runtime",
+      "count": 7
+    },
+    {
+      "src": "tests.test_executor",
+      "dst": "floodmind.agent.runtime",
+      "count": 7
+    },
+    {
+      "src": "tests.test_retry_policy",
+      "dst": "floodmind.agent.native",
+      "count": 7
+    },
+    {
+      "src": "tests.test_sdk_agent",
+      "dst": "floodmind.agent.runtime",
+      "count": 7
+    },
+    {
+      "src": "tests.test_specialist_execution",
+      "dst": "floodmind.agent.runtime",
+      "count": 7
+    },
+    {
+      "src": "tests.test_subagent_journal",
+      "dst": "floodmind.agent.runtime",
+      "count": 7
+    },
+    {
+      "src": "floodmind.tools.agent_tool",
+      "dst": "floodmind.agent.runtime",
+      "count": 6
+    },
+    {
+      "src": "floodmind.tools.base_tools",
+      "dst": "floodmind.agent.runtime",
+      "count": 6
+    },
+    {
+      "src": "tests.test_child_permission_context",
+      "dst": "floodmind.agent.runtime",
+      "count": 6
+    },
+    {
+      "src": "tests.test_child_thread_runtime",
+      "dst": "floodmind.agent.native",
+      "count": 6
+    },
+    {
+      "src": "tests.test_plan_update",
+      "dst": "floodmind.agent.native",
+      "count": 6
+    },
+    {
+      "src": "tests.test_resume_service",
+      "dst": "floodmind.agent.runtime",
+      "count": 6
+    },
+    {
+      "src": "evals.runner",
+      "dst": "floodmind.agent.native",
+      "count": 5
+    },
+    {
+      "src": "floodmind.agent.api",
+      "dst": "floodmind.agent.runtime",
+      "count": 5
+    },
+    {
+      "src": "tests.test_background_reconcile",
+      "dst": "floodmind.agent.runtime",
+      "count": 5
+    },
+    {
+      "src": "tests.test_background_task_service",
+      "dst": "floodmind.agent.native",
+      "count": 5
+    },
+    {
+      "src": "tests.test_bash_workspace_policy",
+      "dst": "floodmind.agent.runtime",
+      "count": 5
+    },
+    {
+      "src": "tests.test_checkpoint_cursor",
+      "dst": "floodmind.agent.runtime",
+      "count": 5
+    },
+    {
+      "src": "tests.test_guardrails",
+      "dst": "floodmind.agent.native",
+      "count": 5
+    },
+    {
+      "src": "tests.test_handoff",
+      "dst": "floodmind.agent.native",
+      "count": 5
+    },
+    {
+      "src": "tests.test_image_message_projection",
+      "dst": "floodmind.agent.native",
+      "count": 5
+    },
+    {
+      "src": "tests.test_p3_acceptance",
+      "dst": "floodmind.agent.runtime",
+      "count": 5
+    },
+    {
+      "src": "tests.test_permission_host_fixes",
+      "dst": "floodmind.agent.native",
+      "count": 5
+    },
+    {
+      "src": "tests.test_token_budget",
+      "dst": "floodmind.agent.native",
+      "count": 5
+    },
+    {
+      "src": "tests.test_tool_lifecycle_reducer",
+      "dst": "floodmind.agent.runtime",
+      "count": 5
+    },
+    {
+      "src": "floodmind.cli",
+      "dst": "floodmind.agent.runtime",
+      "count": 4
+    },
+    {
+      "src": "floodmind.agent.api",
+      "dst": "floodmind.agent.native",
+      "count": 4
+    },
+    {
+      "src": "tests.test_background_kill_chain",
+      "dst": "floodmind.agent.runtime",
+      "count": 4
+    },
+    {
+      "src": "tests.test_background_task_service",
+      "dst": "floodmind.agent.runtime",
+      "count": 4
+    },
+    {
+      "src": "tests.test_checkpoint_service",
+      "dst": "floodmind.agent.runtime",
+      "count": 4
+    },
+    {
+      "src": "tests.test_child_thread_cancellation",
+      "dst": "floodmind.agent.native",
+      "count": 4
+    },
+    {
+      "src": "tests.test_child_thread_quota",
+      "dst": "floodmind.agent.native",
+      "count": 4
+    },
+    {
+      "src": "tests.test_credential_env",
+      "dst": "floodmind.agent.runtime",
+      "count": 4
+    },
+    {
+      "src": "tests.test_handoff",
+      "dst": "floodmind.agent.runtime",
+      "count": 4
+    },
+    {
+      "src": "tests.test_journal_fencing",
+      "dst": "floodmind.agent.runtime",
+      "count": 4
+    },
+    {
+      "src": "tests.test_p2_acceptance",
+      "dst": "floodmind.agent.runtime",
+      "count": 4
+    },
+    {
+      "src": "tests.test_p7_acceptance",
+      "dst": "floodmind.agent.native",
+      "count": 4
+    },
+    {
+      "src": "tests.test_path_service_workspace",
+      "dst": "floodmind.agent.runtime",
+      "count": 4
+    },
+    {
+      "src": "tests.test_plan_contract",
+      "dst": "floodmind.agent.native",
+      "count": 4
+    },
+    {
+      "src": "tests.test_provider_pipelines",
+      "dst": "floodmind.agent.native",
+      "count": 4
+    },
+    {
+      "src": "tests.test_reducer",
+      "dst": "floodmind.agent.runtime",
+      "count": 4
+    },
+    {
+      "src": "tests.test_specialist_execution",
+      "dst": "floodmind.agent.native",
+      "count": 4
+    },
+    {
+      "src": "tests.test_tool_loading",
+      "dst": "floodmind.agent.runtime",
+      "count": 4
+    },
+    {
+      "src": "evals.real_tools",
+      "dst": "floodmind.agent.runtime",
+      "count": 3
+    },
+    {
+      "src": "floodmind.cli",
+      "dst": "floodmind.agent.native",
+      "count": 3
+    },
+    {
+      "src": "floodmind.agent.mcp_client",
+      "dst": "floodmind.agent.runtime",
+      "count": 3
+    },
+    {
+      "src": "floodmind.agent.native",
+      "dst": "floodmind.config.settings",
+      "count": 3
+    },
+    {
+      "src": "floodmind.agent.native",
+      "dst": "floodmind.tools.agent_tool",
+      "count": 3
+    },
+    {
+      "src": "floodmind.agent.runtime",
+      "dst": "floodmind.tools.session_context",
+      "count": 3
+    },
+    {
+      "src": "floodmind.gateway.app",
+      "dst": "floodmind.agent.runtime",
+      "count": 3
+    },
+    {
+      "src": "floodmind.gateway.chainlit_app",
+      "dst": "floodmind.agent.runtime",
+      "count": 3
+    },
+    {
+      "src": "tests.test_apply_patch_permissions",
+      "dst": "floodmind.agent.runtime",
+      "count": 3
+    },
+    {
+      "src": "tests.test_approval_fingerprint",
+      "dst": "floodmind.agent.runtime",
+      "count": 3
+    },
+    {
+      "src": "tests.test_base_tools",
+      "dst": "floodmind.agent.runtime",
+      "count": 3
+    },
+    {
+      "src": "tests.test_child_sandbox_backend",
+      "dst": "floodmind.agent.runtime",
+      "count": 3
+    },
+    {
+      "src": "tests.test_execution_events",
+      "dst": "floodmind.agent.native",
+      "count": 3
+    },
+    {
+      "src": "tests.test_file_tools",
+      "dst": "floodmind.agent.runtime",
+      "count": 3
+    },
+    {
+      "src": "tests.test_file_tools_permissions",
+      "dst": "floodmind.agent.runtime",
+      "count": 3
+    },
+    {
+      "src": "tests.test_history_projection",
+      "dst": "floodmind.agent.runtime",
+      "count": 3
+    },
+    {
+      "src": "tests.test_image_message_projection",
+      "dst": "floodmind.agent.runtime",
+      "count": 3
+    },
+    {
+      "src": "tests.test_journal_authority",
+      "dst": "floodmind.agent.runtime",
+      "count": 3
+    },
+    {
+      "src": "tests.test_permission_service",
+      "dst": "floodmind.agent.runtime",
+      "count": 3
+    },
+    {
+      "src": "tests.test_plan_gap_implementation",
+      "dst": "floodmind.agent.runtime",
+      "count": 3
+    },
+    {
+      "src": "tests.test_plan_persistence",
+      "dst": "floodmind.agent.native",
+      "count": 3
+    },
+    {
+      "src": "tests.test_reconciliation_service",
+      "dst": "floodmind.agent.runtime",
+      "count": 3
+    },
+    {
+      "src": "tests.test_sdk_agent",
+      "dst": "floodmind.agent.native",
+      "count": 3
+    },
+    {
+      "src": "tests.test_sdk_api_identity",
+      "dst": "floodmind.agent.runtime",
+      "count": 3
+    },
+    {
+      "src": "tests.test_subagent_journal",
+      "dst": "floodmind.agent.native",
+      "count": 3
+    },
+    {
+      "src": "tests.test_tool_output_service",
+      "dst": "floodmind.agent.runtime",
+      "count": 3
+    },
+    {
+      "src": "tests.test_trace_processors",
+      "dst": "floodmind.agent.runtime",
+      "count": 3
+    },
+    {
+      "src": "floodmind.agent.native",
+      "dst": "floodmind.config.model_resolver",
+      "count": 2
+    },
+    {
+      "src": "floodmind.agent.native",
+      "dst": "floodmind.config.model_presets",
+      "count": 2
+    },
+    {
+      "src": "floodmind.agent.runtime",
+      "dst": "floodmind.common.filelock",
+      "count": 2
+    },
+    {
+      "src": "floodmind.agent.runtime",
+      "dst": "floodmind.config.settings",
+      "count": 2
+    },
+    {
+      "src": "floodmind.gateway.state",
+      "dst": "floodmind.agent.runtime",
+      "count": 2
+    },
+    {
+      "src": "floodmind.memory.dual_memory",
+      "dst": "floodmind.agent.runtime",
+      "count": 2
+    },
+    {
+      "src": "floodmind.tools.file_tools",
+      "dst": "floodmind.agent.runtime",
+      "count": 2
+    },
+    {
+      "src": "floodmind.tools.memory_tools",
+      "dst": "floodmind.agent.runtime",
+      "count": 2
+    },
+    {
+      "src": "scripts.metrics_report",
+      "dst": "floodmind.agent.runtime",
+      "count": 2
+    },
+    {
+      "src": "tests.test_agent_skill_roots",
+      "dst": "floodmind.agent.native",
+      "count": 2
+    },
+    {
+      "src": "tests.test_agent_tool",
+      "dst": "floodmind.agent.runtime",
+      "count": 2
+    },
+    {
+      "src": "tests.test_artifact_traversal",
+      "dst": "floodmind.agent.runtime",
+      "count": 2
+    },
+    {
+      "src": "tests.test_checkpoint_cursor",
+      "dst": "floodmind.agent.native",
+      "count": 2
+    },
+    {
+      "src": "tests.test_checkpoint_serialization_hardening",
+      "dst": "floodmind.agent.runtime",
+      "count": 2
+    },
+    {
+      "src": "tests.test_child_background_namespace",
+      "dst": "floodmind.agent.runtime",
+      "count": 2
+    },
+    {
+      "src": "tests.test_guardrails",
+      "dst": "floodmind.agent.runtime",
+      "count": 2
+    },
+    {
+      "src": "tests.test_idempotency",
+      "dst": "floodmind.agent.runtime",
+      "count": 2
+    },
+    {
+      "src": "tests.test_input_budget",
+      "dst": "floodmind.agent.native",
+      "count": 2
+    },
+    {
+      "src": "tests.test_journal_compact",
+      "dst": "floodmind.agent.runtime",
+      "count": 2
+    },
+    {
+      "src": "tests.test_journal_index",
+      "dst": "floodmind.agent.runtime",
+      "count": 2
+    },
+    {
+      "src": "tests.test_journal_writer",
+      "dst": "floodmind.agent.runtime",
+      "count": 2
+    },
+    {
+      "src": "tests.test_mcp_agent_isolation",
+      "dst": "floodmind.agent.native",
+      "count": 2
+    },
+    {
+      "src": "tests.test_mcp_client",
+      "dst": "floodmind.agent.native",
+      "count": 2
+    },
+    {
+      "src": "tests.test_memory_tools",
+      "dst": "floodmind.agent.runtime",
+      "count": 2
+    },
+    {
+      "src": "tests.test_native_agent_workspace",
+      "dst": "floodmind.agent.runtime",
+      "count": 2
+    },
+    {
+      "src": "tests.test_native_context_window",
+      "dst": "floodmind.agent.native",
+      "count": 2
+    },
+    {
+      "src": "tests.test_otlp_exporter",
+      "dst": "floodmind.agent.runtime",
+      "count": 2
+    },
+    {
+      "src": "tests.test_p5_acceptance",
+      "dst": "floodmind.agent.native",
+      "count": 2
+    },
+    {
+      "src": "tests.test_p5_acceptance",
+      "dst": "floodmind.agent.runtime",
+      "count": 2
+    },
+    {
+      "src": "tests.test_permission_tier",
+      "dst": "floodmind.agent.runtime",
+      "count": 2
+    },
+    {
+      "src": "tests.test_plan_mode_gate",
+      "dst": "floodmind.agent.runtime",
+      "count": 2
+    },
+    {
+      "src": "tests.test_projection_manifest",
+      "dst": "floodmind.agent.native",
+      "count": 2
+    },
+    {
+      "src": "tests.test_run_state",
+      "dst": "floodmind.agent.runtime",
+      "count": 2
+    },
+    {
+      "src": "tests.test_sandbox_backend",
+      "dst": "floodmind.agent.runtime",
+      "count": 2
+    },
+    {
+      "src": "tests.test_sdk_api_identity",
+      "dst": "floodmind.agent.native",
+      "count": 2
+    },
+    {
+      "src": "tests.test_subagent_contract",
+      "dst": "floodmind.agent.native",
+      "count": 2
+    },
+    {
+      "src": "tests.test_tool_transaction",
+      "dst": "floodmind.agent.runtime",
+      "count": 2
+    },
+    {
+      "src": "tests.test_trace_metrics",
+      "dst": "floodmind.agent.runtime",
+      "count": 2
+    },
+    {
+      "src": "tests.test_tracing_otlp",
+      "dst": "floodmind.agent.runtime",
+      "count": 2
+    },
+    {
+      "src": "tests.test_tracing_service",
+      "dst": "floodmind.agent.runtime",
+      "count": 2
+    },
+    {
+      "src": "tests.test_usage_accounting",
+      "dst": "floodmind.agent.runtime",
+      "count": 2
+    },
+    {
+      "src": "tests.test_workspace",
+      "dst": "floodmind.agent.runtime",
+      "count": 2
+    },
+    {
+      "src": "main",
+      "dst": "floodmind.config.settings",
+      "count": 1
+    },
+    {
+      "src": "main",
+      "dst": "floodmind.agent.native",
+      "count": 1
+    },
+    {
+      "src": "main",
+      "dst": "floodmind.memory",
+      "count": 1
+    },
+    {
+      "src": "main",
+      "dst": "floodmind.agent",
+      "count": 1
+    },
+    {
+      "src": "sitecustomize",
+      "dst": "floodmind.plotting",
+      "count": 1
+    },
+    {
+      "src": "benchmarks.multi_agent.report",
+      "dst": "benchmarks.multi_agent.metrics",
+      "count": 1
+    },
+    {
+      "src": "benchmarks.multi_agent.runner",
+      "dst": "benchmarks.multi_agent.metrics",
+      "count": 1
+    },
+    {
+      "src": "benchmarks.multi_agent.runner",
+      "dst": "benchmarks.multi_agent.report",
+      "count": 1
+    },
+    {
+      "src": "benchmarks.multi_agent.runner",
+      "dst": "benchmarks.multi_agent.tasks",
+      "count": 1
+    },
+    {
+      "src": "benchmarks.multi_agent.runner",
+      "dst": "floodmind",
+      "count": 1
+    },
+    {
+      "src": "benchmarks.multi_agent.runner",
+      "dst": "floodmind.agent.runtime",
+      "count": 1
+    },
+    {
+      "src": "benchmarks.multi_agent.runner",
+      "dst": "floodmind.memory.dual_memory",
+      "count": 1
+    },
+    {
+      "src": "evals.real_tools",
+      "dst": "floodmind.tools",
+      "count": 1
+    },
+    {
+      "src": "evals.real_tools",
+      "dst": "floodmind.tools.file_tools",
+      "count": 1
+    },
+    {
+      "src": "evals.real_tools",
+      "dst": "floodmind.tools.session_context",
+      "count": 1
+    },
+    {
+      "src": "evals.runner",
+      "dst": "evals",
+      "count": 1
+    },
+    {
+      "src": "evals.runner",
+      "dst": "evals.case_packs",
+      "count": 1
+    },
+    {
+      "src": "evals.runner",
+      "dst": "floodmind.agent.runtime",
+      "count": 1
+    },
+    {
+      "src": "evals.runner",
+      "dst": "evals.real_tools",
+      "count": 1
+    },
+    {
+      "src": "evals.runner",
+      "dst": "floodmind.tools.session_context",
+      "count": 1
+    },
+    {
+      "src": "floodmind.cli",
+      "dst": "floodmind",
+      "count": 1
+    },
+    {
+      "src": "floodmind.cli",
+      "dst": "floodmind.config.settings",
+      "count": 1
+    },
+    {
+      "src": "floodmind.cli",
+      "dst": "floodmind.cli_interactive",
+      "count": 1
+    },
+    {
+      "src": "floodmind.cli",
+      "dst": "floodmind.gateway.server",
+      "count": 1
+    },
+    {
+      "src": "floodmind.cli",
+      "dst": "floodmind.memory",
+      "count": 1
+    },
+    {
+      "src": "floodmind.cli",
+      "dst": "floodmind.agent",
+      "count": 1
+    },
+    {
+      "src": "floodmind.cli",
+      "dst": "floodmind.config.provider_registry",
+      "count": 1
+    },
+    {
+      "src": "floodmind.cli",
+      "dst": "floodmind.skills.base",
+      "count": 1
+    },
+    {
+      "src": "floodmind.cli_interactive",
+      "dst": "floodmind.cli",
+      "count": 1
+    },
+    {
+      "src": "floodmind.agent",
+      "dst": "floodmind.agent.native",
+      "count": 1
+    },
+    {
+      "src": "floodmind.agent",
+      "dst": "floodmind.agent.api",
+      "count": 1
+    },
+    {
+      "src": "floodmind.agent.agent_registry",
+      "dst": "floodmind.config.settings",
+      "count": 1
+    },
+    {
+      "src": "floodmind.agent.api",
+      "dst": "floodmind.memory.session_manager",
+      "count": 1
+    },
+    {
+      "src": "floodmind.agent.api",
+      "dst": "floodmind.config.model_resolver",
+      "count": 1
+    },
+    {
+      "src": "floodmind.agent.api",
+      "dst": "floodmind.agent.sdk_events",
+      "count": 1
+    },
+    {
+      "src": "floodmind.agent.api",
+      "dst": "floodmind.memory.dual_memory",
+      "count": 1
+    },
+    {
+      "src": "floodmind.agent.context_runtime",
+      "dst": "floodmind.agent.runtime",
+      "count": 1
+    },
+    {
+      "src": "floodmind.agent.context_runtime",
+      "dst": "floodmind.config.settings",
+      "count": 1
+    },
+    {
+      "src": "floodmind.agent.scheduled_task_runtime",
+      "dst": "floodmind.common.filelock",
+      "count": 1
+    },
+    {
+      "src": "floodmind.agent.native",
+      "dst": "floodmind.memory.experience_tree",
+      "count": 1
+    },
+    {
+      "src": "floodmind.agent.native",
+      "dst": "floodmind.agent.guardrail",
+      "count": 1
+    },
+    {
+      "src": "floodmind.agent.native",
+      "dst": "floodmind.config.provider_registry",
+      "count": 1
+    },
+    {
+      "src": "floodmind.agent.native",
+      "dst": "floodmind.skills.registry",
+      "count": 1
+    },
+    {
+      "src": "floodmind.agent.native",
+      "dst": "floodmind.skills.skill_curator",
+      "count": 1
+    },
+    {
+      "src": "floodmind.agent.native",
+      "dst": "floodmind.tools.session_context",
+      "count": 1
+    },
+    {
+      "src": "floodmind.agent.native",
+      "dst": "floodmind.memory.services",
+      "count": 1
+    },
+    {
+      "src": "floodmind.agent.native",
+      "dst": "floodmind.profile.soul",
+      "count": 1
+    },
+    {
+      "src": "floodmind.agent.native",
+      "dst": "floodmind.profile.guidance",
+      "count": 1
+    },
+    {
+      "src": "floodmind.agent.native",
+      "dst": "floodmind.memory.task_experience",
+      "count": 1
+    },
+    {
+      "src": "floodmind.agent.native",
+      "dst": "floodmind.agent.agent_registry",
+      "count": 1
+    },
+    {
+      "src": "floodmind.agent.native",
+      "dst": "floodmind.tools",
+      "count": 1
+    },
+    {
+      "src": "floodmind.agent.native",
+      "dst": "floodmind.agent.mcp_client",
+      "count": 1
+    },
+    {
+      "src": "floodmind.agent.native",
+      "dst": "floodmind.tools.memory_tools",
+      "count": 1
+    },
+    {
+      "src": "floodmind.agent.native",
+      "dst": "floodmind.tools.file_tools",
+      "count": 1
+    },
+    {
+      "src": "floodmind.agent.native",
+      "dst": "floodmind.tools.base_tools",
+      "count": 1
+    },
+    {
+      "src": "floodmind.agent.native",
+      "dst": "floodmind.agent.context_runtime",
+      "count": 1
+    },
+    {
+      "src": "floodmind.agent.native",
+      "dst": "floodmind.plugin",
+      "count": 1
+    },
+    {
+      "src": "floodmind.agent.runtime",
+      "dst": "floodmind.memory.session_manager",
+      "count": 1
+    },
+    {
+      "src": "floodmind.agent.runtime",
+      "dst": "floodmind.config.secret_store",
+      "count": 1
+    },
+    {
+      "src": "floodmind.agent.runtime",
+      "dst": "floodmind",
+      "count": 1
+    },
+    {
+      "src": "floodmind.agent.runtime",
+      "dst": "floodmind.skills",
+      "count": 1
+    },
+    {
+      "src": "floodmind.config",
+      "dst": "floodmind.config.settings",
+      "count": 1
+    },
+    {
+      "src": "floodmind.config.model_presets",
+      "dst": "floodmind.config.model_resolver",
+      "count": 1
+    },
+    {
+      "src": "floodmind.config.model_presets",
+      "dst": "floodmind.config.settings",
+      "count": 1
+    },
+    {
+      "src": "floodmind.config.model_resolver",
+      "dst": "floodmind.config.settings",
+      "count": 1
+    },
+    {
+      "src": "floodmind.config.model_resolver",
+      "dst": "floodmind.config.provider_registry",
+      "count": 1
+    },
+    {
+      "src": "floodmind.config.provider_registry",
+      "dst": "floodmind.config.model_resolver",
+      "count": 1
+    },
+    {
+      "src": "floodmind.config.provider_registry",
+      "dst": "floodmind.config.settings",
+      "count": 1
+    },
+    {
+      "src": "floodmind.config.provider_registry",
+      "dst": "floodmind.agent.native",
+      "count": 1
+    },
+    {
+      "src": "floodmind.config.search_config",
+      "dst": "floodmind.config.secret_store",
+      "count": 1
+    },
+    {
+      "src": "floodmind.config.secret_store",
+      "dst": "floodmind.config.settings",
+      "count": 1
+    },
+    {
+      "src": "floodmind.config.settings",
+      "dst": "floodmind.config.secret_store",
+      "count": 1
+    },
+    {
+      "src": "floodmind.config.settings",
+      "dst": "floodmind.config.model_resolver",
+      "count": 1
+    },
+    {
+      "src": "floodmind.config.settings",
+      "dst": "floodmind.config.model_presets",
+      "count": 1
+    },
+    {
+      "src": "floodmind.gateway",
+      "dst": "floodmind.gateway.app",
+      "count": 1
+    },
+    {
+      "src": "floodmind.gateway",
+      "dst": "floodmind.gateway.server",
+      "count": 1
+    },
+    {
+      "src": "floodmind.gateway",
+      "dst": "floodmind.gateway.state",
+      "count": 1
+    },
+    {
+      "src": "floodmind.gateway.app",
+      "dst": "floodmind.gateway.state",
+      "count": 1
+    },
+    {
+      "src": "floodmind.gateway.chainlit_app",
+      "dst": "floodmind.gateway",
+      "count": 1
+    },
+    {
+      "src": "floodmind.gateway.chainlit_app",
+      "dst": "floodmind.gateway.chainlit_history",
+      "count": 1
+    },
+    {
+      "src": "floodmind.gateway.chainlit_app",
+      "dst": "floodmind.agent.api",
+      "count": 1
+    },
+    {
+      "src": "floodmind.gateway.chainlit_app",
+      "dst": "floodmind.gateway.state",
+      "count": 1
+    },
+    {
+      "src": "floodmind.gateway.server",
+      "dst": "floodmind.gateway.app",
+      "count": 1
+    },
+    {
+      "src": "floodmind.gateway.server",
+      "dst": "floodmind.gateway.state",
+      "count": 1
+    },
+    {
+      "src": "floodmind.gateway.state",
+      "dst": "floodmind.agent.api",
+      "count": 1
+    },
+    {
+      "src": "floodmind.gateway.state",
+      "dst": "floodmind.config.secret_store",
+      "count": 1
+    },
+    {
+      "src": "floodmind.gateway.state",
+      "dst": "floodmind.memory.session_manager",
+      "count": 1
+    },
+    {
+      "src": "floodmind.gateway.state",
+      "dst": "floodmind.common.filelock",
+      "count": 1
+    },
+    {
+      "src": "floodmind.gateway.state",
+      "dst": "floodmind.config.model_resolver",
+      "count": 1
+    },
+    {
+      "src": "floodmind.gateway.state",
+      "dst": "floodmind.agent.native",
+      "count": 1
+    },
+    {
+      "src": "floodmind.memory",
+      "dst": "floodmind.memory.dual_memory",
+      "count": 1
+    },
+    {
+      "src": "floodmind.memory",
+      "dst": "floodmind.memory.session_manager",
+      "count": 1
+    },
+    {
+      "src": "floodmind.memory",
+      "dst": "floodmind.memory.experience_tree",
+      "count": 1
+    },
+    {
+      "src": "floodmind.memory",
+      "dst": "floodmind.memory.task_experience",
+      "count": 1
+    },
+    {
+      "src": "floodmind.memory.consolidation",
+      "dst": "floodmind.memory.semantic_store",
+      "count": 1
+    },
+    {
+      "src": "floodmind.memory.core_memory",
+      "dst": "floodmind.agent.runtime",
+      "count": 1
+    },
+    {
+      "src": "floodmind.memory.recall",
+      "dst": "floodmind.memory.semantic_store",
+      "count": 1
+    },
+    {
+      "src": "floodmind.memory.semantic_store",
+      "dst": "floodmind.agent.runtime",
+      "count": 1
+    },
+    {
+      "src": "floodmind.memory.semantic_store",
+      "dst": "floodmind.memory.dual_memory",
+      "count": 1
+    },
+    {
+      "src": "floodmind.memory.services",
+      "dst": "floodmind.config.settings",
+      "count": 1
+    },
+    {
+      "src": "floodmind.memory.services",
+      "dst": "floodmind.memory.consolidation",
+      "count": 1
+    },
+    {
+      "src": "floodmind.memory.services",
+      "dst": "floodmind.memory.core_memory",
+      "count": 1
+    },
+    {
+      "src": "floodmind.memory.services",
+      "dst": "floodmind.memory.recall",
+      "count": 1
+    },
+    {
+      "src": "floodmind.memory.services",
+      "dst": "floodmind.memory.semantic_store",
+      "count": 1
+    },
+    {
+      "src": "floodmind.memory.session_manager",
+      "dst": "floodmind.agent.runtime",
+      "count": 1
+    },
+    {
+      "src": "floodmind.memory.skill_generator",
+      "dst": "floodmind.memory.experience_tree",
+      "count": 1
+    },
+    {
+      "src": "floodmind.memory.task_experience",
+      "dst": "floodmind.config.settings",
+      "count": 1
+    },
+    {
+      "src": "floodmind.memory.task_experience",
+      "dst": "floodmind.memory.experience_tree",
+      "count": 1
+    },
+    {
+      "src": "floodmind.memory.task_experience",
+      "dst": "floodmind.memory.skill_generator",
+      "count": 1
+    },
+    {
+      "src": "floodmind.memory.task_experience",
+      "dst": "floodmind.skills.registry",
+      "count": 1
+    },
+    {
+      "src": "floodmind.models",
+      "dst": "floodmind.agent.native",
+      "count": 1
+    },
+    {
+      "src": "floodmind.plugin",
+      "dst": "floodmind.plugin.base",
+      "count": 1
+    },
+    {
+      "src": "floodmind.plugin",
+      "dst": "floodmind.plugin.loader",
+      "count": 1
+    },
+    {
+      "src": "floodmind.plugin.base",
+      "dst": "floodmind.tools.agent_tool",
+      "count": 1
+    },
+    {
+      "src": "floodmind.plugin.loader",
+      "dst": "floodmind.plugin.base",
+      "count": 1
+    },
+    {
+      "src": "floodmind.profile",
+      "dst": "floodmind.profile.soul",
+      "count": 1
+    },
+    {
+      "src": "floodmind.profile.soul",
+      "dst": "floodmind.config.settings",
+      "count": 1
+    },
+    {
+      "src": "floodmind.scripts.check_qwen_reasoning",
+      "dst": "floodmind.agent.native",
+      "count": 1
+    },
+    {
+      "src": "floodmind.skills",
+      "dst": "floodmind.skills.base",
+      "count": 1
+    },
+    {
+      "src": "floodmind.skills",
+      "dst": "floodmind.skills.registry",
+      "count": 1
+    },
+    {
+      "src": "floodmind.skills.base",
+      "dst": "floodmind.skills.registry",
+      "count": 1
+    },
+    {
+      "src": "floodmind.skills.registry",
+      "dst": "floodmind.skills.base",
+      "count": 1
+    },
+    {
+      "src": "floodmind.skills.skill_curator",
+      "dst": "floodmind.skills.registry",
+      "count": 1
+    },
+    {
+      "src": "floodmind.tools",
+      "dst": "floodmind.tools.base_tools",
+      "count": 1
+    },
+    {
+      "src": "floodmind.tools",
+      "dst": "floodmind.tools.agent_tool",
+      "count": 1
+    },
+    {
+      "src": "floodmind.tools.agent_tool",
+      "dst": "floodmind.tools.session_context",
+      "count": 1
+    },
+    {
+      "src": "floodmind.tools.base_tools",
+      "dst": "floodmind.tools.agent_tool",
+      "count": 1
+    },
+    {
+      "src": "floodmind.tools.base_tools",
+      "dst": "floodmind.skills.registry",
+      "count": 1
+    },
+    {
+      "src": "floodmind.tools.base_tools",
+      "dst": "floodmind.tools.session_context",
+      "count": 1
+    },
+    {
+      "src": "floodmind.tools.base_tools",
+      "dst": "floodmind.skills.skill_curator",
+      "count": 1
+    },
+    {
+      "src": "floodmind.tools.base_tools",
+      "dst": "floodmind.tools.file_tools",
+      "count": 1
+    },
+    {
+      "src": "floodmind.tools.base_tools",
+      "dst": "floodmind.config.settings",
+      "count": 1
+    },
+    {
+      "src": "floodmind.tools.base_tools",
+      "dst": "floodmind.memory.experience_tree",
+      "count": 1
+    },
+    {
+      "src": "floodmind.tools.base_tools",
+      "dst": "floodmind.config.search_config",
+      "count": 1
+    },
+    {
+      "src": "floodmind.tools.base_tools",
+      "dst": "floodmind.memory.services",
+      "count": 1
+    },
+    {
+      "src": "floodmind.tools.base_tools",
+      "dst": "floodmind.agent.scheduled_task_runtime",
+      "count": 1
+    },
+    {
+      "src": "floodmind.tools.base_tools",
+      "dst": "floodmind.memory.task_experience",
+      "count": 1
+    },
+    {
+      "src": "floodmind.tools.file_tools",
+      "dst": "floodmind.tools.agent_tool",
+      "count": 1
+    },
+    {
+      "src": "floodmind.tools.file_tools",
+      "dst": "floodmind.tools.base_tools",
+      "count": 1
+    },
+    {
+      "src": "floodmind.tools.memory_tools",
+      "dst": "floodmind.memory.task_experience",
+      "count": 1
+    },
+    {
+      "src": "floodmind.tools.memory_tools",
+      "dst": "floodmind.memory.services",
+      "count": 1
+    },
+    {
+      "src": "floodmind.tools.memory_tools",
+      "dst": "floodmind.tools.agent_tool",
+      "count": 1
+    },
+    {
+      "src": "floodmind.tools.memory_tools",
+      "dst": "floodmind.tools.base_tools",
+      "count": 1
+    },
+    {
+      "src": "scripts.calibrate_judge",
+      "dst": "evals.judge",
+      "count": 1
+    },
+    {
+      "src": "scripts.calibrate_judge",
+      "dst": "floodmind.agent.native",
+      "count": 1
+    },
+    {
+      "src": "scripts.metrics_report",
+      "dst": "floodmind.config.settings",
+      "count": 1
+    },
+    {
+      "src": "scripts.smoke_provider_pipelines",
+      "dst": "floodmind.agent.native",
+      "count": 1
+    },
+    {
+      "src": "scripts.knowledge_graph",
+      "dst": "scripts.knowledge_graph.layers",
+      "count": 1
+    },
+    {
+      "src": "scripts.knowledge_graph",
+      "dst": "scripts.knowledge_graph.model",
+      "count": 1
+    },
+    {
+      "src": "scripts.knowledge_graph",
+      "dst": "scripts.knowledge_graph.py_analyzer",
+      "count": 1
+    },
+    {
+      "src": "scripts.knowledge_graph",
+      "dst": "scripts.knowledge_graph.ts_analyzer",
+      "count": 1
+    },
+    {
+      "src": "scripts.knowledge_graph.__main__",
+      "dst": "scripts.knowledge_graph.model",
+      "count": 1
+    },
+    {
+      "src": "scripts.knowledge_graph.__main__",
+      "dst": "scripts.knowledge_graph.py_analyzer",
+      "count": 1
+    },
+    {
+      "src": "scripts.knowledge_graph.__main__",
+      "dst": "scripts.knowledge_graph.report",
+      "count": 1
+    },
+    {
+      "src": "scripts.knowledge_graph.__main__",
+      "dst": "scripts.knowledge_graph.ts_analyzer",
+      "count": 1
+    },
+    {
+      "src": "scripts.knowledge_graph.py_analyzer",
+      "dst": "scripts.knowledge_graph.layers",
+      "count": 1
+    },
+    {
+      "src": "scripts.knowledge_graph.py_analyzer",
+      "dst": "scripts.knowledge_graph.model",
+      "count": 1
+    },
+    {
+      "src": "scripts.knowledge_graph.report",
+      "dst": "scripts.knowledge_graph.layers",
+      "count": 1
+    },
+    {
+      "src": "scripts.knowledge_graph.report",
+      "dst": "scripts.knowledge_graph.model",
+      "count": 1
+    },
+    {
+      "src": "scripts.knowledge_graph.report",
+      "dst": "scripts.knowledge_graph.subsystems",
+      "count": 1
+    },
+    {
+      "src": "scripts.knowledge_graph.report",
+      "dst": "scripts.knowledge_graph.viz",
+      "count": 1
+    },
+    {
+      "src": "scripts.knowledge_graph.ts_analyzer",
+      "dst": "scripts.knowledge_graph.layers",
+      "count": 1
+    },
+    {
+      "src": "scripts.knowledge_graph.ts_analyzer",
+      "dst": "scripts.knowledge_graph.model",
+      "count": 1
+    },
+    {
+      "src": "tests.conftest",
+      "dst": "floodmind.agent.runtime",
+      "count": 1
+    },
+    {
+      "src": "tests.conftest",
+      "dst": "floodmind.config.settings",
+      "count": 1
+    },
+    {
+      "src": "tests.test_agent_skill_roots",
+      "dst": "floodmind",
+      "count": 1
+    },
+    {
+      "src": "tests.test_agent_skill_roots",
+      "dst": "floodmind.agent.runtime",
+      "count": 1
+    },
+    {
+      "src": "tests.test_agent_tool",
+      "dst": "floodmind.agent.native",
+      "count": 1
+    },
+    {
+      "src": "tests.test_agent_tool",
+      "dst": "floodmind.tools.agent_tool",
+      "count": 1
+    },
+    {
+      "src": "tests.test_apply_patch_permissions",
+      "dst": "floodmind.tools.file_tools",
+      "count": 1
+    },
+    {
+      "src": "tests.test_apply_patch_permissions",
+      "dst": "floodmind.tools.session_context",
+      "count": 1
+    },
+    {
+      "src": "tests.test_artifact_validation",
+      "dst": "floodmind.agent.native",
+      "count": 1
+    },
+    {
+      "src": "tests.test_artifact_watcher_workspace",
+      "dst": "floodmind.agent.native",
+      "count": 1
+    },
+    {
+      "src": "tests.test_artifact_watcher_workspace",
+      "dst": "floodmind.agent.runtime",
+      "count": 1
+    },
+    {
+      "src": "tests.test_artifacts",
+      "dst": "floodmind.agent.runtime",
+      "count": 1
+    },
+    {
+      "src": "tests.test_atomic_groups",
+      "dst": "floodmind.agent.native",
+      "count": 1
+    },
+    {
+      "src": "tests.test_background_review",
+      "dst": "floodmind.agent.native",
+      "count": 1
+    },
+    {
+      "src": "tests.test_background_task_service",
+      "dst": "floodmind.tools.base_tools",
+      "count": 1
+    },
+    {
+      "src": "tests.test_background_task_service",
+      "dst": "floodmind.tools.session_context",
+      "count": 1
+    },
+    {
+      "src": "tests.test_base_tools",
+      "dst": "floodmind.tools.base_tools",
+      "count": 1
+    },
+    {
+      "src": "tests.test_base_tools",
+      "dst": "floodmind.tools.session_context",
+      "count": 1
+    },
+    {
+      "src": "tests.test_base_tools",
+      "dst": "floodmind.memory",
+      "count": 1
+    },
+    {
+      "src": "tests.test_base_tools",
+      "dst": "floodmind.memory.services",
+      "count": 1
+    },
+    {
+      "src": "tests.test_base_tools",
+      "dst": "floodmind.memory.semantic_store",
+      "count": 1
+    },
+    {
+      "src": "tests.test_base_tools",
+      "dst": "floodmind.tools",
+      "count": 1
+    },
+    {
+      "src": "tests.test_bash_workspace_policy",
+      "dst": "floodmind.tools.base_tools",
+      "count": 1
+    },
+    {
+      "src": "tests.test_bash_workspace_policy",
+      "dst": "floodmind.tools.session_context",
+      "count": 1
+    },
+    {
+      "src": "tests.test_canonical_events",
+      "dst": "floodmind.agent.runtime",
+      "count": 1
+    },
+    {
+      "src": "tests.test_canonical_parts",
+      "dst": "floodmind.agent.runtime",
+      "count": 1
+    },
+    {
+      "src": "tests.test_capabilities",
+      "dst": "floodmind.agent.native",
+      "count": 1
+    },
+    {
+      "src": "tests.test_checkpoint_serialization_hardening",
+      "dst": "floodmind.agent.native",
+      "count": 1
+    },
+    {
+      "src": "tests.test_checkpoint_service",
+      "dst": "floodmind.agent.native",
+      "count": 1
+    },
+    {
+      "src": "tests.test_child_thread",
+      "dst": "floodmind.agent.runtime",
+      "count": 1
+    },
+    {
+      "src": "tests.test_cli_commands",
+      "dst": "floodmind",
+      "count": 1
+    },
+    {
+      "src": "tests.test_cli_commands",
+      "dst": "floodmind.cli",
+      "count": 1
+    },
+    {
+      "src": "tests.test_cli_commands",
+      "dst": "floodmind.agent.runtime",
+      "count": 1
+    },
+    {
+      "src": "tests.test_codec",
+      "dst": "floodmind.agent.native",
+      "count": 1
+    },
+    {
+      "src": "tests.test_codec",
+      "dst": "floodmind.agent.runtime",
+      "count": 1
+    },
+    {
+      "src": "tests.test_context_compressor",
+      "dst": "floodmind.agent.native",
+      "count": 1
+    },
+    {
+      "src": "tests.test_core_memory_store",
+      "dst": "floodmind.memory.core_memory",
+      "count": 1
+    },
+    {
+      "src": "tests.test_credential_env",
+      "dst": "floodmind.tools.base_tools",
+      "count": 1
+    },
+    {
+      "src": "tests.test_dual_memory_journal",
+      "dst": "floodmind.agent.runtime",
+      "count": 1
+    },
+    {
+      "src": "tests.test_dual_memory_journal",
+      "dst": "floodmind.memory.dual_memory",
+      "count": 1
+    },
+    {
+      "src": "tests.test_eval_case_packs",
+      "dst": "evals",
+      "count": 1
+    },
+    {
+      "src": "tests.test_eval_case_packs",
+      "dst": "evals.case_packs",
+      "count": 1
+    },
+    {
+      "src": "tests.test_eval_case_packs",
+      "dst": "evals.runner",
+      "count": 1
+    },
+    {
+      "src": "tests.test_exec_write_scanner",
+      "dst": "floodmind.agent.runtime",
+      "count": 1
+    },
+    {
+      "src": "tests.test_execution_plan",
+      "dst": "floodmind.agent.native",
+      "count": 1
+    },
+    {
+      "src": "tests.test_experience_tree",
+      "dst": "floodmind.memory.experience_tree",
+      "count": 1
+    },
+    {
+      "src": "tests.test_file_tools",
+      "dst": "floodmind.tools.file_tools",
+      "count": 1
+    },
+    {
+      "src": "tests.test_file_tools",
+      "dst": "floodmind.tools.session_context",
+      "count": 1
+    },
+    {
+      "src": "tests.test_file_tools_permissions",
+      "dst": "floodmind.tools.file_tools",
+      "count": 1
+    },
+    {
+      "src": "tests.test_file_tools_permissions",
+      "dst": "floodmind.tools.session_context",
+      "count": 1
+    },
+    {
+      "src": "tests.test_get_skill_tool_factory",
+      "dst": "floodmind.skills.base",
+      "count": 1
+    },
+    {
+      "src": "tests.test_get_skill_tool_factory",
+      "dst": "floodmind.tools.base_tools",
+      "count": 1
+    },
+    {
+      "src": "tests.test_golden_fixtures",
+      "dst": "floodmind.agent.native",
+      "count": 1
+    },
+    {
+      "src": "tests.test_golden_fixtures",
+      "dst": "floodmind.agent.runtime",
+      "count": 1
+    },
+    {
+      "src": "tests.test_guardrails",
+      "dst": "floodmind.agent.guardrail",
+      "count": 1
+    },
+    {
+      "src": "tests.test_guardrails",
+      "dst": "floodmind",
+      "count": 1
+    },
+    {
+      "src": "tests.test_handoff",
+      "dst": "floodmind.agent.handoff",
+      "count": 1
+    },
+    {
+      "src": "tests.test_handoff",
+      "dst": "floodmind",
+      "count": 1
+    },
+    {
+      "src": "tests.test_history_authority_wiring",
+      "dst": "floodmind.agent.native",
+      "count": 1
+    },
+    {
+      "src": "tests.test_identity",
+      "dst": "floodmind.agent.runtime",
+      "count": 1
+    },
+    {
+      "src": "tests.test_input_budget",
+      "dst": "floodmind.agent.runtime",
+      "count": 1
+    },
+    {
+      "src": "tests.test_journal_compact",
+      "dst": "floodmind.agent.native",
+      "count": 1
+    },
+    {
+      "src": "tests.test_judge_calibration",
+      "dst": "evals.judge",
+      "count": 1
+    },
+    {
+      "src": "tests.test_knowledge_graph_viz",
+      "dst": "scripts.knowledge_graph.model",
+      "count": 1
+    },
+    {
+      "src": "tests.test_knowledge_graph_viz",
+      "dst": "scripts.knowledge_graph.report",
+      "count": 1
+    },
+    {
+      "src": "tests.test_knowledge_graph_viz",
+      "dst": "scripts.knowledge_graph.viz",
+      "count": 1
+    },
+    {
+      "src": "tests.test_mcp_agent_isolation",
+      "dst": "floodmind.agent.mcp_client",
+      "count": 1
+    },
+    {
+      "src": "tests.test_mcp_agent_isolation",
+      "dst": "floodmind.config.settings",
+      "count": 1
+    },
+    {
+      "src": "tests.test_mcp_client",
+      "dst": "floodmind.agent.mcp_client",
+      "count": 1
+    },
+    {
+      "src": "tests.test_mcp_client",
+      "dst": "floodmind.agent.runtime",
+      "count": 1
+    },
+    {
+      "src": "tests.test_mcp_client",
+      "dst": "floodmind.config.settings",
+      "count": 1
+    },
+    {
+      "src": "tests.test_mcp_config_validation",
+      "dst": "floodmind.agent.mcp_client",
+      "count": 1
+    },
+    {
+      "src": "tests.test_mcp_config_validation",
+      "dst": "floodmind.agent.native",
+      "count": 1
+    },
+    {
+      "src": "tests.test_mcp_config_validation",
+      "dst": "floodmind.config.settings",
+      "count": 1
+    },
+    {
+      "src": "tests.test_memory_consolidation",
+      "dst": "floodmind.memory.consolidation",
+      "count": 1
+    },
+    {
+      "src": "tests.test_memory_consolidation",
+      "dst": "floodmind.memory.semantic_store",
+      "count": 1
+    },
+    {
+      "src": "tests.test_memory_dual",
+      "dst": "floodmind.agent.runtime",
+      "count": 1
+    },
+    {
+      "src": "tests.test_memory_dual",
+      "dst": "floodmind.memory.dual_memory",
+      "count": 1
+    },
+    {
+      "src": "tests.test_memory_expiry",
+      "dst": "floodmind.memory.recall",
+      "count": 1
+    },
+    {
+      "src": "tests.test_memory_expiry",
+      "dst": "floodmind.memory.semantic_store",
+      "count": 1
+    },
+    {
+      "src": "tests.test_memory_expiry",
+      "dst": "floodmind.memory",
+      "count": 1
+    },
+    {
+      "src": "tests.test_memory_expiry",
+      "dst": "floodmind.memory.services",
+      "count": 1
+    },
+    {
+      "src": "tests.test_memory_expiry",
+      "dst": "floodmind.tools",
+      "count": 1
+    },
+    {
+      "src": "tests.test_memory_expiry",
+      "dst": "floodmind.tools.base_tools",
+      "count": 1
+    },
+    {
+      "src": "tests.test_memory_recall",
+      "dst": "floodmind.memory.recall",
+      "count": 1
+    },
+    {
+      "src": "tests.test_memory_recall",
+      "dst": "floodmind.memory.semantic_store",
+      "count": 1
+    },
+    {
+      "src": "tests.test_memory_services",
+      "dst": "floodmind.memory",
+      "count": 1
+    },
+    {
+      "src": "tests.test_memory_services",
+      "dst": "floodmind.memory.services",
+      "count": 1
+    },
+    {
+      "src": "tests.test_memory_services",
+      "dst": "floodmind.agent.native",
+      "count": 1
+    },
+    {
+      "src": "tests.test_memory_tools",
+      "dst": "floodmind.memory.core_memory",
+      "count": 1
+    },
+    {
+      "src": "tests.test_memory_tools",
+      "dst": "floodmind.tools.base_tools",
+      "count": 1
+    },
+    {
+      "src": "tests.test_memory_tools",
+      "dst": "floodmind.tools.memory_tools",
+      "count": 1
+    },
+    {
+      "src": "tests.test_memory_tools",
+      "dst": "floodmind.tools.session_context",
+      "count": 1
+    },
+    {
+      "src": "tests.test_memory_tools",
+      "dst": "floodmind.memory",
+      "count": 1
+    },
+    {
+      "src": "tests.test_memory_tools",
+      "dst": "floodmind.memory.services",
+      "count": 1
+    },
+    {
+      "src": "tests.test_memory_tools",
+      "dst": "floodmind.config.settings",
+      "count": 1
+    },
+    {
+      "src": "tests.test_metrics_report",
+      "dst": "floodmind.agent.runtime",
+      "count": 1
+    },
+    {
+      "src": "tests.test_model_presets",
+      "dst": "floodmind.config.model_presets",
+      "count": 1
+    },
+    {
+      "src": "tests.test_model_resolver",
+      "dst": "floodmind.config.model_resolver",
+      "count": 1
+    },
+    {
+      "src": "tests.test_model_resolver",
+      "dst": "floodmind.config.provider_registry",
+      "count": 1
+    },
+    {
+      "src": "tests.test_multi_agent_benchmark",
+      "dst": "benchmarks.multi_agent.metrics",
+      "count": 1
+    },
+    {
+      "src": "tests.test_multi_agent_benchmark",
+      "dst": "benchmarks.multi_agent.report",
+      "count": 1
+    },
+    {
+      "src": "tests.test_multi_agent_benchmark",
+      "dst": "benchmarks.multi_agent.runner",
+      "count": 1
+    },
+    {
+      "src": "tests.test_multi_agent_benchmark",
+      "dst": "benchmarks.multi_agent.tasks",
+      "count": 1
+    },
+    {
+      "src": "tests.test_multi_agent_benchmark",
+      "dst": "floodmind",
+      "count": 1
+    },
+    {
+      "src": "tests.test_multi_agent_benchmark",
+      "dst": "floodmind.agent.runtime",
+      "count": 1
+    },
+    {
+      "src": "tests.test_multi_agent_benchmark",
+      "dst": "floodmind.memory.dual_memory",
+      "count": 1
+    },
+    {
+      "src": "tests.test_native_agent_workspace",
+      "dst": "floodmind.agent.native",
+      "count": 1
+    },
+    {
+      "src": "tests.test_path_service_workspace",
+      "dst": "floodmind.tools.session_context",
+      "count": 1
+    },
+    {
+      "src": "tests.test_path_service_workspace",
+      "dst": "floodmind.skills",
+      "count": 1
+    },
+    {
+      "src": "tests.test_path_service_workspace",
+      "dst": "floodmind.skills.registry",
+      "count": 1
+    },
+    {
+      "src": "tests.test_path_service_workspace",
+      "dst": "floodmind.tools.agent_tool",
+      "count": 1
+    },
+    {
+      "src": "tests.test_permission_host_fixes",
+      "dst": "floodmind.tools.agent_tool",
+      "count": 1
+    },
+    {
+      "src": "tests.test_permission_host_fixes",
+      "dst": "floodmind.tools.session_context",
+      "count": 1
+    },
+    {
+      "src": "tests.test_plan_contract",
+      "dst": "floodmind.agent.runtime",
+      "count": 1
+    },
+    {
+      "src": "tests.test_plan_gap_implementation",
+      "dst": "floodmind.agent.native",
+      "count": 1
+    },
+    {
+      "src": "tests.test_plan_gap_implementation",
+      "dst": "floodmind.memory.session_manager",
+      "count": 1
+    },
+    {
+      "src": "tests.test_plan_gap_implementation",
+      "dst": "floodmind.plugin.loader",
+      "count": 1
+    },
+    {
+      "src": "tests.test_plan_persistence",
+      "dst": "floodmind.agent.runtime",
+      "count": 1
+    },
+    {
+      "src": "tests.test_plan_store",
+      "dst": "floodmind.agent.native",
+      "count": 1
+    },
+    {
+      "src": "tests.test_plan_store",
+      "dst": "floodmind.agent.runtime",
+      "count": 1
+    },
+    {
+      "src": "tests.test_profile_system",
+      "dst": "floodmind.profile",
+      "count": 1
+    },
+    {
+      "src": "tests.test_profile_system",
+      "dst": "floodmind.profile.soul",
+      "count": 1
+    },
+    {
+      "src": "tests.test_profile_system",
+      "dst": "floodmind.profile.guidance",
+      "count": 1
+    },
+    {
+      "src": "tests.test_profile_system",
+      "dst": "floodmind.agent.native",
+      "count": 1
+    },
+    {
+      "src": "tests.test_profile_system",
+      "dst": "floodmind.config.settings",
+      "count": 1
+    },
+    {
+      "src": "tests.test_profile_system",
+      "dst": "floodmind.agent.context_runtime",
+      "count": 1
+    },
+    {
+      "src": "tests.test_profile_system",
+      "dst": "floodmind.agent.agent_registry",
+      "count": 1
+    },
+    {
+      "src": "tests.test_projection_manifest",
+      "dst": "floodmind.agent.runtime",
+      "count": 1
+    },
+    {
+      "src": "tests.test_provenance",
+      "dst": "floodmind.agent.runtime",
+      "count": 1
+    },
+    {
+      "src": "tests.test_response_pipeline",
+      "dst": "floodmind.agent.native",
+      "count": 1
+    },
+    {
+      "src": "tests.test_response_pipeline",
+      "dst": "floodmind.agent.runtime",
+      "count": 1
+    },
+    {
+      "src": "tests.test_resume_service",
+      "dst": "floodmind.agent.native",
+      "count": 1
+    },
+    {
+      "src": "tests.test_resume_service",
+      "dst": "floodmind.cli",
+      "count": 1
+    },
+    {
+      "src": "tests.test_retry_policy",
+      "dst": "floodmind.agent.runtime",
+      "count": 1
+    },
+    {
+      "src": "tests.test_runtime_context",
+      "dst": "floodmind.agent.runtime",
+      "count": 1
+    },
+    {
+      "src": "tests.test_runtime_context_injection",
+      "dst": "floodmind.agent.runtime",
+      "count": 1
+    },
+    {
+      "src": "tests.test_runtime_context_injection",
+      "dst": "floodmind.tools.session_context",
+      "count": 1
+    },
+    {
+      "src": "tests.test_runtime_context_injection",
+      "dst": "floodmind.tools",
+      "count": 1
+    },
+    {
+      "src": "tests.test_sandbox_service",
+      "dst": "floodmind.tools.session_context",
+      "count": 1
+    },
+    {
+      "src": "tests.test_sandbox_service",
+      "dst": "floodmind.tools.agent_tool",
+      "count": 1
+    },
+    {
+      "src": "tests.test_scheduled_task_runtime",
+      "dst": "floodmind.agent.scheduled_task_runtime",
+      "count": 1
+    },
+    {
+      "src": "tests.test_sdk_agent",
+      "dst": "floodmind.agent.api",
+      "count": 1
+    },
+    {
+      "src": "tests.test_sdk_agent",
+      "dst": "floodmind.tools.agent_tool",
+      "count": 1
+    },
+    {
+      "src": "tests.test_sdk_agent",
+      "dst": "floodmind.skills.base",
+      "count": 1
+    },
+    {
+      "src": "tests.test_sdk_agent",
+      "dst": "floodmind.memory.dual_memory",
+      "count": 1
+    },
+    {
+      "src": "tests.test_sdk_agent",
+      "dst": "floodmind.skills",
+      "count": 1
+    },
+    {
+      "src": "tests.test_sdk_agent",
+      "dst": "floodmind",
+      "count": 1
+    },
+    {
+      "src": "tests.test_sdk_agent",
+      "dst": "floodmind.config.settings",
+      "count": 1
+    },
+    {
+      "src": "tests.test_sdk_agent",
+      "dst": "floodmind.memory",
+      "count": 1
+    },
+    {
+      "src": "tests.test_sdk_agent",
+      "dst": "floodmind.memory.services",
+      "count": 1
+    },
+    {
+      "src": "tests.test_sdk_agent",
+      "dst": "floodmind.tools.base_tools",
+      "count": 1
+    },
+    {
+      "src": "tests.test_sdk_api_identity",
+      "dst": "floodmind.agent.api",
+      "count": 1
+    },
+    {
+      "src": "tests.test_sdk_events",
+      "dst": "floodmind.agent.sdk_events",
+      "count": 1
+    },
+    {
+      "src": "tests.test_sdk_events",
+      "dst": "floodmind.agent.runtime",
+      "count": 1
+    },
+    {
+      "src": "tests.test_sdk_purity",
+      "dst": "floodmind",
+      "count": 1
+    },
+    {
+      "src": "tests.test_search_config",
+      "dst": "floodmind.config",
+      "count": 1
+    },
+    {
+      "src": "tests.test_search_config",
+      "dst": "floodmind.config.search_config",
+      "count": 1
+    },
+    {
+      "src": "tests.test_secret_store",
+      "dst": "floodmind.config",
+      "count": 1
+    },
+    {
+      "src": "tests.test_secret_store",
+      "dst": "floodmind.config.search_config",
+      "count": 1
+    },
+    {
+      "src": "tests.test_secret_store",
+      "dst": "floodmind.config.secret_store",
+      "count": 1
+    },
+    {
+      "src": "tests.test_secret_store",
+      "dst": "floodmind.config.settings",
+      "count": 1
+    },
+    {
+      "src": "tests.test_secret_store",
+      "dst": "floodmind.gateway",
+      "count": 1
+    },
+    {
+      "src": "tests.test_secret_store",
+      "dst": "floodmind.gateway.state",
+      "count": 1
+    },
+    {
+      "src": "tests.test_semantic_store",
+      "dst": "floodmind.memory.semantic_store",
+      "count": 1
+    },
+    {
+      "src": "tests.test_settings",
+      "dst": "floodmind.config.settings",
+      "count": 1
+    },
+    {
+      "src": "tests.test_skill_curator",
+      "dst": "floodmind.skills.registry",
+      "count": 1
+    },
+    {
+      "src": "tests.test_skill_curator",
+      "dst": "floodmind.skills.skill_curator",
+      "count": 1
+    },
+    {
+      "src": "tests.test_skill_md_writeback",
+      "dst": "floodmind.agent.native",
+      "count": 1
+    },
+    {
+      "src": "tests.test_skill_md_writeback",
+      "dst": "floodmind.skills.registry",
+      "count": 1
+    },
+    {
+      "src": "tests.test_skill_registry",
+      "dst": "floodmind.agent.native",
+      "count": 1
+    },
+    {
+      "src": "tests.test_skill_registry",
+      "dst": "floodmind.skills",
+      "count": 1
+    },
+    {
+      "src": "tests.test_skill_registry",
+      "dst": "floodmind.skills.base",
+      "count": 1
+    },
+    {
+      "src": "tests.test_skill_registry",
+      "dst": "floodmind.skills.registry",
+      "count": 1
+    },
+    {
+      "src": "tests.test_skill_registry",
+      "dst": "floodmind.skills.skill_curator",
+      "count": 1
+    },
+    {
+      "src": "tests.test_subagent_contract",
+      "dst": "floodmind.agent.runtime",
+      "count": 1
+    },
+    {
+      "src": "tests.test_task_experience",
+      "dst": "floodmind.memory",
+      "count": 1
+    },
+    {
+      "src": "tests.test_task_experience",
+      "dst": "floodmind.memory.skill_generator",
+      "count": 1
+    },
+    {
+      "src": "tests.test_task_experience",
+      "dst": "floodmind.memory.experience_tree",
+      "count": 1
+    },
+    {
+      "src": "tests.test_task_experience",
+      "dst": "floodmind.memory.task_experience",
+      "count": 1
+    },
+    {
+      "src": "tests.test_task_experience",
+      "dst": "floodmind.tools.base_tools",
+      "count": 1
+    },
+    {
+      "src": "tests.test_token_budget",
+      "dst": "floodmind.agent.runtime",
+      "count": 1
+    },
+    {
+      "src": "tests.test_token_budget",
+      "dst": "floodmind.agent.api",
+      "count": 1
+    },
+    {
+      "src": "tests.test_tool_execution_service",
+      "dst": "floodmind.agent.native",
+      "count": 1
+    },
+    {
+      "src": "tests.test_tool_execution_service",
+      "dst": "floodmind.tools.session_context",
+      "count": 1
+    },
+    {
+      "src": "tests.test_tool_loading",
+      "dst": "floodmind.agent.native",
+      "count": 1
+    },
+    {
+      "src": "tests.test_tool_loading",
+      "dst": "floodmind.tools.session_context",
+      "count": 1
+    },
+    {
+      "src": "tests.test_tool_output_service",
+      "dst": "floodmind.agent.native",
+      "count": 1
+    },
+    {
+      "src": "tests.test_trace_metrics",
+      "dst": "floodmind.agent.native",
+      "count": 1
+    },
+    {
+      "src": "tests.test_trace_processors",
+      "dst": "floodmind",
+      "count": 1
+    },
+    {
+      "src": "tests.test_trace_processors",
+      "dst": "floodmind.agent.native",
+      "count": 1
+    },
+    {
+      "src": "tests.test_trace_processors",
+      "dst": "floodmind.agent.guardrail",
+      "count": 1
+    },
+    {
+      "src": "tests.test_tracing_service",
+      "dst": "floodmind.agent.native",
+      "count": 1
+    },
+    {
+      "src": "tests.test_transport",
+      "dst": "floodmind.agent.native",
+      "count": 1
+    },
+    {
+      "src": "tests.test_workspace",
+      "dst": "floodmind",
+      "count": 1
+    }
+  ],
+  "god_files": [
+    {
+      "path": "floodmind/agent/native/native_flood_agent.py",
+      "in": 21,
+      "out": 52,
+      "total": 73
+    },
+    {
+      "path": "floodmind/agent/runtime/services/journal_authority.py",
+      "in": 44,
+      "out": 6,
+      "total": 50
+    },
+    {
+      "path": "floodmind/agent/native/model_client.py",
+      "in": 38,
+      "out": 10,
+      "total": 48
+    },
+    {
+      "path": "floodmind/agent/native/types.py",
+      "in": 44,
+      "out": 1,
+      "total": 45
+    },
+    {
+      "path": "floodmind/agent/native/executor.py",
+      "in": 20,
+      "out": 19,
+      "total": 39
+    },
+    {
+      "path": "floodmind/config/settings.py",
+      "in": 28,
+      "out": 3,
+      "total": 31
+    },
+    {
+      "path": "floodmind/agent/runtime/contracts/tools.py",
+      "in": 27,
+      "out": 3,
+      "total": 30
+    },
+    {
+      "path": "floodmind/tools/base_tools.py",
+      "in": 13,
+      "out": 17,
+      "total": 30
+    },
+    {
+      "path": "floodmind/agent/runtime/contracts/permissions.py",
+      "in": 29,
+      "out": 0,
+      "total": 29
+    },
+    {
+      "path": "floodmind/agent/native/event_bus.py",
+      "in": 26,
+      "out": 0,
+      "total": 26
+    },
+    {
+      "path": "floodmind/agent/runtime/contracts/canonical_events.py",
+      "in": 26,
+      "out": 0,
+      "total": 26
+    },
+    {
+      "path": "floodmind/agent/runtime/reducer.py",
+      "in": 23,
+      "out": 3,
+      "total": 26
+    },
+    {
+      "path": "floodmind/agent/runtime/services/path_service.py",
+      "in": 18,
+      "out": 7,
+      "total": 25
+    },
+    {
+      "path": "floodmind/agent/runtime/services/workspace_service.py",
+      "in": 21,
+      "out": 3,
+      "total": 24
+    },
+    {
+      "path": "floodmind/agent/runtime/contracts/runtime_context.py",
+      "in": 23,
+      "out": 0,
+      "total": 23
+    },
+    {
+      "path": "floodmind/agent/runtime/services/permission_service.py",
+      "in": 19,
+      "out": 3,
+      "total": 22
+    },
+    {
+      "path": "floodmind/agent/runtime/services/child_thread_runtime.py",
+      "in": 5,
+      "out": 16,
+      "total": 21
+    },
+    {
+      "path": "floodmind/tools/session_context.py",
+      "in": 21,
+      "out": 0,
+      "total": 21
+    },
+    {
+      "path": "floodmind/agent/native/message_builder.py",
+      "in": 19,
+      "out": 1,
+      "total": 20
+    },
+    {
+      "path": "floodmind/agent/runtime/contracts/workspace.py",
+      "in": 20,
+      "out": 0,
+      "total": 20
+    },
+    {
+      "path": "floodmind/tools/agent_tool.py",
+      "in": 13,
+      "out": 7,
+      "total": 20
+    },
+    {
+      "path": "tests/test_sdk_agent.py",
+      "in": 0,
+      "out": 20,
+      "total": 20
+    },
+    {
+      "path": "floodmind/agent/api.py",
+      "in": 6,
+      "out": 13,
+      "total": 19
+    },
+    {
+      "path": "floodmind/agent/runtime/services/tool_execution_service.py",
+      "in": 10,
+      "out": 9,
+      "total": 19
+    },
+    {
+      "path": "floodmind/agent/runtime/services/background_task_service.py",
+      "in": 13,
+      "out": 5,
+      "total": 18
+    },
+    {
+      "path": "floodmind/cli.py",
+      "in": 3,
+      "out": 15,
+      "total": 18
+    },
+    {
+      "path": "tests/test_executor.py",
+      "in": 0,
+      "out": 17,
+      "total": 17
+    },
+    {
+      "path": "floodmind/agent/runtime/services/checkpoint_service.py",
+      "in": 10,
+      "out": 6,
+      "total": 16
+    },
+    {
+      "path": "tests/test_child_thread_runtime.py",
+      "in": 0,
+      "out": 16,
+      "total": 16
+    },
+    {
+      "path": "tests/test_p7_acceptance.py",
+      "in": 0,
+      "out": 16,
+      "total": 16
+    }
+  ],
+  "god_symbols": [
+    {
+      "id": "symbol:tests.test_guardrails._context",
+      "file": "tests/test_guardrails.py",
+      "line": 63,
+      "in": 32,
+      "out": 0
+    },
+    {
+      "id": "symbol:tests.test_guardrails._make_executor",
+      "file": "tests/test_guardrails.py",
+      "line": 43,
+      "in": 32,
+      "out": 0
+    },
+    {
+      "id": "symbol:floodmind.agent.runtime.reducer._clone",
+      "file": "floodmind/agent/runtime/reducer.py",
+      "line": 29,
+      "in": 24,
+      "out": 0
+    },
+    {
+      "id": "symbol:tests.test_permission_service.TestPermissionService._make_svc",
+      "file": "tests/test_permission_service.py",
+      "line": 16,
+      "in": 23,
+      "out": 0
+    },
+    {
+      "id": "symbol:floodmind.memory.session_manager.validate_session_id",
+      "file": "floodmind/memory/session_manager.py",
+      "line": 35,
+      "in": 22,
+      "out": 0
+    },
+    {
+      "id": "symbol:tests.test_executor.TestNativeAgentExecutor._make_context",
+      "file": "tests/test_executor.py",
+      "line": 40,
+      "in": 22,
+      "out": 0
+    },
+    {
+      "id": "symbol:tests.test_executor.TestNativeAgentExecutor._make_executor",
+      "file": "tests/test_executor.py",
+      "line": 18,
+      "in": 22,
+      "out": 0
+    },
+    {
+      "id": "symbol:tests.test_plan_update._make_bare_agent",
+      "file": "tests/test_plan_update.py",
+      "line": 15,
+      "in": 22,
+      "out": 0
+    },
+    {
+      "id": "symbol:tests.test_plan_update._make_plan",
+      "file": "tests/test_plan_update.py",
+      "line": 26,
+      "in": 22,
+      "out": 0
+    },
+    {
+      "id": "symbol:tests.test_guardrails._token_done",
+      "file": "tests/test_guardrails.py",
+      "line": 76,
+      "in": 20,
+      "out": 0
+    },
+    {
+      "id": "symbol:tests.test_provider_pipelines._base_params",
+      "file": "tests/test_provider_pipelines.py",
+      "line": 124,
+      "in": 20,
+      "out": 0
+    },
+    {
+      "id": "symbol:tests.test_tool_execution_service._ctx",
+      "file": "tests/test_tool_execution_service.py",
+      "line": 210,
+      "in": 19,
+      "out": 0
+    },
+    {
+      "id": "symbol:floodmind.agent.native.event_bus.EventBus.emit",
+      "file": "floodmind/agent/native/event_bus.py",
+      "line": 55,
+      "in": 17,
+      "out": 0
+    },
+    {
+      "id": "symbol:floodmind.agent.runtime.reducer._is_current_thread",
+      "file": "floodmind/agent/runtime/reducer.py",
+      "line": 39,
+      "in": 17,
+      "out": 0
+    },
+    {
+      "id": "symbol:floodmind.memory.task_experience.TaskExperienceStore.tree",
+      "file": "floodmind/memory/task_experience.py",
+      "line": 151,
+      "in": 16,
+      "out": 0
+    },
+    {
+      "id": "symbol:tests.test_journal_writer._evt",
+      "file": "tests/test_journal_writer.py",
+      "line": 12,
+      "in": 16,
+      "out": 0
+    },
+    {
+      "id": "symbol:tests.test_model_routing._FakeClient",
+      "file": "tests/test_model_routing.py",
+      "line": 22,
+      "in": 16,
+      "out": 0
+    },
+    {
+      "id": "symbol:tests.test_provider_pipelines._ns",
+      "file": "tests/test_provider_pipelines.py",
+      "line": 24,
+      "in": 16,
+      "out": 0
+    },
+    {
+      "id": "symbol:tests.test_reducer._ev",
+      "file": "tests/test_reducer.py",
+      "line": 8,
+      "in": 16,
+      "out": 0
+    },
+    {
+      "id": "symbol:tests.test_handoff._mc",
+      "file": "tests/test_handoff.py",
+      "line": 23,
+      "in": 14,
+      "out": 0
+    },
+    {
+      "id": "symbol:tests.test_mcp_client.FakeConn",
+      "file": "tests/test_mcp_client.py",
+      "line": 24,
+      "in": 14,
+      "out": 0
+    },
+    {
+      "id": "symbol:tests.test_mcp_config_validation._patched_home",
+      "file": "tests/test_mcp_config_validation.py",
+      "line": 39,
+      "in": 14,
+      "out": 0
+    },
+    {
+      "id": "symbol:tests.test_handoff.Registry",
+      "file": "tests/test_handoff.py",
+      "line": 49,
+      "in": 13,
+      "out": 0
+    },
+    {
+      "id": "symbol:tests.test_plan_persistence._make_bare_agent",
+      "file": "tests/test_plan_persistence.py",
+      "line": 18,
+      "in": 13,
+      "out": 0
+    },
+    {
+      "id": "symbol:tests.test_file_tools._bind_workspace",
+      "file": "tests/test_file_tools.py",
+      "line": 16,
+      "in": 12,
+      "out": 0
+    },
+    {
+      "id": "symbol:tests.test_file_tools._reset",
+      "file": "tests/test_file_tools.py",
+      "line": 23,
+      "in": 12,
+      "out": 0
+    },
+    {
+      "id": "symbol:tests.test_handoff._executor",
+      "file": "tests/test_handoff.py",
+      "line": 35,
+      "in": 12,
+      "out": 0
+    },
+    {
+      "id": "symbol:floodmind.config.search_config.load_search_config",
+      "file": "floodmind/config/search_config.py",
+      "line": 50,
+      "in": 11,
+      "out": 1
+    },
+    {
+      "id": "symbol:tests.test_background_task_service._sleep_cmd",
+      "file": "tests/test_background_task_service.py",
+      "line": 17,
+      "in": 11,
+      "out": 0
+    },
+    {
+      "id": "symbol:tests.test_execution_plan._make_plan",
+      "file": "tests/test_execution_plan.py",
+      "line": 8,
+      "in": 11,
+      "out": 0
+    }
+  ],
+  "cycles": [
+    {
+      "members": [
+        "floodmind/skills/base.py",
+        "floodmind/skills/registry.py"
+      ],
+      "internal_edges": [
+        [
+          "floodmind/skills/base.py",
+          "floodmind/skills/registry.py"
+        ],
+        [
+          "floodmind/skills/registry.py",
+          "floodmind/skills/base.py"
+        ]
+      ]
+    },
+    {
+      "members": [
+        "floodmind/agent/native/model_client.py",
+        "floodmind/config/model_presets.py",
+        "floodmind/config/model_resolver.py",
+        "floodmind/config/provider_registry.py",
+        "floodmind/config/secret_store.py",
+        "floodmind/config/settings.py"
+      ],
+      "internal_edges": [
+        [
+          "floodmind/agent/native/model_client.py",
+          "floodmind/config/provider_registry.py"
+        ],
+        [
+          "floodmind/agent/native/model_client.py",
+          "floodmind/config/model_resolver.py"
+        ],
+        [
+          "floodmind/agent/native/model_client.py",
+          "floodmind/config/model_presets.py"
+        ],
+        [
+          "floodmind/config/model_presets.py",
+          "floodmind/config/model_resolver.py"
+        ],
+        [
+          "floodmind/config/model_presets.py",
+          "floodmind/config/settings.py"
+        ],
+        [
+          "floodmind/config/model_resolver.py",
+          "floodmind/config/settings.py"
+        ],
+        [
+          "floodmind/config/model_resolver.py",
+          "floodmind/config/provider_registry.py"
+        ],
+        [
+          "floodmind/config/provider_registry.py",
+          "floodmind/config/model_resolver.py"
+        ],
+        [
+          "floodmind/config/provider_registry.py",
+          "floodmind/config/settings.py"
+        ],
+        [
+          "floodmind/config/provider_registry.py",
+          "floodmind/agent/native/model_client.py"
+        ],
+        [
+          "floodmind/config/secret_store.py",
+          "floodmind/config/settings.py"
+        ],
+        [
+          "floodmind/config/settings.py",
+          "floodmind/config/secret_store.py"
+        ],
+        [
+          "floodmind/config/settings.py",
+          "floodmind/config/model_resolver.py"
+        ],
+        [
+          "floodmind/config/settings.py",
+          "floodmind/config/model_presets.py"
+        ]
+      ]
+    },
+    {
+      "members": [
+        "floodmind/tools/base_tools.py",
+        "floodmind/tools/file_tools.py"
+      ],
+      "internal_edges": [
+        [
+          "floodmind/tools/base_tools.py",
+          "floodmind/tools/file_tools.py"
+        ],
+        [
+          "floodmind/tools/file_tools.py",
+          "floodmind/tools/base_tools.py"
+        ]
+      ]
+    },
+    {
+      "members": [
+        "floodmind/cli.py",
+        "floodmind/cli_interactive.py"
+      ],
+      "internal_edges": [
+        [
+          "floodmind/cli.py",
+          "floodmind/cli_interactive.py"
+        ],
+        [
+          "floodmind/cli_interactive.py",
+          "floodmind/cli.py"
+        ]
+      ]
+    }
+  ],
+  "orphan_files": [
+    "benchmarks/__init__.py",
+    "benchmarks/multi_agent/__init__.py",
+    "data/sessions/tui-570f4884719c/outputs/create_test_report.js",
+    "data/sessions/tui-ce23517655d1/outputs/create_report.js",
+    "floodmind/agent/runtime/__init__.py",
+    "floodmind/agent/runtime/adapters/__init__.py",
+    "floodmind/agent/runtime/adapters/flask_checkpoint_api.py",
+    "floodmind/agent/runtime/adapters/flask_permission_api.py",
+    "floodmind/agent/runtime/adapters/flask_tracing_api.py",
+    "floodmind/agent/runtime/adapters/sse_stream_adapter.py",
+    "floodmind/agent/runtime/contracts/__init__.py",
+    "floodmind/agent/runtime/services/journal_backend.py",
+    "floodmind/common/__init__.py",
+    "floodmind/gateway/chainlit_app.py",
+    "floodmind/gateway/chainlit_public/floodmind-ui.js",
+    "floodmind/models/__init__.py",
+    "floodmind/scripts/__init__.py",
+    "floodmind/scripts/check_qwen_reasoning.py",
+    "floodmind/skills/csv/scripts/preview_data.py",
+    "floodmind/skills/docx/scripts/__init__.py",
+    "floodmind/skills/docx/scripts/accept_changes.py",
+    "floodmind/skills/docx/scripts/comment.py",
+    "floodmind/skills/docx/scripts/office/helpers/__init__.py",
+    "floodmind/skills/docx/scripts/office/helpers/merge_runs.py",
+    "floodmind/skills/docx/scripts/office/helpers/simplify_redlines.py",
+    "floodmind/skills/docx/scripts/office/pack.py",
+    "floodmind/skills/docx/scripts/office/soffice.py",
+    "floodmind/skills/docx/scripts/office/unpack.py",
+    "floodmind/skills/docx/scripts/office/validate.py",
+    "floodmind/skills/docx/scripts/office/validators/__init__.py",
+    "floodmind/skills/mcp-builder/scripts/connections.py",
+    "floodmind/skills/mcp-builder/scripts/evaluation.py",
+    "floodmind/skills/pdf/scripts/check_bounding_boxes.py",
+    "floodmind/skills/pdf/scripts/check_fillable_fields.py",
+    "floodmind/skills/pdf/scripts/convert_pdf_to_images.py",
+    "floodmind/skills/pdf/scripts/create_validation_image.py",
+    "floodmind/skills/pdf/scripts/extract_form_field_info.py",
+    "floodmind/skills/pdf/scripts/extract_form_structure.py",
+    "floodmind/skills/pdf/scripts/fill_fillable_fields.py",
+    "floodmind/skills/pdf/scripts/fill_pdf_form_with_annotations.py",
+    "floodmind/skills/pptx/scripts/__init__.py",
+    "floodmind/skills/pptx/scripts/add_slide.py",
+    "floodmind/skills/pptx/scripts/clean.py",
+    "floodmind/skills/pptx/scripts/office/helpers/__init__.py",
+    "floodmind/skills/pptx/scripts/office/helpers/merge_runs.py",
+    "floodmind/skills/pptx/scripts/office/helpers/simplify_redlines.py",
+    "floodmind/skills/pptx/scripts/office/pack.py",
+    "floodmind/skills/pptx/scripts/office/soffice.py",
+    "floodmind/skills/pptx/scripts/office/unpack.py",
+    "floodmind/skills/pptx/scripts/office/validate.py",
+    "floodmind/skills/pptx/scripts/office/validators/__init__.py",
+    "floodmind/skills/pptx/scripts/thumbnail.py",
+    "floodmind/skills/skill-creator/scripts/__init__.py",
+    "floodmind/skills/skill-creator/scripts/package_skill.py",
+    "floodmind/skills/skill-creator/scripts/quick_validate.py",
+    "floodmind/skills/skill-creator/scripts/utils.py",
+    "floodmind/skills/xlsx/scripts/create_excel.py",
+    "floodmind/skills/xlsx/scripts/office/helpers/__init__.py",
+    "floodmind/skills/xlsx/scripts/office/helpers/merge_runs.py",
+    "floodmind/skills/xlsx/scripts/office/helpers/simplify_redlines.py",
+    "floodmind/skills/xlsx/scripts/office/pack.py",
+    "floodmind/skills/xlsx/scripts/office/soffice.py",
+    "floodmind/skills/xlsx/scripts/office/unpack.py",
+    "floodmind/skills/xlsx/scripts/office/validate.py",
+    "floodmind/skills/xlsx/scripts/office/validators/__init__.py",
+    "floodmind/skills/xlsx/scripts/preview_data.py",
+    "floodmind/skills/xlsx/scripts/recalc.py",
+    "main.py",
+    "scripts/calibrate_judge.py",
+    "scripts/e2e_gateway.py",
+    "scripts/knowledge_graph/__init__.py",
+    "scripts/knowledge_graph/__main__.py",
+    "scripts/knowledge_graph/query.py",
+    "scripts/metrics_report.py",
+    "scripts/smoke_provider_pipelines.py",
+    "sitecustomize.py",
+    "tests/conftest.py",
+    "tests/test_agent_skill_roots.py",
+    "tests/test_agent_tool.py",
+    "tests/test_apply_patch_permissions.py",
+    "tests/test_approval_fingerprint.py",
+    "tests/test_artifact_service.py",
+    "tests/test_artifact_traversal.py",
+    "tests/test_artifact_validation.py",
+    "tests/test_artifact_watcher_workspace.py",
+    "tests/test_artifacts.py",
+    "tests/test_atomic_groups.py",
+    "tests/test_background_kill_chain.py",
+    "tests/test_background_reconcile.py",
+    "tests/test_background_review.py",
+    "tests/test_background_task_service.py",
+    "tests/test_base_tools.py",
+    "tests/test_bash_workspace_policy.py",
+    "tests/test_canonical_events.py",
+    "tests/test_canonical_parts.py",
+    "tests/test_capabilities.py",
+    "tests/test_checkpoint_cursor.py",
+    "tests/test_checkpoint_serialization_hardening.py",
+    "tests/test_checkpoint_service.py",
+    "tests/test_child_background_namespace.py",
+    "tests/test_child_permission_context.py",
+    "tests/test_child_sandbox_backend.py",
+    "tests/test_child_thread.py",
+    "tests/test_child_thread_cancellation.py",
+    "tests/test_child_thread_quota.py",
+    "tests/test_child_thread_runtime.py",
+    "tests/test_cli_commands.py",
+    "tests/test_codec.py",
+    "tests/test_context_compressor.py",
+    "tests/test_core_memory_store.py",
+    "tests/test_credential_env.py",
+    "tests/test_dual_memory_journal.py",
+    "tests/test_eval_case_packs.py",
+    "tests/test_exec_write_scanner.py",
+    "tests/test_execution_events.py",
+    "tests/test_execution_plan.py",
+    "tests/test_executor.py",
+    "tests/test_experience_tree.py",
+    "tests/test_file_tools.py",
+    "tests/test_file_tools_permissions.py",
+    "tests/test_filelock_cross_platform_import.py",
+    "tests/test_get_skill_tool_factory.py",
+    "tests/test_golden_fixtures.py",
+    "tests/test_guardrails.py",
+    "tests/test_handoff.py",
+    "tests/test_history_authority_wiring.py",
+    "tests/test_history_projection.py",
+    "tests/test_idempotency.py",
+    "tests/test_identity.py",
+    "tests/test_image_message_projection.py",
+    "tests/test_input_budget.py",
+    "tests/test_journal_authority.py",
+    "tests/test_journal_compact.py",
+    "tests/test_journal_fencing.py",
+    "tests/test_journal_index.py",
+    "tests/test_journal_writer.py",
+    "tests/test_judge_calibration.py",
+    "tests/test_knowledge_graph_viz.py",
+    "tests/test_mcp_agent_isolation.py",
+    "tests/test_mcp_client.py",
+    "tests/test_mcp_config_validation.py",
+    "tests/test_memory_consolidation.py",
+    "tests/test_memory_dual.py",
+    "tests/test_memory_expiry.py",
+    "tests/test_memory_recall.py",
+    "tests/test_memory_services.py",
+    "tests/test_memory_tools.py",
+    "tests/test_metrics_report.py",
+    "tests/test_model_presets.py",
+    "tests/test_model_resolver.py",
+    "tests/test_model_routing.py",
+    "tests/test_multi_agent_benchmark.py",
+    "tests/test_native_agent_workspace.py",
+    "tests/test_native_context_window.py",
+    "tests/test_otlp_exporter.py",
+    "tests/test_p2_acceptance.py",
+    "tests/test_p3_acceptance.py",
+    "tests/test_p5_acceptance.py",
+    "tests/test_p6_acceptance.py",
+    "tests/test_p7_acceptance.py",
+    "tests/test_path_service_workspace.py",
+    "tests/test_permission_host_fixes.py",
+    "tests/test_permission_service.py",
+    "tests/test_permission_tier.py",
+    "tests/test_plan_contract.py",
+    "tests/test_plan_gap_implementation.py",
+    "tests/test_plan_mode_gate.py",
+    "tests/test_plan_persistence.py",
+    "tests/test_plan_store.py",
+    "tests/test_plan_update.py",
+    "tests/test_profile_system.py",
+    "tests/test_projection_manifest.py",
+    "tests/test_provenance.py",
+    "tests/test_provider_pipelines.py",
+    "tests/test_reconciliation_service.py",
+    "tests/test_reducer.py",
+    "tests/test_response_pipeline.py",
+    "tests/test_resume_service.py",
+    "tests/test_retry_policy.py",
+    "tests/test_run_state.py",
+    "tests/test_runtime_context.py",
+    "tests/test_runtime_context_injection.py",
+    "tests/test_sandbox_backend.py",
+    "tests/test_sandbox_service.py",
+    "tests/test_scheduled_task_runtime.py",
+    "tests/test_sdk_agent.py",
+    "tests/test_sdk_api_identity.py",
+    "tests/test_sdk_events.py",
+    "tests/test_sdk_purity.py",
+    "tests/test_search_config.py",
+    "tests/test_secret_store.py",
+    "tests/test_semantic_store.py",
+    "tests/test_settings.py",
+    "tests/test_skill_curator.py",
+    "tests/test_skill_md_writeback.py",
+    "tests/test_skill_registry.py",
+    "tests/test_specialist_execution.py",
+    "tests/test_subagent_contract.py",
+    "tests/test_subagent_journal.py",
+    "tests/test_task_experience.py",
+    "tests/test_token_budget.py",
+    "tests/test_tool_execution_service.py",
+    "tests/test_tool_lifecycle_reducer.py",
+    "tests/test_tool_loading.py",
+    "tests/test_tool_output_service.py",
+    "tests/test_tool_transaction.py",
+    "tests/test_trace_metrics.py",
+    "tests/test_trace_processors.py",
+    "tests/test_tracing_otlp.py",
+    "tests/test_tracing_service.py",
+    "tests/test_transport.py",
+    "tests/test_usage_accounting.py",
+    "tests/test_workspace.py"
+  ],
+  "unresolved_by_source": [
+    [
+      "floodmind/skills/skill-creator/scripts/package_skill.py",
+      1
+    ]
+  ]
+}

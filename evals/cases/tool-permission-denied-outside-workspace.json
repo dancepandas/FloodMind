@@ -1,0 +1,45 @@
+{
+  "id": "tool-permission-denied-outside-workspace",
+  "tier": "tool",
+  "tool_mode": "real",
+  "description": "真实 Write 越界：workspace 之外的路径被权限层拒绝，工具不产生副作用，循环继续。",
+  "user_text": "把内容写到 workspace 之外。",
+  "max_iterations": 5,
+  "tools": {
+    "Write": {}
+  },
+  "rounds": [
+    {
+      "events": [
+        {
+          "type": "tool_call_done",
+          "tool_call": {
+            "id": "call_escape",
+            "name": "Write",
+            "arguments": {
+              "file_path": "../escaped.txt",
+              "content": "越界写入\n"
+            }
+          }
+        },
+        {"type": "done", "terminal_reason": "tool_calls"}
+      ]
+    },
+    {
+      "events": [
+        {"type": "token", "content": "无法写入：目标路径在 workspace 之外。"},
+        {"type": "done", "terminal_reason": "stop"}
+      ]
+    }
+  ],
+  "expect": {
+    "model_calls": 2,
+    "tool_calls": ["Write"],
+    "tool_statuses": ["error"],
+    "invalid_calls": 1,
+    "prompt_contains": [
+      {"call_index": 1, "contains": "workspace 之外不可访问"}
+    ],
+    "final_output_contains": ["无法写入"]
+  }
+}

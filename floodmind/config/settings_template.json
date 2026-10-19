@@ -71,5 +71,22 @@
     "max_search_results": 8,
     "max_loaded_tools": 12,
     "get_tool_loads_tool": true
+  },
+  "model_routing": {
+    "subagent_model": "",
+    "fallbacks": [],
+    "max_fallbacks": 2
+  },
+  "model_pricing": {
+    "deepseek-v4-flash": {
+      "input_per_1k": 0.1,
+      "output_per_1k": 0.3,
+      "currency": "USD"
+    }
+  },
+  "observability": {
+    "otlp_endpoint": "",
+    "otlp_headers": {},
+    "otlp_timeout_seconds": 5.0
   }
 }

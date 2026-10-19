@@ -4,8 +4,6 @@ import tempfile
 from pathlib import Path
 from unittest.mock import MagicMock
 
-import pytest
-
 import floodmind.memory.core_memory
 from floodmind.agent.runtime.contracts.runtime_context import RuntimeContext
 from floodmind.agent.runtime.services.journal_authority import open_journal_authority
@@ -17,7 +15,6 @@ from floodmind.tools.memory_tools import (
     journal_get_full_result,
     journal_search,
     _get_session_id,
-    _core_memory_path,
 )
 from floodmind.tools.session_context import set_session_context
 
@@ -26,11 +23,6 @@ class TestMemoryTools:
     def setup_method(self):
         self.tmp = tempfile.mkdtemp()
         set_session_context("test-session", output_dir=self.tmp)
-        # 清理可能存在的 core_memory 文件
-        from floodmind.tools.memory_tools import _core_memory_path
-        cp = _core_memory_path("test-session")
-        if cp.exists():
-            cp.unlink()
         # CoreMemoryAppend/Read 已重定向到项目级 CoreMemoryStore（门面单例）：
         # 重置门面单例并把默认存储文件重定向到临时目录，避免测试污染真实数据。
         from floodmind.memory import services as _svc_mod
@@ -133,4 +125,3 @@ class TestMemoryTools:
 
     def test_session_id_helper(self):
         assert _get_session_id() == "test-session"
-        assert _core_memory_path("test-session").name == "core_memory.json"

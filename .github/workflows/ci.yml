@@ -1,0 +1,62 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+  # C5：故障注入与全量回归除了 push/PR，还要定期跑一次，避免长期未改动的
+  # 路径（恢复、超时、fencing、并发）只在有人提交时才被验证。
+  schedule:
+    - cron: "17 3 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.10", "3.12"]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e . pytest
+
+      - name: Unit and fault-injection tests
+        run: python -m pytest -q
+
+      - name: Judge calibration (deterministic baseline)
+        run: python scripts/calibrate_judge.py --judge rule --min-agreement 1.0
+
+      - name: Internal eval gate (smoke + tool + regression + safety)
+        run: python -m evals.runner --json eval-report.json
+
+      # held-out 集只在定时或手动运行时执行，避免进入日常调参回路。
+      - name: Held-out eval (scheduled/manual only)
+        if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+        run: python -m evals.runner --heldout --json heldout-report.json
+
+      - name: Upload eval report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: eval-report-py${{ matrix.python-version }}
+          path: |
+            eval-report.json
+            heldout-report.json
+          if-no-files-found: ignore

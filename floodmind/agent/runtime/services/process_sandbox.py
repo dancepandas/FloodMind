@@ -14,6 +14,8 @@ import subprocess
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+from floodmind.agent.runtime.services.credential_env import strip_credential_env
+
 logger = logging.getLogger(__name__)
 
 
@@ -90,8 +92,12 @@ class ProcessSandbox:
         self.close()
 
     def restrict_env(self, env: Dict[str, str], workspace_dir: Path) -> Dict[str, str]:
-        """返回限制后的环境变量。"""
-        restricted = dict(env)
+        """返回限制后的环境变量。
+
+        G-06：沙箱子进程不得继承宿主凭证（API Key / Token / Password 等），
+        与 exec_bash 共用同一份过滤规则，避免两条路径策略漂移。
+        """
+        restricted = strip_credential_env(env)
         workspace_str = str(workspace_dir)
         restricted["TEMP"] = workspace_str
         restricted["TMP"] = workspace_str

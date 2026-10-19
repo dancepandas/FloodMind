@@ -1,0 +1,62 @@
+{
+  "id": "tool-search-workspace",
+  "tier": "tool",
+  "tool_mode": "real",
+  "description": "真实 Glob + Grep 组合：先枚举 workspace 内 Markdown，再按内容定位测站记录。",
+  "user_text": "在文档里找出敖江站的水位记录。",
+  "max_iterations": 6,
+  "workspace_files": {
+    "docs/a.md": "# 敖江站\n\n敖江站水位 12.3 m，警戒水位 15.0 m。\n",
+    "docs/b.md": "# 闽江站\n\n闽江站水位 8.1 m。\n",
+    "data/readme.txt": "站点索引\n"
+  },
+  "tools": {
+    "Glob": {},
+    "Grep": {}
+  },
+  "rounds": [
+    {
+      "events": [
+        {
+          "type": "tool_call_done",
+          "tool_call": {
+            "id": "call_glob",
+            "name": "Glob",
+            "arguments": {"pattern": "**/*.md"}
+          }
+        },
+        {"type": "done", "terminal_reason": "tool_calls"}
+      ]
+    },
+    {
+      "events": [
+        {
+          "type": "tool_call_done",
+          "tool_call": {
+            "id": "call_grep",
+            "name": "Grep",
+            "arguments": {"pattern": "敖江站水位", "include": "*.md"}
+          }
+        },
+        {"type": "done", "terminal_reason": "tool_calls"}
+      ]
+    },
+    {
+      "events": [
+        {"type": "token", "content": "只有 docs/a.md 记录了敖江站水位 12.3 m。"},
+        {"type": "done", "terminal_reason": "stop"}
+      ]
+    }
+  ],
+  "expect": {
+    "model_calls": 3,
+    "tool_calls": ["Glob", "Grep"],
+    "tool_statuses": ["completed", "completed"],
+    "invalid_calls": 0,
+    "prompt_contains": [
+      {"call_index": 2, "contains": "a.md"},
+      {"call_index": 2, "contains": "12.3"}
+    ],
+    "final_output_contains": ["docs/a.md", "12.3"]
+  }
+}

@@ -37,7 +37,6 @@ def _get_all_provider_models() -> Dict[str, Dict[str, Any]]:
             "supports_reasoning": bool(m.get("supports_reasoning", m.get("supportsReasoning", False))),
             "supports_search": bool(m.get("supports_search", m.get("supportsSearch", False))),
             "supports_vision": bool(m.get("supports_vision", m.get("supportsVision", False))),
-            "max_context_tokens": int(m.get("context_window", m.get("maxTokens", 8192))),
             "default_temperature": float(m.get("default_temperature", m.get("temperature", 0.3))),
             "default_max_tokens": int(m.get("default_max_tokens", m.get("maxTokens", 8192))),
             "thinking_temperature": float(m.get("thinking_temperature", m.get("thinkingTemperature", 0.2))),

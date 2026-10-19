@@ -1,0 +1,37 @@
+{
+  "id": "regression-abort",
+  "tier": "regression",
+  "description": "用户中断：模型返回工具调用后、工具执行前 abort 生效，不再发起下一次模型调用，终态文案明确。",
+  "user_text": "开始一个较长任务。",
+  "max_iterations": 10,
+  "abort_after_model_calls": 1,
+  "tools": {
+    "SlowTask": {
+      "description": "执行一个耗时任务。",
+      "parameters": {"type": "object", "properties": {}},
+      "result": {"content": "阶段性结果", "status": "completed"}
+    }
+  },
+  "rounds": [
+    {
+      "events": [
+        {
+          "type": "tool_call_done",
+          "tool_call": {"id": "call_1", "name": "SlowTask", "arguments": {}}
+        },
+        {"type": "done", "terminal_reason": "tool_calls"}
+      ]
+    },
+    {
+      "events": [
+        {"type": "token", "content": "不应到达这一轮。"},
+        {"type": "done", "terminal_reason": "stop"}
+      ]
+    }
+  ],
+  "expect": {
+    "model_calls": 1,
+    "tool_calls": [],
+    "final_output_contains": ["中断"]
+  }
+}

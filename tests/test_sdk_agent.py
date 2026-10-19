@@ -52,6 +52,19 @@ def _stream_text_event(event_text, extra_content=None):
     return side_effect
 
 
+def _model_catalog(*models):
+    """构造测试用 settings.json providers 目录（模型顺序即 catalog 顺序）。"""
+    return {
+        "providers": {
+            "test-provider": {
+                "base_url": "https://mock.api/v1",
+                "api_key": "mock-key",
+                "models": list(models),
+            }
+        }
+    }
+
+
 # ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------
@@ -770,6 +783,58 @@ class TestSdkEnhancements:
         assert "## 可用 skills" in prompt
         assert "## 可用工具" in prompt
 
+    def test_full_runtime_registers_memory_add_for_orchestrator_only(
+        self, llm, monkeypatch, tmp_path
+    ):
+        """完整 runtime 注册 MemoryAdd（模型可主动写入），专家注册表不得获得该工具。
+
+        MemoryAdd 的 permission_policy 为 state_write，专家过滤按策略类型排除；
+        该测试把提示词承诺（guidance 指导使用 MemoryAdd）与运行时工具集绑定。
+        """
+        from floodmind.config.settings import settings
+
+        monkeypatch.setattr(settings.mcp, "servers", [])
+        agent = Agent(llm=llm, bare=False, skill_writable_root=tmp_path / "skills")
+        orchestrator_names = {t.name for t in agent.raw._orchestrator_registry.all()}
+        specialist_names = {t.name for t in agent.raw._specialist_registry.all()}
+        assert "MemoryAdd" in orchestrator_names
+        assert "MemoryAdd" not in specialist_names
+
+    def test_full_runtime_run_acquires_and_releases_fencing_lease(
+        self, llm, monkeypatch, tmp_path
+    ):
+        """完整 runtime 的每个 run 持有 fencing lease，结束后释放（G-01）。"""
+        from floodmind.agent.runtime.contracts.workspace import Workspace
+        from floodmind.agent.runtime.services import resume_service
+        from floodmind.config.settings import settings
+        from floodmind.memory import services as memory_services
+
+        monkeypatch.setattr(settings.mcp, "servers", [])
+        monkeypatch.setattr(memory_services, "_instance", None)
+        workspace = Workspace.from_folder(tmp_path / "ws", session_id="lease").ensure()
+        agent = Agent(
+            llm=llm,
+            bare=False,
+            workspace=workspace,
+            skill_writable_root=tmp_path / "skills",
+        )
+
+        recorded = {}
+        real_open = resume_service.open_lease
+
+        def _record(*args, **kwargs):
+            lease = real_open(*args, **kwargs)
+            recorded["lease"] = lease
+            return lease
+
+        monkeypatch.setattr(resume_service, "open_lease", _record)
+        with patch.object(ModelClient, "stream_chat", _stream_text("done")):
+            list(agent.stream("hi", abort_check=lambda: False))
+
+        assert "lease" in recorded
+        assert recorded["lease"]._path is not None
+        assert not recorded["lease"]._path.exists()
+
     def test_create_scheduled_task_description_not_misleading(self):
         """CreateScheduledTask 描述不把『后台』误导为立即运行进程，并指向 Bash。"""
         from floodmind.tools.base_tools import create_scheduled_task
@@ -830,11 +895,12 @@ class TestSdkEnhancements:
     def test_injected_model_window_overrides_global_default_in_both_directions(
         self, llm, injected_window
     ):
-        """The injected model preset wins whether its window is smaller or larger."""
-        with patch(
-            "floodmind.config.model_presets.get_preset",
-            return_value={"max_context_tokens": injected_window},
-        ):
+        """注入模型的窗口（无论更小还是更大）覆盖 catalog 默认模型窗口。"""
+        cfg = _model_catalog(
+            {"id": "global-default", "context_window": 65536},
+            {"id": "mock-model", "context_window": injected_window},
+        )
+        with patch("floodmind.config.model_resolver.get_config", return_value=cfg):
             agent = Agent(llm=llm)
             assert agent.raw._resolve_context_window() == injected_window
 
@@ -854,10 +920,11 @@ class TestSdkEnhancements:
 
     def test_full_runtime_uses_resolved_window_iterations_and_isolated_compressors(self, llm):
         resolved_window = 123_456
-        with patch(
-            "floodmind.config.model_presets.get_preset",
-            return_value={"max_context_tokens": resolved_window},
-        ):
+        cfg = _model_catalog(
+            {"id": "global-default", "context_window": 65536},
+            {"id": "mock-model", "context_window": resolved_window},
+        )
+        with patch("floodmind.config.model_resolver.get_config", return_value=cfg):
             agent = Agent(llm=llm, bare=False, max_iterations=7)
 
         raw = agent.raw
@@ -876,6 +943,25 @@ class TestSdkEnhancements:
         assert raw._specialist_executor._context_compressor is specialist
         assert orchestrator._last_summary == "must survive prompt rebuild"
         assert specialist._last_summary is None
+
+    def test_memory_and_executors_follow_injected_model_not_catalog_first(self):
+        """注入模型是 catalog 第二个时，DualMemory 与 executor 都取该模型窗口。"""
+        injected = ModelClient(
+            api_key="mock-key",
+            base_url="https://mock.api/v1",
+            model_name="model-b",
+        )
+        cfg = _model_catalog(
+            {"id": "model-a", "context_window": 65536},
+            {"id": "model-b", "context_window": 1_000_000},
+        )
+        with patch("floodmind.config.model_resolver.get_config", return_value=cfg):
+            agent = Agent(llm=injected, bare=False)
+
+        assert agent.memory.context_window == 1_000_000
+        assert agent.raw._context_runtime.context_window == 1_000_000
+        assert agent.raw._orchestrator_executor.context_window == 1_000_000
+        assert agent.raw._specialist_executor.context_window == 1_000_000
 
 
 # ---------------------------------------------------------------------------

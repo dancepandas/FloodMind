@@ -28,9 +28,6 @@ else:  # pragma: no cover
 
 LONG_TERM_MEMORY_FILE = _DEFAULT_MEMORY_FILE
 
-# SDK 未配置 providers 时的记忆窗口回退值（api.Agent._resolve_context_window 使用）
-DEFAULT_CONTEXT_WINDOW_FALLBACK = 32768
-
 # 进程级互斥：LongTermMemory 为多 Agent 实例共享的进程内单文件存储
 _LTM_LOCK = threading.RLock()
 
@@ -169,21 +166,10 @@ class DualMemory:
     def __init__(
         self,
         session_id: str,
-        max_short_term: int = 20,   # 已弃用（_short_term 子系统已删除），保留仅兼容旧签名
-        max_long_term: int = 100,   # 已弃用，保留仅兼容旧签名
         persist_dir: Optional[str] = None,
         llm: Optional[Any] = None,
         context_window: int = 32768,
     ):
-        # 弃用警告（不影响使用，仅提示迁移）
-        if max_short_term != 20 or max_long_term != 100:
-            import warnings
-            warnings.warn(
-                "DualMemory(max_short_term=..., max_long_term=...) 已弃用——"
-                "_short_term/_long_term 子系统已删除，这些参数不再生效。"
-                "请移除调用中的这些参数。",
-                DeprecationWarning, stacklevel=2,
-            )
         self.session_id = session_id
         self.persist_dir = persist_dir
         self._llm = llm

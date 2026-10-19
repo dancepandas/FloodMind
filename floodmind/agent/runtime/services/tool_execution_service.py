@@ -45,6 +45,7 @@ from floodmind.agent.runtime.services.idempotency import (
     find_committed_result,
     side_effect_class_for_spec,
 )
+from floodmind.agent.runtime.services.tool_output_service import bound_tool_output
 from floodmind.agent.runtime.services.tracing_service import TracingService
 
 logger = logging.getLogger(__name__)
@@ -544,11 +545,18 @@ class ToolExecutionService:
                     },
                 )
             output_str = str(output) if output is not None else ""
+            bounded, full_ref = bound_tool_output(
+                output_str,
+                tool_name=call.name,
+                call_id=call.id,
+                state_dir=state_dir,
+            )
             return ToolResult(
                 tool_call_id=call.id,
                 name=call.name,
-                content=output_str,
+                content=bounded,
                 status="completed",
+                metadata={"full_ref": full_ref} if full_ref else {},
             )
         except Exception as exc:
             logger.error("ToolExecutionService tool %s execution error: %s", call.name, exc, exc_info=True)

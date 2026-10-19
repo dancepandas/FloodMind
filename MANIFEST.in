@@ -3,4 +3,3 @@ include .env.example
 
 graft floodmind/config
 graft floodmind/skills
-graft floodmind/MCP

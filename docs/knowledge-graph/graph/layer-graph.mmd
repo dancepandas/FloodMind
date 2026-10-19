@@ -1,0 +1,115 @@
+flowchart LR
+    agent_core["Agent 执行核心"]
+    agent_services["Agent 辅助服务"]
+    benchmarks["收益基线"]
+    cli["CLI/宿主入口"]
+    common["通用工具"]
+    evals["内部评测集"]
+    extension["扩展点"]
+    gateway["Gateway（HTTP/SSE 适配）"]
+    mcp["MCP 集成"]
+    memory["记忆与会话"]
+    model_config["模型与配置"]
+    other["其它"]
+    runtime_adapters["运行时适配器"]
+    runtime_contracts["运行时契约"]
+    runtime_kernel["Reducer/运行时内核"]
+    runtime_services["运行时服务"]
+    sdk["SDK 公共入口"]
+    skills["技能"]
+    tests["测试"]
+    tooling["工程脚本"]
+    tools["工具"]
+    tests -->|172| runtime_services
+    tests -->|125| runtime_contracts
+    tests -->|121| agent_core
+    tests -->|50| model_config
+    runtime_services -->|36| runtime_contracts
+    tests -->|34| tools
+    tests -->|30| memory
+    agent_core -->|22| runtime_contracts
+    agent_core -->|20| runtime_services
+    tests -->|18| runtime_kernel
+    agent_core -->|14| model_config
+    tests -->|14| sdk
+    tests -->|12| skills
+    tools -->|10| runtime_services
+    agent_core -->|8| tools
+    runtime_services -->|7| agent_core
+    cli -->|6| model_config
+    tools -->|6| runtime_contracts
+    memory -->|5| runtime_services
+    tools -->|5| memory
+    tests -->|5| agent_services
+    evals -->|4| tools
+    evals -->|4| agent_core
+    cli -->|4| runtime_services
+    runtime_services -->|4| runtime_kernel
+    gateway -->|4| runtime_services
+    gateway -->|4| runtime_contracts
+    tests -->|4| evals
+    tests -->|4| benchmarks
+    tests -->|4| extension
+    sdk -->|3| model_config
+    sdk -->|3| agent_core
+    sdk -->|3| runtime_services
+    agent_core -->|3| memory
+    model_config -->|3| agent_core
+    model_config -->|3| runtime_contracts
+    agent_core -->|3| extension
+    runtime_kernel -->|3| runtime_contracts
+    runtime_adapters -->|3| runtime_contracts
+    runtime_adapters -->|3| runtime_services
+    runtime_services -->|3| model_config
+    gateway -->|3| model_config
+    tooling -->|3| model_config
+    tests -->|3| tooling
+    tests -->|3| mcp
+    cli -->|2| memory
+    cli -->|2| agent_services
+    evals -->|2| runtime_contracts
+    evals -->|2| runtime_services
+    cli -->|2| agent_core
+    sdk -->|2| memory
+    sdk -->|2| runtime_contracts
+    mcp -->|2| runtime_contracts
+    agent_core -->|2| agent_services
+    agent_core -->|2| skills
+    runtime_services -->|2| tools
+    runtime_services -->|2| common
+    gateway -->|2| sdk
+    memory -->|2| model_config
+    tools -->|2| skills
+    tools -->|2| model_config
+    tests -->|2| cli
+    tests -->|2| gateway
+    benchmarks -->|1| sdk
+    benchmarks -->|1| runtime_contracts
+    benchmarks -->|1| memory
+    evals -->|1| model_config
+    cli -->|1| sdk
+    cli -->|1| gateway
+    cli -->|1| skills
+    agent_services -->|1| agent_core
+    agent_services -->|1| sdk
+    agent_services -->|1| runtime_contracts
+    agent_services -->|1| model_config
+    mcp -->|1| runtime_services
+    agent_services -->|1| common
+    agent_core -->|1| runtime_kernel
+    agent_core -->|1| sdk
+    agent_core -->|1| mcp
+    runtime_contracts -->|1| tools
+    runtime_services -->|1| memory
+    runtime_services -->|1| sdk
+    runtime_services -->|1| skills
+    gateway -->|1| memory
+    gateway -->|1| common
+    memory -->|1| skills
+    extension -->|1| tools
+    extension -->|1| model_config
+    tools -->|1| agent_services
+    tooling -->|1| evals
+    tooling -->|1| runtime_contracts
+    tooling -->|1| runtime_services
+    tests -->|1| runtime_adapters

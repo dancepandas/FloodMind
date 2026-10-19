@@ -42,9 +42,18 @@ def open_journal_authority(
     turn_id: str,
     attempt_id: str = "",
     index: bool = False,
+    fence_check: Optional[Any] = None,
 ) -> "JournalAuthority":
+    """打开 run 的权威 journal 门面。
+
+    ``fence_check`` 由 lease 持有方提供（见 ``Lease.fence_check``），在每次
+    追加的 journal 文件锁内校验 token；未提供表示该写入路径不参与 fencing
+    （仅限只读/测试路径）。
+    """
     journal_dir = _run_journal_dir(runtime_dir, conversation_id, task_id, run_id)
-    writer = JournalWriter(runtime_dir, run_id, journal_dir=journal_dir)
+    writer = JournalWriter(
+        runtime_dir, run_id, journal_dir=journal_dir, fence_check=fence_check
+    )
     journal_index = None
     if index:
         from floodmind.agent.runtime.services.journal_index import SqliteJournalIndex
@@ -60,6 +69,7 @@ def open_journal_authority(
         thread_id=thread_id,
         turn_id=turn_id,
         attempt_id=attempt_id,
+        fence_check=fence_check,
     )
 
 
@@ -76,9 +86,11 @@ class JournalAuthority:
         thread_id: str,
         turn_id: str,
         attempt_id: str = "",
+        fence_check: Optional[Any] = None,
     ):
         self._writer = writer
         self._index = index
+        self.fence_check = fence_check
         self._journal_dir = Path(journal_dir) if journal_dir is not None else None
         self.conversation_id = conversation_id
         self.task_id = task_id

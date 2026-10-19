@@ -28,6 +28,7 @@ from pydantic import BaseModel, ConfigDict, PrivateAttr
 from floodmind.agent.runtime.contracts.run_state import RunState
 from floodmind.agent.runtime.contracts.tool_transaction import ToolStatus
 from floodmind.agent.runtime.services.journal_authority import JournalAuthority, open_journal_authority
+from floodmind.agent.runtime.services.journal_writer import JournalFencedError
 from floodmind.agent.runtime.services.reconciliation_service import (
     ReconciliationService,
     ReconcileResult,
@@ -48,17 +49,47 @@ class Lease(BaseModel):
     _path: Optional[Path] = PrivateAttr(default=None)
     _token: str = PrivateAttr(default="")
 
+    def fence_check(self) -> None:
+        """写端 fencing 校验：确认磁盘 lease 仍属于本 token。
+
+        在 JournalWriter 的 journal 文件锁内调用（与 ``open_lease`` 的接管
+        临界区共用同一把锁）。lease 缺失、损坏或 token 已易主都抛
+        ``JournalFencedError``——fail-closed，旧 owner 不得再写入。
+        """
+        path = self._path
+        if path is None:
+            raise JournalFencedError("lease 未绑定路径，拒绝写入")
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except FileNotFoundError as exc:
+            raise JournalFencedError(
+                f"lease 已不存在（run 可能已被接管或已释放）: {path}"
+            ) from exc
+        except (OSError, ValueError) as exc:
+            raise JournalFencedError(f"lease 不可读或损坏，拒绝写入: {path}: {exc}") from exc
+        if str(data.get("token", "")) != self._token:
+            raise JournalFencedError(
+                f"lease token 已易主（当前 owner={data.get('owner')!r}），"
+                "拒绝旧 owner 写入"
+            )
+
     def release(self) -> None:
         """释放 lease。带 owner token 校验：TTL 过期被新 owner 抢占后，
-        旧 owner 迟到的 release 不会误删新 owner 的 lease（D06）。"""
+        旧 owner 迟到的 release 不会误删新 owner 的 lease（D06）。
+
+        与 ``open_lease`` 的接管临界区共用 journal 文件锁：token 校验与删除
+        之间不会插入 takeover，避免“校验通过后删除新 owner lease”的窗口。
+        不得在持有同一 journal 锁的写入路径内调用（文件锁不可跨实例重入）。
+        """
         path = self._path
         if path is None or not path.exists():
             return
         try:
-            data = json.loads(path.read_text(encoding="utf-8"))
-            if str(data.get("token", "")) != self._token:
-                return  # lease 已易主
-            path.unlink()
+            with FileLock(path.parent / "journal" / ".lock", timeout=10.0):
+                data = json.loads(path.read_text(encoding="utf-8"))
+                if str(data.get("token", "")) != self._token:
+                    return  # lease 已易主
+                path.unlink()
         except OSError:
             pass
         except Exception:
@@ -74,14 +105,16 @@ def open_lease(runtime_dir, run_id, owner: str, ttl_seconds: int = 300,
 
     D06 修复：exists→read→write 三步在跨进程 FileLock 内执行，消除两进程同时
     通过检查的 TOCTOU；lease 写入 tmp+os.replace 原子发布。
-    注意：journal 写路径仍未逐条校验 lease epoch（完整 fencing 需写端配合），
-    本层保证的是"同一时刻至多一个 owner 通过 open_lease 入场"。
+    接管临界区与 JournalWriter 的 append 共用同一把 journal 文件锁：旧 owner
+    的 fence_check 与本次 takeover 不会交错，token 易主后其下一次追加必然被
+    ``JournalFencedError`` 拒绝。
     """
     path = lease_file(Path(runtime_dir), conversation_id, task_id, run_id)
     path.parent.mkdir(parents=True, exist_ok=True)
     now = int(time.time())
     token = f"{owner}:{uuid.uuid4().hex}"
-    with FileLock(Path(str(path) + ".lock"), timeout=10.0):
+    journal_lock = path.parent / "journal" / ".lock"
+    with FileLock(journal_lock, timeout=10.0):
         if path.exists():
             try:
                 data = json.loads(path.read_text(encoding="utf-8"))
@@ -156,7 +189,8 @@ class ResumeService:
         try:
             authority = open_journal_authority(
                 runtime_dir, conversation_id=conversation_id, task_id=task_id,
-                run_id=run_id, thread_id=thread_id, turn_id=turn_id)
+                run_id=run_id, thread_id=thread_id, turn_id=turn_id,
+                fence_check=lease.fence_check)
 
             if checkpoint_id:
                 if checkpoint_service is None:

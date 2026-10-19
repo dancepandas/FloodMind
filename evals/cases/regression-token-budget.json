@@ -1,0 +1,38 @@
+{
+  "id": "regression-token-budget",
+  "tier": "regression",
+  "description": "G-18 回归：累计 token 达到预算后不再发起下一次模型调用，终态给出明确文案。",
+  "user_text": "循环查询直到得到结论。",
+  "max_iterations": 10,
+  "max_total_tokens": 100,
+  "tools": {
+    "ReadGauge": {
+      "description": "读取指定测站的当前水位。",
+      "parameters": {"type": "object", "properties": {"station": {"type": "string"}}},
+      "result": {"content": "水位 12.3 m", "status": "completed"}
+    }
+  },
+  "rounds": [
+    {
+      "events": [
+        {"type": "usage", "usage": {"prompt_tokens": 60, "completion_tokens": 40, "total_tokens": 100}},
+        {
+          "type": "tool_call_done",
+          "tool_call": {"id": "call_1", "name": "ReadGauge", "arguments": {"station": "敖江"}}
+        },
+        {"type": "done", "terminal_reason": "tool_calls"}
+      ]
+    },
+    {
+      "events": [
+        {"type": "token", "content": "不应到达这一轮。"},
+        {"type": "done", "terminal_reason": "stop"}
+      ]
+    }
+  ],
+  "expect": {
+    "model_calls": 1,
+    "tool_calls": ["ReadGauge"],
+    "final_output_contains": ["预算上限 100", "累计 token 用量 100"]
+  }
+}

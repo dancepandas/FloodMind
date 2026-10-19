@@ -1,0 +1,39 @@
+{
+  "id": "regression-max-iterations",
+  "tier": "regression",
+  "description": "迭代上界：模型持续要求工具调用时，max_iterations 截断循环并回退到最后一次工具结果。",
+  "user_text": "不断查询，不要停。",
+  "max_iterations": 1,
+  "tools": {
+    "ReadGauge": {
+      "description": "读取指定测站的当前水位。",
+      "parameters": {"type": "object", "properties": {"station": {"type": "string"}}},
+      "result": {"content": "最后可得水位 12.3 m", "status": "completed"}
+    }
+  },
+  "rounds": [
+    {
+      "events": [
+        {
+          "type": "tool_call_done",
+          "tool_call": {"id": "call_1", "name": "ReadGauge", "arguments": {"station": "敖江"}}
+        },
+        {"type": "done", "terminal_reason": "tool_calls"}
+      ]
+    },
+    {
+      "events": [
+        {
+          "type": "tool_call_done",
+          "tool_call": {"id": "call_2", "name": "ReadGauge", "arguments": {"station": "敖江"}}
+        },
+        {"type": "done", "terminal_reason": "tool_calls"}
+      ]
+    }
+  ],
+  "expect": {
+    "model_calls": 1,
+    "tool_calls": ["ReadGauge"],
+    "final_output_contains": ["最后可得水位 12.3 m"]
+  }
+}

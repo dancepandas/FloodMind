@@ -1,0 +1,64 @@
+flowchart LR
+    sdk["SDK 公共入口"]
+    cli_host["CLI 与宿主入口"]
+    agent_core["Agent 执行核心"]
+    runtime_contracts["运行时契约"]
+    runtime_kernel["Reducer 与投影"]
+    runtime_services["运行时服务"]
+    runtime_adapters["运行时适配器"]
+    memory["记忆与会话"]
+    tools["工具层"]
+    skills["Skill 体系"]
+    mcp["MCP 集成"]
+    model["模型与配置"]
+    extension["扩展与辅助"]
+    gateway["Gateway（HTTP/SSE 适配）"]
+    tests["测试体系"]
+    evals["内部评测集"]
+    benchmarks["收益基线"]
+    tooling["工程脚本"]
+    sdk -->|delegates| agent_core
+    sdk -->|uses| model
+    sdk -->|uses| memory
+    sdk -->|uses| tools
+    sdk -->|uses| skills
+    cli_host -->|uses| sdk
+    cli_host -->|uses| agent_core
+    gateway -->|uses| sdk
+    gateway -->|uses| agent_core
+    agent_core -->|depends_on| runtime_contracts
+    agent_core -->|calls| runtime_services
+    agent_core -->|calls| runtime_kernel
+    agent_core -->|calls| model
+    agent_core -->|uses| tools
+    agent_core -->|uses| skills
+    agent_core -->|uses| mcp
+    agent_core -->|reads| memory
+    runtime_services -->|implements| runtime_contracts
+    runtime_services -->|uses| runtime_kernel
+    runtime_services -->|calls| tools
+    runtime_services -->|feeds| memory
+    runtime_adapters -->|exposes| runtime_services
+    memory -->|depends_on| runtime_contracts
+    memory -->|reads| runtime_services
+    memory -->|calls| model
+    tools -->|depends_on| runtime_contracts
+    tools -->|uses| runtime_services
+    skills -->|exposes| tools
+    mcp -->|depends_on| runtime_contracts
+    model -->|depends_on| runtime_contracts
+    extension -->|extends| agent_core
+    tests -->|verifies| sdk
+    tests -->|verifies| agent_core
+    tests -->|verifies| runtime_services
+    tests -->|verifies| memory
+    tests -->|verifies| tools
+    tests -->|verifies| skills
+    tests -->|verifies| mcp
+    tests -->|verifies| model
+    evals -->|verifies| agent_core
+    evals -->|verifies| tools
+    evals -->|uses| model
+    benchmarks -->|uses| sdk
+    benchmarks -->|verifies| agent_core
+    benchmarks -->|uses| memory

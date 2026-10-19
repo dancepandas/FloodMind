@@ -178,6 +178,56 @@ def resolve_model(
     )
 
 
+def resolve_context_window(
+    model_key: Optional[str] = None,
+    provider_id: Optional[str] = None,
+) -> int:
+    """上下文窗口唯一解析入口（记忆压缩预算统一取此值）。
+
+    语义:
+      - model_key 命中 catalog → 该模型的 context_window（显式配置 + clamp）。
+      - model_key 非空但 catalog 中不存在 → 告警（点名模型与最终取值来源），
+        回退 catalog 默认模型（resolve_model().context_window）。
+      - catalog 为空 → 告警并返回 SDK 默认窗口 32768（SDK 构造不依赖全局配置
+        的既定行为）。
+
+    SDK Agent、NativeFloodAgent 等消费方统一调用本函数，不再各自读取
+    model_presets 或 settings.model.context_window。
+    """
+    if model_key:
+        known = any(m.get("id") == model_key for _, _, m in list_models())
+        if known:
+            return resolve_model(model_key=model_key, provider_id=provider_id).context_window
+
+        # 模型未命中：回退 catalog 默认模型；catalog 也为空时用 SDK 默认窗口。
+        try:
+            default_model = resolve_model()
+        except ValueError:
+            logger.warning(
+                "无法解析上下文窗口：settings.json 未配置任何可用模型，"
+                "使用 SDK 默认窗口 %d",
+                _DEFAULT_CONTEXT_WINDOW,
+            )
+            return _DEFAULT_CONTEXT_WINDOW
+        logger.warning(
+            "模型 %r 不在 catalog 中，上下文窗口回退为 catalog 默认模型 %r 的 %d",
+            model_key,
+            default_model.id,
+            default_model.context_window,
+        )
+        return default_model.context_window
+
+    try:
+        return resolve_model(provider_id=provider_id).context_window
+    except ValueError as exc:
+        logger.warning(
+            "无法解析上下文窗口（%s），使用 SDK 默认窗口 %d",
+            exc,
+            _DEFAULT_CONTEXT_WINDOW,
+        )
+        return _DEFAULT_CONTEXT_WINDOW
+
+
 def _build(pid: str, pdata: Dict[str, Any], m: Dict[str, Any]) -> ResolvedModel:
     """从目录条目构造 ResolvedModel（连接信息取自 provider，参数取自模型）。"""
     from floodmind.config.provider_registry import PROVIDER_DEFS

@@ -76,15 +76,17 @@ class EventBus:
     def emit_token(self, content: str) -> None:
         self.emit({"type": "answer_delta", "content": content})
 
-    def emit_tool_status(self, tool_name: str, status: str, tool_input: str = "", call_id: str = "") -> None:
+    def emit_tool_status(self, tool_name: str, status: str, tool_input: str = "", call_id: str = "", run_id: str = "") -> None:
         event: Dict[str, Any] = {"type": "action_start", "tool_name": tool_name, "status": status}
         if call_id:
             event["call_id"] = call_id
         if tool_input:
             event["tool_input"] = tool_input
+        if run_id:
+            event["run_id"] = run_id
         self.emit(event)
 
-    def emit_tool_result(self, tool_name: str, status: str, content: str, tool_input: str = "", call_id: str = "") -> None:
+    def emit_tool_result(self, tool_name: str, status: str, content: str, tool_input: str = "", call_id: str = "", run_id: str = "") -> None:
         event: Dict[str, Any] = {
             "type": "action_end",
             "tool_name": tool_name,
@@ -95,6 +97,8 @@ class EventBus:
             event["call_id"] = call_id
         if tool_input:
             event["tool_input"] = tool_input
+        if run_id:
+            event["run_id"] = run_id
         self.emit(event)
 
     def emit_workflow_plan(self, title: str, steps: List[dict]) -> None:
@@ -181,18 +185,21 @@ class EventBus:
         """上下文压缩完成事件（OpenCode-compatible alias）。"""
         self.emit({"type": "context_compress_done", "content": summary_preview, "summary_preview": summary_preview[:200]})
 
-    def emit_token_usage(self, prompt_tokens: int = 0, completion_tokens: int = 0, total_tokens: int = 0) -> None:
+    def emit_token_usage(self, prompt_tokens: int = 0, completion_tokens: int = 0, total_tokens: int = 0, run_id: str = "") -> None:
         """发送 token 用量统计事件"""
-        self.emit({
+        event: Dict[str, Any] = {
             "type": "token_usage",
             "prompt_tokens": prompt_tokens,
             "completion_tokens": completion_tokens,
             "total_tokens": total_tokens,
-        })
+        }
+        if run_id:
+            event["run_id"] = run_id
+        self.emit(event)
 
     # ── Step 生命周期事件 ─────────────────
 
-    def emit_llm_step_start(self, model_name: str = "", iteration: int = 0) -> None:
+    def emit_llm_step_start(self, model_name: str = "", iteration: int = 0, run_id: str = "") -> None:
         """LLM 调用开始事件。前端可显示当前使用的模型和迭代序号。"""
         event: Dict[str, Any] = {
             "type": "llm_step_start",
@@ -200,6 +207,8 @@ class EventBus:
         }
         if model_name:
             event["model"] = model_name
+        if run_id:
+            event["run_id"] = run_id
         self.emit(event)
 
     def emit_llm_step_end(self, reason: str = "stop", tokens: Optional[Dict[str, int]] = None) -> None:

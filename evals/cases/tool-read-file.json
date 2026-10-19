@@ -1,0 +1,45 @@
+{
+  "id": "tool-read-file",
+  "tier": "tool",
+  "tool_mode": "real",
+  "description": "真实 Read 工具：从 workspace fixture 读取内容，结果回填到下一轮模型上下文。",
+  "user_text": "读取测站记录，告诉我敖江站当前水位。",
+  "max_iterations": 5,
+  "workspace_files": {
+    "data/gauge.md": "# 敖江站\n\n当前水位: 12.3 m\n"
+  },
+  "tools": {
+    "Read": {}
+  },
+  "rounds": [
+    {
+      "events": [
+        {
+          "type": "tool_call_done",
+          "tool_call": {
+            "id": "call_read",
+            "name": "Read",
+            "arguments": {"file_path": "data/gauge.md"}
+          }
+        },
+        {"type": "done", "terminal_reason": "tool_calls"}
+      ]
+    },
+    {
+      "events": [
+        {"type": "token", "content": "敖江站当前水位为 12.3 m。"},
+        {"type": "done", "terminal_reason": "stop"}
+      ]
+    }
+  ],
+  "expect": {
+    "model_calls": 2,
+    "tool_calls": ["Read"],
+    "tool_statuses": ["completed"],
+    "invalid_calls": 0,
+    "prompt_contains": [
+      {"call_index": 1, "contains": "12.3 m"}
+    ],
+    "final_output_contains": ["12.3"]
+  }
+}

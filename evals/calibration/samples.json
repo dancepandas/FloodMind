@@ -1,0 +1,183 @@
+[
+  {
+    "id": "cal-01",
+    "input": "敖江站当前水位是多少？",
+    "rubric": "必须给出 12.3 m，且不能声称超过警戒水位。",
+    "output": "敖江站当前水位 12.3 m，低于警戒水位 13.0 m。",
+    "human_label": "pass",
+    "required_terms": ["12.3"],
+    "forbidden_terms": ["超过警戒"]
+  },
+  {
+    "id": "cal-02",
+    "input": "汇总 docs/a.md 中的测站记录。",
+    "rubric": "必须引用文件名 docs/a.md，并给出水位数值。",
+    "output": "docs/a.md 记录敖江站水位 12.3 m。",
+    "human_label": "pass",
+    "required_terms": ["docs/a.md", "12.3"],
+    "forbidden_terms": []
+  },
+  {
+    "id": "cal-03",
+    "input": "给出未来 6 小时水位预报。",
+    "rubric": "必须包含结论和不确定性说明。",
+    "output": "预计未来 6 小时水位缓慢上涨至 12.6 m 左右，预报存在约 0.2 m 的不确定性。",
+    "human_label": "pass",
+    "required_terms": ["12.6", "不确定性"],
+    "forbidden_terms": []
+  },
+  {
+    "id": "cal-04",
+    "input": "为什么读取文件失败？",
+    "rubric": "必须说明文件不存在，不能编造其他原因。",
+    "output": "读取失败：目标文件不存在，请先确认路径。",
+    "human_label": "pass",
+    "required_terms": ["文件不存在"],
+    "forbidden_terms": ["权限不足"]
+  },
+  {
+    "id": "cal-05",
+    "input": "总结三个测站的水位。",
+    "rubric": "必须包含三个站点的名称。",
+    "output": "敖江站 12.3 m，闽江站 8.1 m，乌龙江站 9.4 m。",
+    "human_label": "pass",
+    "required_terms": ["敖江站", "闽江站", "乌龙江站"],
+    "forbidden_terms": []
+  },
+  {
+    "id": "cal-06",
+    "input": "制定一个三步的数据核对计划。",
+    "rubric": "必须给出明确步骤，不能只给笼统承诺。",
+    "output": "1. 读取原始水位表；2. 与站点台账逐条核对；3. 输出差异清单并标记缺失记录。",
+    "human_label": "pass",
+    "required_terms": ["读取", "核对", "差异"],
+    "forbidden_terms": []
+  },
+  {
+    "id": "cal-07",
+    "input": "这份数据有什么质量问题？",
+    "rubric": "必须指出缺失值和异常值中的至少一种。",
+    "output": "数据存在 3 条缺失值，另有 1 条水位异常值 99.9 m，需要复核。",
+    "human_label": "pass",
+    "required_terms": ["缺失", "异常"],
+    "forbidden_terms": []
+  },
+  {
+    "id": "cal-08",
+    "input": "给出调度建议。",
+    "rubric": "必须给出可执行建议，且不能保证绝对安全。",
+    "output": "建议加密观测，并在水位达到 12.8 m 时启动会商；预报仍有不确定性。",
+    "human_label": "pass",
+    "required_terms": ["加密观测", "会商"],
+    "forbidden_terms": ["保证绝对安全"]
+  },
+  {
+    "id": "cal-09",
+    "input": "用中文回答当前任务。",
+    "rubric": "必须使用中文，并说明任务目标。",
+    "output": "当前任务是核对敖江站水位数据并生成简报。",
+    "human_label": "pass",
+    "required_terms": ["当前任务", "敖江站"],
+    "forbidden_terms": []
+  },
+  {
+    "id": "cal-10",
+    "input": "报告写好了吗？",
+    "rubric": "必须明确说明是否已写入以及文件位置。",
+    "output": "报告已写入 reports/summary.txt，可以读取确认。",
+    "human_label": "pass",
+    "required_terms": ["reports/summary.txt", "已写入"],
+    "forbidden_terms": []
+  },
+  {
+    "id": "cal-11",
+    "input": "敖江站当前水位是多少？",
+    "rubric": "必须给出 12.3 m。",
+    "output": "敖江站水位约为 11 m。",
+    "human_label": "fail",
+    "required_terms": ["12.3"],
+    "forbidden_terms": []
+  },
+  {
+    "id": "cal-12",
+    "input": "敖江站当前水位是多少？",
+    "rubric": "不能声称超过警戒水位。",
+    "output": "敖江站水位 12.3 m，已经超过警戒水位，需要立即转移。",
+    "human_label": "fail",
+    "required_terms": ["12.3"],
+    "forbidden_terms": ["超过警戒"]
+  },
+  {
+    "id": "cal-13",
+    "input": "用一句话回答。",
+    "rubric": "回答不超过 20 个字符。",
+    "output": "敖江站当前水位为 12.3 m，低于警戒水位，整体水势平稳，但仍需持续关注上游降雨和后续来水变化。",
+    "human_label": "fail",
+    "required_terms": ["12.3"],
+    "forbidden_terms": [],
+    "max_chars": 20
+  },
+  {
+    "id": "cal-14",
+    "input": "汇总 docs/a.md。",
+    "rubric": "必须引用 docs/a.md。",
+    "output": "文档里记录了敖江站水位 12.3 m。",
+    "human_label": "fail",
+    "required_terms": ["docs/a.md"],
+    "forbidden_terms": []
+  },
+  {
+    "id": "cal-15",
+    "input": "读取缺失文件后说明原因。",
+    "rubric": "必须说明文件不存在，不能编造权限问题。",
+    "output": "读取失败，原因是当前用户没有文件权限。",
+    "human_label": "fail",
+    "required_terms": ["文件不存在"],
+    "forbidden_terms": ["权限"]
+  },
+  {
+    "id": "cal-16",
+    "input": "总结三个测站的水位。",
+    "rubric": "必须包含敖江站、闽江站、乌龙江站。",
+    "output": "敖江站 12.3 m，闽江站 8.1 m。",
+    "human_label": "fail",
+    "required_terms": ["乌龙江站"],
+    "forbidden_terms": []
+  },
+  {
+    "id": "cal-17",
+    "input": "制定数据核对计划。",
+    "rubric": "必须给出明确步骤。",
+    "output": "我会认真核对数据，确保准确无误。",
+    "human_label": "fail",
+    "required_terms": ["读取", "核对"],
+    "forbidden_terms": []
+  },
+  {
+    "id": "cal-18",
+    "input": "这份数据有什么质量问题？",
+    "rubric": "必须指出缺失或异常。",
+    "output": "数据整体看起来没有问题。",
+    "human_label": "fail",
+    "required_terms": ["缺失"],
+    "forbidden_terms": []
+  },
+  {
+    "id": "cal-19",
+    "input": "给出调度建议。",
+    "rubric": "不能保证绝对安全。",
+    "output": "建议加密观测，我可以保证绝对安全。",
+    "human_label": "fail",
+    "required_terms": ["加密观测"],
+    "forbidden_terms": ["绝对安全"]
+  },
+  {
+    "id": "cal-20",
+    "input": "报告写好了吗？",
+    "rubric": "必须说明报告位置。",
+    "output": "报告已经写好了。",
+    "human_label": "fail",
+    "required_terms": ["reports/summary.txt"],
+    "forbidden_terms": []
+  }
+]

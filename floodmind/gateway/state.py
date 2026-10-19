@@ -22,6 +22,7 @@ from typing import Any, Dict, Optional
 from floodmind.agent.api import Agent
 from floodmind.agent.runtime.contracts.workspace import Workspace
 from floodmind.agent.runtime.services.ask_service import get_ask_service
+from floodmind.config.secret_store import protect, unprotect
 from floodmind.memory.session_manager import SessionManager
 from floodmind.common.filelock import FileLock
 
@@ -119,11 +120,11 @@ def resolve_auth_token(explicit: Optional[str] = None) -> str:
                 cfg = json.loads(_SETTINGS_FILE.read_text(encoding="utf-8"))
             except Exception:
                 cfg = {}
-        token = str((cfg.get("gateway") or {}).get("auth_token") or "").strip()
+        token = unprotect(str((cfg.get("gateway") or {}).get("auth_token") or "")).strip()
         if token:
             return token
         token = f"fmgt-{secrets.token_hex(20)}"
-        cfg.setdefault("gateway", {})["auth_token"] = token
+        cfg.setdefault("gateway", {})["auth_token"] = protect(token)
         _SETTINGS_FILE.parent.mkdir(parents=True, exist_ok=True)
         tmp = _SETTINGS_FILE.with_suffix(".json.tmp")
         tmp.write_text(json.dumps(cfg, ensure_ascii=False, indent=2), encoding="utf-8")

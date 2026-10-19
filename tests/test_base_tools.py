@@ -213,8 +213,8 @@ def test_add_memory_redirects_to_facade_store(tmp_path, monkeypatch):
     assert store.count_active() == 1
 
 
-def test_add_memory_fallback_when_facade_unavailable(monkeypatch):
-    """门面不可用（构造异常）时回退旧直写路径，写 memory_instance 且返回文案不变。"""
+def test_add_memory_fail_closed_when_facade_unavailable(monkeypatch):
+    """门面不可用（构造异常）时 fail-closed：返回错误且不写旧 LTM。"""
     from floodmind.memory import services as svc_mod
     from floodmind.tools import base_tools
 
@@ -236,5 +236,5 @@ def test_add_memory_fallback_when_facade_unavailable(monkeypatch):
     monkeypatch.setattr(base_tools, "get_memory_instance", lambda: mem)
 
     result = base_tools._impl_add_memory("旧路径事实", "note")
-    assert "已记录到长期记忆" in result
-    assert mem.written == [("旧路径事实", "note")]
+    assert "记忆服务不可用" in result
+    assert mem.written == []

@@ -116,6 +116,9 @@ class RunContext:
     # 运行模式（阶段E）：planning=只读硬门，execution=执行。
     # 由 executor 从 AgentLoopState.mode 注入；子代理恒 execution。
     mode: str = "execution"
+    # G-18：单 run 累计 token 预算（0 = 不限制）。达到上限后不再发起新的
+    # LLM 调用，以 failed 终态结束并给出明确文案，而不是继续烧预算。
+    max_total_tokens: int = 0
 
 
 @dataclass(frozen=True)
@@ -391,6 +394,20 @@ class ExecutionPlan(BaseModel):
 
     def all_steps_completed(self) -> bool:
         return all(s.get("status") == "completed" for s in self.steps) if self.steps else False
+
+    def has_open_steps(self) -> bool:
+        """存在未完成步骤（pending/running）时返回 True，用于跨 run 恢复判定。"""
+        return bool(self.steps) and any(
+            s.get("status") in ("pending", "running") for s in self.steps
+        )
+
+    def refresh_terminal_status(self) -> None:
+        """依据步骤状态刷新整体终态：全部 completed/skipped -> completed，否则 running。"""
+        closed = {"completed", "skipped"}
+        if self.steps and all(s.get("status") in closed for s in self.steps):
+            self.terminal_status = "completed"
+        else:
+            self.terminal_status = "running"
 
     def _topological_order(self) -> tuple[List[str], Dict[str, List[str]]]:
         """Build the dependency graph once and return its stable Kahn ordering."""

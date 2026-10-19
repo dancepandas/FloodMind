@@ -1,7 +1,7 @@
 """Tests for context compression."""
 
 import json
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -52,6 +52,24 @@ class TestContextCompressor:
         assert len(result.compressed_messages) == 5  # 2 head + 1 summary + 2 tail
         assert result.compressed_messages[2]["role"] == "system"
         assert SUMMARY_PREFIX in result.compressed_messages[2]["content"]
+
+    def test_compress_keeps_original_when_summary_empty(self):
+        """G-04：中间区非空但摘要为空时返回原文，绝不丢弃中间区。"""
+        c = ContextCompressor(head_keep=2, tail_keep=2)
+        messages = [
+            {"role": "system", "content": "sys"},
+            {"role": "user", "content": "q1" * 500},
+            {"role": "assistant", "content": "a1" * 500},
+            {"role": "user", "content": "q2" * 500},
+            {"role": "assistant", "content": "a2" * 500},
+            {"role": "user", "content": "q3" * 500},
+            {"role": "assistant", "content": "a3" * 500},
+        ]
+        with patch.object(c, "_generate_summary", return_value=""):
+            result = c.compress(messages, 100)
+        assert result.compressed_messages is messages
+        assert result.saved_tokens == 0
+        assert result.summary == ""
 
     def test_trim_tool_outputs(self):
         """Long tool outputs are trimmed."""

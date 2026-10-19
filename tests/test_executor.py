@@ -824,6 +824,59 @@ class TestExecutorPlaceholderStates:
         assert result.final_output != "任务已被用户中断。"
         assert not result.is_timeout
 
+    def test_compaction_summary_missing_fails_closed_without_busy_loop(self):
+        """G-04：摘要缺失时中止压缩、保留原文并报错，且不会忙循环。
+
+        compress_journal 抛 CompactionSummaryError → executor 保持原始 messages、
+        设置 _compaction_failed、发出 error 事件；下一次 awaiting_llm 直接走 LLM。
+        """
+        from floodmind.agent.native.context_compressor import (
+            CompactionSummaryError,
+            ContextCompressor,
+        )
+        from floodmind.agent.native.types import AgentLoopState
+
+        cc = MagicMock(spec=ContextCompressor)
+        cc.should_compress.return_value = True
+        cc.compress_journal.side_effect = CompactionSummaryError(
+            "summary is empty for compressible messages[1:4]"
+        )
+        executor = self._make_executor(context_compressor=cc, context_window=100)
+        errors = []
+        executor.event_bus.add_listener(
+            lambda event: errors.append(event) if event.get("type") == "error" else None
+        )
+        original = [
+            {"role": "system", "content": "sys"},
+            {"role": "user", "content": "x" * 200},
+            {"role": "assistant", "content": "y" * 200},
+            {"role": "user", "content": "a" * 200},
+            {"role": "assistant", "content": "b" * 200},
+            {"role": "user", "content": "z" * 200},
+        ]
+        state = AgentLoopState(
+            session_id="test-session",
+            run_id="run-1",
+            status="awaiting_llm",
+            messages=list(original),
+        )
+        entries = {"n": 0}
+
+        def abort_check() -> bool:
+            entries["n"] += 1
+            return entries["n"] >= 50
+
+        ctx = self._make_context()
+        ctx.abort_check = abort_check
+        result = executor.run_from_state(ctx, state)
+
+        assert executor._compaction_failed is True
+        assert state.messages == original
+        assert errors and "摘要缺失" in errors[0]["content"]
+        # 未修复的忙循环永不调用 LLM；此处必须恰好调用一次
+        assert executor.model_client.stream_chat.call_count == 1
+        assert not result.is_timeout
+
     def test_model_call_emits_projection_manifest(self):
         """F3：每次模型调用前 emit context.projection.committed（回答「模型看到了什么」）。"""
         mc = MagicMock(spec=ModelClient)

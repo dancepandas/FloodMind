@@ -1,0 +1,230 @@
+flowchart LR
+    evals_real_tools["evals.real_tools"]
+    evals_runner["evals.runner"]
+    floodmind_agent_api["floodmind.agent.api"]
+    floodmind_agent_mcp_client["floodmind.agent.mcp_client"]
+    floodmind_agent_native["floodmind.agent.native"]
+    floodmind_agent_runtime["floodmind.agent.runtime"]
+    floodmind_cli["floodmind.cli"]
+    floodmind_common_filelock["floodmind.common.filelock"]
+    floodmind_config_model_presets["floodmind.config.model_presets"]
+    floodmind_config_model_resolver["floodmind.config.model_resolver"]
+    floodmind_config_settings["floodmind.config.settings"]
+    floodmind_gateway_app["floodmind.gateway.app"]
+    floodmind_gateway_chainlit_app["floodmind.gateway.chainlit_app"]
+    floodmind_gateway_state["floodmind.gateway.state"]
+    floodmind_memory_dual_memory["floodmind.memory.dual_memory"]
+    floodmind_tools_agent_tool["floodmind.tools.agent_tool"]
+    floodmind_tools_base_tools["floodmind.tools.base_tools"]
+    floodmind_tools_file_tools["floodmind.tools.file_tools"]
+    floodmind_tools_memory_tools["floodmind.tools.memory_tools"]
+    floodmind_tools_session_context["floodmind.tools.session_context"]
+    scripts_metrics_report["scripts.metrics_report"]
+    tests_test_agent_skill_roots["tests.test_agent_skill_roots"]
+    tests_test_agent_tool["tests.test_agent_tool"]
+    tests_test_apply_patch_permissions["tests.test_apply_patch_permissions"]
+    tests_test_approval_fingerprint["tests.test_approval_fingerprint"]
+    tests_test_artifact_service["tests.test_artifact_service"]
+    tests_test_artifact_traversal["tests.test_artifact_traversal"]
+    tests_test_background_kill_chain["tests.test_background_kill_chain"]
+    tests_test_background_reconcile["tests.test_background_reconcile"]
+    tests_test_background_task_service["tests.test_background_task_service"]
+    tests_test_base_tools["tests.test_base_tools"]
+    tests_test_bash_workspace_policy["tests.test_bash_workspace_policy"]
+    tests_test_checkpoint_cursor["tests.test_checkpoint_cursor"]
+    tests_test_checkpoint_serialization_hardening["tests.test_checkpoint_serialization_hardening"]
+    tests_test_checkpoint_service["tests.test_checkpoint_service"]
+    tests_test_child_background_namespace["tests.test_child_background_namespace"]
+    tests_test_child_permission_context["tests.test_child_permission_context"]
+    tests_test_child_sandbox_backend["tests.test_child_sandbox_backend"]
+    tests_test_child_thread_cancellation["tests.test_child_thread_cancellation"]
+    tests_test_child_thread_quota["tests.test_child_thread_quota"]
+    tests_test_child_thread_runtime["tests.test_child_thread_runtime"]
+    tests_test_credential_env["tests.test_credential_env"]
+    tests_test_execution_events["tests.test_execution_events"]
+    tests_test_executor["tests.test_executor"]
+    tests_test_file_tools["tests.test_file_tools"]
+    tests_test_file_tools_permissions["tests.test_file_tools_permissions"]
+    tests_test_guardrails["tests.test_guardrails"]
+    tests_test_handoff["tests.test_handoff"]
+    tests_test_history_projection["tests.test_history_projection"]
+    tests_test_idempotency["tests.test_idempotency"]
+    tests_test_image_message_projection["tests.test_image_message_projection"]
+    tests_test_input_budget["tests.test_input_budget"]
+    tests_test_journal_authority["tests.test_journal_authority"]
+    tests_test_journal_compact["tests.test_journal_compact"]
+    tests_test_journal_fencing["tests.test_journal_fencing"]
+    tests_test_journal_index["tests.test_journal_index"]
+    tests_test_journal_writer["tests.test_journal_writer"]
+    tests_test_mcp_agent_isolation["tests.test_mcp_agent_isolation"]
+    tests_test_mcp_client["tests.test_mcp_client"]
+    tests_test_memory_tools["tests.test_memory_tools"]
+    tests_test_model_routing["tests.test_model_routing"]
+    tests_test_native_agent_workspace["tests.test_native_agent_workspace"]
+    tests_test_native_context_window["tests.test_native_context_window"]
+    tests_test_otlp_exporter["tests.test_otlp_exporter"]
+    tests_test_p2_acceptance["tests.test_p2_acceptance"]
+    tests_test_p3_acceptance["tests.test_p3_acceptance"]
+    tests_test_p5_acceptance["tests.test_p5_acceptance"]
+    tests_test_p6_acceptance["tests.test_p6_acceptance"]
+    tests_test_p7_acceptance["tests.test_p7_acceptance"]
+    tests_test_path_service_workspace["tests.test_path_service_workspace"]
+    tests_test_permission_host_fixes["tests.test_permission_host_fixes"]
+    tests_test_permission_service["tests.test_permission_service"]
+    tests_test_permission_tier["tests.test_permission_tier"]
+    tests_test_plan_contract["tests.test_plan_contract"]
+    tests_test_plan_gap_implementation["tests.test_plan_gap_implementation"]
+    tests_test_plan_mode_gate["tests.test_plan_mode_gate"]
+    tests_test_plan_persistence["tests.test_plan_persistence"]
+    tests_test_plan_update["tests.test_plan_update"]
+    tests_test_projection_manifest["tests.test_projection_manifest"]
+    tests_test_provider_pipelines["tests.test_provider_pipelines"]
+    tests_test_reconciliation_service["tests.test_reconciliation_service"]
+    tests_test_reducer["tests.test_reducer"]
+    tests_test_resume_service["tests.test_resume_service"]
+    tests_test_retry_policy["tests.test_retry_policy"]
+    tests_test_run_state["tests.test_run_state"]
+    tests_test_sandbox_backend["tests.test_sandbox_backend"]
+    tests_test_sandbox_service["tests.test_sandbox_service"]
+    tests_test_sdk_agent["tests.test_sdk_agent"]
+    tests_test_sdk_api_identity["tests.test_sdk_api_identity"]
+    tests_test_specialist_execution["tests.test_specialist_execution"]
+    tests_test_subagent_contract["tests.test_subagent_contract"]
+    tests_test_subagent_journal["tests.test_subagent_journal"]
+    tests_test_token_budget["tests.test_token_budget"]
+    tests_test_tool_execution_service["tests.test_tool_execution_service"]
+    tests_test_tool_lifecycle_reducer["tests.test_tool_lifecycle_reducer"]
+    tests_test_tool_loading["tests.test_tool_loading"]
+    tests_test_tool_output_service["tests.test_tool_output_service"]
+    tests_test_tool_transaction["tests.test_tool_transaction"]
+    tests_test_trace_metrics["tests.test_trace_metrics"]
+    tests_test_trace_processors["tests.test_trace_processors"]
+    tests_test_tracing_otlp["tests.test_tracing_otlp"]
+    tests_test_tracing_service["tests.test_tracing_service"]
+    tests_test_usage_accounting["tests.test_usage_accounting"]
+    tests_test_workspace["tests.test_workspace"]
+    floodmind_agent_native -->|46| floodmind_agent_runtime
+    tests_test_p7_acceptance -->|12| floodmind_agent_runtime
+    tests_test_child_thread_runtime -->|10| floodmind_agent_runtime
+    tests_test_execution_events -->|10| floodmind_agent_runtime
+    tests_test_executor -->|10| floodmind_agent_native
+    tests_test_p6_acceptance -->|9| floodmind_agent_runtime
+    tests_test_permission_host_fixes -->|9| floodmind_agent_runtime
+    tests_test_tool_execution_service -->|9| floodmind_agent_runtime
+    tests_test_child_thread_cancellation -->|8| floodmind_agent_runtime
+    tests_test_child_thread_quota -->|8| floodmind_agent_runtime
+    tests_test_model_routing -->|8| floodmind_agent_native
+    tests_test_sandbox_service -->|8| floodmind_agent_runtime
+    floodmind_agent_runtime -->|7| floodmind_agent_native
+    tests_test_artifact_service -->|7| floodmind_agent_runtime
+    tests_test_executor -->|7| floodmind_agent_runtime
+    tests_test_retry_policy -->|7| floodmind_agent_native
+    tests_test_sdk_agent -->|7| floodmind_agent_runtime
+    tests_test_specialist_execution -->|7| floodmind_agent_runtime
+    tests_test_subagent_journal -->|7| floodmind_agent_runtime
+    floodmind_tools_agent_tool -->|6| floodmind_agent_runtime
+    floodmind_tools_base_tools -->|6| floodmind_agent_runtime
+    tests_test_child_permission_context -->|6| floodmind_agent_runtime
+    tests_test_child_thread_runtime -->|6| floodmind_agent_native
+    tests_test_plan_update -->|6| floodmind_agent_native
+    tests_test_resume_service -->|6| floodmind_agent_runtime
+    evals_runner -->|5| floodmind_agent_native
+    floodmind_agent_api -->|5| floodmind_agent_runtime
+    tests_test_background_reconcile -->|5| floodmind_agent_runtime
+    tests_test_background_task_service -->|5| floodmind_agent_native
+    tests_test_bash_workspace_policy -->|5| floodmind_agent_runtime
+    tests_test_checkpoint_cursor -->|5| floodmind_agent_runtime
+    tests_test_guardrails -->|5| floodmind_agent_native
+    tests_test_handoff -->|5| floodmind_agent_native
+    tests_test_image_message_projection -->|5| floodmind_agent_native
+    tests_test_p3_acceptance -->|5| floodmind_agent_runtime
+    tests_test_permission_host_fixes -->|5| floodmind_agent_native
+    tests_test_token_budget -->|5| floodmind_agent_native
+    tests_test_tool_lifecycle_reducer -->|5| floodmind_agent_runtime
+    floodmind_cli -->|4| floodmind_agent_runtime
+    floodmind_agent_api -->|4| floodmind_agent_native
+    tests_test_background_kill_chain -->|4| floodmind_agent_runtime
+    tests_test_background_task_service -->|4| floodmind_agent_runtime
+    tests_test_checkpoint_service -->|4| floodmind_agent_runtime
+    tests_test_child_thread_cancellation -->|4| floodmind_agent_native
+    tests_test_child_thread_quota -->|4| floodmind_agent_native
+    tests_test_credential_env -->|4| floodmind_agent_runtime
+    tests_test_handoff -->|4| floodmind_agent_runtime
+    tests_test_journal_fencing -->|4| floodmind_agent_runtime
+    tests_test_p2_acceptance -->|4| floodmind_agent_runtime
+    tests_test_p7_acceptance -->|4| floodmind_agent_native
+    tests_test_path_service_workspace -->|4| floodmind_agent_runtime
+    tests_test_plan_contract -->|4| floodmind_agent_native
+    tests_test_provider_pipelines -->|4| floodmind_agent_native
+    tests_test_reducer -->|4| floodmind_agent_runtime
+    tests_test_specialist_execution -->|4| floodmind_agent_native
+    tests_test_tool_loading -->|4| floodmind_agent_runtime
+    evals_real_tools -->|3| floodmind_agent_runtime
+    floodmind_cli -->|3| floodmind_agent_native
+    floodmind_agent_mcp_client -->|3| floodmind_agent_runtime
+    floodmind_agent_native -->|3| floodmind_config_settings
+    floodmind_agent_native -->|3| floodmind_tools_agent_tool
+    floodmind_agent_runtime -->|3| floodmind_tools_session_context
+    floodmind_gateway_app -->|3| floodmind_agent_runtime
+    floodmind_gateway_chainlit_app -->|3| floodmind_agent_runtime
+    tests_test_apply_patch_permissions -->|3| floodmind_agent_runtime
+    tests_test_approval_fingerprint -->|3| floodmind_agent_runtime
+    tests_test_base_tools -->|3| floodmind_agent_runtime
+    tests_test_child_sandbox_backend -->|3| floodmind_agent_runtime
+    tests_test_execution_events -->|3| floodmind_agent_native
+    tests_test_file_tools -->|3| floodmind_agent_runtime
+    tests_test_file_tools_permissions -->|3| floodmind_agent_runtime
+    tests_test_history_projection -->|3| floodmind_agent_runtime
+    tests_test_image_message_projection -->|3| floodmind_agent_runtime
+    tests_test_journal_authority -->|3| floodmind_agent_runtime
+    tests_test_permission_service -->|3| floodmind_agent_runtime
+    tests_test_plan_gap_implementation -->|3| floodmind_agent_runtime
+    tests_test_plan_persistence -->|3| floodmind_agent_native
+    tests_test_reconciliation_service -->|3| floodmind_agent_runtime
+    tests_test_sdk_agent -->|3| floodmind_agent_native
+    tests_test_sdk_api_identity -->|3| floodmind_agent_runtime
+    tests_test_subagent_journal -->|3| floodmind_agent_native
+    tests_test_tool_output_service -->|3| floodmind_agent_runtime
+    tests_test_trace_processors -->|3| floodmind_agent_runtime
+    floodmind_agent_native -->|2| floodmind_config_model_resolver
+    floodmind_agent_native -->|2| floodmind_config_model_presets
+    floodmind_agent_runtime -->|2| floodmind_common_filelock
+    floodmind_agent_runtime -->|2| floodmind_config_settings
+    floodmind_gateway_state -->|2| floodmind_agent_runtime
+    floodmind_memory_dual_memory -->|2| floodmind_agent_runtime
+    floodmind_tools_file_tools -->|2| floodmind_agent_runtime
+    floodmind_tools_memory_tools -->|2| floodmind_agent_runtime
+    scripts_metrics_report -->|2| floodmind_agent_runtime
+    tests_test_agent_skill_roots -->|2| floodmind_agent_native
+    tests_test_agent_tool -->|2| floodmind_agent_runtime
+    tests_test_artifact_traversal -->|2| floodmind_agent_runtime
+    tests_test_checkpoint_cursor -->|2| floodmind_agent_native
+    tests_test_checkpoint_serialization_hardening -->|2| floodmind_agent_runtime
+    tests_test_child_background_namespace -->|2| floodmind_agent_runtime
+    tests_test_guardrails -->|2| floodmind_agent_runtime
+    tests_test_idempotency -->|2| floodmind_agent_runtime
+    tests_test_input_budget -->|2| floodmind_agent_native
+    tests_test_journal_compact -->|2| floodmind_agent_runtime
+    tests_test_journal_index -->|2| floodmind_agent_runtime
+    tests_test_journal_writer -->|2| floodmind_agent_runtime
+    tests_test_mcp_agent_isolation -->|2| floodmind_agent_native
+    tests_test_mcp_client -->|2| floodmind_agent_native
+    tests_test_memory_tools -->|2| floodmind_agent_runtime
+    tests_test_native_agent_workspace -->|2| floodmind_agent_runtime
+    tests_test_native_context_window -->|2| floodmind_agent_native
+    tests_test_otlp_exporter -->|2| floodmind_agent_runtime
+    tests_test_p5_acceptance -->|2| floodmind_agent_native
+    tests_test_p5_acceptance -->|2| floodmind_agent_runtime
+    tests_test_permission_tier -->|2| floodmind_agent_runtime
+    tests_test_plan_mode_gate -->|2| floodmind_agent_runtime
+    tests_test_projection_manifest -->|2| floodmind_agent_native
+    tests_test_run_state -->|2| floodmind_agent_runtime
+    tests_test_sandbox_backend -->|2| floodmind_agent_runtime
+    tests_test_sdk_api_identity -->|2| floodmind_agent_native
+    tests_test_subagent_contract -->|2| floodmind_agent_native
+    tests_test_tool_transaction -->|2| floodmind_agent_runtime
+    tests_test_trace_metrics -->|2| floodmind_agent_runtime
+    tests_test_tracing_otlp -->|2| floodmind_agent_runtime
+    tests_test_tracing_service -->|2| floodmind_agent_runtime
+    tests_test_usage_accounting -->|2| floodmind_agent_runtime
+    tests_test_workspace -->|2| floodmind_agent_runtime

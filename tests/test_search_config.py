@@ -148,15 +148,18 @@ class TestSearchConfigWrite(BaseSearchConfigTest):
     """Test write_search_config."""
 
     def test_write_creates_file(self):
-        """write_search_config creates search.json."""
+        """write_search_config 落盘时加密凭证，加载时还原明文。"""
         with tempfile.TemporaryDirectory() as tmp:
             fake_path = Path(tmp) / "search.json"
-            with patch.object(sc, "_GLOBAL_SEARCH_PATH", fake_path):
+            with patch.object(sc, "_GLOBAL_SEARCH_PATH", fake_path), \
+                    patch.dict(os.environ, {"FLOODMIND_HOME": tmp}):
                 path = sc.write_search_config({"engine": "bing", "api_key": "key123"})
                 assert path.exists()
                 data = json.loads(path.read_text("utf-8"))
                 assert data["engine"] == "bing"
-                assert data["api_key"] == "key123"
+                assert data["api_key"].startswith("enc:v1:")
+                sc.invalidate_search_config()
+                assert sc.load_search_config()["api_key"] == "key123"
 
     def test_write_invalidate_cache(self):
         """write_search_config invalidates cache."""

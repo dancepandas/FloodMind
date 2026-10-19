@@ -20,11 +20,13 @@ from floodmind.agent.runtime.contracts.sandbox import (
     SandboxViolation,
     ToolInvocation,
 )
+from floodmind.agent.runtime.services.credential_env import strip_credential_env
 from floodmind.agent.runtime.services.process_sandbox import ProcessSandbox
 
 logger = logging.getLogger(__name__)
 
-_CRED_KEYS = ("HOME", "USERPROFILE", "HOMEDRIVE", "HOMEPATH")
+# 路径类变量：沙箱内 HOME 不能指向宿主用户目录（避免读取 ~/.ssh、~/.floodmind 等）。
+_HOME_KEYS = ("HOME", "USERPROFILE", "HOMEDRIVE", "HOMEPATH")
 _REQUIRED_ENV = ("PATH", "SYSTEMROOT", "SystemRoot", "COMSPEC", "TEMP", "TMP", "TMPDIR")
 
 _LL_EXECUTE = 1 << 0
@@ -318,14 +320,17 @@ class LocalRestrictedSandbox:
         return cwd
 
     def _build_env(self, base_env: Dict[str, str], policy: SandboxPolicy, root: Path) -> Dict[str, str]:
-        env = dict(base_env)
+        # G-06：先剔除凭证类变量，再处理 HOME 与允许列表；secret_inject 是配置显式授权。
+        env = strip_credential_env(base_env)
         tmp_dir = str(root / "tmp")
         env.update({"TEMP": tmp_dir, "TMP": tmp_dir, "TMPDIR": tmp_dir})
-        for key in _CRED_KEYS:
+        for key in _HOME_KEYS:
             env.pop(key, None)
         if policy.env_allowlist:
             keep = set(policy.env_allowlist)
-            keep.update(key for key in _REQUIRED_ENV if key in base_env)
+            # 必需变量无条件保留：TEMP/TMP/TMPDIR 刚被重定向到沙箱根，
+            # 不依赖宿主 base_env 是否原本存在同名变量。
+            keep.update(_REQUIRED_ENV)
             env = {key: value for key, value in env.items() if key in keep}
         env.update(policy.secret_inject)
         return env

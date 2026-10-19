@@ -121,13 +121,50 @@ class TestPermissionService:
         decision = svc.check(req, journal_authority=object())
         assert decision.behavior == PermissionBehavior.ALLOW
 
-    def test_no_policy_non_readonly_tool_asks(self):
-        """P2：未声明 policy 的非只读工具走 ASK（无 ask_service 时降级 DENY）。"""
+    def test_no_policy_non_readonly_tool_denied_without_ask_service(self):
+        """未声明 policy 的非只读工具：AskService 不可用时必须 DENY（fail-closed）。"""
         svc = self._make_svc()
         req = PermissionRequest(tool_name="MyWriteTool", tool_input={}, permission_policy=None, is_readonly=False)
         decision = svc.check(req, journal_authority=object())
-        assert decision.behavior in (PermissionBehavior.ASK, PermissionBehavior.DENY)
-        assert decision.behavior != PermissionBehavior.ALLOW
+        assert decision.behavior == PermissionBehavior.DENY
+        assert "AskService 不可用" in decision.reason
+
+    def test_no_policy_non_readonly_tool_goes_through_ask(self):
+        """未声明 policy 的非只读工具：有 AskService 时确实进入 ASK，用户拒绝即 DENY。"""
+        class _AskService:
+            def __init__(self):
+                self.calls = []
+
+            def request(self, request, *, journal_authority):
+                self.calls.append(request)
+                return False
+
+        ask = _AskService()
+        svc = PermissionService(ask_service=ask)
+        req = PermissionRequest(tool_name="MyWriteTool", tool_input={}, permission_policy=None, is_readonly=False)
+        decision = svc.check(req, journal_authority=object())
+        assert len(ask.calls) == 1
+        assert decision.behavior == PermissionBehavior.DENY
+        assert decision.reason == "用户拒绝"
+
+    def test_explicit_deny_policy_cannot_be_overridden_by_global_allow(self):
+        """显式策略 DENY 先于全局 allow 规则返回，allow 不可翻盘。"""
+        from floodmind.agent.runtime.contracts.permissions import PermissionRule
+
+        svc = self._make_svc()
+        svc.add_allow_rule(PermissionRule(
+            name="allow_all",
+            pattern=r".*",
+            behavior=PermissionBehavior.ALLOW,
+            reason="测试用全局放行",
+        ))
+        req = PermissionRequest(
+            tool_name="unknown_internal",
+            tool_input={},
+            permission_policy=ToolPermissionPolicy(policy_type="internal", reason="内部工具"),
+        )
+        decision = svc.check(req, journal_authority=object())
+        assert decision.behavior == PermissionBehavior.DENY
 
     def test_exec_unresolved_write_target_asks_when_interactive_route_exists(self):
         class _AskService:

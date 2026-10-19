@@ -20,7 +20,7 @@ import logging
 import os
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Dict, Iterator, List, Optional
+from typing import Callable, Dict, Iterator, List, Optional
 
 from floodmind.agent.runtime.contracts.canonical_events import (
     EventEnvelope, canonical_json, canonical_payload_sha256,
@@ -37,6 +37,14 @@ logger = logging.getLogger(__name__)
 
 class JournalWriteConflict(Exception):
     """expected_last_sequence did not match the on-disk tail."""
+
+
+class JournalFencedError(RuntimeError):
+    """写端 fencing 拒绝：lease 已失效/易主/缺失（可能被新 owner 接管）。
+
+    append 在 journal 文件锁内校验 lease token；校验失败即拒绝写入，
+    保证旧 owner 的迟到事件不会进入权威日志造成状态分叉。
+    """
 
 
 class JournalMidFileCorruption(Exception):
@@ -103,6 +111,7 @@ class JournalWriter:
         *,
         max_segment_bytes: int = 10 * 1024 * 1024,
         journal_dir: Optional[Path] = None,
+        fence_check: Optional[Callable[[], None]] = None,
     ):
         if not run_id or run_id in {".", ".."} or ".." in run_id or Path(run_id).name != run_id:
             raise ValueError(f"unsafe run_id: {run_id!r}")
@@ -118,6 +127,7 @@ class JournalWriter:
         self._lock_path = self._journal_dir / ".lock"
         self._file_lock = FileLock(self._lock_path, timeout=30.0)
         self._index_path = self._journal_dir / "index.json"
+        self._fence_check = fence_check
         self._sealed: Dict[str, EventEnvelope] = {}
         self._load_index()
 
@@ -129,6 +139,15 @@ class JournalWriter:
         # 复用实例：FileLock 的可重入保护是 thread-local 的，逐次新建会使重入保护失效。
         with self._file_lock:
             yield
+
+    def _assert_fence_locked(self) -> None:
+        """在 journal 文件锁内校验 fencing lease；未配置时不做校验。
+
+        与 open_lease 的接管临界区共用同一把 journal 锁，因此校验与写入之间
+        不会插入新的采集点：旧 owner 一旦失去 token，下一次追加必然被拒绝。
+        """
+        if self._fence_check is not None:
+            self._fence_check()
 
     # ── index + authoritative reconciliation ─────────────────────
 
@@ -252,6 +271,7 @@ class JournalWriter:
         expected_last_sequence: Optional[int] = None,
     ) -> EventEnvelope:
         with self._locked():
+            self._assert_fence_locked()
             # Re-read the authoritative tail under the lock: a concurrent writer
             # instance may have advanced the journal since this one loaded it.
             self._reconcile_from_journal()
@@ -319,6 +339,7 @@ class JournalWriter:
         if not events:
             return []
         with self._locked():
+            self._assert_fence_locked()
             self._reconcile_from_journal()
             self._ensure_clean_tail_locked()
             # 组内 event_id 不得重复

@@ -32,6 +32,7 @@ import httpx
 
 from floodmind.agent.runtime.contracts.permissions import ToolPermissionPolicy
 from floodmind.agent.runtime.contracts.tools import ToolSpec
+from floodmind.agent.runtime.services.credential_env import apply_env_policy
 
 logger = logging.getLogger(__name__)
 
@@ -184,7 +185,9 @@ class McpClientConnection:
         # expand ~ in args for cross-platform paths
         args = [os.path.expanduser(a) if isinstance(a, str) else a for a in args]
         env = self._config.get("env", {})
-        merged_env = {**os.environ, **env}
+        # G-06：MCP 子进程默认不继承宿主凭证；server 需要的密钥必须由配置 env
+        # 显式声明（显式授权注入），而不是从宿主环境隐式带入。
+        merged_env = apply_env_policy(os.environ, inject=env)
 
         self._process = subprocess.Popen(
             [command] + args,
@@ -479,8 +482,13 @@ class McpClientPool:
         registry（agent 有 orchestrator/specialist 多个 registry，池不应知道它们）。
         把"连接"与"注册"解耦，是 MCP 接入唯一明确路径的根基。
         """
-        transport = server_config.get("transport", "sse")
-        cfg = {k: v for k, v in server_config.items() if k not in ("name", "transport")}
+        transport = server_config.get("transport")
+        if transport not in ("sse", "stdio"):
+            raise McpConnectionError(
+                f"MCP server 配置 transport 必须是 sse/stdio，收到: {transport!r}；"
+                "字段名不是 type"
+            )
+        cfg = {k: v for k, v in server_config.items() if k not in ("name", "transport", "enabled")}
         explicit_name = server_config.get("name")
         if explicit_name:
             name = explicit_name

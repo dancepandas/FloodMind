@@ -3,7 +3,7 @@ PermissionService — 统一权限检查服务
 
 修复旧 PermissionManager 的核心问题：
 1. 全局 allow 规则不能覆盖工具级 ASK
-2. 所有工具必须显式声明权限策略
+2. 未声明 policy 的工具按 is_readonly 分类处理（只读放行，非只读走 ASK）
 3. ASK、DENY、ALLOW 逻辑集中，不散落在工具和 executor 里
 
 优先级顺序（固定，不可覆盖）：
@@ -15,7 +15,9 @@ PermissionService — 统一权限检查服务
 6. 默认：按工具级 policy 的结果返回
 
 设计原则：
-- ToolSpec.permission_policy 为 None 时默认 DENY（fail closed）
+- ToolSpec.permission_policy 为 None：只读工具按 is_readonly 放行；非只读工具
+  走 ASK，且 AskService 不可用时降级 DENY（未分类的写操作绝不静默放行）
+- 显式策略 DENY 与全局 deny 规则不可被 allow 规则或宿主预授权翻越
 - AskService 是唯一 ASK 出口
 - PermissionService 不直接持有 ASK callback
 """

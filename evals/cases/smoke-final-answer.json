@@ -1,0 +1,22 @@
+{
+  "id": "smoke-final-answer",
+  "tier": "smoke",
+  "description": "单轮纯文本回答：不调用工具，一次模型调用后进入 completed 终态。",
+  "user_text": "用一句话说明你当前的任务。",
+  "max_iterations": 5,
+  "tools": {},
+  "rounds": [
+    {
+      "events": [
+        {"type": "token", "content": "当前任务：检查敖江站水位并给出预报结论。"},
+        {"type": "done", "terminal_reason": "stop"}
+      ]
+    }
+  ],
+  "expect": {
+    "final_output_contains": ["检查敖江站水位"],
+    "model_calls": 1,
+    "tool_calls": [],
+    "is_timeout": false
+  }
+}

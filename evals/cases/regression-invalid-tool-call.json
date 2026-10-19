@@ -1,0 +1,48 @@
+{
+  "id": "regression-invalid-tool-call",
+  "tier": "regression",
+  "description": "非法工具参数：工具绝不执行，结构化错误回填到模型上下文，循环继续。",
+  "user_text": "查询敖江站水位。",
+  "max_iterations": 5,
+  "tools": {
+    "ReadGauge": {
+      "description": "读取指定测站的当前水位。",
+      "parameters": {
+        "type": "object",
+        "properties": {"station": {"type": "string"}},
+        "required": ["station"]
+      },
+      "result": {"content": "水位 12.3 m", "status": "completed"}
+    }
+  },
+  "rounds": [
+    {
+      "events": [
+        {
+          "type": "invalid_tool_call",
+          "invalid_tool_call": {
+            "id": "call_bad",
+            "name": "ReadGauge",
+            "raw_arguments": "{\"station\": ",
+            "error": "Unexpected end of JSON input"
+          }
+        },
+        {"type": "done", "terminal_reason": "tool_calls"}
+      ]
+    },
+    {
+      "events": [
+        {"type": "token", "content": "参数有误，已放弃本次查询。"},
+        {"type": "done", "terminal_reason": "stop"}
+      ]
+    }
+  ],
+  "expect": {
+    "final_output_contains": ["参数有误"],
+    "model_calls": 2,
+    "tool_calls": [],
+    "prompt_contains": [
+      {"call_index": 1, "contains": "参数 JSON 无法解析"}
+    ]
+  }
+}

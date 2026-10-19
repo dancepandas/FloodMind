@@ -44,6 +44,7 @@ from floodmind.agent.runtime.services.tracing_service import TracingService
 # 上下文压缩（可选）
 from floodmind.agent.native.context_compressor import (
     CompactionOverBudgetError,
+    CompactionSummaryError,
     ContextCompressor,
 )
 from floodmind.agent.native.capabilities import ModelCapabilities, default_registry
@@ -458,6 +459,10 @@ class NativeAgentExecutor:
         """
         # executor 跨 run 复用；handoff 的依赖切换只属于前一个 run。
         self._restore_base_runtime()
+        # G-19：每次 run 从主模型重新开始，避免上一 run 的回退状态永久粘住会话。
+        reset_fallbacks = getattr(self.model_client, "reset_fallbacks", None)
+        if callable(reset_fallbacks):
+            reset_fallbacks()
         # Checkpoint snapshots are projections. Replay the canonical journal before
         # driving the loop so authoritative fields come from reducer state.
         if run_state is not None:
@@ -634,13 +639,17 @@ class NativeAgentExecutor:
                 logger.info("[EXEC] context_compress triggered but no compression performed")
             # Summary Event（§9.5 CompactSummary）已由 compress_journal 经 authority
             # 落 journal——只 append context.compaction.completed，不改原始事件。
-        except CompactionOverBudgetError as e:
-            # F4 fail-closed：不静默截断当前用户请求，也不返回超预算投影。
+        except (CompactionOverBudgetError, CompactionSummaryError) as e:
+            # F4/G-04 fail-closed：不静默截断当前用户请求，也不丢弃中间区语义。
             # 保持原始 messages 继续运行，交由宿主/检索缩减（P6）处理。
             # 同一轮消息未变，重试压缩必再失败 → 抑制再触发，避免忙循环。
             self._compaction_failed = True
-            logger.error("[EXEC] context compression over input budget, keeping original messages: %s", e)
-            self.event_bus.emit_error(f"上下文压缩失败（超输入预算）: {str(e)[:200]}")
+            reason = "摘要缺失" if isinstance(e, CompactionSummaryError) else "超输入预算"
+            logger.error(
+                "[EXEC] context compression failed (%s), keeping original messages: %s",
+                reason, e,
+            )
+            self.event_bus.emit_error(f"上下文压缩失败（{reason}）: {str(e)[:200]}")
         except Exception as e:
             # 与上同理：任何压缩失败都保持原始 messages，必须抑制再触发。
             self._compaction_failed = True
@@ -652,6 +661,20 @@ class NativeAgentExecutor:
 
     def _on_awaiting_llm(self, state: AgentLoopState, context: RunContext) -> AgentLoopState:
         """调用 LLM stream，消费事件，得到 tool_calls 或 final_answer。"""
+        # G-18：token 预算检查点。达到上限即终态 failed，不再发起新的 LLM 调用；
+        # 用量是累计实际消耗（含重试/guardrail 重试），不做预估或截断。
+        token_budget = int(getattr(context, "max_total_tokens", 0) or 0)
+        if token_budget and state.token_usage.total_tokens >= token_budget:
+            over_budget = (
+                f"已停止：本次运行累计 token 用量 {state.token_usage.total_tokens} "
+                f"已达到预算上限 {token_budget}。请缩小任务范围或提高预算后重试。"
+            )
+            logger.warning("[EXEC] token budget exceeded: %d/%d", state.token_usage.total_tokens, token_budget)
+            state.final_output = over_budget
+            self.event_bus.emit_error(over_budget)
+            state.status = "failed"
+            return state
+
         if state.iteration >= self.max_iterations:
             logger.warning("NativeAgentExecutor reached max_iterations=%d", self.max_iterations)
             state.final_output = state.final_output or self._fallback_final_output(state)
@@ -751,6 +774,7 @@ class NativeAgentExecutor:
         self.event_bus.emit_llm_step_start(
             model_name=getattr(self.model_client, 'model_name', ''),
             iteration=state.iteration,
+            run_id=state.run_id,
         )
 
         # LLM 流消费（带自动重试）
@@ -788,14 +812,40 @@ class NativeAgentExecutor:
             except Exception as e:
                 # §7.7 Orchestrator 决策：Transport 只给 Retry Advice（model_client 门面），
                 # 是否重试由 should_retry 结合终态判定。
+                # Transport 在连接阶段分类，无法知道流是否已开始；这里用本轮实际观察到的
+                # 输出补齐：token/reasoning 已产生（无论是否缓冲，均已计费），工具事件已
+                # 产生结构化输出。已开始输出且无 replay safety 时禁止自动重试，避免重复
+                # 输出与重复扣费。
+                response_started = (
+                    bool(attempt_output_events) or bool(tool_calls) or bool(invalid_tool_calls)
+                )
                 advice = self.model_client.classify_error(e)
+                if response_started and not advice.response_started:
+                    advice = advice.model_copy(update={"response_started": True})
                 terminal_reason = state.terminal_reason
-                if attempt >= retry_policy.max_retries or not should_retry(advice, terminal_reason):
+                can_retry = (
+                    attempt < retry_policy.max_retries
+                    and should_retry(advice, terminal_reason)
+                )
+                if response_started and not can_retry:
+                    logger.warning(
+                        "[EXEC] 响应已开始输出，禁止自动重试（replay_safe=%s, error=%s）",
+                        advice.replay_safe, str(e)[:200],
+                    )
+                if not can_retry:
                     self.event_bus.emit_error(str(e)[:500])
                     self.event_bus.emit_llm_step_end(reason="error")
                     state.final_output = f"模型调用失败: {str(e)[:300]}"
                     state.status = "failed"
                     return state
+                # 取消是一等公民：退避前先确认未中断。已取消时不再发重试事件，
+                # 也不再发起新的模型调用，直接按流式阶段中断语义收尾。
+                if context.abort_check and context.abort_check():
+                    logger.info(
+                        "[EXEC] aborted before retry backoff, stop retrying (iter=%d)",
+                        state.iteration,
+                    )
+                    return self._finish_aborted(state)
                 attempt += 1
                 delay = retry_policy.delay_for(attempt)
                 logger.warning(
@@ -822,7 +872,12 @@ class NativeAgentExecutor:
                 invalid_tool_calls = []
                 state.terminal_reason = None
                 step_tokens = TokenUsage()
-                time.sleep(delay)
+                if not self._sleep_with_abort(delay, context):
+                    logger.info(
+                        "[EXEC] aborted during retry backoff, stop retrying (iter=%d)",
+                        state.iteration,
+                    )
+                    return self._finish_aborted(state)
 
         # 图片等内容块只在本次 run 的第一次 LLM 调用可见：调用完成后立即把 user
         # 消息退化为纯文本——剥离按 run 内首次调用计数（与会话级 projection
@@ -834,10 +889,7 @@ class NativeAgentExecutor:
         # 缓冲的本轮 token/reasoning 一并丢弃（fail-closed：半截输出不外泄）。
         if context.abort_check and context.abort_check():
             logger.info("[EXEC] aborted during LLM stream, discarding partial round (iter=%d)", state.iteration)
-            self.event_bus.emit_llm_step_end(reason="aborted")
-            state.final_output = "任务已被用户中断。"
-            state.status = "failed"
-            return state
+            return self._finish_aborted(state)
 
         # 本轮 reasoning 切片（跨轮 state.reasoning 累加，按本轮起点切片），写 memory 用
         state.round_reasoning = state.reasoning[reasoning_before:]
@@ -1070,7 +1122,7 @@ class NativeAgentExecutor:
                     },
                     call_id=call.id,
                 )
-            self.event_bus.emit_tool_status(call.name, "running", tool_input=tool_input_str, call_id=call.id)
+            self.event_bus.emit_tool_status(call.name, "running", tool_input=tool_input_str, call_id=call.id, run_id=state.run_id)
             logger.info("[EXEC] executing tool: name=%s, call_id=%s, input_len=%d", call.name, call.id, len(tool_input_str))
 
             # 执行工具。progressive 模式下 fail-closed：未加载工具不能绕过目录直接执行。
@@ -1149,6 +1201,7 @@ class NativeAgentExecutor:
                 content=inline_content,
                 tool_input=tool_input_str,
                 call_id=call.id,
+                run_id=state.run_id,
             )
 
             if result.artifacts:
@@ -1481,6 +1534,37 @@ class NativeAgentExecutor:
 
     # --- 辅助方法 ---
 
+    @staticmethod
+    def _sleep_with_abort(
+        delay: float,
+        context: RunContext,
+        poll_interval: float = 0.2,
+    ) -> bool:
+        """等待 delay 秒，期间按 poll_interval 检查 abort。
+
+        返回 True 表示正常等完，False 表示被用户中断。取消是一等公民：
+        重试退避不得拖住已取消的 run（旧实现 time.sleep 会阻塞到退避结束）。
+        """
+        abort_check = context.abort_check
+        if abort_check is None:
+            time.sleep(delay)
+            return True
+        deadline = time.monotonic() + max(delay, 0.0)
+        while True:
+            if abort_check():
+                return False
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return True
+            time.sleep(min(poll_interval, remaining))
+
+    def _finish_aborted(self, state: AgentLoopState) -> AgentLoopState:
+        """统一的中断终态：丢弃本轮半截产物，不写 memory（暂停 = abort）。"""
+        self.event_bus.emit_llm_step_end(reason="aborted")
+        state.final_output = "任务已被用户中断。"
+        state.status = "failed"
+        return state
+
     def _consume_llm_event(
         self,
         event: ModelEvent,
@@ -1535,6 +1619,7 @@ class NativeAgentExecutor:
                 prompt_tokens=payload.get("prompt_tokens", 0),
                 completion_tokens=payload.get("completion_tokens", 0),
                 total_tokens=payload.get("total_tokens", 0),
+                run_id=state.run_id,
             )
 
     def _is_doom_loop(self, state: AgentLoopState, tool_name: str, input_sig: str) -> bool:

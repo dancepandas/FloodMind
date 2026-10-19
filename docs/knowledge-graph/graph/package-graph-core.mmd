@@ -1,0 +1,269 @@
+flowchart LR
+    benchmarks_multi_agent_metrics["benchmarks.multi_agent.metrics"]
+    benchmarks_multi_agent_report["benchmarks.multi_agent.report"]
+    benchmarks_multi_agent_runner["benchmarks.multi_agent.runner"]
+    benchmarks_multi_agent_tasks["benchmarks.multi_agent.tasks"]
+    evals["evals"]
+    evals_case_packs["evals.case_packs"]
+    evals_judge["evals.judge"]
+    evals_real_tools["evals.real_tools"]
+    evals_runner["evals.runner"]
+    floodmind["floodmind"]
+    floodmind_agent["floodmind.agent"]
+    floodmind_agent_agent_registry["floodmind.agent.agent_registry"]
+    floodmind_agent_api["floodmind.agent.api"]
+    floodmind_agent_context_runtime["floodmind.agent.context_runtime"]
+    floodmind_agent_guardrail["floodmind.agent.guardrail"]
+    floodmind_agent_mcp_client["floodmind.agent.mcp_client"]
+    floodmind_agent_native["floodmind.agent.native"]
+    floodmind_agent_runtime["floodmind.agent.runtime"]
+    floodmind_agent_scheduled_task_runtime["floodmind.agent.scheduled_task_runtime"]
+    floodmind_agent_sdk_events["floodmind.agent.sdk_events"]
+    floodmind_cli["floodmind.cli"]
+    floodmind_cli_interactive["floodmind.cli_interactive"]
+    floodmind_common_filelock["floodmind.common.filelock"]
+    floodmind_config["floodmind.config"]
+    floodmind_config_model_presets["floodmind.config.model_presets"]
+    floodmind_config_model_resolver["floodmind.config.model_resolver"]
+    floodmind_config_provider_registry["floodmind.config.provider_registry"]
+    floodmind_config_search_config["floodmind.config.search_config"]
+    floodmind_config_secret_store["floodmind.config.secret_store"]
+    floodmind_config_settings["floodmind.config.settings"]
+    floodmind_gateway["floodmind.gateway"]
+    floodmind_gateway_app["floodmind.gateway.app"]
+    floodmind_gateway_chainlit_app["floodmind.gateway.chainlit_app"]
+    floodmind_gateway_chainlit_history["floodmind.gateway.chainlit_history"]
+    floodmind_gateway_server["floodmind.gateway.server"]
+    floodmind_gateway_state["floodmind.gateway.state"]
+    floodmind_memory["floodmind.memory"]
+    floodmind_memory_consolidation["floodmind.memory.consolidation"]
+    floodmind_memory_core_memory["floodmind.memory.core_memory"]
+    floodmind_memory_dual_memory["floodmind.memory.dual_memory"]
+    floodmind_memory_experience_tree["floodmind.memory.experience_tree"]
+    floodmind_memory_recall["floodmind.memory.recall"]
+    floodmind_memory_semantic_store["floodmind.memory.semantic_store"]
+    floodmind_memory_services["floodmind.memory.services"]
+    floodmind_memory_session_manager["floodmind.memory.session_manager"]
+    floodmind_memory_skill_generator["floodmind.memory.skill_generator"]
+    floodmind_memory_task_experience["floodmind.memory.task_experience"]
+    floodmind_models["floodmind.models"]
+    floodmind_plotting["floodmind.plotting"]
+    floodmind_plugin["floodmind.plugin"]
+    floodmind_plugin_base["floodmind.plugin.base"]
+    floodmind_plugin_loader["floodmind.plugin.loader"]
+    floodmind_profile["floodmind.profile"]
+    floodmind_profile_guidance["floodmind.profile.guidance"]
+    floodmind_profile_soul["floodmind.profile.soul"]
+    floodmind_scripts_check_qwen_reasoning["floodmind.scripts.check_qwen_reasoning"]
+    floodmind_skills["floodmind.skills"]
+    floodmind_skills_base["floodmind.skills.base"]
+    floodmind_skills_registry["floodmind.skills.registry"]
+    floodmind_skills_skill_curator["floodmind.skills.skill_curator"]
+    floodmind_tools["floodmind.tools"]
+    floodmind_tools_agent_tool["floodmind.tools.agent_tool"]
+    floodmind_tools_base_tools["floodmind.tools.base_tools"]
+    floodmind_tools_file_tools["floodmind.tools.file_tools"]
+    floodmind_tools_memory_tools["floodmind.tools.memory_tools"]
+    floodmind_tools_session_context["floodmind.tools.session_context"]
+    main["main"]
+    scripts_calibrate_judge["scripts.calibrate_judge"]
+    scripts_knowledge_graph["scripts.knowledge_graph"]
+    scripts_knowledge_graph___main__["scripts.knowledge_graph.__main__"]
+    scripts_knowledge_graph_layers["scripts.knowledge_graph.layers"]
+    scripts_knowledge_graph_model["scripts.knowledge_graph.model"]
+    scripts_knowledge_graph_py_analyzer["scripts.knowledge_graph.py_analyzer"]
+    scripts_knowledge_graph_report["scripts.knowledge_graph.report"]
+    scripts_knowledge_graph_subsystems["scripts.knowledge_graph.subsystems"]
+    scripts_knowledge_graph_ts_analyzer["scripts.knowledge_graph.ts_analyzer"]
+    scripts_knowledge_graph_viz["scripts.knowledge_graph.viz"]
+    scripts_metrics_report["scripts.metrics_report"]
+    scripts_smoke_provider_pipelines["scripts.smoke_provider_pipelines"]
+    sitecustomize["sitecustomize"]
+    floodmind_agent_native -->|46| floodmind_agent_runtime
+    floodmind_agent_runtime -->|7| floodmind_agent_native
+    floodmind_tools_agent_tool -->|6| floodmind_agent_runtime
+    floodmind_tools_base_tools -->|6| floodmind_agent_runtime
+    evals_runner -->|5| floodmind_agent_native
+    floodmind_agent_api -->|5| floodmind_agent_runtime
+    floodmind_cli -->|4| floodmind_agent_runtime
+    floodmind_agent_api -->|4| floodmind_agent_native
+    evals_real_tools -->|3| floodmind_agent_runtime
+    floodmind_cli -->|3| floodmind_agent_native
+    floodmind_agent_mcp_client -->|3| floodmind_agent_runtime
+    floodmind_agent_native -->|3| floodmind_config_settings
+    floodmind_agent_native -->|3| floodmind_tools_agent_tool
+    floodmind_agent_runtime -->|3| floodmind_tools_session_context
+    floodmind_gateway_app -->|3| floodmind_agent_runtime
+    floodmind_gateway_chainlit_app -->|3| floodmind_agent_runtime
+    floodmind_agent_native -->|2| floodmind_config_model_resolver
+    floodmind_agent_native -->|2| floodmind_config_model_presets
+    floodmind_agent_runtime -->|2| floodmind_common_filelock
+    floodmind_agent_runtime -->|2| floodmind_config_settings
+    floodmind_gateway_state -->|2| floodmind_agent_runtime
+    floodmind_memory_dual_memory -->|2| floodmind_agent_runtime
+    floodmind_tools_file_tools -->|2| floodmind_agent_runtime
+    floodmind_tools_memory_tools -->|2| floodmind_agent_runtime
+    scripts_metrics_report -->|2| floodmind_agent_runtime
+    main -->|1| floodmind_config_settings
+    main -->|1| floodmind_agent_native
+    main -->|1| floodmind_memory
+    main -->|1| floodmind_agent
+    sitecustomize -->|1| floodmind_plotting
+    benchmarks_multi_agent_report -->|1| benchmarks_multi_agent_metrics
+    benchmarks_multi_agent_runner -->|1| benchmarks_multi_agent_metrics
+    benchmarks_multi_agent_runner -->|1| benchmarks_multi_agent_report
+    benchmarks_multi_agent_runner -->|1| benchmarks_multi_agent_tasks
+    benchmarks_multi_agent_runner -->|1| floodmind
+    benchmarks_multi_agent_runner -->|1| floodmind_agent_runtime
+    benchmarks_multi_agent_runner -->|1| floodmind_memory_dual_memory
+    evals_real_tools -->|1| floodmind_tools
+    evals_real_tools -->|1| floodmind_tools_file_tools
+    evals_real_tools -->|1| floodmind_tools_session_context
+    evals_runner -->|1| evals
+    evals_runner -->|1| evals_case_packs
+    evals_runner -->|1| floodmind_agent_runtime
+    evals_runner -->|1| evals_real_tools
+    evals_runner -->|1| floodmind_tools_session_context
+    floodmind_cli -->|1| floodmind
+    floodmind_cli -->|1| floodmind_config_settings
+    floodmind_cli -->|1| floodmind_cli_interactive
+    floodmind_cli -->|1| floodmind_gateway_server
+    floodmind_cli -->|1| floodmind_memory
+    floodmind_cli -->|1| floodmind_agent
+    floodmind_cli -->|1| floodmind_config_provider_registry
+    floodmind_cli -->|1| floodmind_skills_base
+    floodmind_cli_interactive -->|1| floodmind_cli
+    floodmind_agent -->|1| floodmind_agent_native
+    floodmind_agent -->|1| floodmind_agent_api
+    floodmind_agent_agent_registry -->|1| floodmind_config_settings
+    floodmind_agent_api -->|1| floodmind_memory_session_manager
+    floodmind_agent_api -->|1| floodmind_config_model_resolver
+    floodmind_agent_api -->|1| floodmind_agent_sdk_events
+    floodmind_agent_api -->|1| floodmind_memory_dual_memory
+    floodmind_agent_context_runtime -->|1| floodmind_agent_runtime
+    floodmind_agent_context_runtime -->|1| floodmind_config_settings
+    floodmind_agent_scheduled_task_runtime -->|1| floodmind_common_filelock
+    floodmind_agent_native -->|1| floodmind_memory_experience_tree
+    floodmind_agent_native -->|1| floodmind_agent_guardrail
+    floodmind_agent_native -->|1| floodmind_config_provider_registry
+    floodmind_agent_native -->|1| floodmind_skills_registry
+    floodmind_agent_native -->|1| floodmind_skills_skill_curator
+    floodmind_agent_native -->|1| floodmind_tools_session_context
+    floodmind_agent_native -->|1| floodmind_memory_services
+    floodmind_agent_native -->|1| floodmind_profile_soul
+    floodmind_agent_native -->|1| floodmind_profile_guidance
+    floodmind_agent_native -->|1| floodmind_memory_task_experience
+    floodmind_agent_native -->|1| floodmind_agent_agent_registry
+    floodmind_agent_native -->|1| floodmind_tools
+    floodmind_agent_native -->|1| floodmind_agent_mcp_client
+    floodmind_agent_native -->|1| floodmind_tools_memory_tools
+    floodmind_agent_native -->|1| floodmind_tools_file_tools
+    floodmind_agent_native -->|1| floodmind_tools_base_tools
+    floodmind_agent_native -->|1| floodmind_agent_context_runtime
+    floodmind_agent_native -->|1| floodmind_plugin
+    floodmind_agent_runtime -->|1| floodmind_memory_session_manager
+    floodmind_agent_runtime -->|1| floodmind_config_secret_store
+    floodmind_agent_runtime -->|1| floodmind
+    floodmind_agent_runtime -->|1| floodmind_skills
+    floodmind_config -->|1| floodmind_config_settings
+    floodmind_config_model_presets -->|1| floodmind_config_model_resolver
+    floodmind_config_model_presets -->|1| floodmind_config_settings
+    floodmind_config_model_resolver -->|1| floodmind_config_settings
+    floodmind_config_model_resolver -->|1| floodmind_config_provider_registry
+    floodmind_config_provider_registry -->|1| floodmind_config_model_resolver
+    floodmind_config_provider_registry -->|1| floodmind_config_settings
+    floodmind_config_provider_registry -->|1| floodmind_agent_native
+    floodmind_config_search_config -->|1| floodmind_config_secret_store
+    floodmind_config_secret_store -->|1| floodmind_config_settings
+    floodmind_config_settings -->|1| floodmind_config_secret_store
+    floodmind_config_settings -->|1| floodmind_config_model_resolver
+    floodmind_config_settings -->|1| floodmind_config_model_presets
+    floodmind_gateway -->|1| floodmind_gateway_app
+    floodmind_gateway -->|1| floodmind_gateway_server
+    floodmind_gateway -->|1| floodmind_gateway_state
+    floodmind_gateway_app -->|1| floodmind_gateway_state
+    floodmind_gateway_chainlit_app -->|1| floodmind_gateway
+    floodmind_gateway_chainlit_app -->|1| floodmind_gateway_chainlit_history
+    floodmind_gateway_chainlit_app -->|1| floodmind_agent_api
+    floodmind_gateway_chainlit_app -->|1| floodmind_gateway_state
+    floodmind_gateway_server -->|1| floodmind_gateway_app
+    floodmind_gateway_server -->|1| floodmind_gateway_state
+    floodmind_gateway_state -->|1| floodmind_agent_api
+    floodmind_gateway_state -->|1| floodmind_config_secret_store
+    floodmind_gateway_state -->|1| floodmind_memory_session_manager
+    floodmind_gateway_state -->|1| floodmind_common_filelock
+    floodmind_gateway_state -->|1| floodmind_config_model_resolver
+    floodmind_gateway_state -->|1| floodmind_agent_native
+    floodmind_memory -->|1| floodmind_memory_dual_memory
+    floodmind_memory -->|1| floodmind_memory_session_manager
+    floodmind_memory -->|1| floodmind_memory_experience_tree
+    floodmind_memory -->|1| floodmind_memory_task_experience
+    floodmind_memory_consolidation -->|1| floodmind_memory_semantic_store
+    floodmind_memory_core_memory -->|1| floodmind_agent_runtime
+    floodmind_memory_recall -->|1| floodmind_memory_semantic_store
+    floodmind_memory_semantic_store -->|1| floodmind_agent_runtime
+    floodmind_memory_semantic_store -->|1| floodmind_memory_dual_memory
+    floodmind_memory_services -->|1| floodmind_config_settings
+    floodmind_memory_services -->|1| floodmind_memory_consolidation
+    floodmind_memory_services -->|1| floodmind_memory_core_memory
+    floodmind_memory_services -->|1| floodmind_memory_recall
+    floodmind_memory_services -->|1| floodmind_memory_semantic_store
+    floodmind_memory_session_manager -->|1| floodmind_agent_runtime
+    floodmind_memory_skill_generator -->|1| floodmind_memory_experience_tree
+    floodmind_memory_task_experience -->|1| floodmind_config_settings
+    floodmind_memory_task_experience -->|1| floodmind_memory_experience_tree
+    floodmind_memory_task_experience -->|1| floodmind_memory_skill_generator
+    floodmind_memory_task_experience -->|1| floodmind_skills_registry
+    floodmind_models -->|1| floodmind_agent_native
+    floodmind_plugin -->|1| floodmind_plugin_base
+    floodmind_plugin -->|1| floodmind_plugin_loader
+    floodmind_plugin_base -->|1| floodmind_tools_agent_tool
+    floodmind_plugin_loader -->|1| floodmind_plugin_base
+    floodmind_profile -->|1| floodmind_profile_soul
+    floodmind_profile_soul -->|1| floodmind_config_settings
+    floodmind_scripts_check_qwen_reasoning -->|1| floodmind_agent_native
+    floodmind_skills -->|1| floodmind_skills_base
+    floodmind_skills -->|1| floodmind_skills_registry
+    floodmind_skills_base -->|1| floodmind_skills_registry
+    floodmind_skills_registry -->|1| floodmind_skills_base
+    floodmind_skills_skill_curator -->|1| floodmind_skills_registry
+    floodmind_tools -->|1| floodmind_tools_base_tools
+    floodmind_tools -->|1| floodmind_tools_agent_tool
+    floodmind_tools_agent_tool -->|1| floodmind_tools_session_context
+    floodmind_tools_base_tools -->|1| floodmind_tools_agent_tool
+    floodmind_tools_base_tools -->|1| floodmind_skills_registry
+    floodmind_tools_base_tools -->|1| floodmind_tools_session_context
+    floodmind_tools_base_tools -->|1| floodmind_skills_skill_curator
+    floodmind_tools_base_tools -->|1| floodmind_tools_file_tools
+    floodmind_tools_base_tools -->|1| floodmind_config_settings
+    floodmind_tools_base_tools -->|1| floodmind_memory_experience_tree
+    floodmind_tools_base_tools -->|1| floodmind_config_search_config
+    floodmind_tools_base_tools -->|1| floodmind_memory_services
+    floodmind_tools_base_tools -->|1| floodmind_agent_scheduled_task_runtime
+    floodmind_tools_base_tools -->|1| floodmind_memory_task_experience
+    floodmind_tools_file_tools -->|1| floodmind_tools_agent_tool
+    floodmind_tools_file_tools -->|1| floodmind_tools_base_tools
+    floodmind_tools_memory_tools -->|1| floodmind_memory_task_experience
+    floodmind_tools_memory_tools -->|1| floodmind_memory_services
+    floodmind_tools_memory_tools -->|1| floodmind_tools_agent_tool
+    floodmind_tools_memory_tools -->|1| floodmind_tools_base_tools
+    scripts_calibrate_judge -->|1| evals_judge
+    scripts_calibrate_judge -->|1| floodmind_agent_native
+    scripts_metrics_report -->|1| floodmind_config_settings
+    scripts_smoke_provider_pipelines -->|1| floodmind_agent_native
+    scripts_knowledge_graph -->|1| scripts_knowledge_graph_layers
+    scripts_knowledge_graph -->|1| scripts_knowledge_graph_model
+    scripts_knowledge_graph -->|1| scripts_knowledge_graph_py_analyzer
+    scripts_knowledge_graph -->|1| scripts_knowledge_graph_ts_analyzer
+    scripts_knowledge_graph___main__ -->|1| scripts_knowledge_graph_model
+    scripts_knowledge_graph___main__ -->|1| scripts_knowledge_graph_py_analyzer
+    scripts_knowledge_graph___main__ -->|1| scripts_knowledge_graph_report
+    scripts_knowledge_graph___main__ -->|1| scripts_knowledge_graph_ts_analyzer
+    scripts_knowledge_graph_py_analyzer -->|1| scripts_knowledge_graph_layers
+    scripts_knowledge_graph_py_analyzer -->|1| scripts_knowledge_graph_model
+    scripts_knowledge_graph_report -->|1| scripts_knowledge_graph_layers
+    scripts_knowledge_graph_report -->|1| scripts_knowledge_graph_model
+    scripts_knowledge_graph_report -->|1| scripts_knowledge_graph_subsystems
+    scripts_knowledge_graph_report -->|1| scripts_knowledge_graph_viz
+    scripts_knowledge_graph_ts_analyzer -->|1| scripts_knowledge_graph_layers
+    scripts_knowledge_graph_ts_analyzer -->|1| scripts_knowledge_graph_model

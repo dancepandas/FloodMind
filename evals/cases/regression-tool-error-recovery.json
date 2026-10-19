@@ -1,0 +1,44 @@
+{
+  "id": "regression-tool-error-recovery",
+  "tier": "regression",
+  "description": "工具失败不吞掉：错误结果回填到模型上下文，循环继续并给出可解释的最终答复。",
+  "user_text": "读取 /data/missing.csv 并总结。",
+  "max_iterations": 5,
+  "tools": {
+    "Read": {
+      "description": "读取文件内容。",
+      "parameters": {
+        "type": "object",
+        "properties": {"path": {"type": "string"}},
+        "required": ["path"]
+      },
+      "result": {"content": "错误：文件不存在 /data/missing.csv", "status": "error"}
+    }
+  },
+  "rounds": [
+    {
+      "events": [
+        {
+          "type": "tool_call_done",
+          "tool_call": {"id": "call_1", "name": "Read", "arguments": {"path": "/data/missing.csv"}}
+        },
+        {"type": "done", "terminal_reason": "tool_calls"}
+      ]
+    },
+    {
+      "events": [
+        {"type": "token", "content": "未能读取 /data/missing.csv：文件不存在。"},
+        {"type": "done", "terminal_reason": "stop"}
+      ]
+    }
+  ],
+  "expect": {
+    "final_output_contains": ["文件不存在"],
+    "model_calls": 2,
+    "tool_calls": ["Read"],
+    "tool_statuses": ["error"],
+    "prompt_contains": [
+      {"call_index": 1, "contains": "文件不存在 /data/missing.csv"}
+    ]
+  }
+}

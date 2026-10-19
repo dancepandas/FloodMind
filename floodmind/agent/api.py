@@ -89,6 +89,8 @@ class Agent:
             SDK 的安全拒绝（路径越界/危险命令/子代理分层/planning 硬门）不可被覆盖；钩子异常或
             返回非法值时保留 SDK 原决策。desktop 可用它替代对内部 registry 的 monkey patch。
         max_iterations: Agent 循环最大迭代轮数（默认 999，有 auto-compact + DOOM LOOP 兜底）。
+        max_total_tokens: 单次 run 累计 token 预算（默认 0 = 不限制）。每次新 run 从 0 起算；
+            累计实际用量达到上限后不再发起新的 LLM 调用，run 以失败终态结束并返回明确说明。
         workspace: 工作区对象（``floodmind.agent.runtime.contracts.workspace.Workspace``）。
             嵌入式宿主（如桌面端）可显式注入，避免跨线程 contextvar 丢失。未传时 SDK
             默认使用当前进程 cwd 创建 folder-first workspace；底层 contextvar 仅作为 legacy
@@ -131,6 +133,7 @@ class Agent:
         permission_handler: Optional[Callable[[str, Dict[str, Any]], bool]] = None,
         permission_decision_hook: Optional[Callable] = None,
         max_iterations: int = 999,
+        max_total_tokens: int = 0,
         workspace: Optional[Any] = None,
         tool_loading: Optional[Any] = None,
         bare: bool = True,
@@ -173,6 +176,7 @@ class Agent:
             permission_handler=permission_handler,
             permission_decision_hook=permission_decision_hook,
             max_iterations=max_iterations,
+            max_total_tokens=max_total_tokens,
             workspace=workspace,
             tool_loading=tool_loading,
             skill_roots=skill_roots,
@@ -186,25 +190,15 @@ class Agent:
 
     @staticmethod
     def _resolve_context_window(llm: Any) -> int:
-        """记忆窗口取当前激活模型的 context_window；无全局配置时回退默认值。
+        """记忆窗口跟随注入模型的 catalog 配置。
 
-        显式传入 llm 的宿主不应被 settings.json 的 providers 配置缺失阻塞构造——
-        全局配置只用于提升默认记忆窗口精度，缺失时用 SDK 默认值（32768）降级。
+        统一委托 model_resolver.resolve_context_window()：宿主显式传入的
+        ModelClient 模型优先于全局默认（catalog 第一个）；该模型不在 catalog
+        或 catalog 为空时由统一入口告警并降级，保证构造不被全局配置缺失阻塞。
         """
-        from floodmind.memory.dual_memory import DEFAULT_CONTEXT_WINDOW_FALLBACK
+        from floodmind.config.model_resolver import resolve_context_window
 
-        try:
-            from floodmind.config.model_resolver import resolve_model
-            return resolve_model().context_window
-        except Exception as exc:
-            logger.warning(
-                "resolve_model 失败（%s），记忆窗口回退为 %d。"
-                "如需精确记忆窗口，请在 ~/.floodmind/settings.json 配置 providers，"
-                "或显式传入 memory=DualMemory(session_id=..., context_window=...)。",
-                exc,
-                DEFAULT_CONTEXT_WINDOW_FALLBACK,
-            )
-            return DEFAULT_CONTEXT_WINDOW_FALLBACK
+        return resolve_context_window(model_key=getattr(llm, "model_name", ""))
 
     def bind_workspace(self, ws: Any) -> None:
         """绑定/切换工作区（透传给底层 NativeFloodAgent）。

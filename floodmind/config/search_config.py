@@ -22,6 +22,8 @@ import os
 from pathlib import Path
 from typing import Any, Dict, Optional
 
+from floodmind.config.secret_store import protect_tree, unprotect_tree
+
 logger = logging.getLogger(__name__)
 
 _GLOBAL_SEARCH_PATH = Path.home() / ".floodmind" / "search.json"
@@ -50,7 +52,7 @@ def load_search_config() -> Dict[str, Any]:
     cfg = dict(DEFAULT_CONFIG)
     file_cfg = _load_json(_GLOBAL_SEARCH_PATH)
     if file_cfg:
-        cfg.update(file_cfg)
+        cfg.update(unprotect_tree(file_cfg))
 
     # 环境变量覆盖
     env_engine = os.getenv("FLOODMIND_SEARCH_ENGINE")
@@ -84,7 +86,7 @@ def write_search_config(cfg: Dict[str, Any]) -> Path:
     """写入搜索配置到全局文件"""
     _GLOBAL_SEARCH_PATH.parent.mkdir(parents=True, exist_ok=True)
     with open(_GLOBAL_SEARCH_PATH, "w", encoding="utf-8") as f:
-        json.dump(cfg, f, ensure_ascii=False, indent=2)
+        json.dump(protect_tree(cfg), f, ensure_ascii=False, indent=2)
     invalidate_search_config()
     logger.info("Search config written: %s", _GLOBAL_SEARCH_PATH)
     return _GLOBAL_SEARCH_PATH

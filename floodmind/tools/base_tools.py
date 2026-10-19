@@ -22,7 +22,7 @@ import subprocess
 import threading
 import contextvars
 from functools import lru_cache
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Optional, Dict, Any, List, Union
 
@@ -45,6 +45,7 @@ from floodmind.tools.agent_tool import (
 from floodmind.agent.runtime.contracts.permissions import ToolPermissionPolicy
 from floodmind.skills.registry import get_skill_registry
 from floodmind.agent.runtime.services.process_sandbox import get_process_sandbox
+from floodmind.agent.runtime.services.credential_env import strip_credential_env
 from floodmind.tools.session_context import (
     SESSION_CONTEXT,
     set_session_context,
@@ -83,8 +84,12 @@ _RETRY_GUARD_PROMPT = (
 
 
 def _build_exec_env() -> Dict[str, str]:
-    """为 exec_bash 构建更稳定的运行环境。"""
-    env = os.environ.copy()
+    """为 exec_bash 构建更稳定的运行环境。
+
+    G-06：不直接继承宿主环境——先剔除凭证类变量（API Key / Token / Password 等），
+    再写入工具自身需要的确定性变量。子进程无法通过 `env` 读取宿主凭证。
+    """
+    env = strip_credential_env(os.environ)
     env['PYTHONIOENCODING'] = 'utf-8'
     env['PYTHONUTF8'] = '1'
     existing_pythonpath = env.get('PYTHONPATH', '')
@@ -1377,11 +1382,16 @@ class AddMemoryInput(BaseModel):
     """添加长期记忆的输入参数"""
     content: str = Field(default="", description="要记录的内容")
     entry_type: str = Field(default="note", description="记忆类型: note(备注), preference(偏好), decision(决策), rule(规则)")
+    ttl_days: Optional[int] = Field(
+        default=None,
+        description="[可选] 有效天数。临时结论/阶段性方案填写，过期后自动失效、不再召回；长期事实不填。",
+    )
 
 
-def _impl_add_memory(content: str = "", entry_type: str = "note") -> str:
+def _impl_add_memory(content: str = "", entry_type: str = "note", ttl_days: Optional[int] = None) -> str:
     parsed = _parse_json_if_needed(content)
     if parsed and 'content' in parsed:
+        ttl_days = parsed.get('ttl_days', ttl_days)
         content = parsed.get('content', content)
         entry_type = parsed.get('entry_type', entry_type)
     
@@ -1395,40 +1405,30 @@ def _impl_add_memory(content: str = "", entry_type: str = "note") -> str:
     if entry_type not in valid_types:
         entry_type = "note"
     
-    memory_instance = get_memory_instance()
-
-    # P0 记忆增强（MemoryAdd 重定向）：优先写门面语义事实存储——与回顾/固化
-    # 管线共用同一数据底座，工具写入的事实才能被召回/失效语义覆盖；旧
-    # DualMemory LTM 已冻结只读，不再追加。门面不可用（未装配/构造异常）时
-    # 回退下方旧直写路径，行为降级而非工具整体失效。
+    # 门面语义事实存储是长期记忆的唯一写入入口（与回顾/固化管线共用同一数据
+    # 底座，工具写入的事实才能被召回/失效语义覆盖）。门面不可用时 fail-closed：
+    # 不写旧 DualMemory LTM（已冻结只读），也不静默降级到第二写路径。
     try:
         from floodmind.memory.services import get_memory_services
 
         store = get_memory_services().store
         # 语义存储 add 不自带去重，先按 content 查 active 条目：重复写入会产生
-        # 内容完全相同的多条 active 事实，召回时互相干扰（与旧 store 返回文案一致）
+        # 内容完全相同的多条 active 事实，召回时互相干扰。
         if any(e.content == content for e in store.active_entries()):
             return _finalize_tool_output("add_memory", "该内容已存在于长期记忆中", content=content, entry_type=entry_type)
-        store.add(content, category=entry_type)
+        try:
+            ttl = int(ttl_days) if ttl_days is not None else 0
+        except (TypeError, ValueError):
+            ttl = 0
+        valid_to = (
+            (datetime.now() + timedelta(days=ttl)).isoformat()
+            if ttl > 0 else None
+        )
+        store.add(content, category=entry_type, valid_to=valid_to)
         return _finalize_tool_output("add_memory", f"已记录到长期记忆：{content}", content=content, entry_type=entry_type)
     except Exception as e:
-        logger.debug("[MemoryAdd] 门面语义存储不可用，回退旧直写路径: %s", e)
-
-    if memory_instance is None:
-        return _finalize_tool_output("add_memory", "错误：记忆系统未初始化", content=content, entry_type=entry_type)
-    
-    try:
-        if hasattr(memory_instance, 'add_long_term_memory'):
-            success = memory_instance.add_long_term_memory(content, entry_type)
-            if success:
-                return _finalize_tool_output("add_memory", f"已记录到长期记忆：{content}", content=content, entry_type=entry_type)
-            else:
-                return _finalize_tool_output("add_memory", "该内容已存在于长期记忆中", content=content, entry_type=entry_type)
-        else:
-            return _finalize_tool_output("add_memory", "错误：记忆系统不支持此操作", content=content, entry_type=entry_type)
-    except Exception as e:
-        logger.error(f"添加长期记忆失败: {e}")
-        return _finalize_tool_output("add_memory", f"添加长期记忆失败: {str(e)}", content=content, entry_type=entry_type)
+        logger.error("[MemoryAdd] 记忆服务不可用，拒绝写入: %s", e)
+        return _finalize_tool_output("add_memory", f"错误：记忆服务不可用：{e}", content=content, entry_type=entry_type)
 
 
 add_memory = build_agent_tool(

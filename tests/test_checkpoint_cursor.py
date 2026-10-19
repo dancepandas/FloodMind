@@ -248,6 +248,7 @@ def test_run_from_state_uses_supplied_reducer_state_without_replaying():
     from floodmind.agent.native.executor import NativeAgentExecutor
 
     native = object.__new__(NativeAgentExecutor)
+    native.model_client = MagicMock()
     native._journal_authority = authority
     native._TERMINAL_STATUSES = {"completed", "failed"}
     native._tracing_service = None

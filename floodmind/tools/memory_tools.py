@@ -12,10 +12,7 @@ Memory 工具模块
 所有工具都遵循 build_agent_tool 模式，与现有工具体系统一。
 """
 
-import json
 import logging
-from datetime import datetime, timezone
-from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from pydantic import BaseModel, Field
@@ -25,35 +22,20 @@ from floodmind.agent.runtime.services.history_projection import project_current
 from floodmind.memory.task_experience import get_task_experience_store
 from floodmind.memory.services import get_memory_services
 from floodmind.tools.agent_tool import (
-    ToolRegistry,
     build_agent_tool,
     make_readonly_permission_fn,
-    make_write_permission_fn,
 )
 from floodmind.tools.base_tools import (
     SESSION_CONTEXT,
     _finalize_tool_output,
-    _parse_json_if_needed,
     get_memory_instance,
 )
-from floodmind.agent.runtime.services._runtime_root import PROJECT_ROOT as _PROJECT_ROOT
 
 logger = logging.getLogger(__name__)
 
 
 def _get_session_id() -> str:
     return SESSION_CONTEXT.get("session_id", "") or "default"
-
-
-def _get_session_dir(session_id: str) -> Path:
-    return _PROJECT_ROOT / "data" / "sessions" / session_id
-
-
-def _core_memory_path(session_id: str) -> Path:
-    output_dir = SESSION_CONTEXT.get("output_dir")
-    if output_dir:
-        return Path(output_dir).parent / "core_memory.json"
-    return _PROJECT_ROOT / "data" / "sessions" / session_id / "core_memory.json"
 
 
 # ── ConversationSearch ─────────────────────────────────────────────────────
@@ -146,24 +128,6 @@ class CoreMemoryReadInput(BaseModel):
     category: Optional[str] = Field(default=None, description="[可选] 只读取某个类别，不填则读取全部")
 
 
-def _load_core_memory(session_id: str) -> Dict[str, Any]:
-    path = _core_memory_path(session_id)
-    if not path.exists():
-        return {"updated_at": datetime.now(timezone.utc).isoformat(), "facts": {}}
-    try:
-        return json.loads(path.read_text(encoding="utf-8"))
-    except Exception as e:
-        logger.warning("读取 core memory 失败: %s", e)
-        return {"updated_at": datetime.now(timezone.utc).isoformat(), "facts": {}}
-
-
-def _save_core_memory(session_id: str, data: Dict[str, Any]) -> None:
-    path = _core_memory_path(session_id)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    data["updated_at"] = datetime.now(timezone.utc).isoformat()
-    path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
-
-
 def _impl_core_memory_append(category: str = "", fact: str = "") -> str:
     category = str(category).strip().strip('"').strip("'")
     fact = str(fact).strip().strip('"').strip("'")
@@ -172,7 +136,7 @@ def _impl_core_memory_append(category: str = "", fact: str = "") -> str:
     if not fact:
         return _finalize_tool_output("core_memory_append", "错误：fact 不能为空", category=category, fact=fact)
 
-    # 重定向到项目级 CoreMemoryStore（门面装配）；会话级旧文件读写保留在下方不删（P1 清理）
+    # 项目级 CoreMemoryStore（门面装配）是唯一 core memory 路径。
     try:
         store = get_memory_services().core
     except Exception as e:
@@ -198,7 +162,7 @@ core_memory_append = build_agent_tool(
 
 
 def _impl_core_memory_read(category: Optional[str] = None) -> str:
-    # 重定向到项目级 CoreMemoryStore；条目为 dict 结构（实际落盘仅 {fact, scope} 两键）
+    # 项目级 CoreMemoryStore 是唯一路径；条目实际落盘仅 {fact, scope} 两键。
     try:
         store = get_memory_services().core
     except Exception as e:

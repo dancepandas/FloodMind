@@ -5,7 +5,9 @@ from unittest.mock import patch
 
 import pytest
 
-from floodmind.config.model_resolver import resolve_model, list_models, ResolvedModel
+from floodmind.config.model_resolver import (
+    resolve_context_window, resolve_model, list_models, ResolvedModel,
+)
 from floodmind.config.provider_registry import PROVIDER_DEFS
 
 
@@ -143,6 +145,30 @@ class TestListModels:
         ids = [(pid, m["id"]) for pid, _, m in items]
         assert ids[0] == ("dashscope", "model-a")
         assert ids[-1] == ("openai", "gpt-test")
+
+
+class TestResolveContextWindow:
+    """resolve_context_window 是上下文窗口的唯一解析入口。"""
+
+    def test_hit_returns_model_window(self):
+        assert resolve_context_window(model_key="gpt-test") == 128000
+        assert resolve_context_window(model_key="model-b") == 32768
+
+    def test_unknown_model_falls_back_to_catalog_default(self, caplog):
+        import logging
+        with caplog.at_level(logging.WARNING, logger="floodmind.config.model_resolver"):
+            window = resolve_context_window(model_key="does-not-exist")
+        assert window == 65536  # catalog 默认模型 model-a
+        assert "does-not-exist" in caplog.text
+        assert "model-a" in caplog.text
+
+    def test_empty_catalog_returns_sdk_default(self, caplog):
+        import logging
+        with patch("floodmind.config.model_resolver.get_config", return_value={}):
+            with caplog.at_level(logging.WARNING, logger="floodmind.config.model_resolver"):
+                window = resolve_context_window(model_key="any-model")
+        assert window == 32768
+        assert "SDK 默认窗口" in caplog.text
 
 
 class TestContextWindowClamp:

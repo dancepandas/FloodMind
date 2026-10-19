@@ -16,6 +16,8 @@ import re
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+from floodmind.config.secret_store import protect_tree, unprotect_tree
+
 _logger = logging.getLogger(__name__)
 
 
@@ -139,7 +141,10 @@ def migrate_settings() -> bool:
         backup.write_text(user_path.read_text(encoding="utf-8"), encoding="utf-8")
         _logger.info("已备份旧 settings.json: %s", backup)
 
-    user_path.write_text(json.dumps(next_cfg, ensure_ascii=False, indent=2), encoding="utf-8")
+    user_path.write_text(
+        json.dumps(protect_tree(next_cfg), ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
     if migrate_mcp:
         mcp_path.write_text(
             json.dumps({"servers": legacy_servers}, ensure_ascii=False, indent=2),
@@ -194,6 +199,17 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         "max_search_results": 8,
         "max_loaded_tools": 12,
         "get_tool_loads_tool": True,
+    },
+    "model_routing": {
+        "subagent_model": "",
+        "fallbacks": [],
+        "max_fallbacks": 2,
+    },
+    "model_pricing": {},
+    "observability": {
+        "otlp_endpoint": "",
+        "otlp_headers": {},
+        "otlp_timeout_seconds": 5.0,
     },
     "api": {
         "base_url": "http://127.0.0.1:8000",
@@ -358,7 +374,8 @@ def _load_config() -> dict:
         cfg = _deep_merge(cfg, normalized)
         _logger.debug("已加载旧配置: %s", old_path)
 
-    return cfg
+    # G-06：磁盘上是密文，内存中始终是明文；解密失败按空值处理（fail-closed）。
+    return unprotect_tree(cfg)
 
 
 # 全局配置缓存
@@ -391,12 +408,12 @@ def _atomic_write_json(path, cfg: dict) -> None:
 
 
 def save_config(cfg: dict) -> None:
-    """保存用户配置到 ~/.floodmind/settings.json。"""
+    """保存用户配置到 ~/.floodmind/settings.json（敏感值加密后落盘）。"""
     global _config_cache
     config_dir = get_floodmind_home()
     config_dir.mkdir(parents=True, exist_ok=True)
     config_path = _config_path()
-    _atomic_write_json(config_path, cfg)
+    _atomic_write_json(config_path, protect_tree(cfg))
     _config_cache = None  # 强制下次重新加载
     _logger.info("配置已保存: %s", config_path)
 
@@ -638,48 +655,159 @@ class ToolLoadingConfig:
 
 # ── MCP 配置 (独立文件 mcp.json) ─────────────────────────
 
+_MCP_TRANSPORTS = frozenset({"sse", "stdio"})
+_MCP_SERVER_KEYS = frozenset({
+    "name", "transport", "enabled", "url", "headers", "request_timeout",
+    "command", "args", "env",
+})
+
+
+class McpConfigError(ValueError):
+    """mcp.json 不符合唯一契约（字段名/传输类型/必填项）。不做兜底解析。"""
+
+
 def _mcp_config_path() -> Path:
     return get_floodmind_home() / "mcp.json"
 
 
+def _validate_mcp_servers(raw: Any, source: str) -> List[Dict[str, Any]]:
+    """校验 servers 数组，返回原顺序的合法条目；任何违规直接抛 ``McpConfigError``。
+
+    ``source`` 用于错误定位（配置文件路径或环境变量名）。
+    """
+    if not isinstance(raw, list):
+        raise McpConfigError(f"{source}: servers 必须是数组")
+    validated: List[Dict[str, Any]] = []
+    seen_names: set = set()
+    for index, entry in enumerate(raw):
+        where = f"{source}: servers[{index}]"
+        if not isinstance(entry, dict):
+            raise McpConfigError(f"{where} 必须是对象")
+        if "type" in entry:
+            raise McpConfigError(
+                f"{where} 包含不受支持的字段 'type'；传输类型字段名必须是 'transport'"
+                f"（取值 {'/'.join(sorted(_MCP_TRANSPORTS))}）"
+            )
+        unknown = sorted(set(entry) - _MCP_SERVER_KEYS)
+        if unknown:
+            raise McpConfigError(
+                f"{where} 包含未知字段: {', '.join(unknown)}；"
+                f"允许字段: {', '.join(sorted(_MCP_SERVER_KEYS))}"
+            )
+        name = entry.get("name")
+        if not isinstance(name, str) or not name.strip():
+            raise McpConfigError(f"{where} 缺少非空 name")
+        if name in seen_names:
+            raise McpConfigError(f"{where} name 重复: {name}")
+        seen_names.add(name)
+        transport = entry.get("transport")
+        if transport not in _MCP_TRANSPORTS:
+            raise McpConfigError(
+                f"{where} transport 必须是 {'/'.join(sorted(_MCP_TRANSPORTS))}，"
+                f"收到: {transport!r}"
+            )
+        if transport == "sse" and not entry.get("url"):
+            raise McpConfigError(f"{where} transport=sse 需要非空 url")
+        if transport == "stdio" and not entry.get("command"):
+            raise McpConfigError(f"{where} transport=stdio 需要非空 command")
+        if "args" in entry and not isinstance(entry["args"], list):
+            raise McpConfigError(f"{where} args 必须是数组")
+        for key in ("env", "headers"):
+            if key in entry and not isinstance(entry[key], dict):
+                raise McpConfigError(f"{where} {key} 必须是对象")
+        if "enabled" in entry and not isinstance(entry["enabled"], bool):
+            raise McpConfigError(f"{where} enabled 必须是布尔值")
+        validated.append(entry)
+    return validated
+
+
+def _warn_if_project_mcp_config_ignored(active_path: Path) -> None:
+    """显式区分两份 mcp.json：项目级 ``.floodmind/mcp.json`` 不是运行配置。
+
+    该文件通常来自旧版布局或手工拷贝，字段可能仍是 ``type``；静默忽略会让
+    “改了配置不生效”极难排查，因此存在时每次加载都告警并给出正确路径。
+    """
+    project_path = Path.cwd() / ".floodmind" / "mcp.json"
+    try:
+        if not project_path.exists() or project_path.resolve() == active_path.resolve():
+            return
+    except OSError:
+        return
+    _logger.warning(
+        "检测到项目级 MCP 配置 %s，该文件不会被加载；运行时只读取 %s。"
+        "请把 servers 迁移到后者，并确认字段名为 transport（type 不受支持）。",
+        project_path, active_path,
+    )
+
+
 def load_mcp_config() -> Dict[str, Any]:
-    """Load MCP configuration and apply environment overrides, without writes."""
+    """加载并校验 MCP 配置（唯一契约；不做无效字段兜底）。
+
+    只读取 ``get_floodmind_home()/mcp.json``（``MCP_SERVERS`` 环境变量可整体
+    覆盖 servers）。条目不合规抛 ``McpConfigError``，由调用方在启动点显式报错。
+    """
     mcp_path = _mcp_config_path()
-    mcp_cfg = _load_json_config(mcp_path) if mcp_path.exists() else {}
+    mcp_cfg: Dict[str, Any] = {}
+    if mcp_path.exists():
+        try:
+            text = mcp_path.read_text(encoding="utf-8")
+            parsed_file = json.loads(text) if text.strip() else {}
+        except (OSError, ValueError) as exc:
+            raise McpConfigError(f"{mcp_path} 不可读或不是合法 JSON: {exc}") from exc
+        if not isinstance(parsed_file, dict):
+            raise McpConfigError(f"{mcp_path} 顶层必须是对象")
+        # G-06：headers/env 中的凭证在磁盘上加密，运行时还原为明文。
+        mcp_cfg = unprotect_tree(parsed_file)
 
     if not mcp_cfg:
         mcp_cfg = {"servers": []}
 
-    # 环境变量覆盖
+    source = str(mcp_path)
     env_raw = os.getenv("MCP_SERVERS", "")
     if env_raw.strip():
         try:
             parsed = json.loads(env_raw)
-            if isinstance(parsed, list):
-                mcp_cfg["servers"] = parsed
-        except Exception:
-            pass
+        except ValueError as exc:
+            raise McpConfigError(f"MCP_SERVERS 不是合法 JSON: {exc}") from exc
+        if not isinstance(parsed, list):
+            raise McpConfigError("MCP_SERVERS 必须是 JSON 数组")
+        mcp_cfg["servers"] = parsed
+        source = "MCP_SERVERS"
 
+    mcp_cfg["servers"] = _validate_mcp_servers(mcp_cfg.get("servers", []), source)
+    _warn_if_project_mcp_config_ignored(mcp_path)
     return mcp_cfg
 
 
 def save_mcp_config(mcp_cfg: Dict[str, Any]) -> None:
-    """保存 MCP 配置到 mcp.json。"""
+    """校验后保存 MCP 配置到 mcp.json；非法条目拒绝落盘。"""
+    servers = _validate_mcp_servers(mcp_cfg.get("servers", []), "save_mcp_config")
     config_dir = get_floodmind_home()
     config_dir.mkdir(parents=True, exist_ok=True)
     mcp_path = _mcp_config_path()
-    _atomic_write_json(mcp_path, mcp_cfg)
+    _atomic_write_json(mcp_path, protect_tree({**mcp_cfg, "servers": servers}))
     _logger.info("MCP 配置已保存: %s", mcp_path)
 
 
 class McpServerConfig:
+    """运行时 MCP server 快照。
+
+    配置非法时设置 ``error`` 并拒绝暴露任何 server（fail-closed）；由 agent
+    初始化点（``_load_mcp_tools``）抛出 ``McpConfigError``，避免带着空 MCP 静默运行。
+    """
+
     def __init__(self):
-        mcp_cfg = load_mcp_config()
-        raw = mcp_cfg.get("servers", [])
-        if isinstance(raw, list):
-            self.servers: List[Dict[str, Any]] = raw
-        else:
-            self.servers = []
+        self.error: str = ""
+        try:
+            mcp_cfg = load_mcp_config()
+        except McpConfigError as exc:
+            self.error = str(exc)
+            self.servers: List[Dict[str, Any]] = []
+            _logger.error("MCP 配置无效，已拒绝接入任何 server: %s", exc)
+            return
+        self.servers = [
+            entry for entry in mcp_cfg["servers"] if entry.get("enabled", True)
+        ]
 
 
 class APIConfig:
@@ -724,6 +852,11 @@ class Settings:
         self.tool_loading = ToolLoadingConfig(cfg)
         self.mcp = McpServerConfig()
         self.workspace = WorkspaceConfig(cfg)
+        # 模型单价表（usage_accounting 成本归因）：{model: {"input_per_1k": float,
+        # "output_per_1k": float, "currency": "USD"}}；空表表示不估算成本
+        self.model_pricing = dict(cfg.get("model_pricing", {}))
+        # OTLP/HTTP 导出配置（C4）：endpoint 为空表示只落本地 trace/metrics
+        self.observability = dict(cfg.get("observability", {}))
 
     @property
     def qwen(self):

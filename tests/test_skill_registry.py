@@ -331,6 +331,7 @@ class _CrudHarness:
     _validate_skill_name = staticmethod(NativeFloodAgent._validate_skill_name)
     _split_skill_md = staticmethod(NativeFloodAgent._split_skill_md)
     _apply_skill_body_action = staticmethod(NativeFloodAgent._apply_skill_body_action)
+    _write_skill_md_verified = NativeFloodAgent._write_skill_md_verified
     _handle_list_skills = NativeFloodAgent._handle_list_skills
     _handle_create_skill = NativeFloodAgent._handle_create_skill
     _handle_update_skill = NativeFloodAgent._handle_update_skill

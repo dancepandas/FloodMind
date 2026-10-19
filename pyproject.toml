@@ -43,6 +43,7 @@ dependencies = [
     "defusedxml>=0.7",
     "jieba>=0.42",
     "jsonschema>=4.17",
+    "cryptography>=42",
 ]
 
 [project.optional-dependencies]
@@ -91,7 +92,6 @@ include = ["floodmind*"]
 [tool.setuptools.package-data]
 floodmind = [
     "config/settings_template.json",
-    "MCP/**/*.py",
     "skills/**/SKILL.md",
     "skills/**/scripts/**",
     "skills/**/templates/**",

@@ -1,0 +1,48 @@
+{
+  "id": "smoke-multi-tool",
+  "tier": "smoke",
+  "description": "同一轮并行请求两个工具：两者都被调度，结果按调用进入下一轮上下文。",
+  "user_text": "同时查询敖江站和闽江站水位。",
+  "max_iterations": 5,
+  "tools": {
+    "ReadGauge": {
+      "description": "读取指定测站的当前水位。",
+      "parameters": {
+        "type": "object",
+        "properties": {"station": {"type": "string"}},
+        "required": ["station"]
+      },
+      "result": {"content": "水位 12.3 m", "status": "completed"}
+    }
+  },
+  "rounds": [
+    {
+      "events": [
+        {
+          "type": "tool_call_done",
+          "tool_call": {"id": "call_ao", "name": "ReadGauge", "arguments": {"station": "敖江"}}
+        },
+        {
+          "type": "tool_call_done",
+          "tool_call": {"id": "call_min", "name": "ReadGauge", "arguments": {"station": "闽江"}}
+        },
+        {"type": "done", "terminal_reason": "tool_calls"}
+      ]
+    },
+    {
+      "events": [
+        {"type": "token", "content": "两站水位均为 12.3 m。"},
+        {"type": "done", "terminal_reason": "stop"}
+      ]
+    }
+  ],
+  "expect": {
+    "final_output_contains": ["12.3"],
+    "model_calls": 2,
+    "tool_calls": ["ReadGauge", "ReadGauge"],
+    "tool_statuses": ["completed", "completed"],
+    "prompt_contains": [
+      {"call_index": 1, "contains": "水位 12.3 m"}
+    ]
+  }
+}

@@ -193,6 +193,7 @@ class ChildThreadRuntime:
                 run_id=parent_ctx.run_id,
                 thread_id=child_thread.thread_id,
                 turn_id=child_turn_id,
+                fence_check=getattr(parent_auth, "fence_check", None),
             )
             tdirs = thread_dirs(
                 self._runtime_dir, parent_ctx.conversation_id, parent_ctx.task_id,
@@ -298,7 +299,23 @@ class ChildThreadRuntime:
             )
             # 4. 独立 ToolRuntime（§13.2：loaded set / GetTool closure 不共享）
             specialist_registry, specialist_tool_loader = self._tool_runtime_factory()
-            child_model_client = _TokenBudgetModelClient(self._model_client, quota)
+            # G-19：子代理可显式路由到独立模型；回退链与外层 token 配额叠加，
+            # 保证任何回退模型的消耗都计入同一子线程预算。
+            from floodmind.agent.native.model_gateway import build_subagent_model_client
+
+            def _record_fallback(from_model: str, to_model: str, error: str) -> None:
+                child_event_bus.emit({
+                    "type": "model_fallback",
+                    "from_model": from_model,
+                    "to_model": to_model,
+                    "error": error,
+                })
+
+            child_model_client = build_subagent_model_client(
+                self._model_client,
+                wrap=lambda client: _TokenBudgetModelClient(client, quota),
+                on_fallback=_record_fallback,
+            )
             child_executor = self._build_child_executor(
                 child_auth, child_model_client, specialist_registry,
                 specialist_tool_loader, child_event_bus,
