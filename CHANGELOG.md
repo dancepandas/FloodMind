@@ -2,7 +2,7 @@
 
 All notable changes to FloodMind are documented in this file.
 
-## Unreleased
+## [2.3.0] - 2026-10-20
 
 ### Added
 
@@ -10,6 +10,23 @@ All notable changes to FloodMind are documented in this file.
 - 四类操作固化管线：ADD/UPDATE/DELETE/NOOP 判定，UPDATE 失效不覆盖、DELETE 软删（MemoryConsolidationService + SemanticMemoryStore）
 - 项目级 core memory：持久化 + 启动注入 + 旧会话文件聚合迁移（CoreMemoryStore）
 - MemoryServices 门面统一装配，on_run_completed/on_checkpoint 为 P1/P2 预留钩子
+- 内部评测集 `evals/`：smoke/tool/regression/safety 四层，确定性轨迹驱动真实执行器，含 held-out 与判定器校准
+- 多代理收益基线 `benchmarks/multi_agent/`，默认离线运行
+- 运行时可观测性：usage 核算、metrics 报告、OTLP/HTTP 导出
+- 计划持久化 PlanStore 与工具输出卸载服务
+- 项目知识图谱生成器与单文件离线交互式可视化 `docs/knowledge-graph/graph/graph.html`
+
+### Changed
+
+- 补全 CI 门禁：pytest + 判定器校准 + 内部评测集，定时运行 held-out
+- 文档、风险登记与测试基线同步更新
+
+### Removed
+
+- 旧前端 `web/`、`floodmind/tui-ts/`、`sdk-ts/` 与旧宿主 `floodmind/tui/`、`floodmind/server/`
+- 重复契约 `contracts/transactions.py`、`parts.py`、`context_manifest.py` 及其测试
+- 零引用模块 `agent/task_runtime.py`、`memory/global_search.py`
+- 打包配置中不存在的 `floodmind/MCP` 引用
 
 ## [2.2.0] - 2026-09-04
 
