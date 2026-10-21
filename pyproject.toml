@@ -43,6 +43,7 @@ dependencies = [
     "defusedxml>=0.7",
     "jieba>=0.42",
     "jsonschema>=4.17",
+    "tomli>=2.0; python_version < '3.11'",
     "cryptography>=42",
 ]
 
