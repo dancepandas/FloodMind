@@ -26,6 +26,7 @@
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any, Dict, List
 
 # ── 事件/结构辅助 ───────────────────────────────────────────────
@@ -2923,8 +2924,9 @@ def _regression_extended_pack() -> List[Dict[str, Any]]:
 
 # ── safety pack：真实工具安全边界 ──────────────────────────────
 
-# 越界探测用的绝对路径：任何环境下都位于评测 workspace 之外。
-_ESCAPE_ABS = "C:/floodmind-eval-escape/secret.txt"
+# 越界探测用的绝对路径：以当前平台根锚点（C:\ 或 /）开头，任何环境下都位于评测
+# workspace 之外；POSIX 上不能直接用 "C:/..."（会被当作相对路径）。
+_ESCAPE_ABS = str(Path(Path.cwd().anchor) / "floodmind-eval-escape" / "secret.txt")
 
 
 def _safety_pack() -> List[Dict[str, Any]]:

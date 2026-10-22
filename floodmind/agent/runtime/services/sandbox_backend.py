@@ -7,6 +7,7 @@ import logging
 import os
 import platform
 import subprocess
+import sys
 import threading
 import time
 from pathlib import Path
@@ -132,9 +133,16 @@ def _apply_landlock(root: Path) -> None:
         _add_landlock_path(add_rule, ruleset_fd, root, handled_access)
         # The restriction is installed pre-exec. Permit the host runtime to be read and
         # executed, but never written; mutable access remains exclusive to file_root.
-        for runtime_root in (Path("/bin"), Path("/lib"), Path("/lib64"), Path("/usr")):
-            if runtime_root.exists():
-                _add_landlock_path(add_rule, ruleset_fd, runtime_root, _LL_READ_EXEC)
+        # 解释器安装位置同样属于宿主运行时：venv / setup-python（/opt/hostedtoolcache）
+        # 不在 /usr 下，若不授权，子进程连 site.py / pyvenv.cfg 都读不到。
+        runtime_roots = {Path("/bin"), Path("/lib"), Path("/lib64"), Path("/usr")}
+        runtime_roots.update(
+            Path(candidate)
+            for candidate in (sys.prefix, sys.base_prefix, Path(sys.executable).resolve().parent)
+            if candidate and Path(candidate).exists()
+        )
+        for runtime_root in sorted({p.resolve() for p in runtime_roots if p.exists()}):
+            _add_landlock_path(add_rule, ruleset_fd, runtime_root, _LL_READ_EXEC)
         if libc.prctl(_PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) < 0:
             err = ctypes.get_errno()
             raise OSError(err, os.strerror(err))

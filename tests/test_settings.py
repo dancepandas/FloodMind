@@ -1,5 +1,6 @@
 """Tests for Settings configuration (v2: providers-only schema + resolver facade)."""
 
+import importlib
 import json
 import os
 from pathlib import Path
@@ -103,7 +104,10 @@ class TestModelConfig:
 class TestAgentConfig:
     def test_defaults(self):
         """agent 段已精简：无 max_history/context_window；max_iterations 默认 999。"""
-        with patch("floodmind.config.settings.get_config", return_value=DEFAULT_CONFIG):
+        # 包属性 floodmind.config.settings 是 Settings 实例，会遮蔽同名子模块，
+        # 因此按模块对象 patch，避免依赖导入顺序。
+        settings_module = importlib.import_module("floodmind.config.settings")
+        with patch.object(settings_module, "get_config", return_value=DEFAULT_CONFIG):
             cfg = AgentConfig(DEFAULT_CONFIG)
         assert cfg.runtime == "native"
         assert cfg.max_iterations == DEFAULT_MAX_ITERATIONS == 999
