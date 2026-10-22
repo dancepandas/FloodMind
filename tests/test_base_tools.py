@@ -57,9 +57,11 @@ def test_clamp_exec_timeout_bounds_and_fallbacks():
 def test_impl_exec_bash_timeout_path_returns_within_bound(tmp_path):
     """同步超时路径：超时应返回超时信息而非挂起（内部走杀进程树逻辑）。"""
     ws = _bind_workspace(tmp_path)
+    script = ws.workspace_dir / "sleep_long.py"
+    script.write_text("import time\ntime.sleep(30)\n", encoding="utf-8")
     try:
         start = time.monotonic()
-        result = _impl_exec_bash(command="Start-Sleep 30", timeout=2)
+        result = _impl_exec_bash(command=f"python {script}", timeout=2)
         elapsed = time.monotonic() - start
     finally:
         _reset(tmp_path)
@@ -160,6 +162,19 @@ def test_kill_process_tree_terminates_grandchild(tmp_path):
     finally:
         if parent.poll() is None:
             parent.kill()
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX 进程组语义专属")
+def test_kill_process_tree_never_kills_caller_group():
+    """P0 回归：子进程未隔离进程组时，killpg 不得连带杀死调用者（Linux CI 曾因此整组被杀）。"""
+    proc = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
+    try:
+        _kill_process_tree(proc)
+        assert proc.poll() is not None
+        assert os.getpid() > 0  # 调用者存活（否则本测试进程已被 SIGKILL）
+    finally:
+        if proc.poll() is None:
+            proc.kill()
 
 
 # ── WebFetch 编码 ─────────────────────────────────────────────────────────

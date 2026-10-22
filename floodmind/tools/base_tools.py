@@ -28,6 +28,7 @@ from typing import Optional, Dict, Any, List, Union
 
 from pydantic import BaseModel, Field
 
+from floodmind.common.process_tree import isolate_process_group, terminate_process_tree
 from floodmind.tools.agent_tool import (
     AgentTool,
     ToolRegistry,
@@ -484,40 +485,12 @@ _impl_get_skill = get_skill.func
 
 
 def _kill_process_tree(process: Optional[subprocess.Popen]) -> None:
-    """终止整棵进程树：Windows 用 taskkill /PID <pid> /T /F，POSIX 用 killpg。
+    """终止整棵进程树（Windows: taskkill /T /F；POSIX: 独立进程组 killpg）。
 
-    与 BackgroundTaskService._kill_process 同策略：process.kill() 只杀直接子进程，
-    Windows 下孙进程会全部泄漏，必须用 taskkill /T 递归终止；taskkill 失败时
-    保留 process.kill() 作为兜底（至少保证直接子进程被终止）。
+    委托 ``floodmind.common.process_tree.terminate_process_tree``：POSIX 下若子进程
+    未与调用者隔离进程组，killpg 会连带杀死调用者，助手会检测并退回 kill()。
     """
-    if process is None:
-        return
-    try:
-        if process.poll() is not None:
-            return
-        if os.name == "nt":
-            subprocess.run(
-                ["taskkill", "/PID", str(process.pid), "/T", "/F"],
-                capture_output=True,
-                timeout=10,
-                check=False,
-            )
-        else:
-            try:
-                os.killpg(os.getpgid(process.pid), 9)
-            except (ProcessLookupError, PermissionError):
-                process.kill()
-        try:
-            process.wait(timeout=5)
-        except Exception:
-            # taskkill/killpg 未能终止（或不可用）时兜底杀直接子进程
-            process.kill()
-    except Exception as e:
-        logger.warning("终止进程树失败 pid=%s: %s", process.pid, e)
-        try:
-            process.kill()
-        except Exception:
-            pass
+    terminate_process_tree(process)
 
 
 def _decode_command_output(data: bytes) -> str:
@@ -751,6 +724,7 @@ def _impl_exec_bash(command: str = "", workdir: str = "", timeout: int = 120, en
             # 命令输出多为 GBK，强制 utf-8 会乱码。由读线程累积原始 bytes，
             # 结束后用 _decode_command_output（UTF-8 严格 → GBK → replace）解码。
         }
+        popen_kwargs = isolate_process_group(popen_kwargs)
         if process_sandbox is not None:
             popen_kwargs = process_sandbox.wrap_popen_kwargs(popen_kwargs)
 

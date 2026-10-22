@@ -45,8 +45,8 @@ class ProcessSandbox:
             flags |= subprocess.CREATE_NEW_PROCESS_GROUP
             kwargs["creationflags"] = flags
         else:
-            # Linux: 新 session，便于 killpg
-            if "preexec_fn" not in kwargs:
+            # Linux: 新 session，便于 killpg；调用方已用 start_new_session 隔离时不重复设置
+            if "preexec_fn" not in kwargs and not kwargs.get("start_new_session"):
                 kwargs["preexec_fn"] = os.setsid
         return kwargs
 

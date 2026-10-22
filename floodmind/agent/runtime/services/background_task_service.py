@@ -30,6 +30,7 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Deque, Dict, List, Optional, Tuple
 
+from floodmind.common.process_tree import terminate_process_tree
 from floodmind.memory.session_manager import session_path, validate_session_id
 from floodmind.agent.runtime.contracts.sandbox import ToolInvocation
 
@@ -703,27 +704,8 @@ class BackgroundTaskService:
                 logger.warning("BackgroundTask subscriber error: %s", e)
 
     def _kill_process(self, process: Optional[subprocess.Popen]) -> None:
-        """杀整棵进程树。Windows: taskkill /T /F；POSIX: killpg。"""
-        if process is None:
-            return
-        try:
-            if process.poll() is not None:
-                return
-            if self._platform == "win":
-                subprocess.run(
-                    ["taskkill", "/PID", str(process.pid), "/T", "/F"],
-                    capture_output=True,
-                    timeout=10,
-                    check=False,
-                )
-            else:
-                os.killpg(os.getpgid(process.pid), 9)
-            try:
-                process.wait(timeout=5)
-            except Exception:
-                process.kill()
-        except Exception as e:
-            logger.warning("BackgroundTask kill failed pid=%s: %s", process.pid, e)
+        """杀整棵进程树（Windows: taskkill /T /F；POSIX: 独立进程组 killpg）。"""
+        terminate_process_tree(process)
 
     def _read_tail(self, stdout_path: str, stderr_path: str = "", limit: int = _NOTIFICATION_TAIL_MAX) -> str:
         """有界读取 stdout+stderr 尾部（供完成通知注入），stderr-only 失败也能看到输出。
