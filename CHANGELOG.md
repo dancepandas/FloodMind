@@ -2,6 +2,17 @@
 
 All notable changes to FloodMind are documented in this file.
 
+## [2.3.1] - 2026-10-23
+
+### Fixed
+
+- CI：Python 3.10 下 `test_sdk_purity` 收集失败（`tomllib` 回退 `tomli`，并新增条件依赖）
+- POSIX 进程树终止：`exec_bash` 子进程未隔离进程组，超时后 `killpg` 会连带杀死调用者（Linux 上表现为 pytest / Agent / CI runner worker 被整组终止）
+- Landlock 沙箱未放行解释器安装目录，venv / setup-python 环境下子进程读不到 `site.py` / `pyvenv.cfg`
+- 评测 safety 用例在 POSIX 上使用 `C:/...` 绝对路径，被当作相对路径导致越界断言失效
+- `test_settings` 在包属性 `settings` 实例遮蔽同名子模块时 patch 失败
+- CI 安装 `gateway` extra，覆盖 `floodmind.gateway` 相关测试
+
 ## [2.3.0] - 2026-10-20
 
 ### Added

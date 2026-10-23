@@ -1,6 +1,6 @@
 # FloodMind
 
-**SDK-first 的智能水文 Agent Runtime — v2.3.0**
+**SDK-first 的智能水文 Agent Runtime — v2.3.1**
 
 FloodMind 收敛为面向 Python 宿主系统的纯 SDK：以 `Agent` / `ModelClient` / `Workspace` / `build_agent_tool` 为公共入口，把水文模型、数据分析、文档生成、MCP 工具与 Skill 体系嵌入到业务平台或桌面助手中。Web / TUI 前端已随 v2.0.0 移除，FloodMind 为纯 SDK 形态。
 

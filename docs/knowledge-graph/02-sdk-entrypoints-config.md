@@ -4,7 +4,7 @@
 
 ## 1. 公共导出
 
-`floodmind/__init__.py` 使用惰性 `__getattr__`，`__all__` 共 33 个符号（`floodmind/__init__.py:91`），`__version__ = "2.3.0"`。核心导出：
+`floodmind/__init__.py` 使用惰性 `__getattr__`，`__all__` 共 33 个符号（`floodmind/__init__.py:91`），`__version__ = "2.3.1"`。核心导出：
 
 | 类别 | 符号 |
 |---|---|
