@@ -2,6 +2,30 @@
 
 All notable changes to FloodMind are documented in this file.
 
+## [2.4.0] - 2026-10-26
+
+### Added
+
+- 权限 ASK 交互时限：`Agent(permission_ask_timeout=...)` 支持正数等待、`None` 不限时、`0` 无人值守直接 fail-closed；新增 `Agent.respond_permission()` / `pending_permissions()` 公开 API
+- `ModelClient(context_window=..., trust_env=...)` 显式声明上下文窗口与代理策略；自定义模型无需进入 catalog
+- 子代理 `delegate_cwd`：经父权限校验后作为额外读写根，可直接在指定目录执行
+- 真实模型评测工具：BFCL v3 适配器、11 个端到端场景、链路探针（`tools/`），并附评测报告
+- 根 README 目录导航与各主要目录的独立 README
+
+### Changed
+
+- 内置工具的文本失败前缀统一归一为 `status=error`（`TOOL_REPORTED_ERROR`），宿主与指标可区分成功与失败
+- 完整 runtime 直接复用宿主注入的 `ModelClient`，不再重建并丢失 `context_window` / `trust_env` / `timeout`
+- 私有网段与回环地址默认绕过系统代理；非 SSE 端点返回可行动的配置诊断
+- 行为指导与实现对齐：`Task` 更正为 `SubAgent`；经验检索与 `update_plan` 改为按需触发
+- 回归基线：1601 passed, 2 skipped
+
+### Fixed
+
+- PowerShell 默认 `Continue` 使非终止错误以退出码 0 结束、被误记为成功；现统一注入 `$ErrorActionPreference = 'Stop'`
+- 未命中 catalog 的模型上下文窗口告警重复刷屏；同一配置每进程只提示一次
+- 权限 ASK 应答后仍出现在待处理列表；`pending()` 现在只返回仍可应答的请求
+
 ## [2.3.1] - 2026-10-23
 
 ### Fixed
