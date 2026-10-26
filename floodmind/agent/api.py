@@ -88,6 +88,11 @@ class Agent:
             把 ALLOW 升级为 ASK（走 permission_ask 交互确认）或 DENY。钩子只能收紧不能放开——
             SDK 的安全拒绝（路径越界/危险命令/子代理分层/planning 硬门）不可被覆盖；钩子异常或
             返回非法值时保留 SDK 原决策。desktop 可用它替代对内部 registry 的 monkey patch。
+        permission_ask_timeout: permission_ask 交互确认的等待秒数。
+            - 正数（默认 300）：等待宿主通过 ``respond_permission()`` 应答，超时自动拒绝；
+            - ``None``：不限时等待；
+            - ``0``：无人值守模式，需要确认的工具直接 fail-closed 拒绝，不发 ASK 事件。
+            嵌入到无人值守脚本/CI 时应显式传 0，避免模型触发确认时长时间阻塞。
         max_iterations: Agent 循环最大迭代轮数（默认 999，有 auto-compact + DOOM LOOP 兜底）。
         max_total_tokens: 单次 run 累计 token 预算（默认 0 = 不限制）。每次新 run 从 0 起算；
             累计实际用量达到上限后不再发起新的 LLM 调用，run 以失败终态结束并返回明确说明。
@@ -132,6 +137,7 @@ class Agent:
         on_event: Optional[Callable[[Dict[str, Any]], None]] = None,
         permission_handler: Optional[Callable[[str, Dict[str, Any]], bool]] = None,
         permission_decision_hook: Optional[Callable] = None,
+        permission_ask_timeout: Optional[float] = 300.0,
         max_iterations: int = 999,
         max_total_tokens: int = 0,
         workspace: Optional[Any] = None,
@@ -175,6 +181,7 @@ class Agent:
             system_prompt=system_prompt,
             permission_handler=permission_handler,
             permission_decision_hook=permission_decision_hook,
+            permission_ask_timeout=permission_ask_timeout,
             max_iterations=max_iterations,
             max_total_tokens=max_total_tokens,
             workspace=workspace,
@@ -193,12 +200,16 @@ class Agent:
         """记忆窗口跟随注入模型的 catalog 配置。
 
         统一委托 model_resolver.resolve_context_window()：宿主显式传入的
-        ModelClient 模型优先于全局默认（catalog 第一个）；该模型不在 catalog
+        ModelClient 模型优先于全局默认（catalog 第一个）；ModelClient.context_window
+        显式声明时直接采用（自定义模型无需进入 catalog）；该模型不在 catalog
         或 catalog 为空时由统一入口告警并降级，保证构造不被全局配置缺失阻塞。
         """
         from floodmind.config.model_resolver import resolve_context_window
 
-        return resolve_context_window(model_key=getattr(llm, "model_name", ""))
+        return resolve_context_window(
+            model_key=getattr(llm, "model_name", ""),
+            explicit_context_window=getattr(llm, "context_window", None),
+        )
 
     def bind_workspace(self, ws: Any) -> None:
         """绑定/切换工作区（透传给底层 NativeFloodAgent）。
@@ -400,6 +411,34 @@ class Agent:
         """清空底层 NativeFloodAgent 的会话记忆。"""
         if hasattr(self._agent, "clear_memory"):
             self._agent.clear_memory()
+
+    # ── 权限 ASK 公开 API（交互式宿主在 on_event 收到 permission_ask 后应答） ──
+    def respond_permission(self, ask_id: str, approved: bool) -> bool:
+        """应答本会话的 permission_ask。
+
+        宿主在 ``on_event`` 收到 ``{"type": "permission_ask", "ask_id": ...}`` 后调用；
+        executor 在 awaiting_permission 轮询处续跑。ask 不存在、会话不匹配或已超时
+        返回 False。
+        """
+        from floodmind.agent.runtime.contracts.permissions import PermissionAskResponse
+        from floodmind.agent.runtime.services.ask_service import get_ask_service
+
+        if not ask_id:
+            return False
+        return get_ask_service().respond(PermissionAskResponse(
+            session_id=self.session_id,
+            ask_id=ask_id,
+            approved=bool(approved),
+        ))
+
+    def pending_permissions(self) -> List[Dict[str, Any]]:
+        """本会话仍待应答的 permission_ask 快照列表。"""
+        from floodmind.agent.runtime.services.ask_service import get_ask_service
+
+        return [
+            snapshot.model_dump()
+            for snapshot in get_ask_service().pending(self.session_id or "")
+        ]
 
     # ── 后台任务公开 API（desktop/LS 契约；宿主不再需要 agent.raw._background_task_service） ──
     def list_background_tasks(self) -> List[Dict[str, Any]]:

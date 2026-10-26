@@ -37,6 +37,8 @@ class ModelClient:
         timeout: int = 90,
         enable_thinking: bool = False,
         provider: str = "",
+        trust_env: Optional[bool] = None,
+        context_window: Optional[int] = None,
     ):
         self.api_key = api_key
         self.base_url = base_url
@@ -46,6 +48,15 @@ class ModelClient:
         self.timeout = timeout
         self.enable_thinking = enable_thinking
         self.provider = provider
+        # 宿主显式声明的上下文窗口：自定义/未入 catalog 的模型用它覆盖窗口解析，
+        # None 表示按 settings.json catalog 解析（见 model_resolver.resolve_context_window）。
+        if context_window is not None and (
+            isinstance(context_window, bool)
+            or not isinstance(context_window, int)
+            or context_window <= 0
+        ):
+            raise ValueError("ModelClient context_window 必须是正整数或 None")
+        self.context_window = context_window
         from floodmind.config.provider_registry import validate_openai_compatible_transport
         validate_openai_compatible_transport(provider, base_url)
         from floodmind.agent.native.providers import route_codec
@@ -54,6 +65,7 @@ class ModelClient:
             api_key=api_key,
             base_url=base_url,
             timeout=timeout,
+            trust_env=trust_env,
         )
 
     # ── 工厂方法：从 settings.json 构造 ───────────────────────────
@@ -66,6 +78,7 @@ class ModelClient:
         temperature: Optional[float] = None,
         max_tokens: Optional[int] = None,
         enable_thinking: bool = False,
+        trust_env: Optional[bool] = None,
     ) -> "ModelClient":
         """从 settings.json 构造 ModelClient（默认激活模型），参数未提供时用解析值。
 
@@ -82,6 +95,7 @@ class ModelClient:
             max_tokens=max_tokens if max_tokens is not None else rm.max_tokens,
             enable_thinking=enable_thinking,
             provider=rm.provider,
+            trust_env=trust_env,
         )
 
     @classmethod
@@ -89,6 +103,7 @@ class ModelClient:
         cls,
         model_key: str,
         enable_reasoning: bool = False,
+        trust_env: Optional[bool] = None,
     ) -> "ModelClient":
         """根据 settings.json 中的指定模型构造 ModelClient。"""
         from floodmind.config.model_resolver import resolve_model
@@ -112,6 +127,7 @@ class ModelClient:
             max_tokens=max_tokens,
             enable_thinking=enable_reasoning,
             provider=rm.provider,
+            trust_env=trust_env,
         )
 
     # ── Retry Advice 门面：Transport 只给 Advice，Orchestrator 决策（§7.7）──
@@ -253,7 +269,7 @@ class ModelClient:
             yield from emit_finalized(calls, invalids)
 
         try:
-            stream = self._transport.send(request_params).chunks()
+            raw = self._transport.send(request_params)
         except openai.APIError as e:
             # 可重试错误（如连接阶段的网络抖动）直接抛给调用方（executor 重试循环），
             # 保留异常链（APIConnectionError 的 str() 恒为 "Connection error."，
@@ -263,6 +279,29 @@ class ModelClient:
             logger.error("ModelClient API error: %s", e)
             yield ModelEvent(type="error", content=str(e))
             return
+
+        # 协议健全性检查：请求 stream=True 却拿到 HTML/JSON 正文（典型是 base_url
+        # 少了 /v1，网关把 /chat/completions 当网页或 JSON 路由处理）。此时 SDK 不会
+        # 报错，只是流里没有任何 chunk，最终表现为"模型以未知原因结束: empty"。
+        # 在进入解析前给出可行动的诊断，避免把配置错误伪装成模型异常。
+        content_type = raw.content_type() if hasattr(raw, "content_type") else ""
+        if content_type and ("text/html" in content_type or "json" in content_type):
+            logger.error(
+                "ModelClient 端点返回非 SSE 响应: base_url=%s content-type=%s",
+                self.base_url, content_type,
+            )
+            yield ModelEvent(
+                type="error",
+                content=(
+                    f"模型端点返回了非流式响应（Content-Type: {content_type}），无法解析流式数据。"
+                    f"当前 base_url={self.base_url}；OpenAI 兼容端点通常以 /v1 结尾，"
+                    "或该地址不是 Chat Completions 接口。请核对 base_url 与服务端点后重试。"
+                ),
+                terminal_reason=TerminalReason.from_raw("error"),
+            )
+            return
+
+        stream = raw.chunks()
 
         try:
             for chunk in stream:

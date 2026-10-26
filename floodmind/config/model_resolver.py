@@ -36,6 +36,10 @@ _DEFAULT_CONTEXT_WINDOW = 32768
 # context_window 合法区间上界（当前主流模型记忆窗口远低于此值）
 _MAX_CONTEXT_WINDOW = 2_000_000
 
+# 未命中 catalog 的窗口回退告警去重：(model_key, 回退模型 id)。
+# 窗口解析可能每轮都会调用，同一配置问题只提示一次，避免刷屏。
+_WARNED_CONTEXT_FALLBACKS: set = set()
+
 
 @dataclass(frozen=True)
 class ResolvedModel:
@@ -181,19 +185,31 @@ def resolve_model(
 def resolve_context_window(
     model_key: Optional[str] = None,
     provider_id: Optional[str] = None,
+    explicit_context_window: Optional[int] = None,
 ) -> int:
     """上下文窗口唯一解析入口（记忆压缩预算统一取此值）。
 
     语义:
+      - explicit_context_window 非空 → 直接采用（宿主为自定义模型显式声明的窗口，
+        clamp 到合法区间），不再查 catalog、不告警。
       - model_key 命中 catalog → 该模型的 context_window（显式配置 + clamp）。
-      - model_key 非空但 catalog 中不存在 → 告警（点名模型与最终取值来源），
-        回退 catalog 默认模型（resolve_model().context_window）。
+      - model_key 非空但 catalog 中不存在 → 告警（点名模型与最终取值来源，同一
+        模型每进程只提示一次），回退 catalog 默认模型（resolve_model().context_window）。
       - catalog 为空 → 告警并返回 SDK 默认窗口 32768（SDK 构造不依赖全局配置
         的既定行为）。
 
     SDK Agent、NativeFloodAgent 等消费方统一调用本函数，不再各自读取
     model_presets 或 settings.model.context_window。
     """
+    if explicit_context_window is not None:
+        if (
+            isinstance(explicit_context_window, bool)
+            or not isinstance(explicit_context_window, int)
+            or explicit_context_window <= 0
+        ):
+            raise ValueError("explicit_context_window 必须是正整数")
+        return min(explicit_context_window, _MAX_CONTEXT_WINDOW)
+
     if model_key:
         known = any(m.get("id") == model_key for _, _, m in list_models())
         if known:
@@ -209,12 +225,16 @@ def resolve_context_window(
                 _DEFAULT_CONTEXT_WINDOW,
             )
             return _DEFAULT_CONTEXT_WINDOW
-        logger.warning(
-            "模型 %r 不在 catalog 中，上下文窗口回退为 catalog 默认模型 %r 的 %d",
-            model_key,
-            default_model.id,
-            default_model.context_window,
-        )
+        warn_key = (model_key, default_model.id)
+        if warn_key not in _WARNED_CONTEXT_FALLBACKS:
+            _WARNED_CONTEXT_FALLBACKS.add(warn_key)
+            logger.warning(
+                "模型 %r 不在 catalog 中，上下文窗口回退为 catalog 默认模型 %r 的 %d"
+                "（可在构造 ModelClient 时显式传 context_window 覆盖）",
+                model_key,
+                default_model.id,
+                default_model.context_window,
+            )
         return default_model.context_window
 
     try:

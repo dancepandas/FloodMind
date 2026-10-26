@@ -170,6 +170,26 @@ class TestResolveContextWindow:
         assert window == 32768
         assert "SDK 默认窗口" in caplog.text
 
+    def test_explicit_window_wins_and_skips_catalog_warning(self, caplog):
+        import logging
+        with caplog.at_level(logging.WARNING, logger="floodmind.config.model_resolver"):
+            window = resolve_context_window(
+                model_key="custom-unlisted-model",
+                explicit_context_window=1_000_000,
+            )
+        assert window == 1_000_000
+        assert "不在 catalog 中" not in caplog.text
+
+    def test_explicit_window_is_clamped(self):
+        assert resolve_context_window(
+            explicit_context_window=5_000_000,
+        ) == 2_000_000
+
+    @pytest.mark.parametrize("bad", [0, -1, True, "100"])
+    def test_explicit_window_must_be_positive_int(self, bad):
+        with pytest.raises(ValueError):
+            resolve_context_window(explicit_context_window=bad)
+
 
 class TestContextWindowClamp:
     """context_window 只认显式配置，maxTokens 不再回退 + 数值钳制。"""

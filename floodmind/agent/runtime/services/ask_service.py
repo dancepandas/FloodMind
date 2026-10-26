@@ -63,10 +63,35 @@ class _PendingAsk:
 class AskService:
     def __init__(self, timeout: Optional[float] = _DEFAULT_TIMEOUT):
         self._timeout = timeout
+        self._session_timeouts: Dict[str, Optional[float]] = {}
         self._pending: Dict[str, _PendingAsk] = {}
         self._lock = threading.RLock()
         self._emit_fn: Optional[Callable[[dict], None]] = None
         self._emit_fns: Dict[str, Callable[[dict], None]] = {}
+
+    def set_session_timeout(self, session_id: str, timeout: Optional[float]) -> None:
+        """为单个会话设置 ASK 等待上限（覆盖全局默认）。
+
+        - 正数：等待用户响应该秒数，超时自动拒绝；
+        - ``None``：不限时（调用方自行保证有人应答）；
+        - ``0``：当前会话没有交互审批通道，ASK 不发起，由 PermissionService
+          直接 fail-closed。
+        """
+        if timeout is not None and timeout < 0:
+            raise ValueError("permission ask timeout 不能为负数")
+        if not session_id:
+            return
+        with self._lock:
+            self._session_timeouts[session_id] = timeout
+
+    def clear_session_timeout(self, session_id: str) -> None:
+        with self._lock:
+            self._session_timeouts.pop(session_id, None)
+
+    def accepts_asks(self, session_id: str = "") -> bool:
+        """该会话是否允许发起交互式 ASK（0 表示纯无人值守模式）。"""
+        timeout = self.get_timeout(session_id)
+        return timeout is None or timeout > 0
 
     def set_emit_fn(self, fn: Callable[[dict], None], session_id: str = "") -> None:
         with self._lock:
@@ -318,13 +343,17 @@ class AskService:
         logger.info("AskService: ASK %s 被强制拒绝（超时无响应）", ask_id)
         return True
 
-    def get_timeout(self) -> Optional[float]:
-        """当前 ASK 超时秒数（None = 不限时）。"""
+    def get_timeout(self, session_id: str = "") -> Optional[float]:
+        """当前会话的 ASK 超时秒数（None = 不限时，0 = 不发起 ASK）。"""
+        with self._lock:
+            if session_id and session_id in self._session_timeouts:
+                return self._session_timeouts[session_id]
         return self._timeout
 
     def pending(self, session_id: str = "") -> List[PermissionAskSnapshot]:
+        """仍待用户应答的 ASK 快照（已应答、尚未被 executor 消费的不再列出）。"""
         with self._lock:
-            items = self._pending.values()
+            items = [p for p in self._pending.values() if p.accepting_response]
             if session_id:
                 items = [p for p in items if p.session_id == session_id]
             return [

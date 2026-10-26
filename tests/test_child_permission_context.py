@@ -46,6 +46,57 @@ def test_child_path_service_confined_to_child_workspace(tmp_path):
     assert not outside.allowed
 
 
+def test_child_delegate_cwd_becomes_relative_base_and_writable(tmp_path):
+    parent_ws, parent_perm = _parent_services(tmp_path)
+    child_ws_dir = tmp_path / "child-workspace"
+    child_ws_dir.mkdir()
+    shared = tmp_path / "shared"
+    shared.mkdir()
+
+    child_perm, child_path = build_child_permission_context(
+        parent_path_service=parent_ws,
+        parent_permission_service=parent_perm,
+        child_workspace=child_ws_dir,
+        child_session_id="sub-1",
+        delegate_cwd=shared,
+    )
+
+    res = child_path.resolve(PathResolveRequest(
+        raw_path="out.txt", access="write", session_id="sub-1",
+    ))
+    assert res.allowed
+    assert Path(res.resolved_path) == (shared / "out.txt").resolve()
+
+    # delegate_cwd 之外仍被拒绝（不会借 workdir 放行任意目录）
+    other = tmp_path / "other" / "x.txt"
+    outside = child_path.resolve(PathResolveRequest(
+        raw_path=str(other), access="write", session_id="sub-1",
+    ))
+    assert not outside.allowed
+
+
+def test_child_reads_delegate_cwd(tmp_path):
+    parent_ws, parent_perm = _parent_services(tmp_path)
+    child_ws_dir = tmp_path / "child-workspace"
+    child_ws_dir.mkdir()
+    shared = tmp_path / "shared"
+    shared.mkdir()
+
+    _, child_path = build_child_permission_context(
+        parent_path_service=parent_ws,
+        parent_permission_service=parent_perm,
+        child_workspace=child_ws_dir,
+        child_session_id="sub-1",
+        delegate_cwd=shared,
+    )
+
+    res = child_path.resolve(PathResolveRequest(
+        raw_path="out.txt", access="read", session_id="sub-1",
+    ))
+    assert res.allowed
+    assert Path(res.resolved_path) == (shared / "out.txt").resolve()
+
+
 def test_child_cannot_escalate_no_ask_no_network(tmp_path):
     parent_ws, parent_perm = _parent_services(tmp_path)
     child_ws_dir = tmp_path / "child-workspace"

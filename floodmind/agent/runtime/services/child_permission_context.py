@@ -4,6 +4,7 @@
 PermissionService（父规则快照，无 AskService，tier 硬门）——不共享父的可变
 rule list 与 ask 出口。WIP contracts/permissions.py 不改，仅导入其契约。
 """
+from dataclasses import replace
 from pathlib import Path
 
 from floodmind.agent.runtime.contracts.workspace import Workspace
@@ -17,16 +18,27 @@ def build_child_permission_context(
     parent_permission_service: PermissionService,
     child_workspace,
     child_session_id: str,
+    delegate_cwd=None,
 ):
     """构造子代理专用的 (PermissionService, PathService)。
 
     - child PathService：project_root 同父；workspace = child-workspace（folder-first），
       extra_read_roots 继承父（skill 只读根等）。
+    - delegate_cwd：宿主显式指定的子代理工作目录（已由父权限校验）。指定后相对路径
+      以它为基准解析，并作为额外读写根授权——子代理直接在该目录干活，无需回流沙盒。
     - child PermissionService：ask_service=None（子代理无权 ASK）；父 deny/allow 规则
       复制为不可变快照；tier 硬门（agent_tier=="sub"）继续生效。
     """
     child_root = Path(child_workspace)
     child_ws = Workspace.from_folder(child_root, session_id=child_session_id)
+    if delegate_cwd is not None:
+        delegate = Path(delegate_cwd).resolve()
+        child_ws = replace(
+            child_ws,
+            cwd=delegate,
+            writable_roots=tuple(dict.fromkeys((*child_ws.writable_roots, delegate))),
+            readable_roots=tuple(dict.fromkeys((*child_ws.readable_roots, delegate))),
+        )
     child_path = PathService(
         project_root=parent_path_service._project_root,
         workspace=child_ws,

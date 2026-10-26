@@ -1389,9 +1389,16 @@ class NativeAgentExecutor:
         if approved is None:
             # 宿主无响应：超过 AskService 配置超时后自动拒绝，避免无限轮询卡死
             # （web 宿主无人响应 / 前端无 permission 处理时，此前会永久 sleep 循环）。
-            ask_timeout = getattr(ask_service, "get_timeout", lambda: 300.0)() or 300.0
+            # None = 不限时，0 = 未启用交互审批（PermissionService 已提前拒绝，不会到这里）。
+            get_timeout = getattr(ask_service, "get_timeout", None)
+            ask_timeout = get_timeout(state.session_id) if callable(get_timeout) else 300.0
             age = getattr(ask_service, "age", lambda _a: None)(state.pending_ask_id)
-            if age is not None and age > ask_timeout:
+            if (
+                ask_timeout is not None
+                and ask_timeout > 0
+                and age is not None
+                and age > ask_timeout
+            ):
                 logger.warning(
                     "[EXEC] ASK %s 等待 %.0fs 超过超时 %.0fs，自动拒绝",
                     state.pending_ask_id, age, ask_timeout,

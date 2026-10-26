@@ -379,6 +379,19 @@ class PermissionService:
         if self._ask_service is None:
             logger.warning("PermissionService: AskService 未设置，ASK 自动拒绝")
             return PermissionDecision(behavior=PermissionBehavior.DENY, reason=f"需要用户确认: {reason}（AskService 不可用）")
+        accepts_asks = getattr(self._ask_service, "accepts_asks", None)
+        if accepts_asks is not None and not accepts_asks(request.session_id):
+            logger.info(
+                "PermissionService: 会话 %s 未启用交互审批，ASK 自动拒绝: %s",
+                request.session_id, reason,
+            )
+            return PermissionDecision(
+                behavior=PermissionBehavior.DENY,
+                reason=(
+                    f"需要用户确认的操作在当前会话未启用交互审批（permission_ask_timeout=0），"
+                    f"已自动拒绝: {reason}"
+                ),
+            )
 
         from floodmind.agent.runtime.contracts.permissions import PermissionAskRequest
         call_id = request.call_id

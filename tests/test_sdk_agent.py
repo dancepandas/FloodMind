@@ -665,6 +665,20 @@ class TestSdkEnhancements:
         names = {t.name for t in agent.raw._orchestrator_registry.all()}
         assert any(n in names for n in ("Read", "Write", "Bash", "Glob", "Grep"))
 
+    def test_bare_false_reuses_injected_model_client(self):
+        """完整 runtime 复用注入的 ModelClient：重建会丢 context_window 等宿主字段。"""
+        injected = ModelClient(
+            api_key="mock-key",
+            base_url="https://mock.api/v1",
+            model_name="mock-model",
+            context_window=200_000,
+        )
+
+        agent = Agent(llm=injected, bare=False)
+
+        assert agent.raw._model_client.model_name == "mock-model"
+        assert agent.raw._resolve_context_window() == 200_000
+
     def test_bare_false_registers_unclassified_host_tools_only_for_orchestrator(self, llm, sample_tools):
         """Full mode preserves host tools on orchestrator but fails closed for specialist."""
         agent = Agent(llm=llm, bare=False, tools=sample_tools)

@@ -333,6 +333,7 @@ class NativeFloodAgent:
         max_total_tokens: int = 0,
         permission_handler: Optional[Callable[[str, Dict[str, Any]], bool]] = None,
         permission_decision_hook: Optional[Callable] = None,
+        permission_ask_timeout: Optional[float] = 300.0,
         workspace: Optional["Workspace"] = None,
         tool_loading: Optional[Any] = None,
         skill_roots: Optional[Sequence[Union[str, Path]]] = None,
@@ -478,6 +479,10 @@ class NativeFloodAgent:
         self._permission_decision_hook = _require_sync_callback(
             "permission_decision_hook", permission_decision_hook
         )
+        # ASK 交互时限：正数=等待秒数；None=不限时；0=无人值守（需要确认的工具直接拒绝）。
+        if permission_ask_timeout is not None and permission_ask_timeout < 0:
+            raise ValueError("permission_ask_timeout 不能为负数")
+        self._permission_ask_timeout = permission_ask_timeout
         self._sandbox_service = SandboxService(workspace=self._workspace)
         # 后台任务服务（exec_bash run_in_background）：按 Agent 实例显式注入。
         from floodmind.agent.runtime.services.background_task_service import BackgroundTaskService
@@ -825,6 +830,7 @@ class NativeFloodAgent:
 
         ask_service = get_ask_service()
         set_ask_service(ask_service)
+        ask_service.set_session_timeout(self.session_id, self._permission_ask_timeout)
 
         perm_svc = PermissionService.create_default(ask_service=ask_service, path_service=path_service)
         perm_svc.add_allow_rule(PermissionRule(
@@ -1356,12 +1362,16 @@ class NativeFloodAgent:
         model_presets / settings.model.context_window。此前硬编码全局默认模型窗口
         （catalog 第一个），与宿主注入的 ModelClient 实际模型不一致——例如默认是
         deepseek-v4-pro(131072) 而注入 MiniMax-M3(1M) 时，压缩在本不该发生的体量
-        就触发，放大结构破坏风险。
+        就触发，放大结构破坏风险。ModelClient.context_window 显式声明时优先采用。
         """
         from floodmind.config.model_resolver import resolve_context_window
 
         model_name = getattr(self._model_client, "model_name", None) if self._model_client else None
-        return resolve_context_window(model_key=model_name)
+        explicit = getattr(self._model_client, "context_window", None) if self._model_client else None
+        return resolve_context_window(
+            model_key=model_name,
+            explicit_context_window=explicit,
+        )
 
     def _make_context_compressor(self) -> Optional[ContextCompressor]:
         """创建上下文压缩器，供 orchestrator executor 使用。"""
@@ -1375,7 +1385,12 @@ class NativeFloodAgent:
         )
 
     def _init_model_client(self) -> None:
-        if self.llm_service is not None:
+        if isinstance(self.llm_service, ModelClient):
+            # 已构造完成的 ModelClient 原样复用：重建会丢掉宿主声明的
+            # context_window / trust_env / timeout 等字段，且窗口解析发生在
+            # _init_executors 之前，丢字段会直接污染压缩预算。
+            self._model_client = self.llm_service
+        elif self.llm_service is not None:
             # 兼容外部传入 LLM service 的旧路径（如 web_server 传入的 get_qwen_llm_service）
             thinking = bool(
                 hasattr(self.llm_service, "enable_reasoning") and self.llm_service.enable_reasoning
@@ -1389,6 +1404,7 @@ class NativeFloodAgent:
                 max_tokens=getattr(self.llm_service, "max_tokens", 4096),
                 enable_thinking=thinking,
                 provider=getattr(self.llm_service, "provider", ""),
+                context_window=getattr(self.llm_service, "context_window", None),
             )
         else:
             # 默认路径：从 settings.json 读取

@@ -302,7 +302,11 @@ class PathService:
             ws = self._effective_workspace()
             allowed_roots = []
             if ws is not None:
-                allowed_roots += [ws.sandbox_base / session_id / "workspace", ws.user_dir]
+                allowed_roots += [
+                    ws.sandbox_base / session_id / "workspace",
+                    ws.user_dir,
+                    *ws.writable_roots,
+                ]
             else:
                 workspace = self._project_root / "data" / "sessions" / session_id / "workspace"
                 allowed_roots.append(workspace)

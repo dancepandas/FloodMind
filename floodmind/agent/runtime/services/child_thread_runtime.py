@@ -200,10 +200,28 @@ class ChildThreadRuntime:
                 parent_ctx.run_id, child_thread.thread_id,
             )
             # 2. 沙盒 + Artifact 服务（§15 同一 durable store，子 publish 根=workspace）
+            # delegate_cwd：相对路径以父 run cwd 为基准；必须是父权限允许写的目录，
+            # 否则回退独立 sandbox（子代理不能借 workdir 扩权）。
+            effective_delegate: Optional[Path] = None
+            if delegate_cwd:
+                candidate = Path(delegate_cwd).expanduser()
+                if not candidate.is_absolute():
+                    candidate = Path(context.cwd or context.workspace_dir) / candidate
+                candidate = candidate.resolve()
+                check = self._path_service.resolve_simple(
+                    str(candidate), access="write", session_id=context.session_id,
+                )
+                if check.allowed:
+                    effective_delegate = candidate
+                else:
+                    logger.warning(
+                        "child thread delegate_cwd 被父权限拒绝，回退独立 sandbox: %s (%s)",
+                        candidate, check.reason,
+                    )
             sandbox_ctx = self._sandbox_service.create(
                 sub_session_id=child_session_id,
                 parent_output_dir=Path(context.output_dir) if context.output_dir else None,
-                delegate_cwd=Path(delegate_cwd) if delegate_cwd else None,
+                delegate_cwd=effective_delegate,
             )
             from floodmind.agent.runtime.contracts.sandbox import (
                 ResourceLimits,
@@ -231,7 +249,10 @@ class ChildThreadRuntime:
             sub_artifact_service = ArtifactService(
                 self._artifact_store_root,
                 authority=child_auth,
-                allowed_roots=[str(sandbox_ctx.workspace_dir)],
+                allowed_roots=[
+                    str(sandbox_ctx.workspace_dir),
+                    *([str(sandbox_ctx.delegate_cwd)] if sandbox_ctx.delegate_cwd else []),
+                ],
             )
             from floodmind.agent.runtime.services.child_permission_context import (
                 build_child_permission_context,
@@ -241,6 +262,7 @@ class ChildThreadRuntime:
                 parent_permission_service=self._permission_service,
                 child_workspace=sandbox_ctx.workspace_dir,
                 child_session_id=child_session_id,
+                delegate_cwd=sandbox_ctx.delegate_cwd,
             )
             if self._quota_factory is not None:
                 quota = self._quota_factory(child_thread)
