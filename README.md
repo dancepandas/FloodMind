@@ -651,71 +651,75 @@ WebSearch 工具的 API Key 和搜索引擎配置独立存储在 `~/.floodmind/s
 
 ```
 FloodMind/
-├── floodmind/
-│   ├── agent/                     # Agent 编排核心
-│   │   ├── native/                #   Native Agent Runtime
+├── floodmind/                     # SDK 包（子目录说明见 floodmind/README.md）
+│   ├── agent/                     # Agent 门面与装配
+│   │   ├── api.py                 #   Agent SDK 类（嵌入/CLI/网关共用）
+│   │   ├── native/                #   Native 执行引擎
 │   │   │   ├── native_flood_agent.py  # Agent 主体（双 registry、MCP/Skill、流式）
 │   │   │   ├── executor.py        #     状态机 LLM↔Tool 循环
-│   │   │   ├── model_client.py    #     统一 LLM 服务
-│   │   │   ├── providers/         #     厂商 Pipeline（dashscope/deepseek/kimi/minimax + OpenAI 兜底，自动路由）
-│   │   │   ├── model_router.py    #     模型路由/降级
-│   │   │   ├── event_bus.py       #     EventBus + StepEventBus
-│   │   │   ├── message_builder.py #     消息组装
-│   │   │   ├── tool_runtime.py    #     AgentTool→ToolSpec 桥接
-│   │   │   ├── context_compressor.py #  上下文压缩
-│   │   │   ├── artifact_watcher.py #    产物检测
-│   │   │   ├── background_review.py #   后台对话回顾
-│   │   │   └── types.py           #     数据类型定义
-│   │   ├── runtime/               #   Runtime 服务
-│   │   │   ├── contracts/         #     数据契约（tools, messages, events, permissions, workspace）
-│   │   │   ├── services/          #     工具执行/权限/询问/路径/检查点/日志/追踪/沙箱/工作区
-│   │   │   └── adapters/          #     中性 runtime API 适配器
-│   │   ├── mcp_client.py          #   MCP 客户端池 + build_mcp_tool_specs
-│   │   ├── agent_registry.py      #   Agent 类型注册
-│   │   ├── api.py                 #   Agent SDK 类（嵌入式入口）
-│   │   └── scheduled_task_runtime.py  # 定时任务运行时
-│   ├── config/                    # 全局配置
-│   │   ├── settings.py            #   主配置模型
-│   │   ├── search_config.py       #   WebSearch 配置
-│   │   ├── model_presets.py       #   模型预设
-│   │   └── settings_template.json #   初始模板
-│   ├── profile/                   # 身份与提示词定制
-│   │   ├── soul.py                #   SOUL.md 加载与种子
-│   │   └── guidance.py            #   行为指导常量
-│   ├── plugin/                    # Plugin 系统
-│   │   ├── base.py                #   FloodmindPlugin 基类
-│   │   └── loader.py              #   自动发现式 PluginLoader
-│   ├── memory/                    # 记忆与经验系统
-│   │   ├── dual_memory.py         #   扁平 _turns 对话历史
-│   │   ├── experience_tree.py     #   经验树索引
-│   │   ├── task_experience.py     #   任务经验
-│   │   ├── session_manager.py     #   会话管理（含 worktree 隔离）
-│   │   ├── session_store.py       #   SQLite 存储（SyncEvent）
-│   │   └── skill_generator.py     #   经验→Skill 自动生成
-│   ├── models/                    # 已弃用的 model 目录
-│   ├── skills/                    # Skill 系统（10 个内置 Skill）
-│   │   ├── base.py                #   Skill dataclass + 发现 + catalog
-│   │   ├── registry.py            #   SkillRoot + 每 Agent SkillRegistry + 全局兼容 getter
-│   │   ├── skill_curator.py       #   SkillCurator 生命周期
-│   │   └── <skill-name>/          #   各 Skill 子目录（csv/docx/pdf/pptx/xlsx/...）
-│   ├── tools/                     # Agent 工具层
-│   │   ├── agent_tool.py          #   AgentTool + ToolRegistry
-│   │   ├── base_tools.py          #   内置工具（GetSkill/Bash/Write/Read/...）
-│   │   ├── file_tools.py          #   文件工具
-│   │   └── memory_tools.py        #   记忆工具
+│   │   │   ├── model_client.py    #     统一 LLM 客户端
+│   │   │   ├── transport.py       #     纯 Wire I/O 与 retry advice
+│   │   │   ├── tool_loading.py    #     eager/catalog/progressive 工具加载
+│   │   │   ├── context_compressor.py  # 上下文压缩
+│   │   │   └── providers/         #     厂商方言 codec
+│   │   └── runtime/               #   契约、服务、适配与 reducer
+│   │       ├── contracts/         #     纯数据协议
+│   │       ├── services/          #     工具/权限/路径/Journal/Checkpoint/沙盒等
+│   │       └── adapters/          #     传输无关适配
+│   ├── tools/                     # AgentTool + 内置工具
+│   ├── memory/                    # 会话历史、语义记忆、经验树、会话管理
+│   ├── skills/                    # Skill 体系 + 10 个内置技能
+│   ├── config/                    # 配置、模型解析、Provider、密钥加密
+│   ├── profile/                   # SOUL.md 身份与行为指导
+│   ├── plugin/                    # Python 原生插件
+│   ├── gateway/                   # FastAPI + Chainlit 网关（可选）
+│   ├── common/                    # 文件锁、进程树、工具输出失败判定
+│   ├── models/                    # ModelClient 兼容导出
+│   ├── scripts/                   # 包内手工诊断脚本
 │   └── cli.py                     # CLI 入口
-├── contrib/                       # 已外置为 MCP 服务的脚本（chronos/hydro_case_client）
-├── tests/                         # v2.0.0 完整回归 1565 passed / 1 skipped
-├── evals/                         # 内部评测集（smoke/tool/regression，CI 门禁）
+├── skills/                        # 项目级可写 Skill（SkillCurator 维护）
+├── tests/                         # 单元与故障注入回归
+├── evals/                         # 确定性轨迹评测（CI 门禁）
 ├── benchmarks/multi_agent/        # 多代理收益基线（默认离线）
+├── tools/                         # 真实模型评测（BFCL / live_eval / probe）
+├── scripts/                       # 校准、指标报告、知识图谱
+├── docs/                          # 文档索引（ADR / blueprint / 知识图谱 / 评测记录）
+├── .github/workflows/             # CI
 ├── main.py                        # CLI 交互入口
 ├── Dockerfile                     # Docker 构建
-├── docs/                          # 文档
-│   ├── DEVELOPER_GUIDE.md         #   二次开发指南
-│   └── architecture/              #   架构 Wiki
 ├── pyproject.toml                 # 包配置
 └── README.md
 ```
+
+各主要目录均带独立 `README.md`，说明职责、关键文件与修改约束：
+
+| 目录 | 入口 |
+| --- | --- |
+| SDK 包根 | [`floodmind/README.md`](floodmind/README.md) |
+| Agent 门面 | [`floodmind/agent/README.md`](floodmind/agent/README.md) |
+| Native 执行引擎 | [`floodmind/agent/native/README.md`](floodmind/agent/native/README.md) |
+| 厂商 codec | [`floodmind/agent/native/providers/README.md`](floodmind/agent/native/providers/README.md) |
+| Runtime 分层 | [`floodmind/agent/runtime/README.md`](floodmind/agent/runtime/README.md) |
+| 数据契约 | [`floodmind/agent/runtime/contracts/README.md`](floodmind/agent/runtime/contracts/README.md) |
+| Runtime 服务 | [`floodmind/agent/runtime/services/README.md`](floodmind/agent/runtime/services/README.md) |
+| 传输适配 | [`floodmind/agent/runtime/adapters/README.md`](floodmind/agent/runtime/adapters/README.md) |
+| 工具层 | [`floodmind/tools/README.md`](floodmind/tools/README.md) |
+| 记忆子系统 | [`floodmind/memory/README.md`](floodmind/memory/README.md) |
+| 技能体系 | [`floodmind/skills/README.md`](floodmind/skills/README.md) |
+| 配置与模型解析 | [`floodmind/config/README.md`](floodmind/config/README.md) |
+| 身份与行为指导 | [`floodmind/profile/README.md`](floodmind/profile/README.md) |
+| 插件 | [`floodmind/plugin/README.md`](floodmind/plugin/README.md) |
+| 网关 | [`floodmind/gateway/README.md`](floodmind/gateway/README.md) |
+| 低层基础设施 | [`floodmind/common/README.md`](floodmind/common/README.md) |
+| 项目级 Skill | [`skills/README.md`](skills/README.md) |
+| 测试 | [`tests/README.md`](tests/README.md) |
+| 确定性评测 | [`evals/README.md`](evals/README.md) |
+| 多代理基线 | [`benchmarks/README.md`](benchmarks/README.md) |
+| 真实模型评测 | [`tools/README.md`](tools/README.md) |
+| 仓库脚本 | [`scripts/README.md`](scripts/README.md) |
+| 知识图谱 | [`scripts/knowledge_graph/README.md`](scripts/knowledge_graph/README.md) |
+| 文档索引 | [`docs/README.md`](docs/README.md) |
+| CI | [`.github/workflows/README.md`](.github/workflows/README.md) |
 
 ---
 
@@ -735,13 +739,27 @@ FloodMind 面向宿主暴露的标准 SDK 契约（desktop / 业务平台据此�
 
 ---
 
+## Harness 评测
+
+| 层 | 入口 | 验证内容 | CI |
+| --- | --- | --- | --- |
+| 单元与故障注入 | `python -m pytest -q` | 组件行为与故障路径 | 是 |
+| 确定性轨迹 | `python -m evals.runner` | 模型轨迹 → 执行器 → 工具 → 下一轮上下文 | 是 |
+| 真实模型 | `python tools/live_eval.py` / `python tools/bench_bfcl.py` | 任务完成度、效率、工具错误、重复调用、技能触发 | 否 |
+
+真实模型评测覆盖两层：BFCL v3 测函数调用契约，端到端场景测任务闭环与效率。最近一次记录（2026-10-23）：BFCL 200 条通过 174 条（87.0%），端到端 11 个场景任务与行为全部通过，重复调用与重复 GetTool 为 0。完整数据、失败分类与复现命令见 [`docs/benchmarks/harness-eval-2026-10-23.md`](docs/benchmarks/harness-eval-2026-10-23.md)。
+
+评测工具只从 `FM_BASE` / `FM_KEY` / `FM_MODEL` 等环境变量读取配置，不落盘。
+
+---
+
 ## 开发指南
 
 ```bash
 # 运行测试
 python -m pytest tests/ -q
-# v2.0.0 完整回归：1565 passed, 1 skipped
-# 唯一 skipped = Linux Landlock 平台测试，Windows 环境跳过
+# v2.3.1 完整回归：1601 passed, 2 skipped
+# skipped 为平台专属用例（Linux Landlock / Windows 进程树）
 
 # 内部评测集（确定性轨迹，CI 门禁）
 python -m evals.runner
