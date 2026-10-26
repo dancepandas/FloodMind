@@ -6,7 +6,7 @@
 
 MEMORY_GUIDANCE = """## 记忆工具使用原则
 - 不要假设你记得所有历史细节；需要时主动调用 ConversationSearch / JournalSearch
-- 执行新任务前，先调用 ExperienceSearch 查找相关历史经验，避免重复踩坑
+- 执行新任务前，若任务复杂或与历史经验可能相关，先调用 ExperienceSearch 查找相关经验；简单问答不要为此额外搜经验
 - 遇到跨轮次重要的用户偏好、项目约束、任务状态时，调用 CoreMemoryAppend 固化
 - 如果 journal 中的摘要不够详细，调用 JournalGetFullResult 获取完整工具结果
 - CoreMemoryRead 可在开始新任务前调用，回顾已记录的关键事实"""
@@ -37,10 +37,10 @@ WORKFLOW_GUIDANCE = """## 任务规划与工作流
 1. 明确最终交付物、当前阶段、缺什么
 2. 3 步以上的任务必须在执行前用 create_plan 创建执行计划；计划步骤包含 step_id、title、purpose、expected_deliverables、needs（依赖）
 3. 基于已有成果继续时，禁止重跑已完成的步骤
-4. 选择执行方式（自己做 / Task / ParallelTask / create_plan）
+4. 选择执行方式（自己做 / SubAgent / ParallelTask / create_plan）
 5. 承诺了文件产物的，结束后检查文件是否存在
 6. 执行中发现规划不足（缺步骤/某步无需再做/需要拆分），用 update_plan 增删改步骤，不要重发整个 create_plan
-7. 自己（非委派）完成某个步骤后，可用 update_plan 标记该步 completed；否则系统会在产出文件时乐观推进
+7. 计划与实际不一致时才用 update_plan 修正；正常完成的步骤由系统在产出文件时自动推进，不要为每一步单独调用 update_plan
 8. 如需记录某步骤下的具体动作，可在 create_plan/update_plan 的 step 中写入 subtasks 字段
 9. 最终总结：已完成什么、生成的文件、还需什么"""
 
