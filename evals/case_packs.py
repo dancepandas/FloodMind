@@ -685,7 +685,7 @@ def _tool_pack() -> List[Dict[str, Any]]:
         {
             "model_calls": 2,
             "tool_calls": ["Read"],
-            "tool_statuses": ["completed"],
+            "tool_statuses": ["error"],
             "prompt_contains": [{"call_index": 1, "contains": "文件不存在"}],
             "final_output_contains": ["不存在"],
         },
@@ -783,7 +783,7 @@ def _tool_pack() -> List[Dict[str, Any]]:
         {
             "model_calls": 2,
             "tool_calls": ["Edit"],
-            "tool_statuses": ["completed"],
+            "tool_statuses": ["error"],
             "prompt_contains": [{"call_index": 1, "contains": "文件不存在"}],
             "final_output_contains": ["不存在"],
             "workspace_not_contains": ["missing.md"],
@@ -2496,7 +2496,7 @@ def _regression_extended_pack() -> List[Dict[str, Any]]:
             {
                 "model_calls": 4,
                 "tool_calls": ["Read", "Write", "Read"],
-                "tool_statuses": ["completed"] * 3,
+                "tool_statuses": ["error", "completed", "completed"],
                 "workspace_contains": {"log.txt": "首条记录"},
                 "prompt_contains": [
                     {"call_index": 1, "contains": "文件不存在"},

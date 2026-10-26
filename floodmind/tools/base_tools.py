@@ -106,6 +106,19 @@ def _build_exec_env() -> Dict[str, str]:
     return env
 
 
+def _apply_powershell_error_policy(command: str) -> str:
+    """让 PowerShell 的非终止错误终止命令。
+
+    默认 ``$ErrorActionPreference = 'Continue'`` 下，cmdlet 报错后脚本会继续
+    执行，最终退出码可能是 0——工具层会把一次失败记成成功。统一改为 Stop：
+    错误立即终止，退出码非 0，执行层才能如实归一为 error。
+    用户显式设置了偏好时不覆盖。
+    """
+    if "$ErrorActionPreference" in command:
+        return command
+    return "$ErrorActionPreference = 'Stop'; " + command
+
+
 def _detect_shell_command() -> tuple[list[str], str]:
     """自动选择当前环境可用的 shell。"""
     if shutil.which('powershell.exe'):
@@ -627,6 +640,8 @@ def _impl_exec_bash(command: str = "", workdir: str = "", timeout: int = 120, en
         if shell_name == "powershell" and "&&" in command:
             logger.warning(f"[exec_bash] PowerShell 不支持 &&，已自动转为 ;（建议后续直接用 ; 或写 .py 文件执行）：{command[:120]}")
             command = command.replace("&&", ";")
+        if shell_name in ("powershell", "pwsh"):
+            command = _apply_powershell_error_policy(command)
         shell_cmd = shell_prefix + [command]
 
         session_id = SESSION_CONTEXT.get("session_id", "")

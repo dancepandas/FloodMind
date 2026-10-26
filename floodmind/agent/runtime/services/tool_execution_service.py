@@ -39,6 +39,7 @@ from floodmind.agent.runtime.contracts.permissions import (
 from floodmind.agent.runtime.contracts.paths import PathResolveRequest, PathResolveResult
 from floodmind.agent.runtime.contracts.tools import ToolCall, ToolExecutionContext, ToolResult, ToolSpec
 from floodmind.agent.runtime.contracts.tool_transaction import canonical_arguments
+from floodmind.common.tool_output import tool_output_is_error
 from floodmind.agent.runtime.services.approval_fingerprint import compute_approval_fingerprint
 from floodmind.agent.runtime.services.idempotency import (
     derive_idempotency_key,
@@ -551,12 +552,18 @@ class ToolExecutionService:
                 call_id=call.id,
                 state_dir=state_dir,
             )
+            # 内置工具用文本前缀表达预期失败（如"错误：文件不存在"）。执行层
+            # 在此统一归一状态，宿主/指标/journal 才能区分成功与失败。
+            reported_error = tool_output_is_error(output_str)
+            metadata: Dict[str, Any] = {"full_ref": full_ref} if full_ref else {}
+            if reported_error:
+                metadata["error_code"] = "TOOL_REPORTED_ERROR"
             return ToolResult(
                 tool_call_id=call.id,
                 name=call.name,
                 content=bounded,
-                status="completed",
-                metadata={"full_ref": full_ref} if full_ref else {},
+                status="error" if reported_error else "completed",
+                metadata=metadata,
             )
         except Exception as exc:
             logger.error("ToolExecutionService tool %s execution error: %s", call.name, exc, exc_info=True)

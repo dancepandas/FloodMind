@@ -20,6 +20,7 @@ from floodmind.agent.runtime.contracts.runtime_context import RuntimeContext
 from floodmind.agent.runtime.services.path_service import PathService
 from floodmind.agent.runtime.services.workspace_service import build_folder_workspace
 from floodmind.tools.base_tools import (
+    _apply_powershell_error_policy,
     _clamp_exec_timeout,
     _impl_exec_bash,
     _kill_process_tree,
@@ -52,6 +53,20 @@ def test_clamp_exec_timeout_bounds_and_fallbacks():
     assert _clamp_exec_timeout(0) == 120
     assert _clamp_exec_timeout("abc") == 120
     assert _clamp_exec_timeout(None) == 120
+
+
+def test_powershell_error_policy_stops_on_error():
+    """PowerShell 默认 Continue 会把失败命令跑成退出码 0，必须改为 Stop。"""
+    assert (
+        _apply_powershell_error_policy("Get-Item missing.txt")
+        == "$ErrorActionPreference = 'Stop'; Get-Item missing.txt"
+    )
+
+
+def test_powershell_error_policy_respects_explicit_preference():
+    """模型显式设置错误偏好时不覆盖。"""
+    command = "$ErrorActionPreference = 'Continue'; Get-Item missing.txt"
+    assert _apply_powershell_error_policy(command) == command
 
 
 def test_impl_exec_bash_timeout_path_returns_within_bound(tmp_path):
