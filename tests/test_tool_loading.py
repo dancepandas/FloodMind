@@ -43,6 +43,65 @@ def _tool(name, desc, params=None, readonly=True, destructive=False):
     )
 
 
+def test_eager_agent_does_not_advertise_tool_loader(tmp_path):
+    from floodmind.agent.api import Agent
+    from floodmind.agent.native.model_client import ModelClient
+    from floodmind.agent.runtime.contracts.workspace import Workspace
+
+    model = ModelClient(api_key="mock-key", base_url="https://mock.api/v1",
+                        model_name="mock-model", context_window=65536)
+    for loading, expected in [(False, False), (True, True)]:
+        agent = Agent(
+            llm=model, bare=True, tools=[_tool("Read", "Read a file")],
+            tool_loading=loading,
+            workspace=Workspace.from_folder(tmp_path / str(loading)).ensure(),
+        )
+        for registry in (agent._agent._orchestrator_registry,
+                         agent._agent._specialist_registry):
+            names = {item["function"]["name"] for item in registry.tools_schema()}
+            assert ("GetTool" in names) is expected
+            assert "Read" in names
+
+
+def test_specialist_runtime_respects_tool_loading_mode_and_isolates_loads(tmp_path):
+    from floodmind.agent.api import Agent
+    from floodmind.agent.native.model_client import ModelClient
+    from floodmind.agent.runtime.contracts.workspace import Workspace
+
+    model = ModelClient(api_key="mock-key", base_url="https://mock.api/v1",
+                        model_name="mock-model", context_window=65536)
+    for loading, expected in [(False, False), (True, True)]:
+        config = ToolLoadingConfig(
+            mode="progressive" if loading else "eager", core_tools=["GetTool"],
+        )
+        agent = Agent(
+            llm=model, bare=True, tools=[_tool("Lookup", "Lookup a file")],
+            tool_loading=config,
+            workspace=Workspace.from_folder(tmp_path / str(loading)).ensure(),
+        )
+        registry, loader = agent._agent._make_specialist_tool_runtime()
+        other_registry, other_loader = agent._agent._make_specialist_tool_runtime()
+        names = {item["function"]["name"] for item in registry.tools_schema()}
+        assert ("GetTool" in names) is expected
+        assert "Lookup" in names
+        if loading:
+            assert "Lookup" not in {
+                item["function"]["name"] for item in loader.request_tools(registry)
+            }
+            registry.get("GetTool").func(tool_name="Lookup")
+            assert "Lookup" in {
+                item["function"]["name"] for item in loader.request_tools(registry)
+            }
+            assert "Lookup" not in {
+                item["function"]["name"]
+                for item in other_loader.request_tools(other_registry)
+            }
+        else:
+            assert "Lookup" in {
+                item["function"]["name"] for item in loader.request_tools(registry)
+            }
+
+
 def test_compact_prompt_catalog_omits_full_schema_in_eager_mode():
     reg = Registry([_tool("Read", "读取文件内容。用于查看本地文件。")])
     text = compact_prompt_catalog(reg)
@@ -51,6 +110,94 @@ def test_compact_prompt_catalog_omits_full_schema_in_eager_mode():
     assert "读取文件内容" not in text
     assert "properties" not in text
     assert "JSON Schema" not in text
+
+
+def test_catalog_mode_injects_complete_tool_contract_without_loading():
+    import json
+
+    params = {
+        "type": "object",
+        "properties": {
+            "location": {"type": "string", "description": "Exact station identifier"},
+            "options": {"type": "object", "properties": {
+                "units": {"type": "string", "enum": ["metric", "imperial"],
+                          "default": "metric"},
+            }},
+        },
+        "required": ["location"],
+        "additionalProperties": False,
+    }
+    reg = Registry([_tool("StationLookup", "Find a station. Preserve its identifier.", params)])
+    text = compact_prompt_catalog(reg, mode="catalog")
+    assert "Find a station. Preserve its identifier." in text
+    schema_text = text.split("```json\n", 1)[1].split("```", 1)[0]
+    assert json.loads(schema_text) == params
+    assert "GetTool" not in text
+    loader = ToolLoader(ToolLoadingConfig(mode="catalog", core_tools=[]))
+    assert loader.is_executable("StationLookup")
+    assert loader.request_tools(reg)[0]["function"]["parameters"] == params
+
+
+def test_catalog_agent_injects_contract_into_both_executors(tmp_path):
+    from floodmind.agent.api import Agent
+    from floodmind.agent.native.model_client import ModelClient
+    from floodmind.agent.runtime.contracts.workspace import Workspace
+
+    agent = Agent(
+        llm=ModelClient(api_key="mock-key", base_url="https://mock.api/v1",
+                        model_name="mock-model", context_window=65536),
+        bare=True, tools=[_tool("StationLookup", "Exact station identifier lookup.")],
+        tool_loading=ToolLoadingConfig(mode="catalog"),
+        workspace=Workspace.from_folder(tmp_path).ensure(),
+    )
+    for executor in (agent._agent._orchestrator_executor,
+                     agent._agent._specialist_executor):
+        prompt = "\n".join(executor.system_prompts)
+        assert "Exact station identifier lookup." in prompt
+        assert '"required": [' in prompt
+        assert '"path"' in prompt
+    registry, loader = agent._agent._make_specialist_tool_runtime()
+    assert registry.get("GetTool") is None
+    assert loader.is_executable("StationLookup")
+
+
+def test_bare_catalog_refresh_preserves_host_and_replaces_old_contract(tmp_path):
+    from floodmind.agent.api import Agent
+    from floodmind.agent.native.model_client import ModelClient
+    from floodmind.agent.runtime.contracts.workspace import Workspace
+
+    agent = Agent(
+        llm=ModelClient(api_key="mock-key", base_url="https://mock.api/v1",
+                        model_name="mock-model", context_window=65536),
+        bare=True, system_prompt="HOST-MUST-SURVIVE",
+        tools=[_tool("StationLookup", "OLD-CONTRACT")],
+        tool_loading=ToolLoadingConfig(mode="catalog"),
+        workspace=Workspace.from_folder(tmp_path).ensure(),
+    )
+    runtime = agent._agent
+    runtime._skill_catalog = "SKILL-CONTRACT-INITIAL"
+    runtime._rebuild_system_prompts()
+    for executor in (runtime._orchestrator_executor, runtime._specialist_executor):
+        assert "SKILL-CONTRACT-INITIAL" in "\n".join(executor.system_prompts)
+    runtime._skill_catalog = "SKILL-CONTRACT-UPDATED"
+    for registry in (runtime._orchestrator_registry, runtime._specialist_registry):
+        registry.get("StationLookup").description = "UPDATED-CONTRACT"
+    runtime._rebuild_system_prompts()
+    runtime._rebuild_system_prompts()
+    for executor in (runtime._orchestrator_executor, runtime._specialist_executor):
+        prompt = "\n".join(executor.system_prompts)
+        assert prompt.count("HOST-MUST-SURVIVE") == 1
+        assert prompt.count("UPDATED-CONTRACT") == 1
+        assert "OLD-CONTRACT" not in prompt
+        assert prompt.count("SKILL-CONTRACT-UPDATED") == 1
+        assert "SKILL-CONTRACT-INITIAL" not in prompt
+    runtime._skill_catalog = ""
+    runtime._rebuild_system_prompts()
+    for executor in (runtime._orchestrator_executor, runtime._specialist_executor):
+        prompt = "\n".join(executor.system_prompts)
+        assert "SKILL-CONTRACT" not in prompt
+        assert "HOST-MUST-SURVIVE" in prompt
+        assert "UPDATED-CONTRACT" in prompt
 
 
 def test_get_tool_real_end_to_end_malformed_key():

@@ -6,6 +6,9 @@
 
 | 文件/目录 | 作用 |
 | --- | --- |
+| `check_doc_examples.py` | 编译执行显式登记的契约示例，忽略普通围栏 |
+| `check_distribution.py` | 受控源副本 → sdist → wheel → 临时环境安装与真实控制台入口；归档输入用 `--source-manifest` 指定同提交清单，见[产物验收](../docs/testing/artifacts-and-release.md) |
+| `check_ci_results.py` | NEEDS JSON 中仅全 success 通过的汇总门禁 |
 | `calibrate_judge.py` | 用人工标注集校准 `RuleJudge` / `ModelJudge`，输出一致率与混淆矩阵 |
 | `metrics_report.py` | 读取 `trace.jsonl`，按 run/model/step/tool 聚合 token 与成本 |
 | `e2e_gateway.py` | 网关 SSE 对话 + 权限 ASK 闭环的手工端到端脚本 |

@@ -1,5 +1,7 @@
 # FloodMind SDK 开发指南 v3.2
 
+> 本文为使用教程，含明确标注的历史版本记录。现行开发约束见 [开发契约](development/README.md)，测试与交付要求见 [测试规范](testing/README.md)；教程不得覆盖规范，行为以源码和可重复测试核实。
+
 > **更新**: 2026-08-11 — SDK v2.0.0；宿主可通过 `Agent(skill_roots=[...], skill_writable_root=...)` 部署显式 Skill 根，并从公开的 `agent.skill_registry` 检查实例状态。Agent runtime 改为每实例独立 Registry + Curator；全局 `get_skill_registry()` / `register_skill()` 仅保留兼容行为与历史状态路径。发现优先级固定为内置 > 宿主 > 项目 > `.claude` > ephemeral；显式根 CWD 无关，workspace 不会被隐式扫描。Skill 根默认只读，普通 Write/Edit/Bash 不因 Skill 加载获得写权；CRUD 只能操作 writable source，并执行 symlink/containment 校验。bare/full 都提供 catalog + GetSkill，full 仅为 orchestrator 增加 CRUD，specialist 仍只有 GetSkill。
 
 FloodMind v2.0.0 是 **Python SDK + 最小 CLI run**：开发者通过 `Agent`、`ModelClient`、`Workspace`、`build_agent_tool`、Provider Pipeline、MCP 与 Skill API 将能力嵌入自己的平台、桌面助手或业务系统。旧 Web / TUI 实现已移除，不再是可安装或可调用的公共面。
@@ -393,14 +395,17 @@ agent = Agent(
     ),
 )
 
-# 兼容旧行为：每轮请求直接携带全部工具 schema
+# 完整工具契约注入系统提示词，同时保留原生结构化工具调用，无需 GetTool
+catalog_agent = Agent(llm=llm, tools=tools, tool_loading=ToolLoadingConfig(mode="catalog"))
+
+# 每轮请求直接携带全部工具 schema，系统提示词不重复参数
 legacy_agent = Agent(llm=llm, tools=tools, tool_loading=False)
 ```
 
 | 模式 | 行为 |
 |------|------|
 | `eager` | 每轮请求暴露全部工具 schema，兼容旧行为 |
-| `catalog` | 提示词不重复列完整工具参数，但请求仍暴露全部工具 schema |
+| `catalog` | 系统提示词注入全部工具的完整说明、风险属性与参数 JSON Schema；请求同时暴露全部原生工具 schema，可直接调用，不注册 `GetTool`。提示词更长，应结合模型上下文预算选择 |
 | `progressive` | 初始只暴露 `GetTool` / `GetSkill` 等 core tools；提示目录列出全部工具名称与基本描述，模型读目录后调用 `GetTool` 查看并加载目标工具，下一轮请求才携带该工具 schema；未加载工具 fail-closed |
 
 完整配置可写入 `settings.json` 的高级 `tool_loading` 块，也可在 SDK 构造时显式传入；显式参数优先。

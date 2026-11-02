@@ -1,6 +1,6 @@
 # FloodMind
 
-**SDK-first 的智能水文 Agent Runtime — v2.4.0**
+**SDK-first 的智能水文 Agent Runtime — v2.5.0**
 
 FloodMind 收敛为面向 Python 宿主系统的纯 SDK：以 `Agent` / `ModelClient` / `Workspace` / `build_agent_tool` 为公共入口，把水文模型、数据分析、文档生成、MCP 工具与 Skill 体系嵌入到业务平台或桌面助手中。Web / TUI 前端已随 v2.0.0 移除，FloodMind 为纯 SDK 形态。
 
@@ -349,7 +349,7 @@ agent = Agent(
 legacy_agent = Agent(llm=llm, tools=tools, tool_loading=False)
 ```
 
-模式说明：`eager` 每轮暴露全部工具 schema；`catalog` 不在系统提示词重复完整参数但请求仍带全部 schema；`progressive` 初始只暴露 core tools，`GetTool` 加载后下一轮才暴露目标工具 schema。
+模式说明：`eager` 每轮暴露全部工具 schema；`catalog` 将全部工具的完整说明与参数 JSON Schema 注入系统提示词，同时保留原生工具 schema，无需 `GetTool` 预加载；`progressive` 初始只暴露 core tools，`GetTool` 加载后下一轮才暴露目标工具 schema。`catalog` 会增加输入 token，适合需要完整提示词契约的场景。
 
 **模型配置解析（桌面端集成推荐）**：无需手动解析 `settings.json`，调用单一入口 `resolve_model()` 即可拿到完整的连接与参数：
 

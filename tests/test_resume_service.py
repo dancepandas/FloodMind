@@ -236,8 +236,9 @@ def test_resume_holds_lease_then_release_unblocks_next_resume(tmp_path):
 def test_cli_resume_releases_lease_after_run(tmp_path, monkeypatch):
     """CLI resume 路径在 run 到达终态后必须释放 lease（try/finally），
     否则 lease 文件残留 300s TTL，同一 run 的后续 resume 被 ResumeBusyError 阻塞。"""
-    from types import SimpleNamespace
-    from unittest.mock import MagicMock
+    from floodmind.agent.api import Agent
+    from floodmind.agent.native.model_client import ModelClient
+    from floodmind.agent.native.types import ModelEvent
 
     from click.testing import CliRunner
 
@@ -263,23 +264,19 @@ def test_cli_resume_releases_lease_after_run(tmp_path, monkeypatch):
         },
     )
 
-    executor = SimpleNamespace(
-        run_from_state=lambda context, state, run_state=None: SimpleNamespace(
-            final_output="done"
-        )
+    model = ModelClient(
+        api_key="mock-key", base_url="https://mock.api/v1", model_name="mock-model",
     )
-    agent = SimpleNamespace(
-        _orchestrator_executor=executor,
-        _current_run_context=None,
-        _journal_authority=None,
-        _last_loop_state=None,
-    )
+    model.stream_chat = lambda *args, **kwargs: iter([
+        ModelEvent(type="token", content="done"), ModelEvent(type="done"),
+    ])
+    agent = Agent(llm=model, session_id="sess_1", bare=True, workspace=ws)._agent
 
     monkeypatch.setattr("floodmind.cli._validate_api_key", lambda: None)
     monkeypatch.setattr("floodmind.cli._build_cli_workspace", lambda sid: ws)
     monkeypatch.setattr(
         "floodmind.agent.native.model_client.ModelClient.from_settings",
-        lambda **kw: MagicMock(),
+        lambda **kw: model,
     )
     monkeypatch.setattr("floodmind.agent.create_flood_agent", lambda **kw: agent)
 
@@ -289,7 +286,7 @@ def test_cli_resume_releases_lease_after_run(tmp_path, monkeypatch):
         catch_exceptions=False,
     )
 
-    assert result.exit_code == 0
+    assert result.exit_code == 0, result.output
     assert "done" in result.output
     # run 到达终态后 lease 文件已被释放：同一 run 可重新获取 lease
     lease_path = lease_file(tmp_path, "c", "t", "run_1")

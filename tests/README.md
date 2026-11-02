@@ -24,7 +24,7 @@ python -m pytest -q
 python -m pytest tests/test_executor.py -k permission -q
 ```
 
-当前基线：1601 passed, 2 skipped（Windows；skip 为平台专属用例）。
+测试数量以本次执行结果为准，不维护会漂移的当前数量。标准要求见 [测试规范](../docs/testing/README.md) 与 [变更验证矩阵](../docs/testing/change-matrix.md)。
 
 ## 约定
 

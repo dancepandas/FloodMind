@@ -1,3 +1,4 @@
+from floodmind.common.tool_output import tool_output_is_error
 from floodmind.agent.runtime.contracts.runtime_context import RuntimeContext
 from floodmind.agent.runtime.services.path_service import PathService
 from floodmind.agent.runtime.services.workspace_service import build_folder_workspace
@@ -33,6 +34,7 @@ def test_apply_patch_rejects_external_section_before_any_write(tmp_path):
         _reset(tmp_path)
 
     assert "权限拒绝" in result
+    assert tool_output_is_error(result)
     assert not (ws.workspace_dir / "ok.txt").exists()
     assert not outside.exists()
 
@@ -67,6 +69,7 @@ def test_apply_patch_delete_requires_ask_and_does_not_delete(tmp_path):
         _reset(tmp_path)
 
     assert "权限拒绝" in result
+    assert tool_output_is_error(result)
     assert "删除" in result
     assert target.exists()
 
@@ -90,5 +93,6 @@ def test_apply_patch_move_target_is_checked(tmp_path):
         _reset(tmp_path)
 
     assert "权限拒绝" in result
+    assert tool_output_is_error(result)
     assert target.exists()
     assert not outside.exists()

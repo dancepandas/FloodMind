@@ -1,7 +1,7 @@
-"""渐进式工具参数加载与工具目录检索。
+"""工具契约提示、渐进式参数加载与工具目录检索。
 
-工具注册表仍是唯一事实源；本模块只负责从 registry 构建轻量目录、
-按需返回完整工具说明，并在 progressive 模式下维护本 executor 的 loaded set。
+工具注册表仍是唯一事实源；本模块从 registry 构建轻量目录或 catalog 完整契约，
+按需返回工具说明，并在 progressive 模式下维护本 executor 的 loaded set。
 """
 
 from __future__ import annotations
@@ -143,8 +143,34 @@ def compact_prompt_catalog(registry: Any, *, mode: str = "eager") -> str:
     if not entries:
         return "- (无工具注册)"
 
-    if mode in ("eager", "catalog"):
+    if mode == "eager":
         return "工具已通过请求的 tools schema 提供；本段不重复列工具目录或参数。"
+
+    if mode == "catalog":
+        lines = [
+            "工具完整契约如下；所有工具可直接通过原生工具调用使用，无需预加载。",
+            "Tool-use rules: use a tool only when it fits the requested task and the required "
+            "arguments are available. Never invent missing values. Ask for missing information "
+            "or explain why the tool cannot fulfill the request.",
+            "Preserve user-provided identifiers. Follow parameter descriptions, units, types, "
+            "and defaults; do not add optional arguments without a task-based reason. "
+            "Do not introduce unrequested preparatory actions. For independent operations, "
+            "make separate calls unless the tool explicitly defines the required batch semantics.",
+        ]
+        for spec in _registry_tools(registry):
+            entry = ToolCatalogEntry.from_spec(spec)
+            flags = "destructive" if entry.is_destructive else (
+                "readonly" if entry.is_readonly else "mutating"
+            )
+            lines.extend([
+                f"### `{entry.name}` [{flags}]",
+                entry.description,
+                "参数 JSON Schema：",
+                "```json",
+                json.dumps(spec.parameters, ensure_ascii=False, indent=2),
+                "```",
+            ])
+        return "\n".join(lines)
 
     lines = [
         "progressive 模式：本段直接列出全部可用工具的名称和简短说明。",

@@ -17,6 +17,7 @@ def test_deactivate_run_clears_authority_and_disables_enqueue():
     agent = NativeFloodAgent.__new__(NativeFloodAgent)
     authority = MagicMock()
     agent._journal_authority = authority
+    agent._current_run_context = None
 
     agent._deactivate_run_authority(authority)
 

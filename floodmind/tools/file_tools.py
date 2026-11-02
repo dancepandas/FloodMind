@@ -17,6 +17,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple, Union
 
+from floodmind.common.tool_output import ToolOutput, tool_output_is_error
 from pydantic import BaseModel, Field
 
 from floodmind.tools.agent_tool import (
@@ -862,17 +863,44 @@ def _impl_apply_patch(file_path: str = "", patch: str = "") -> str:
 
     preflight = _check_patch_permissions(sections)
     if preflight.behavior != PermissionBehavior.ALLOW:
-        return _finalize_tool_output("ApplyPatch", f"权限拒绝：{preflight.reason}", patch=patch[:200])
+        return _finalize_tool_output(
+            "ApplyPatch", ToolOutput(f"权限拒绝：{preflight.reason}", is_error=True),
+            patch=patch[:200],
+        )
 
     results = []
+    section_results = []
+    failed = False
     for sec in sections:
         try:
             result = _apply_section(sec)
-            results.append(result)
         except Exception as e:
-            results.append(f"错误 ({sec.get('action', '?')} {sec.get('file_path', '?')}): {e}")
+            result = ToolOutput(
+                f"错误 ({sec.get('action', '?')} {sec.get('file_path', '?')}): {e}",
+                is_error=True,
+            )
+        section_failed = tool_output_is_error(result)
+        failed = failed or section_failed
+        section_results.append({
+            "action": sec["action"], "file_path": sec["file_path"],
+            "status": "error" if section_failed else "completed",
+            "partial_side_effects": (
+                bool(result.metadata.get("partial_side_effects"))
+                if isinstance(result, ToolOutput) else False
+            ),
+        })
+        results.append(result)
 
-    return _finalize_tool_output("ApplyPatch", "\n".join(results), patch=patch[:200])
+    partial = failed and any(
+        item["status"] == "completed" or item["partial_side_effects"]
+        for item in section_results
+    )
+    output = ToolOutput("\n".join(results), is_error=failed, metadata={
+        "sections": section_results,
+        "partial_side_effects": partial,
+        "do_not_retry_same_call": failed,
+    })
+    return _finalize_tool_output("ApplyPatch", output, patch=patch[:200])
 
 
 def _parse_patch(patch_text: str) -> List[Dict[str, Any]]:
@@ -972,44 +1000,51 @@ def _apply_section(sec: Dict[str, Any]) -> str:
 
     elif action == "update":
         if not target.exists():
-            return f"Update failed: {target} does not exist"
+            return ToolOutput(f"Update failed: {target} does not exist", is_error=True)
 
         try:
             # 无损解码（UTF-8 严格 → GBK 严格）：无法无损解码时拒绝执行，
             # 避免 errors=replace 读 + UTF-8 写回永久损坏 GBK 等非 UTF-8 文件。
             content, file_encoding = _decode_text_strict(target.read_bytes())
         except (UnicodeDecodeError, UnicodeError):
-            return (
+            return ToolOutput(
                 f"Update failed: {target} 不是有效的 UTF-8/GBK 文本文件，"
-                "无法无损解码，为避免损坏已拒绝执行，请人工处理"
+                "无法无损解码，为避免损坏已拒绝执行，请人工处理", is_error=True,
             )
         lines = content.splitlines(keepends=True)
 
         # Parse unified diff hunks from sec["lines"]
         hunks = _parse_hunks(sec["lines"])
         if not hunks:
-            return f"Update failed: no valid diff hunks found in patch"
+            return ToolOutput("Update failed: no valid diff hunks found in patch", is_error=True)
 
         # 保持原文件行尾风格：CRLF 文件的替换行同样使用 CRLF，避免混入 LF
         newline_style = "\r\n" if "\r\n" in content else "\n"
         new_lines, apply_error = _apply_hunks(lines, hunks, newline=newline_style)
         if apply_error:
             # fail-closed：上下文与原文不一致时不写盘，绝不损坏目标文件
-            return f"Update failed: {apply_error}"
+            return ToolOutput(f"Update failed: {apply_error}", is_error=True)
 
         try:
             data = "".join(new_lines).encode(file_encoding)
         except (UnicodeEncodeError, UnicodeError):
-            return f"Update failed: 文件编码无法无损写回，请人工处理"
+            return ToolOutput("Update failed: 文件编码无法无损写回，请人工处理", is_error=True)
         _atomic_write_bytes(target, data)
 
         if move_to:
-            move_result = resolve_tool_path(move_to, access="write")
-            if not move_result.allowed:
-                raise PermissionError(move_result.reason or f"移动目标路径不允许: {move_to}")
-            new_target = move_result.resolved
-            new_target.parent.mkdir(parents=True, exist_ok=True)
-            shutil.move(str(target), str(new_target))
+            try:
+                move_result = resolve_tool_path(move_to, access="write")
+                if not move_result.allowed:
+                    raise PermissionError(move_result.reason or f"移动目标路径不允许: {move_to}")
+                new_target = move_result.resolved
+                new_target.parent.mkdir(parents=True, exist_ok=True)
+                shutil.move(str(target), str(new_target))
+            except Exception as exc:
+                return ToolOutput(
+                    f"Updated {target}; move to {move_to} failed: {exc}. "
+                    "文件内容已更新，未回滚；请先核实源和目标状态，不要直接重试原补丁。",
+                    is_error=True, metadata={"partial_side_effects": True},
+                )
             return f"Updated and moved {target} → {new_target}"
 
         return f"Updated {target}"

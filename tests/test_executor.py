@@ -45,6 +45,40 @@ class TestNativeAgentExecutor:
             upload_dir="/tmp/test-up",
         )
 
+    def test_success_body_with_error_word_resets_failure_count(self, tmp_path):
+        from floodmind.agent.runtime.services.journal_authority import open_journal_authority
+        from floodmind.agent.native.types import AgentLoopState
+        from floodmind.agent.runtime.contracts.tools import ToolSpec
+        from floodmind.agent.runtime.services.tool_execution_service import ToolExecutionService
+
+        tool = ToolSpec(
+            name="ContractSuccess", description="test", parameters={},
+            func=lambda: "执行成功，错误：0 个",
+        )
+
+        class Registry:
+            def get(self, name):
+                return tool if name == tool.name else None
+
+        executor = self._make_executor(
+            MagicMock(spec=ModelClient),
+            tool_executor=ToolExecutionService(), tool_registry=Registry(),
+        )
+        executor._journal_authority = open_journal_authority(
+            tmp_path / "runtime", conversation_id="c", task_id="t",
+            run_id="run-1", thread_id="th", turn_id="tu",
+        )
+        state = AgentLoopState(
+            session_id="test-session", run_id="run-1", status="awaiting_tool",
+            pending_tool_calls=[ToolCall(id="c1", name=tool.name, arguments={})],
+            consecutive_failures={tool.name: executor.MAX_CONSECUTIVE_TOOL_FAILURES - 1},
+        )
+        state = executor._on_awaiting_tool(state, self._make_context())
+
+        assert state.tool_results[0].status == "completed"
+        assert state.status == "awaiting_llm"
+        assert state.consecutive_failures[tool.name] == 0
+
     def test_executor_returns_final_answer_without_tool_calls(self):
         """Agent loops ends when LLM returns text without tool calls."""
         mc = MagicMock(spec=ModelClient)

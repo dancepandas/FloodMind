@@ -265,77 +265,14 @@ def run(task, model, resume_session_id, resume_checkpoint_id, verbose):
     agent = create_flood_agent(llm_service=llm, memory=memory, session_id=sid, workspace=workspace)
 
     if resume_checkpoint_id is not None:
-        from floodmind.agent.native.executor import project_run_state_to_loop_state
-        from floodmind.agent.native.types import AgentLoopState
-        from floodmind.agent.runtime.services.checkpoint_service import CheckpointService
-        from floodmind.agent.runtime.services.resume_service import ResumeService
+        from floodmind.agent.native.resume_execution import resume_agent
 
-        svc = CheckpointService(base_dir=str(workspace.session_root))
         try:
-            state = svc.load(sid, resume_checkpoint_id, state_class=AgentLoopState)
-            manifest = svc.load_manifest(sid, resume_checkpoint_id)
-            identity = manifest.metadata
-            required = (
-                "conversation_id", "task_id", "run_id", "thread_id", "turn_id", "runtime_dir"
-            )
-            missing = [key for key in required if not identity.get(key)]
-            if missing:
-                raise ValueError(f"checkpoint 缺少 journal identity: {', '.join(missing)}")
-            # ResumeService：fencing lease + replay + reconcile + resume.started/completed 事件；
-            # user_message 作为新的 thread.message.sent 事件落进 canonical journal。
-            outcome = ResumeService().resume(
-                runtime_dir=Path(identity["runtime_dir"]),
-                conversation_id=identity["conversation_id"],
-                task_id=identity["task_id"],
-                run_id=identity["run_id"],
-                thread_id=identity["thread_id"],
-                turn_id=identity["turn_id"],
-                checkpoint_id=resume_checkpoint_id,
-                user_message=task,
-                session_id=sid,
-                checkpoint_service=svc,
-            )
-            run_state = outcome.run_state
-            # 必须复用 resume 打开的权威门面：它携带 lease fence，旧 owner
-            # 的迟到写入会被拒绝；重新 open 会得到无 fencing 的第二个写者。
-            authority = outcome.authority
-            if authority is None:
-                raise RuntimeError("ResumeService returned no JournalAuthority")
-            state = project_run_state_to_loop_state(state, run_state)
-            state.user_message = task
-            state.original_input = state.original_input or task
-            if state.status in {"completed", "failed"}:
-                state.status = "awaiting_llm"
-                state.final_output = ""
-            agent._journal_authority = authority
-            agent._orchestrator_executor._journal_authority = authority
-            agent._last_loop_state = state
-            context = agent._current_run_context
-            if context is None:
-                from floodmind.agent.native.types import RunContext
-
-                context = RunContext(
-                    session_id=sid,
-                    user_text=task,
-                    cwd=str(workspace.default_cwd),
-                    workspace_dir=str(workspace.workspace_dir),
-                    state_dir=str(workspace.state_dir),
-                    artifact_dir=str(workspace.artifact_dir),
-                    tmp_dir=str(workspace.tmp_dir),
-                    scripts_dir=str(workspace.scripts_dir),
-                )
-            try:
-                result = agent._orchestrator_executor.run_from_state(
-                    context, state, run_state=run_state
-                )
-            finally:
-                # fencing lease 覆盖整个 resumed run；到达终态后释放，
-                # 使同一 run 的后续 resume 不被 300s TTL 阻塞。
-                outcome.lease.release()
-            print(result.final_output)
-            return
+            result, _ = resume_agent(agent, resume_checkpoint_id, task)
         except Exception as e:
             raise click.ClickException(f"checkpoint 恢复失败: {e}") from e
+        print(result.final_output)
+        return
 
     result = agent.run_with_resume(
         task,

@@ -1962,8 +1962,7 @@ def _regression_extended_pack() -> List[Dict[str, Any]]:
             },
         ))
 
-    # F21 软错误内容也计入连续失败：status=completed 但内容以“错误”开头，
-    # 连续 5 次同样强制终止。
+    # F21 显式错误状态计入连续失败，连续 5 次同样强制终止。
     soft_rounds = [
         _tool_round(_call(f"c{i}", "ReadGauge", {"station": f"站点{i}"}))
         for i in range(1, 6)
@@ -1971,19 +1970,18 @@ def _regression_extended_pack() -> List[Dict[str, Any]]:
     cases.append(_case(
         "regression-ext-soft-error-five-terminate",
         "regression",
-        "软错误失败计数：工具结果 status=completed 但内容前缀为“错误：”时照样累计"
-        "连续失败，第 5 次强制终止——验证计数依据内容而非仅状态。",
+        "工具显式报告错误时累计连续失败，第 5 次强制终止；正文不参与状态判定。",
         "一直重试。",
         soft_rounds,
         {
             "model_calls": 5,
             "tool_calls": ["ReadGauge"] * 5,
-            "tool_statuses": ["completed"] * 5,
+            "tool_statuses": ["error"] * 5,
             "final_output_contains": ["已连续失败 5 次"],
         },
         tools=gauge,
         tool_results={
-            f"c{i}": _call_result(f"错误：软错误 {i}") for i in range(1, 6)
+            f"c{i}": _call_result(f"错误：软错误 {i}", status="error") for i in range(1, 6)
         },
     ))
 
@@ -2004,14 +2002,14 @@ def _regression_extended_pack() -> List[Dict[str, Any]]:
         {
             "model_calls": 5,
             "tool_calls": ["QueryLink"] * 4,
-            "tool_statuses": ["completed"] * 4,
+            "tool_statuses": ["error", "completed", "error", "completed"],
             "final_output_contains": ["完成"],
         },
         tools={"QueryLink": _tool_spec("链路查询。", "占位", parameters=_GAUGE_PARAMS)},
         tool_results={
-            "c1": _call_result("错误：软超时 1"),
+            "c1": _call_result("错误：软超时 1", status="error"),
             "c2": _call_result("备源正常"),
-            "c3": _call_result("错误：软超时 3"),
+            "c3": _call_result("错误：软超时 3", status="error"),
             "c4": _call_result("备源正常"),
         },
     ))

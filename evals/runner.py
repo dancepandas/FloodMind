@@ -43,7 +43,6 @@ import tempfile
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from types import SimpleNamespace
 from typing import Any, Dict, Iterable, List, Optional
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -368,6 +367,7 @@ def run_case(case: Dict[str, Any]) -> CaseOutcome:
     from floodmind.agent.native.message_builder import MessageBuilder
     from floodmind.agent.native.types import RunContext
     from floodmind.agent.runtime.contracts.tools import ToolSpec
+    from floodmind.agent.runtime.contracts.runtime_context import RuntimeContext
 
     case_id = str(case["id"])
     tier = str(case.get("tier", "regression"))
@@ -416,7 +416,11 @@ def run_case(case: Dict[str, Any]) -> CaseOutcome:
             max_total_tokens=int(case.get("max_total_tokens", 0) or 0),
             mode=mode,
             runtime_context=(
-                SimpleNamespace(path_service=WorkspacePathService(workdir))
+                RuntimeContext(
+                    conversation_id=f"eval-{case_id}", task_id=case_id,
+                    run_id=case_id, thread_id="main", turn_id="turn-0",
+                    path_service=WorkspacePathService(workdir),
+                )
                 if real_tools else None
             ),
         )

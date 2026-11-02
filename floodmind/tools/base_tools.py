@@ -28,6 +28,7 @@ from typing import Optional, Dict, Any, List, Union
 
 from pydantic import BaseModel, Field
 
+from floodmind.common.tool_output import ToolOutput, tool_output_is_error
 from floodmind.common.process_tree import isolate_process_group, terminate_process_tree
 from floodmind.tools.agent_tool import (
     AgentTool,
@@ -203,32 +204,7 @@ def _build_call_signature(tool_name: str, **kwargs: Any) -> str:
 
 
 def _looks_like_error_output(output: str) -> bool:
-    text = (output or "").strip()
-    if not text:
-        return False
-
-    error_markers = (
-        "错误：",
-        "未找到技能",
-        "中未找到脚本",
-        "执行失败",
-        "执行超时",
-        "命令执行失败",
-        "命令执行超时",
-        "添加知识失败",
-        "文档添加失败",
-        "搜索失败",
-        "搜索请求失败",
-        "搜索超时",
-        "搜索记忆失败",
-        "添加长期记忆失败",
-        "记忆系统未初始化",
-        "未配置",
-        "缺少必要的依赖库",
-        "遇到问题",
-        "功能未启用",
-    )
-    return any(marker in text for marker in error_markers)
+    return tool_output_is_error(output)
 
 
 def _check_retry_guard_before_exec(tool_name: str, **signature_parts: Any) -> Optional[str]:
@@ -269,7 +245,10 @@ def _apply_retry_guard(tool_name: str, signature: str, output: str) -> str:
 
     if consecutive_failures >= 3 and _RETRY_GUARD_PROMPT not in output:
         logger.warning("检测到连续 %s 次相同失败调用: %s", consecutive_failures, signature)
-        return f"{output}{_RETRY_GUARD_PROMPT}"
+        content = f"{output}{_RETRY_GUARD_PROMPT}"
+        if isinstance(output, ToolOutput):
+            return ToolOutput(content, is_error=output.is_error, metadata=output.metadata)
+        return content
     return output
 
 
@@ -1432,7 +1411,6 @@ add_memory = build_agent_tool(
     is_readonly=False,
     is_destructive=False,
     is_concurrency_safe=False,
-    check_permissions_fn=make_readonly_permission_fn(),
     permission_policy=ToolPermissionPolicy(policy_type="state_write"),
 )
 
@@ -1440,7 +1418,7 @@ add_memory = build_agent_tool(
 class SearchMemoryInput(BaseModel):
     """搜索记忆的输入参数"""
     keywords: Union[str, List[str]] = Field(default="", description="搜索关键词或正则表达式")
-    search_type: str = Field(default="conversation", description="搜索类型: conversation=只搜索对话历史, global=搜索对话历史+Skills")
+    search_type: str = Field(default="conversation", description="搜索类型标注；conversation 和 global 均只搜索当前 Agent 的对话历史")
     max_results: int = Field(default=5, description="最大返回结果数")
 
 
@@ -1485,8 +1463,8 @@ def _impl_search_memory(
 search_memory = build_agent_tool(
     name="MemorySearch",
     description=(
-        "在记忆系统中搜索内容。"
-        "当需要查找之前对话中的具体内容、或搜索Skills文档中的信息时使用此工具。"
+        "搜索当前 Agent 的对话历史。"
+        "当需要查找之前已完成对话中的具体内容时使用此工具；不搜索技能文档。"
     ),
     args_schema=SearchMemoryInput,
     func=_impl_search_memory,
@@ -1984,7 +1962,6 @@ def _register_all_tools():
             args_schema=_AddTaskExperienceInput,
             func=_add_task_experience,
             is_readonly=False, is_destructive=False, is_concurrency_safe=False,
-            check_permissions_fn=make_write_permission_fn(),
             permission_policy=ToolPermissionPolicy(policy_type="state_write"),
         ))
 

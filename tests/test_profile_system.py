@@ -4,18 +4,30 @@ Tests all 10 areas: imports, SOUL.md, guidance, prompt assembly,
 config paths, context_runtime, customization, agent override,
 rebuild consistency, and full unit test suite.
 """
-import os
+import importlib
 import sys
-import tempfile
-import shutil
 from pathlib import Path
+
+import pytest
+
+
+@pytest.fixture(autouse=True)
+def isolated_profile(tmp_path, monkeypatch):
+    settings_module = importlib.import_module("floodmind.config.settings")
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("FLOODMIND_HOME", str(home))
+    monkeypatch.setenv("FLOODMIND_PROFILE", "default")
+    monkeypatch.setattr(settings_module, "_DEFAULT_HOME", home)
+    monkeypatch.setattr(settings_module, "_PROFILES_ROOT", home / "profiles")
+    monkeypatch.setattr(settings_module, "_active_profile_cache", None)
+    monkeypatch.setattr(settings_module, "_config_cache", None)
+    monkeypatch.chdir(tmp_path)
+    return home
 
 
 PASS = 0
 FAIL = 0
-# pytest 直接调用 test_1..test_9 时必须让失败可见；手工运行 __main__ 时
-# 关闭该开关，继续累积 PASS/FAIL 并在末尾汇总。
-_RAISE_ON_FAILURE = True
 
 
 def check(name, condition, detail=""):
@@ -26,20 +38,7 @@ def check(name, condition, detail=""):
     else:
         FAIL += 1
         print(f"  [FAIL] {name}  -- {detail}")
-        if _RAISE_ON_FAILURE:
-            raise AssertionError(f"{name}: {detail}")
-
-
-def run_test_suite(name, fn):
-    print(f"\n{'='*60}")
-    print(f"Test Suite: {name}")
-    print('='*60)
-    try:
-        fn()
-    except Exception as e:
-        print(f"  [ERROR] Suite crashed: {type(e).__name__}: {e}")
-        import traceback
-        traceback.print_exc()
+        raise AssertionError(f"{name}: {detail}")
 
 
 # ============================================================
@@ -212,7 +211,7 @@ def test_4_prompt_assembly():
 # ============================================================
 # Test 5: settings.py path resolution
 # ============================================================
-def test_5_config_paths():
+def test_5_config_paths(tmp_path, monkeypatch):
     from floodmind.config.settings import get_floodmind_home, get_active_profile
 
     home = get_floodmind_home()
@@ -223,18 +222,11 @@ def test_5_config_paths():
     check("profile is 'default'", profile == "default")
 
     # Test FLOODMIND_HOME env override
-    tmp = tempfile.mkdtemp(prefix="floodmind_test_")
-    try:
-        os.environ["FLOODMIND_HOME"] = tmp
-        # Reset cache
-        import floodmind.config.settings as s
-        s._active_profile_cache = None
+    tmp = tmp_path / "override"
+    with monkeypatch.context() as scoped:
+        scoped.setenv("FLOODMIND_HOME", str(tmp))
         home2 = get_floodmind_home()
-        check("FLOODMIND_HOME override", str(home2) == tmp)
-    finally:
-        del os.environ["FLOODMIND_HOME"]
-        s._active_profile_cache = None
-        shutil.rmtree(tmp, ignore_errors=True)
+        check("FLOODMIND_HOME override", home2 == tmp)
 
     # Restore
     home3 = get_floodmind_home()
@@ -270,17 +262,16 @@ def test_6_context_runtime():
 # ============================================================
 # Test 7: Custom SOUL.md secondary development
 # ============================================================
-def test_7_custom_soul():
+def test_7_custom_soul(tmp_path, monkeypatch):
     from floodmind.profile.soul import load_soul_md, get_floodmind_home_path
 
     original_home = get_floodmind_home_path()
 
     # Create a temp home with custom SOUL.md
-    tmp_home = tempfile.mkdtemp(prefix="floodmind_custom_")
-    try:
-        os.environ["FLOODMIND_HOME"] = tmp_home
-        import floodmind.config.settings as s
-        s._active_profile_cache = None
+    tmp_home = tmp_path / "custom"
+    tmp_home.mkdir()
+    with monkeypatch.context() as scoped:
+        scoped.setenv("FLOODMIND_HOME", str(tmp_home))
 
         # Write custom SOUL.md
         custom_path = Path(tmp_home) / "SOUL.md"
@@ -300,10 +291,7 @@ def test_7_custom_soul():
         check("default identity NOT in assembled prompt",
               "大水云科技" not in p)
 
-    finally:
-        del os.environ["FLOODMIND_HOME"]
-        s._active_profile_cache = None
-        shutil.rmtree(tmp_home, ignore_errors=True)
+    check("custom home override restored", get_floodmind_home_path() == original_home)
 
 
 # ============================================================
@@ -352,41 +340,7 @@ def test_9_rebuild():
 
 
 # ============================================================
-# Test 10: Run full pytest suite
-# ============================================================
-def run_full_pytest_suite():
-    import subprocess
-    project_root = str(Path(__file__).parent.parent)
-    result = subprocess.run(
-        [sys.executable, "-m", "pytest", "tests/", "-q", "--tb=short",
-         "--deselect", "tests/test_settings.py::TestAgentConfig::test_defaults"],
-        capture_output=True, text=True,
-        cwd=project_root,
-    )
-    check("pytest exit code 0", result.returncode == 0,
-          f"exit={result.returncode}\n{result.stdout[-500:]}" if result.returncode else "")
-
-
-# ============================================================
 # Main
 # ============================================================
 if __name__ == "__main__":
-    _RAISE_ON_FAILURE = False
-    os.chdir(Path(__file__).parent)
-
-    run_test_suite("1. Module Import Chain", test_1_imports)
-    run_test_suite("2. SOUL.md Load/Seed/Fallback", test_2_soul)
-    run_test_suite("3. Guidance Constants", test_3_guidance)
-    run_test_suite("4. Prompt Assembly (_build_stable_prompt)", test_4_prompt_assembly)
-    run_test_suite("5. Config Path Resolution", test_5_config_paths)
-    run_test_suite("6. Context Runtime AGENTS.md", test_6_context_runtime)
-    run_test_suite("7. Custom SOUL.md (Secondary Dev)", test_7_custom_soul)
-    run_test_suite("8. AgentInfo.prompt Override", test_8_agent_override)
-    run_test_suite("9. Rebuild Consistency", test_9_rebuild)
-    run_test_suite("10. Full Pytest Suite", run_full_pytest_suite)
-
-    print(f"\n{'='*60}")
-    print(f"RESULTS: {PASS} passed, {FAIL} failed, {PASS+FAIL} total")
-    print('='*60)
-
-    sys.exit(0 if FAIL == 0 else 1)
+    sys.exit(pytest.main([str(Path(__file__).resolve()), "-q"]))

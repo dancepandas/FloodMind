@@ -606,20 +606,8 @@ class NativeFloodAgent:
         self._load_skills()
         self._register_tool_catalog_tools()
 
-        # 工具描述
-        tool_descriptions = self._build_tool_descriptions(
-            self._orchestrator_registry,
-            mode=self._tool_loading_config.mode,
-        )
-
-        # 提示词：用户自定义 or 最小默认
-        prompt = system_prompt or "你是一个智能助手，使用可用工具帮助用户完成任务。"
-
-        # 组装 orchestrator system prompt：用户 prompt + 可用 skills（如有）+ 工具目录
-        _sys_prompt = prompt
-        if self._skill_catalog:
-            _sys_prompt += "\n\n## 可用 skills\n" + self._skill_catalog
-        _sys_prompt += "\n\n## 可用工具\n" + tool_descriptions
+        # 初始化与刷新使用同一个完整提示词构造入口。
+        _sys_prompt = self._build_bare_system_prompt(self._orchestrator_registry)
 
         # 初始化 model client：如果传入的已是 ModelClient 实例则直接复用
         # （思考开关语义由 model_client.enable_thinking 承载，厂商方言由 pipeline 翻译）
@@ -680,12 +668,7 @@ class NativeFloodAgent:
             event_bus=self._event_bus,
             message_builder=self._message_builder,
             max_iterations=self._max_iterations,
-            # 宿主 prompt + 工具目录独立段：bare specialist 同样走 GetTool 渐进加载，
-            # 没有目录段时模型只能盲猜工具名（直接调用未加载工具会被拒）。
-            system_prompts=[prompt, "## 可用工具\n" + self._build_tool_descriptions(
-                self._specialist_registry,
-                mode=self._tool_loading_config.mode,
-            )],
+            system_prompts=[self._build_bare_system_prompt(self._specialist_registry)],
             tools_schema=self._specialist_registry.tools_schema(),
             tool_registry=self._specialist_registry,
             tool_loader=self._specialist_tool_loader,
@@ -795,7 +778,7 @@ class NativeFloodAgent:
 
     @staticmethod
     def _build_tool_descriptions(registry, mode: str = "eager") -> str:
-        """从工具注册表生成紧凑工具目录；完整参数通过 GetTool 按需查看。"""
+        """从工具注册表按模式生成工具目录或完整工具契约。"""
         return compact_prompt_catalog(registry, mode=mode)
 
     def _init_tools(self) -> None:
@@ -804,7 +787,7 @@ class NativeFloodAgent:
             web_search, fetch_webpage, add_memory, search_memory,
             update_project_instructions,
             create_scheduled_task, list_scheduled_tasks, cancel_scheduled_task,
-            set_memory_instance, reset_retry_guard,
+            reset_retry_guard,
             task_output, task_list, task_kill,
         )
         from floodmind.tools.memory_tools import (
@@ -821,7 +804,6 @@ class NativeFloodAgent:
         from floodmind.agent.runtime.services.tool_execution_service import ToolExecutionService
 
         if self.memory is not None:
-            set_memory_instance(self.memory)
             if self.memory._llm is None:
                 self.memory.set_llm(self.llm_service)
 
@@ -1318,7 +1300,9 @@ class NativeFloodAgent:
         return getattr(policy, "policy_type", None) in {"readonly", "read_path"}
 
     def _register_tool_catalog_tools(self) -> None:
-        """注册 GetTool：像 GetSkill 一样按需查看工具参数。工具目录已由 system prompt 全量列出，无需 SearchTools。"""
+        """仅渐进加载模式注册 GetTool；eager 已直接提供完整工具 schema。"""
+        if self._tool_loading_config.mode != "progressive":
+            return
         self._orchestrator_registry.register(make_get_tool_tool(
             self._orchestrator_tool_loader,
             self._orchestrator_registry,
@@ -1564,10 +1548,27 @@ class NativeFloodAgent:
             output_guardrails=self._output_guardrails,
         )
 
+    def _build_bare_system_prompt(self, registry) -> str:
+        """Initial construction and refresh share one complete bare prompt contract."""
+        prompt = self._host_system_prompt or "你是一个智能助手，使用可用工具帮助用户完成任务。"
+        if self._skill_catalog:
+            prompt += "\n\n## 可用 skills\n" + self._skill_catalog
+        return prompt + "\n\n## 可用工具\n" + self._build_tool_descriptions(
+            registry, mode=self._tool_loading_config.mode,
+        )
+
     def _rebuild_system_prompts(self) -> None:
         """当 skill catalog / tool 列表刷新时，只需重建 STATIC_GLOBAL 部分
         （PROJECT 和 SESSION 部分是稳定的）。"""
         if not self._orchestrator_executor or not self._specialist_executor:
+            return
+
+        if getattr(self, "_bare", False):
+            for executor, registry in (
+                (self._orchestrator_executor, self._orchestrator_registry),
+                (self._specialist_executor, self._specialist_registry),
+            ):
+                executor.system_prompts = [self._build_bare_system_prompt(registry)]
             return
 
         pc = getattr(self, "_project_context", "")
@@ -2240,7 +2241,8 @@ class NativeFloodAgent:
         for spec in self._specialist_registry.all():
             if spec.name != "GetTool":
                 registry.register(spec)
-        registry.register(make_get_tool_tool(loader, registry))
+        if loader.mode == "progressive":
+            registry.register(make_get_tool_tool(loader, registry))
         return registry, loader
 
     def _ensure_child_thread_runtime(self, parent_runtime_context) -> ChildThreadRuntime:
@@ -2788,11 +2790,8 @@ class NativeFloodAgent:
         delegate_cwd: Optional[str] = None,
         **kwargs,
     ) -> None:
-        try:
-            from floodmind.tools.base_tools import set_session_context
-            set_session_context(session_id, output_dir, delegate_cwd=delegate_cwd, **kwargs)
-        except Exception as e:
-            logger.warning("Failed to set session context: %s", e)
+        from floodmind.tools.base_tools import set_session_context
+        set_session_context(session_id, output_dir, delegate_cwd=delegate_cwd, **kwargs)
 
     def _on_permission_ask(self, tool_name: str, tool_input: Dict[str, Any], reason: str) -> bool:
         from floodmind.agent.runtime.services.ask_service import get_ask_service
@@ -2931,6 +2930,54 @@ class NativeFloodAgent:
             "scripts_dir": str(ws.scripts_dir or ""),
         }
 
+    def _assemble_run_context(
+        self, *, authority, runtime_dir, identity, workspace, session_id,
+        user_text, attachments=None, enable_reasoning=False,
+    ) -> RunContext:
+        """Bind the active writer and build the same execution context for run/resume."""
+        from floodmind.agent.runtime.contracts.runtime_context import RuntimeContext
+        from floodmind.agent.runtime.services.artifact_service import ArtifactService
+        from floodmind.agent.runtime.services.workspace_service import set_workspace
+        from floodmind.tools.base_tools import reset_retry_guard, set_memory_instance
+
+        self._path_service.bind_workspace(workspace)
+        if workspace is not None:
+            set_workspace(workspace)
+        set_memory_instance(self.memory)
+        reset_retry_guard()
+        self._journal_authority = authority
+        self._orchestrator_executor._journal_authority = authority
+        self.memory.bind_journal(authority, runtime_dir, identity["conversation_id"])
+        for processor in getattr(self, "_trace_processors", []) or []:
+            authority.add_processor(processor)
+        workspace_id = str(workspace.workspace_dir) if workspace is not None else ""
+        runtime_context = RuntimeContext(
+            **{key: identity[key] for key in
+               ("conversation_id", "task_id", "run_id", "thread_id", "turn_id")},
+            actor_type="host", actor_id=session_id, agent_tier="main",
+            runtime_mode="execution", workspace_id=workspace_id,
+            permission_service=self._permission_service, path_service=self._path_service,
+            background_service=self._background_task_service,
+            artifact_service=ArtifactService(
+                runtime_dir / "artifacts", authority=authority,
+                allowed_roots=[workspace_id] if workspace_id else [],
+            ),
+            journal_authority=authority,
+        )
+        output_dir = self._get_output_dir(session_id)
+        dirs = self._workspace_context_dirs(output_dir)
+        self._set_session_context(session_id, output_dir, runtime_context=runtime_context, **dirs)
+        context = RunContext(
+            session_id=session_id, user_text=user_text, attachments=attachments or [],
+            output_dir=output_dir, upload_dir=self._get_upload_dir(session_id),
+            runtime_context=runtime_context, enable_reasoning=enable_reasoning,
+            max_total_tokens=self._max_total_tokens, **dirs,
+        )
+        from floodmind.agent.runtime.services.ask_service import get_ask_service
+        get_ask_service().set_emit_fn(self._event_bus.emit, session_id=session_id)
+        self._current_run_context = context
+        return context
+
     def _deactivate_run_authority(self, authority: Any) -> None:
         """Clear run-scoped Journal bindings only if this run still owns them."""
         if self._journal_authority is not authority:
@@ -2938,9 +2985,15 @@ class NativeFloodAgent:
         self._journal_authority = None
         if hasattr(self, "_orchestrator_executor"):
             self._orchestrator_executor._journal_authority = None
-        memory = getattr(self, "memory", None)
-        if memory is not None and hasattr(memory, "bind_journal"):
-            memory.bind_journal(None, None, "")
+        try:
+            memory = getattr(self, "memory", None)
+            if memory is not None and hasattr(memory, "bind_journal"):
+                memory.bind_journal(None, None, "")
+        finally:
+            from floodmind.agent.runtime.services.ask_service import get_ask_service
+            context = self._current_run_context
+            if context is not None:
+                get_ask_service().clear_emit_fn(session_id=context.session_id)
 
     def enqueue_user_message(self, content: str) -> bool:
         """Append a queued user message through the active run's Journal authority."""
@@ -2987,6 +3040,7 @@ class NativeFloodAgent:
         # 并存，复现 D-02 的绑定串台。worker 结束（含 abort 后）才释放；
         # 线程启动失败的兜底由 generator finally 处理。
         lock_released = [False]
+        worker_started = False
 
         def _release_stream_lock() -> None:
             if not lock_released[0]:
@@ -3010,6 +3064,8 @@ class NativeFloodAgent:
                 context: Optional[RunContext] = None
                 state: Optional[AgentLoopState] = None
                 try:
+                    from floodmind.tools.base_tools import set_memory_instance
+                    set_memory_instance(self.memory)
                     logger.info("[RUN_LOOP] === _run_loop started, session=%s ===", self.session_id)
 
                     # 子线程不继承宿主在主线程注入的 floodmind_workspace contextvar：
@@ -3025,10 +3081,8 @@ class NativeFloodAgent:
                     output_dir = self._get_output_dir(effective_session_id)
                     upload_dir = self._get_upload_dir(effective_session_id)
                     workspace_dirs = self._workspace_context_dirs(output_dir)
-                    from floodmind.agent.runtime.contracts.runtime_context import RuntimeContext
                     from floodmind.agent.runtime.services.journal_authority import open_journal_authority
                     from floodmind.agent.runtime.services.run_identity import resolve_identity
-                    from floodmind.tools.session_context import set_runtime_context
 
                     if workspace_dirs.get("state_dir"):
                         runtime_dir = Path(workspace_dirs["state_dir"])
@@ -3054,44 +3108,13 @@ class NativeFloodAgent:
                     auth = open_journal_authority(
                         runtime_dir, **ident, fence_check=lease.fence_check
                     )
-                    for _proc in getattr(self, "_trace_processors", []) or []:
-                        auth.add_processor(_proc)
-                    self._journal_authority = auth
+                    context = self._assemble_run_context(
+                        authority=auth, runtime_dir=runtime_dir, identity=ident,
+                        workspace=_ws, session_id=effective_session_id, user_text=user_input,
+                        attachments=attachments, enable_reasoning=enable_reasoning,
+                    )
+                    runtime_context = context.runtime_context
                     auth.emit("thread.message.sent", {"content": user_input, "turn_index": 0})
-                    self.memory.bind_journal(auth, runtime_dir, ident["conversation_id"])
-                    self._orchestrator_executor._journal_authority = auth
-
-                    workspace_id = str(_ws.workspace_dir) if _ws is not None else ""
-                    from floodmind.agent.runtime.services.artifact_service import ArtifactService
-                    artifact_service = ArtifactService(
-                        runtime_dir / "artifacts",
-                        authority=auth,
-                        allowed_roots=[workspace_id] if workspace_id else [],
-                    )
-                    runtime_context = RuntimeContext(
-                        conversation_id=ident["conversation_id"],
-                        task_id=ident["task_id"],
-                        run_id=ident["run_id"],
-                        thread_id=ident["thread_id"],
-                        turn_id=ident["turn_id"],
-                        actor_type="host",
-                        actor_id=effective_session_id,
-                        agent_tier="main",
-                        runtime_mode="execution",
-                        workspace_id=workspace_id,
-                        permission_service=self._permission_service,
-                        path_service=self._path_service,
-                        background_service=self._background_task_service,
-                        artifact_service=artifact_service,
-                        journal_authority=auth,
-                    )
-                    set_runtime_context(runtime_context)
-                    self._set_session_context(
-                        effective_session_id,
-                        output_dir,
-                        runtime_context=runtime_context,
-                        **workspace_dirs,
-                    )
 
                     artifact_dir = workspace_dirs.get("artifact_dir", "") or output_dir
                     ignore_managed = Path(artifact_dir).resolve() == Path(output_dir).resolve()
@@ -3102,24 +3125,6 @@ class NativeFloodAgent:
                     )
                     self._artifact_watcher.take_snapshot()
 
-                    context = RunContext(
-                        session_id=effective_session_id,
-                        user_text=user_input,
-                        attachments=attachments or [],
-                        output_dir=output_dir,
-                        upload_dir=upload_dir,
-                        cwd=workspace_dirs.get("cwd", ""),
-                        workspace_dir=workspace_dirs.get("workspace_dir", ""),
-                        state_dir=workspace_dirs.get("state_dir", ""),
-                        artifact_dir=workspace_dirs.get("artifact_dir", ""),
-                        tmp_dir=workspace_dirs.get("tmp_dir", ""),
-                        scripts_dir=workspace_dirs.get("scripts_dir", ""),
-                        runtime_context=runtime_context,
-                        enable_reasoning=enable_reasoning,
-                        abort_check=None,
-                        max_total_tokens=self._max_total_tokens,
-                    )
-                    self._current_run_context = context
 
                     # 包装 abort_check（D-05）：宿主回调异常按"未中止"处理，不得炸穿 run 循环；
                     # 消费端提前关闭同样触发取消（D-13），worker 在下一个检查点停止。
@@ -3135,10 +3140,6 @@ class NativeFloodAgent:
                         return False
 
                     context.abort_check = _effective_abort_check
-
-                    from floodmind.agent.runtime.services.ask_service import get_ask_service
-                    ask_service = get_ask_service()
-                    ask_service.set_emit_fn(lambda event: self._event_bus.emit(event), session_id=effective_session_id)
 
                     # 新会话开始时重置重试保护状态，避免跨任务累积误拦合法调用
                     try:
@@ -3274,36 +3275,42 @@ class NativeFloodAgent:
                 finally:
                     # D5：落盘 run 收尾时的计划最新状态（含 auto-advance）。
                     # 必须在复位 _current_run_context 之前，_persist_plan 依赖它定位会话目录。
+                    cleanup_actions = []
+                    cleanup_errors = []
                     if (
                         state is not None
                         and context is not None
                         and self._current_run_context is context
                     ):
-                        self._persist_plan_state(state)
+                        cleanup_actions.append(lambda: self._persist_plan_state(state))
                     if auth is not None:
-                        self._deactivate_run_authority(auth)
+                        cleanup_actions.append(lambda: self._deactivate_run_authority(auth))
                     if lease is not None:
-                        lease.release()
+                        cleanup_actions.append(lease.release)
+                    for cleanup in cleanup_actions:
+                        try:
+                            cleanup()
+                        except Exception as exc:
+                            logger.exception("Run cleanup failed")
+                            cleanup_errors.append(str(exc))
                     # 归属守卫：仅当仍是本 run 的上下文时才复位，避免并发/迟到
                     # 收尾清掉新 run 的绑定（P1-3）
                     if self._current_run_context is context:
                         self._current_run_context = None
                     self._model_client.enable_thinking = saved_thinking
                     try:
-                        from floodmind.agent.runtime.services.ask_service import get_ask_service
-                        get_ask_service().clear_emit_fn(session_id=effective_session_id)
-                    except Exception:
-                        pass
-                    try:
                         self._tracing_service.flush(effective_session_id)
                     except Exception:
                         pass
-                    q.put({"type": "__done__"})
                     _release_stream_lock()
+                    for error in cleanup_errors:
+                        q.put({"type": "error", "content": error})
+                    q.put({"type": "__done__"})
 
             current_ctx = contextvars.copy_context()
             t = threading.Thread(target=lambda: current_ctx.run(_run_loop), daemon=True)
             t.start()
+            worker_started = True
 
             while True:
                 try:
@@ -3446,7 +3453,8 @@ class NativeFloodAgent:
             _active_input_var.set("")
             consumer_gone.set()
             # 正常路径锁已由 worker 释放；此处只兜底线程未启动/启动失败的场景
-            _release_stream_lock()
+            if not worker_started:
+                _release_stream_lock()
 
     def run(self, user_input: str) -> str:
         """非流式运行（收集所有流式事件后返回最终回答）。"""

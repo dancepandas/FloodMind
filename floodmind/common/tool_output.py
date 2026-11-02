@@ -1,12 +1,10 @@
-"""工具输出语义：识别内置工具约定的失败输出。
+"""工具输出语义：显式状态优先，普通文本按固定失败前缀归一。
 
-内置工具（Read/Bash/Grep/GetSkill 等）把可预期失败编码为带固定前缀的
-文本返回，而不是抛异常。执行层用本模块把这一约定归一为
-``ToolResult.status == "error"``，让宿主、指标、journal 与重试逻辑看到真实
-结果，而不是把"文件不存在"记成一次成功调用。
+ToolOutput 保留正文接口，并携带错误状态与副作用 metadata。生产者应显式
+聚合分段结果；执行层和重试保护共享此判定，不能扫描正文推断显式结果的状态。
+将 ToolOutput 转为普通 str 会丢失这些语义，应在消费状态和 metadata 后再转换。
 
-判定只看输出开头：工具失败信息总是以固定前缀开头，而 Read 等工具返回的
-文件正文前面有头部，不会被正文里的"错误："字样误判。
+尚返回普通文本的工具按开头固定失败前缀判定，不扫描正文中的错误词。
 """
 
 from typing import Tuple
@@ -39,8 +37,20 @@ _FAILURE_PREFIXES: Tuple[str, ...] = (
 )
 
 
+class ToolOutput(str):
+    """带显式执行语义的文本；正文不参与结构化结果的状态判定。"""
+
+    def __new__(cls, content: str, *, is_error: bool = False, metadata=None):
+        instance = super().__new__(cls, content)
+        instance.is_error = is_error
+        instance.metadata = dict(metadata or {})
+        return instance
+
+
 def tool_output_is_error(output: str) -> bool:
-    """判断工具返回文本是否表示一次失败（按开头前缀判定）。"""
+    """优先使用显式状态，普通文本按工具失败前缀判定。"""
+    if isinstance(output, ToolOutput):
+        return output.is_error
     head = (output or "").lstrip()
     if not head:
         return False

@@ -39,7 +39,7 @@ from floodmind.agent.runtime.contracts.permissions import (
 from floodmind.agent.runtime.contracts.paths import PathResolveRequest, PathResolveResult
 from floodmind.agent.runtime.contracts.tools import ToolCall, ToolExecutionContext, ToolResult, ToolSpec
 from floodmind.agent.runtime.contracts.tool_transaction import canonical_arguments
-from floodmind.common.tool_output import tool_output_is_error
+from floodmind.common.tool_output import ToolOutput, tool_output_is_error
 from floodmind.agent.runtime.services.approval_fingerprint import compute_approval_fingerprint
 from floodmind.agent.runtime.services.idempotency import (
     derive_idempotency_key,
@@ -554,8 +554,10 @@ class ToolExecutionService:
             )
             # 内置工具用文本前缀表达预期失败（如"错误：文件不存在"）。执行层
             # 在此统一归一状态，宿主/指标/journal 才能区分成功与失败。
-            reported_error = tool_output_is_error(output_str)
-            metadata: Dict[str, Any] = {"full_ref": full_ref} if full_ref else {}
+            reported_error = tool_output_is_error(output if isinstance(output, ToolOutput) else output_str)
+            metadata: Dict[str, Any] = dict(output.metadata) if isinstance(output, ToolOutput) else {}
+            if full_ref:
+                metadata["full_ref"] = full_ref
             if reported_error:
                 metadata["error_code"] = "TOOL_REPORTED_ERROR"
             return ToolResult(
@@ -766,7 +768,11 @@ class ToolExecutionService:
                 host_preapproved=host_preapproved,
             )
 
-        result = tool.check_permissions(perm_input)
+        from floodmind.tools.session_context import get_runtime_context
+
+        runtime_context = get_runtime_context()
+        permission_service = runtime_context.permission_service if runtime_context is not None else None
+        result = tool.check_permissions(perm_input, permission_service=permission_service)
         if hasattr(result, "behavior"):
             behavior = result.behavior
             if isinstance(behavior, PermissionBehavior):
@@ -1020,4 +1026,4 @@ class ToolExecutionService:
             return None
         except Exception as e:
             logger.warning("ToolExecutionService schema validation error for %s: %s", tool.name, e)
-            return dict(arguments) if arguments else {}
+            return None

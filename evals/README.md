@@ -26,7 +26,7 @@
   - 中断点扫描：abort_after_model_calls 1..10（单工具与多工具轮两种粒度）、中断永不触发、中断×usage 共存；
   - 迭代上界：max_iterations 1..8（单工具、多工具、截断守卫——未到达的脚本轮绝不被请求）；
   - token 预算：截断位置扫描（第 1..10 轮）、粒度 20/30 扫描、+1/-1 边界、答案轮边界、非法轮计费、total-only usage 形状、预算 0 不限、预算优先于迭代上界；
-  - 连续失败：失败 1..4 后恢复、5 次强制终止、软错误内容（status=completed 但内容前缀“错误”）同样计数、计数按工具名隔离与重置、换工具恢复、失败反馈可区分回填；
+  - 连续失败：失败 1..4 后恢复、5 次强制终止、显式错误状态（`status="error"`）计数，成功正文中的错误词不影响状态、计数按工具名隔离与重置、换工具恢复、失败反馈可区分回填；
   - 非法参数：12 种 malformed 形态（含数组/字符串/数字/布尔根、尾逗号、未闭合、坏转义、单引号）、单轮 2/3 个非法调用、非法+合法交替、非法+终态组合、同轮非法+stop（该轮按工具轮处理）；
   - 终态映射：canonical 与别名 wire 值全表（stop/end_turn/tool_calls/tool_use/length/max_tokens/content_filter/filtered/refusal/refused/pause_turn/paused/aborted/error/unknown）、error/timeout 事件文案与 is_timeout；
   - max_tokens 续写：length/max_tokens 别名续写成功、续写耗尽、续写轮带 usage、续写后继续工具调用（held-out）；

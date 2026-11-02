@@ -17,7 +17,9 @@ BFCL 把"函数调用"拆成四个可客观判分的维度，正好覆盖 harnes
     FM_BASE=... FM_KEY=... FM_MODEL=... python tools/bench_bfcl.py \
         --data-dir /path/to/bfcl --categories simple,multiple --limit 20 --out report.json
 
-评分规则与官方 AST checker 对齐：
+评分模式与工具加载模式独立，均不是官方排行榜成绩。CLI 默认 python-ast-compat，
+是固定 revision 的 Python JSON-call 兼容子集（详见 tools/bfcl_scoring.py 和 tools/README.md）。
+--scoring simplified 保留历史简化规则：
 - 函数名必须匹配；
 - ground truth 里列出的每个参数都必须出现，且取值命中候选值之一
   （候选值含空串表示该参数可省略）；
@@ -43,6 +45,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from floodmind.agent.api import Agent
 from floodmind.agent.native.model_client import ModelClient
+from floodmind.agent.native.tool_loading import ToolLoadingConfig
+from tools.bfcl_scoring import CHECKER_REVISION, SCORING_MODES, score_python_compat
 from floodmind.agent.runtime.contracts.tools import ToolSpec
 from floodmind.agent.runtime.contracts.workspace import Workspace
 
@@ -97,6 +101,8 @@ def load_categories(data_dir: Path, categories: Sequence[str]) -> Dict[str, List
             for item in _load_jsonl(answer_path):
                 answers[item["id"]] = item.get("ground_truth", [])
         for case in cases:
+            if answer_name and case["id"] not in answers:
+                raise ValueError(f"缺少样本标注: {case['id']}")
             case["ground_truth"] = answers.get(case["id"], [])
         result[category] = cases
     return result
@@ -146,10 +152,14 @@ def normalize_schema(schema: Any) -> Dict[str, Any]:
             if mapped is None:
                 continue
             normalized[key] = mapped
-        elif key in ("properties",) and isinstance(value, dict):
+        elif key in ("properties", "$defs", "definitions", "patternProperties") and isinstance(value, dict):
             normalized[key] = {
                 name: normalize_schema(spec) for name, spec in value.items()
             }
+        elif key in ("anyOf", "oneOf", "allOf", "prefixItems") and isinstance(value, list):
+            normalized[key] = [normalize_schema(item) for item in value]
+        elif key in ("additionalProperties", "not", "contains", "if", "then", "else") and isinstance(value, dict):
+            normalized[key] = normalize_schema(value)
         elif key == "items":
             if isinstance(value, list):
                 normalized[key] = [normalize_schema(item) for item in value]
@@ -294,6 +304,26 @@ def score_case(category: str, ground_truth: List[Dict[str, Any]], calls: List[Di
     return True, ""
 
 
+def score_result(
+    category: str, ground_truth: List[Dict[str, Any]],
+    calls: List[Dict[str, Any]], *, error: str = "", errors: Sequence[str] = (),
+    scoring: str = "simplified", functions: Sequence[Dict[str, Any]] = (),
+    auxiliary_call_results: Sequence[Dict[str, Any]] = (),
+) -> Tuple[bool, str]:
+    """Runtime failures are failures even when the expected call set is empty."""
+    if scoring not in SCORING_MODES:
+        raise ValueError(f"Unknown scoring mode: {scoring}")
+    if error or errors:
+        return False, f"运行错误: {error or '; '.join(errors)}"
+    for call in [*calls, *auxiliary_call_results]:
+        status = call.get("status", "")
+        if status and status != "completed":
+            return False, f"工具执行未成功: {call.get('name', '')} ({status})"
+    if scoring == "python-ast-compat":
+        return score_python_compat(category, ground_truth, calls, functions)
+    return score_case(category, ground_truth, calls)
+
+
 # ── 执行 ──────────────────────────────────────────────────────────────
 
 class _Recorder:
@@ -329,7 +359,8 @@ class _Recorder:
             self.errors.append(str(event.get("content", "")))
 
 
-def run_case(category: str, case: Dict[str, Any]) -> Dict[str, Any]:
+def run_case(category: str, case: Dict[str, Any], *,
+             scoring: str = "python-ast-compat", tool_loading: str = "eager") -> Dict[str, Any]:
     root = Path(tempfile.mkdtemp(prefix=f"fm-bfcl-{category}-"))
     workspace = Workspace.from_folder(root, session_id=f"bfcl-{case['id']}").ensure()
 
@@ -350,9 +381,7 @@ def run_case(category: str, case: Dict[str, Any]) -> Dict[str, Any]:
         tools=specs,
         workspace=workspace,
         system_prompt=_SYSTEM_PROMPT,
-        # BFCL 的设定是"所有函数 schema 随请求一次性给出"，用 eager 模式对齐；
-        # progressive 下函数要经 GetTool 才可调用，会把加载开销混进调用准确性分数。
-        tool_loading=False,
+        tool_loading=ToolLoadingConfig(mode=tool_loading),
         max_iterations=1,
         on_event=recorder.on_event,
     )
@@ -367,24 +396,29 @@ def run_case(category: str, case: Dict[str, Any]) -> Dict[str, Any]:
 
     # 只保留 BFCL 函数调用；bare runtime 自带的 GetTool/task_* 不属于被测函数。
     tool_calls: List[Dict[str, Any]] = []
-    auxiliary: List[str] = []
+    auxiliary: List[Dict[str, Any]] = []
     for call in recorder.calls:
         original = name_map.get(call["name"])
         if original is None:
-            auxiliary.append(str(call["name"]))
+            auxiliary.append(dict(call))
             continue
         item = dict(call)
         item["name"] = original
         tool_calls.append(item)
 
-    passed, reason = score_case(category, case.get("ground_truth", []), tool_calls)
-    if error:
-        passed, reason = False, f"运行错误: {error}"
+    passed, reason = score_result(
+        category, case.get("ground_truth", []), tool_calls,
+        error=error, errors=recorder.errors, auxiliary_call_results=auxiliary,
+        scoring=scoring, functions=case.get("function", []),
+    )
 
     usages = recorder.usages or []
     return {
         "id": case["id"],
         "category": category,
+        "scoring": scoring,
+        "checker_revision": CHECKER_REVISION if scoring == "python-ast-compat" else None,
+        "tool_loading": tool_loading,
         "passed": passed,
         "reason": reason,
         "elapsed_s": elapsed,
@@ -392,14 +426,17 @@ def run_case(category: str, case: Dict[str, Any]) -> Dict[str, Any]:
         "tokens": sum(item.get("total_tokens", 0) for item in usages),
         "tool_calls": tool_calls,
         "call_statuses": [call.get("status", "") for call in tool_calls],
-        "auxiliary_calls": auxiliary,
+        "auxiliary_calls": [call["name"] for call in auxiliary],
+        "auxiliary_call_results": auxiliary,
         "error": error,
+        "errors": recorder.errors,
     }
 
 
 # ── CLI ───────────────────────────────────────────────────────────────
 
-def rescore_report(report_path: Path, data_dir: Path) -> List[Dict[str, Any]]:
+def rescore_report(report_path: Path, data_dir: Path, *,
+                   scoring: str = "python-ast-compat") -> List[Dict[str, Any]]:
     """用当前判分规则重算已有报告（不重新调用模型）。"""
     rows = json.loads(report_path.read_text(encoding="utf-8"))
     categories = sorted({row["category"] for row in rows})
@@ -407,10 +444,16 @@ def rescore_report(report_path: Path, data_dir: Path) -> List[Dict[str, Any]]:
     cases = {case["id"]: case for items in data.values() for case in items}
     for row in rows:
         case = cases[row["id"]]
-        passed, reason = score_case(
-            row["category"], case.get("ground_truth", []), row.get("tool_calls", [])
+        passed, reason = score_result(
+            row["category"], case.get("ground_truth", []), row.get("tool_calls", []),
+            error=row.get("error", ""), errors=row.get("errors", []),
+            auxiliary_call_results=row.get("auxiliary_call_results", []),
+            scoring=scoring, functions=case.get("function", []),
         )
         row["passed"], row["reason"] = passed, reason
+        row["scoring"] = scoring
+        row["checker_revision"] = CHECKER_REVISION if scoring == "python-ast-compat" else None
+        row.setdefault("tool_loading", "unknown")
     return rows
 
 
@@ -418,13 +461,15 @@ def _print_summary(rows: List[Dict[str, Any]], out_path: Optional[Path]) -> None
     print("=" * 100)
     print("BFCL 工具调用评测（bare runtime：只暴露 BFCL 函数）")
     print("=" * 100)
+    print(f"评分模式: {sorted({row.get('scoring', 'unknown') for row in rows})}")
+    print(f"工具加载: {sorted({row.get('tool_loading', 'unknown') for row in rows})}")
     by_category: Dict[str, List[Dict[str, Any]]] = {}
     for row in rows:
         by_category.setdefault(row["category"], []).append(row)
     for category, items in by_category.items():
         passed = sum(1 for item in items if item["passed"])
-        tokens = sum(item["tokens"] for item in items)
-        elapsed = sum(item["elapsed_s"] for item in items)
+        tokens = sum(item.get("tokens", 0) for item in items)
+        elapsed = sum(item.get("elapsed_s", 0) for item in items)
         print(
             f"{category:<12} {passed}/{len(items)} 通过  "
             f"{elapsed:>7.1f}s  {tokens:>8} tok"
@@ -442,6 +487,13 @@ def _print_summary(rows: List[Dict[str, Any]], out_path: Optional[Path]) -> None
         print(f"JSON 报告: {out_path}")
 
 
+def _nonnegative(value: str) -> int:
+    number = int(value)
+    if number < 0:
+        raise argparse.ArgumentTypeError("must be nonnegative")
+    return number
+
+
 def main(argv: Optional[Sequence[str]] = None) -> int:
     parser = argparse.ArgumentParser(description="BFCL 工具调用评测")
     parser.add_argument("--data-dir", required=True, help="BFCL v3 数据目录")
@@ -449,13 +501,16 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         "--categories", default="simple,multiple,parallel,irrelevance",
         help="逗号分隔的类别",
     )
-    parser.add_argument("--limit", type=int, default=20, help="每类样本数上限")
+    parser.add_argument("--offset", type=_nonnegative, default=0, help="每类跳过前 N 条样本")
+    parser.add_argument("--tool-loading", choices=("eager", "catalog"), default="eager")
+    parser.add_argument("--scoring", choices=SCORING_MODES, default="python-ast-compat")
+    parser.add_argument("--limit", type=_nonnegative, default=20, help="每类样本数上限")
     parser.add_argument("--out", default="", help="JSON 报告路径")
     parser.add_argument("--rescore", default="", help="用当前规则重算已有 JSON 报告，不调用模型")
     args = parser.parse_args(argv)
 
     if args.rescore:
-        rows = rescore_report(Path(args.rescore), Path(args.data_dir))
+        rows = rescore_report(Path(args.rescore), Path(args.data_dir), scoring=args.scoring)
         out_path = Path(args.out) if args.out else None
         _print_summary(rows, out_path)
         return 0 if all(row["passed"] for row in rows) else 1
@@ -473,9 +528,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     data = load_categories(Path(args.data_dir), categories)
     rows: List[Dict[str, Any]] = []
     for category in categories:
-        cases = data[category][: args.limit]
+        cases = data[category][args.offset : args.offset + args.limit]
         for case in cases:
-            row = run_case(category, case)
+            row = run_case(category, case, scoring=args.scoring, tool_loading=args.tool_loading)
             rows.append(row)
             mark = "PASS" if row["passed"] else "FAIL"
             print(f"[{mark}] {category:<12} {row['id']:<24} {row['elapsed_s']:>5.1f}s")

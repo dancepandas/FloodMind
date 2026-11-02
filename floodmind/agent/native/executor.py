@@ -1167,7 +1167,7 @@ class NativeAgentExecutor:
                 return state
 
             # 连续失败检测
-            if result.status == "error" or (result.content and "错误" in result.content[:50]):
+            if result.status == "error":
                 state.consecutive_failures[call.name] = state.consecutive_failures.get(call.name, 0) + 1
             else:
                 state.consecutive_failures[call.name] = 0
