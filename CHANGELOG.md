@@ -2,6 +2,14 @@
 
 All notable changes to FloodMind are documented in this file.
 
+## [2.5.1] - 2026-11-03
+
+### Fixed
+
+- 权限检查入口统一规范化路径，修复 Windows 短长路径别名导致的子代理合法写入误拒绝；保持符号链接逃逸拒绝
+- Workspace 测试按规范化路径比较，避免 Windows 临时目录路径别名造成误报
+- 后台任务测试等待回调与实际收尾完成，消除终态字段先于完成队列发布的时序竞争
+
 ## [2.5.0] - 2026-11-02
 
 ### Added
