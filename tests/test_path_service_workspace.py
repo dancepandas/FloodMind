@@ -119,6 +119,34 @@ class TestSubAgentWriteRange:
         allowed, _ = svc._check_path_allowed(f, "write", sub_id)
         assert allowed
 
+    def test_sub_write_accepts_equivalent_path_alias(self, tmp_workspace):
+        root, ws = tmp_workspace
+        alias = root / "user-alias"
+        try:
+            alias.symlink_to(ws.user_dir, target_is_directory=True)
+        except OSError:
+            pytest.skip("directory symlinks unavailable")
+        svc = PathService(project_root=root, workspace=ws)
+        allowed, reason = svc._check_path_allowed(
+            alias / "result.txt", "write", "sub-parent-step-abc12345"
+        )
+        assert allowed, reason
+
+    def test_sub_write_rejects_symlink_escape(self, tmp_workspace):
+        root, ws = tmp_workspace
+        outside = root / "outside"
+        outside.mkdir()
+        link = ws.user_dir / "escape"
+        try:
+            link.symlink_to(outside, target_is_directory=True)
+        except OSError:
+            pytest.skip("directory symlinks unavailable")
+        svc = PathService(project_root=root, workspace=ws)
+        allowed, _ = svc._check_path_allowed(
+            link / "result.txt", "write", "sub-parent-step-abc12345"
+        )
+        assert not allowed
+
     def test_sub_denied_outside_range(self, tmp_workspace):
         root, ws = tmp_workspace
         svc = PathService(project_root=root, workspace=ws)
@@ -365,10 +393,10 @@ class TestSubAgentRelativePathIsolation:
                 raw_path="result.py", access="write", session_id=sub_id,
             ))
             # 关键断言：相对路径 result.py 必须解析到子代理 sandbox，而非主代理 user_dir
-            assert str(sandbox_outputs) in str(result.resolved_path), (
+            assert Path(result.resolved_path) == (sandbox_outputs / "result.py").resolve(), (
                 f"子代理相对写入应落到 sandbox outputs，实际: {result.resolved_path}"
             )
-            assert str(ws.user_dir) not in str(result.resolved_path) or str(ws.user_dir) == str(sandbox_outputs), (
+            assert Path(result.resolved_path).parent != ws.user_dir.resolve(), (
                 f"子代理相对写入不应落到主代理 user_dir: {result.resolved_path}"
             )
             assert result.allowed

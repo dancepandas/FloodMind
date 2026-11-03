@@ -21,7 +21,7 @@ class TestBuildWorkspace:
         with tempfile.TemporaryDirectory() as tmp:
             sr = Path(tmp) / "data" / "sessions"
             ws = build_workspace("test-sess", session_root=sr)
-            assert ws.user_dir == sr / "test-sess" / "outputs"
+            assert ws.user_dir == (sr / "test-sess" / "outputs").resolve()
             assert ws.session_root == sr.resolve()
             assert ws.sandbox_base == ws.session_root  # strategy=session_root
 
@@ -44,7 +44,7 @@ class TestBuildWorkspace:
             user = Path(tmp) / "project"
             ws = build_workspace("s1", session_root=Path(tmp) / "data" / "sessions",
                                 user_dir=user, sandbox_strategy="user_dir")
-            assert ws.sandbox_base == user / ".floodmind" / "sandboxes"
+            assert ws.sandbox_base == (user / ".floodmind" / "sandboxes").resolve()
 
     def test_overwrite_protection_default_false(self):
         with tempfile.TemporaryDirectory() as tmp:

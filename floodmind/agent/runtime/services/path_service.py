@@ -289,6 +289,7 @@ class PathService:
         return suffix or path_str
 
     def _check_path_allowed(self, resolved: Path, access: str, session_id: str = "") -> tuple:
+        resolved = resolved.resolve()
         for pattern in _FORBIDDEN_PATH_PATTERNS:
             if pattern.match(str(resolved)):
                 return False, f"禁止访问系统目录: {pattern.pattern}"

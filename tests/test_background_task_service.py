@@ -119,6 +119,7 @@ class TestBackgroundTaskService:
         svc = BackgroundTaskService(base_dir=tmp_path)
         task = svc.start("s1", "sleep", _sleep_cmd(30), cwd=str(tmp_path))
         observed = []
+        callback_done = threading.Event()
         original_kill = svc._kill_process
 
         def lock_available_from_other_thread():
@@ -139,9 +140,14 @@ class TestBackgroundTaskService:
             observed.append(lock_available_from_other_thread())
             original_kill(process)
 
+        def checked_callback(_):
+            observed.append(lock_available_from_other_thread())
+            callback_done.set()
+
         svc._kill_process = checked_kill
-        svc.subscribe(lambda _: observed.append(lock_available_from_other_thread()))
+        svc.subscribe(checked_callback)
         assert svc.kill_session("s1") == 1
+        assert callback_done.wait(timeout=5)
         assert observed == [True, True]
         assert task.status == "killed"
 
