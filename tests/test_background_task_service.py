@@ -19,12 +19,14 @@ def _sleep_cmd(seconds: float = 5):
 
 
 def _wait_status(svc, task, statuses, timeout=10.0):
-    deadline = time.time() + timeout
-    while time.time() < deadline:
-        if task.status in statuses:
-            return task.status
-        time.sleep(0.05)
-    return task.status
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        # 状态先更新，日志、元数据和完成队列随后才收尾；不能只等终态字段。
+        with svc._lock:
+            if task.status in statuses and task.task_id not in svc._active_tasks:
+                return task.status
+        time.sleep(0.01)
+    raise AssertionError(f"task {task.task_id} did not finalize in {timeout}s: {task.status}")
 
 
 class TestBackgroundTaskService:
